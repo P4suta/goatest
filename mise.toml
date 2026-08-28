@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[tools]
+go = "1.26.5"
+goreleaser = "2.17.1"
+actionlint = "1.7.12"
+taplo = "0.10.0"
+
+[tasks.build]
+description = "Build the public library and single CLI"
+run = ["go build ./...", "go vet ./..."]
+
+[tasks.test]
+description = "Run unit, property, protocol, and toolchain-backed E2E tests"
+run = "go test -timeout 40m ./..."
+
+[tasks.test-race]
+description = "Run the complete suite under Go's race detector"
+run = "go test -race -timeout 40m ./..."
+
+[tasks.fmt]
+description = "Check Go and TOML formatting without rewriting files"
+run = [
+  'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }',
+  "taplo fmt --check",
+]
+run_windows = [
+  'pwsh -NoLogo -NoProfile -Command "$f = gofmt -l .; if ($f) { $f; exit 1 }"',
+  "taplo fmt --check",
+]
+
+[tasks.check]
+description = "Run every local release gate"
+run = ["mise run fmt", "mise run build", "mise run test"]
+
+[tasks.package]
+description = "Build cross-platform snapshot archives"
+run = "goreleaser release --snapshot --clean"
+
+[tasks.dogfood]
+description = "Run goatest against its own repository"
+run = "go run ./cmd/goatest --no-tui"

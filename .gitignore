@@ -1,0 +1,4 @@
+/dist/
+/.goatest/
+/reports/
+*.test

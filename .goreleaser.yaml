@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+version: 2
+project_name: goatest
+
+builds:
+  - id: goatest
+    main: ./cmd/goatest
+    binary: goatest
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/P4suta/goatest/internal/assure.GoatestVersion={{ .Version }}
+
+archives:
+  - id: goatest
+    ids: [goatest]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+    files: [LICENSE-MIT, LICENSE-APACHE, README.md]
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:", "^build:"]
+
+release:
+  github:
+    owner: P4suta
+    name: goatest
+  mode: keep-existing
