@@ -20,10 +20,7 @@ import (
 func ConcurrencyPackages(root string, packages []Package) ([]string, error) {
 	var result []string
 	for _, pkg := range packages {
-		directory := root
-		if pkg.RelativeDir != "." && pkg.RelativeDir != "" {
-			directory = filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
-		}
+		directory := filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
 		entries, err := os.ReadDir(directory)
 		if err != nil {
 			return nil, fmt.Errorf("goatest: inspect concurrency in %s: %w", pkg.ImportPath, err)
@@ -63,16 +60,15 @@ func importsSynchronization(file *ast.File) bool {
 func hasConcurrencyNode(file *ast.File) bool {
 	found := false
 	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
-		}
 		switch value := node.(type) {
 		case *ast.GoStmt, *ast.SendStmt, *ast.ChanType, *ast.SelectStmt:
 			found = true
 		case *ast.UnaryExpr:
-			found = value.Op == token.ARROW
+			if value.Op == token.ARROW {
+				found = true
+			}
 		}
-		return !found
+		return true
 	})
 	return found
 }
