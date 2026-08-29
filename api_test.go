@@ -13,17 +13,24 @@ import (
 
 func TestRunPreservesTestingTAndScope(t *testing.T) {
 	called := false
-	goatest.Run(t, goatest.Integration("postgres"), func(gt *goatest.T) {
+	goatest.Run(t, goatest.Unit(), func(gt *goatest.T) {
 		called = true
 		if gt.T != t {
 			t.Fatal("goatest.T did not embed the original testing.T")
 		}
-		if got := gt.Scope(); got.Kind != goatest.ScopeIntegration || got.Capability != "postgres" {
+		if got := gt.Scope(); got.Kind != goatest.ScopeUnit || got.Capability != "" {
 			t.Errorf("scope = %+v", got)
 		}
 	})
 	if !called {
 		t.Fatal("Run did not execute the test body")
+	}
+}
+
+func TestIntegrationCarriesCapability(t *testing.T) {
+	got := goatest.Integration("postgres")
+	if got.Kind != goatest.ScopeIntegration || got.Capability != "postgres" {
+		t.Fatalf("scope = %+v", got)
 	}
 }
 
