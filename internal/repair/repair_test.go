@@ -7,9 +7,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/provider"
@@ -96,9 +98,81 @@ func TestApplyRefusesProductionPathsAndPreservesDirtyEdits(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsSymlinkDirectoryEscapingRepository(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	checker := &validator{}
+	_, err := repair.ValidateAndApply(t.Context(), root, report.Finding{ID: "finding-escape"}, provider.Candidate{
+		Kind: "patch", Path: "linked/escape_test.go", Content: []byte("package escaped\n"),
+	}, checker)
+	if err == nil {
+		t.Fatal("repair followed a symlink outside the repository")
+	}
+	if len(checker.calls) != 0 {
+		t.Fatalf("symlink escape reached validation: %v", checker.calls)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "escape_test.go")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside target exists after rejected repair: %v", statErr)
+	}
+}
+
+func TestApplyAcceptsRepositoryRootAlias(t *testing.T) {
+	realRoot := t.TempDir()
+	aliasRoot := filepath.Join(t.TempDir(), "repository-alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+	result, err := repair.ValidateAndApply(t.Context(), aliasRoot, report.Finding{ID: "finding-alias"}, provider.Candidate{
+		Kind: "patch", Path: "alias_test.go", Content: []byte("package fixture\n"),
+	}, &validator{})
+	if err != nil || result.Status != repair.StatusApplied {
+		t.Fatalf("aliased-root repair = %+v, %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(realRoot, "alias_test.go")); err != nil {
+		t.Fatalf("repair was not written through root alias: %v", err)
+	}
+}
+
+func TestDirtyArtifactHashesUntrustedFindingIdentity(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repository")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "candidate_test.go")
+	if err := os.WriteFile(path, []byte("user edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repair.ValidateAndApply(t.Context(), root, report.Finding{ID: "../../../outside"}, provider.Candidate{
+		Kind: "patch", Path: "candidate_test.go", PreimageSHA256: digest([]byte("old")), Content: []byte("candidate"),
+	}, &validator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != repair.StatusArtifact || strings.Contains(result.Artifact, "..") {
+		t.Fatalf("artifact = %+v", result)
+	}
+	absolute := filepath.Join(root, filepath.FromSlash(result.Artifact))
+	relative, err := filepath.Rel(root, absolute)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("artifact escaped repository: path=%q relative=%q err=%v", absolute, relative, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "outside.json")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside artifact exists: %v", statErr)
+	}
+}
+
 func TestCorpusPathsAreAllowed(t *testing.T) {
 	if !repair.AllowedPath("testdata/fuzz/FuzzRoundTrip/abc123") || !repair.AllowedPath("pkg/testdata/fuzz/FuzzX/seed") {
 		t.Fatal("standard fuzz corpus path was refused")
+	}
+	for _, path := range []string{"./A:/escape_test.go", "pkg/\x00_test.go"} {
+		if repair.AllowedPath(path) {
+			t.Errorf("cross-platform-invalid path %q was accepted", path)
+		}
 	}
 }
 

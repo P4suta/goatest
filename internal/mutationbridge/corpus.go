@@ -77,7 +77,7 @@ func PromoteCorpus(root string, artifact gomutants.Artifact) (string, bool, erro
 }
 
 func corpusPath(path string) (string, bool) {
-	if path == "" || strings.ContainsRune(path, '\\') {
+	if path == "" || strings.ContainsAny(path, "\\:\x00") {
 		return "", false
 	}
 	native := filepath.FromSlash(path)
@@ -85,7 +85,8 @@ func corpusPath(path string) (string, bool) {
 		return "", false
 	}
 	clean := filepath.Clean(native)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" {
 		return "", false
 	}
 	normalized := filepath.ToSlash(clean)

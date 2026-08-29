@@ -48,6 +48,8 @@ func TestPromoteCorpusIsAtomicIdempotentAndStandardOnly(t *testing.T) {
 		{Path: "production.go", Data: artifact.Data},
 		{Path: artifact.Path, Data: []byte("not a standard corpus")},
 		{Path: "../testdata/fuzz/FuzzX/x", Data: artifact.Data},
+		{Path: "./A:/testdata/fuzz/FuzzX/x", Data: artifact.Data},
+		{Path: "testdata/fuzz/FuzzX/\x00", Data: artifact.Data},
 	} {
 		if _, _, err := mutationbridge.PromoteCorpus(root, invalid); err == nil {
 			t.Errorf("invalid artifact was promoted: %+v", invalid)

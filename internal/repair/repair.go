@@ -65,6 +65,9 @@ func ValidateAndApply(ctx context.Context, root string, finding report.Finding, 
 	if candidate.Kind != "patch" && candidate.Kind != "corpus" {
 		return Result{}, fmt.Errorf("goatest: repair candidate kind %q is invalid", candidate.Kind)
 	}
+	if _, err := confinedPath(root, normalized); err != nil {
+		return Result{}, err
+	}
 	for range 3 {
 		if err := validator.OriginalStable(ctx, candidate); err != nil {
 			return Result{}, fmt.Errorf("goatest: candidate is unstable on original code: %w", err)
@@ -79,7 +82,10 @@ func ValidateAndApply(ctx context.Context, root string, finding report.Finding, 
 		return Result{}, fmt.Errorf("goatest: candidate fails related suite: %w", err)
 	}
 
-	target := filepath.Join(root, filepath.FromSlash(normalized))
+	target, err := confinedPath(root, normalized)
+	if err != nil {
+		return Result{}, err
+	}
 	match, mode, err := matchesPreimage(target, candidate.PreimageSHA256)
 	if err != nil {
 		return Result{}, err
@@ -91,14 +97,14 @@ func ValidateAndApply(ctx context.Context, root string, finding report.Finding, 
 		}
 		return Result{Status: StatusArtifact, Path: normalized, Artifact: artifact}, nil
 	}
-	if err := atomicWrite(target, candidate.Content, mode); err != nil {
+	if err := atomicWrite(root, normalized, candidate.Content, mode); err != nil {
 		return Result{}, fmt.Errorf("goatest: apply repair %s: %w", normalized, err)
 	}
 	return Result{Status: StatusApplied, Path: normalized}, nil
 }
 
 func normalize(path string) (string, bool) {
-	if path == "" || strings.ContainsRune(path, '\\') {
+	if path == "" || strings.ContainsAny(path, "\\:\x00") {
 		return "", false
 	}
 	native := filepath.FromSlash(path)
@@ -106,10 +112,48 @@ func normalize(path string) (string, bool) {
 		return "", false
 	}
 	clean := filepath.Clean(native)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" {
 		return "", false
 	}
 	return filepath.ToSlash(clean), true
+}
+
+func confinedPath(root, normalized string) (string, error) {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("goatest: resolve repair root: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return "", fmt.Errorf("goatest: resolve repair root: %w", err)
+	}
+	rootInfo, err := os.Stat(resolvedRoot)
+	if err != nil {
+		return "", fmt.Errorf("goatest: inspect repair root: %w", err)
+	}
+	if !rootInfo.IsDir() {
+		return "", fmt.Errorf("goatest: repair root %s is not a directory", root)
+	}
+	parts := strings.Split(normalized, "/")
+	current := resolvedRoot
+	for index, part := range parts {
+		current = filepath.Join(current, filepath.FromSlash(part))
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("goatest: inspect repair path %s: %w", normalized, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("goatest: repair path %q crosses symbolic link %q", normalized, strings.Join(parts[:index+1], "/"))
+		}
+		if index+1 < len(parts) && !info.IsDir() {
+			return "", fmt.Errorf("goatest: repair path %q crosses non-directory %q", normalized, strings.Join(parts[:index+1], "/"))
+		}
+	}
+	return filepath.Join(resolvedRoot, filepath.FromSlash(normalized)), nil
 }
 
 func matchesPreimage(path, expected string) (bool, os.FileMode, error) {
@@ -128,7 +172,11 @@ func matchesPreimage(path, expected string) (bool, os.FileMode, error) {
 	return hex.EncodeToString(sum[:]) == expected, info.Mode().Perm(), nil
 }
 
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
+func atomicWrite(root, relative string, data []byte, mode os.FileMode) error {
+	path, err := confinedPath(root, relative)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -157,10 +205,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 }
 
 func writeArtifact(root string, finding report.Finding, candidate provider.Candidate) (string, error) {
-	identifier := finding.ID
-	if identifier == "" {
-		identifier = report.FindingID(candidate.Kind, candidate.Path, candidate.PreimageSHA256)
-	}
+	identifier := report.FindingID("repair-artifact", finding.ID, candidate.Kind, candidate.Path, candidate.PreimageSHA256)
 	relative := filepath.ToSlash(filepath.Join(".goatest", "patches", identifier+".json"))
 	payload, err := json.MarshalIndent(struct {
 		Finding   string             `json:"finding"`
@@ -171,7 +216,7 @@ func writeArtifact(root string, finding report.Finding, candidate provider.Candi
 		return "", err
 	}
 	payload = append(payload, '\n')
-	if err := atomicWrite(filepath.Join(root, filepath.FromSlash(relative)), payload, 0o600); err != nil {
+	if err := atomicWrite(root, relative, payload, 0o600); err != nil {
 		return "", err
 	}
 	return relative, nil
