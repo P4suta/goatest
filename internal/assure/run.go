@@ -56,6 +56,7 @@ type Options struct {
 	TempDirectory          string
 	MutationOperators      []string
 	FuzzExecutions         int
+	MutationJobs           int
 	Generate               func(context.Context, provider.Request) (provider.Response, error)
 	Validator              repair.Validator
 	AllowedGenerationPaths []string
@@ -221,7 +222,8 @@ func Run(ctx context.Context, options Options) (report.Report, error) {
 		emit(options, "mutation-target", fmt.Sprintf("%d mutants", len(session.Catalog().Mutants)))
 		mutation, err := EvaluateMutations(ctx, session, baseline.Targets, MutationOptions{
 			Root: root, Contract: contract, NoApply: options.NoApply,
-			FuzzExecutions: options.FuzzExecutions, Accepted: accepted,
+			FuzzExecutions: options.FuzzExecutions, Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
+			Progress: mutationProgress(options),
 		})
 		if err != nil {
 			_ = closeRound()
@@ -484,6 +486,28 @@ func acquireResources(ctx context.Context, loaded config.Config, targets []goana
 		baseline[i] = BaselineTarget{Target: target, Environment: slices.Clone(environments[target.Capability])}
 	}
 	return manager, baseline, evidenceItems, allEnvironment, nil
+}
+
+func mutationJobLimit(options Options, loaded config.Config) int {
+	for _, spec := range loaded.Resources {
+		if spec.Exclusive {
+			return 1
+		}
+	}
+	jobs := options.MutationJobs
+	if jobs <= 0 {
+		jobs = runtime.GOMAXPROCS(0)
+	}
+	return max(1, min(jobs, 4))
+}
+
+func mutationProgress(options Options) func(completed, total int) {
+	return func(completed, total int) {
+		step := max(1, (total+99)/100)
+		if completed == 1 || completed == total || completed%step == 0 {
+			emit(options, "mutation-progress", fmt.Sprintf("%d/%d", completed, total))
+		}
+	}
 }
 
 func mergeEnvironment(base, overlay []string) ([]string, error) {

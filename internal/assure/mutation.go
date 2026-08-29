@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
@@ -48,7 +49,9 @@ type MutationOptions struct {
 	NoApply        bool
 	FuzzExecutions int
 	Timeout        time.Duration
+	Jobs           int
 	Accepted       map[string]bool
+	Progress       func(completed, total int)
 }
 
 type MutationEvaluation struct {
@@ -76,67 +79,45 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			Kind: "mutation", ID: rejection.ID, Status: "compile-equivalent", Detail: rejection.Diagnostic,
 		})
 	}
+	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
 	for _, mutant := range catalog.Mutants {
-		if !mutant.Accepted {
-			continue
+		if mutant.Accepted {
+			mutants = append(mutants, mutant)
 		}
-		reaching := reachingTargets(mutant.Path, targets)
-		if len(reaching) == 0 {
-			evaluation.addFinding(mutant, "unreached-mutant", "no top-level test or fuzz target reaches this mutation", options.Accepted)
+	}
+	seeds := evaluateMutationSeeds(ctx, session, mutants, targets, options)
+	for _, seed := range seeds {
+		if seed.err != nil {
+			return MutationEvaluation{}, seed.err
+		}
+		evaluation.append(seed.evaluation)
+		if seed.resolved {
 			continue
 		}
 
 		killed := false
 		blocked := false
-		for _, target := range reaching {
-			result, err := session.Exec(ctx, seedRequest(mutant, target, options.Timeout))
-			if err != nil {
-				return MutationEvaluation{}, fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, target.Target.Name, err)
-			}
-			switch result.Outcome {
-			case gomutants.OutcomeKilled:
-				evaluation.addKill(mutant, target.Target.Name)
-				killed = true
-			case gomutants.OutcomeSurvived:
-				// Continue through every demonstrably relevant target.
-			case gomutants.OutcomeTimedOut:
-				evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active", options.Accepted)
-				blocked = true
-			case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-				evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome", options.Accepted)
-				blocked = true
-			default:
-				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
-			}
-			if killed || blocked {
-				break
-			}
-		}
-		if killed || blocked {
-			continue
-		}
-
-		for _, target := range reaching {
+		for _, target := range seed.reaching {
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
 			}
-			result, err := session.Exec(ctx, fuzzRequest(mutant, target, executions, options.Timeout))
+			result, err := session.Exec(ctx, fuzzRequest(seed.mutant, target, executions, options.Timeout))
 			if err != nil {
-				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", mutant.DisplayID, target.Target.Name, err)
+				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", seed.mutant.DisplayID, target.Target.Name, err)
 			}
 			switch result.Outcome {
 			case gomutants.OutcomeKilled:
 				if options.NoApply {
-					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input, but --no-apply left it outside the corpus", options.Accepted)
+					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input, but --no-apply left it outside the corpus", options.Accepted)
 					killed = true
 					break
 				}
-				promoted, err := promoteTargetArtifacts(options.Root, mutant, target.Target.Name, result.Artifacts, &evaluation)
+				promoted, err := promoteTargetArtifacts(options.Root, seed.mutant, target.Target.Name, result.Artifacts, &evaluation)
 				if err != nil {
 					return MutationEvaluation{}, err
 				}
 				if !promoted {
-					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input", options.Accepted)
+					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input", options.Accepted)
 				} else {
 					evaluation.Applied = true
 				}
@@ -144,13 +125,13 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			case gomutants.OutcomeSurvived:
 				// Try another covering fuzz target, if present.
 			case gomutants.OutcomeTimedOut:
-				evaluation.addFinding(mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout", options.Accepted)
+				evaluation.addFinding(seed.mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout", options.Accepted)
 				blocked = true
 			case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-				evaluation.addFinding(mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome", options.Accepted)
+				evaluation.addFinding(seed.mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome", options.Accepted)
 				blocked = true
 			default:
-				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown fuzz outcome %q", mutant.DisplayID, result.Outcome)
+				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown fuzz outcome %q", seed.mutant.DisplayID, result.Outcome)
 			}
 			if killed || blocked {
 				break
@@ -160,9 +141,99 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
-		evaluation.addFinding(mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		evaluation.addFinding(seed.mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
 	}
 	return evaluation, nil
+}
+
+type mutationSeed struct {
+	mutant     gomutants.Mutant
+	reaching   []TargetEvidence
+	evaluation MutationEvaluation
+	resolved   bool
+	err        error
+}
+
+func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
+	results := make([]mutationSeed, len(mutants))
+	if len(mutants) == 0 {
+		return results
+	}
+	jobs := options.Jobs
+	if jobs <= 0 {
+		jobs = 1
+	}
+	if jobs > len(mutants) {
+		jobs = len(mutants)
+	}
+	indexes := make(chan int)
+	var workers sync.WaitGroup
+	var progress sync.Mutex
+	completed := 0
+	workers.Add(jobs)
+	for range jobs {
+		go func() {
+			defer workers.Done()
+			for index := range indexes {
+				results[index] = evaluateMutationSeed(ctx, session, mutants[index], targets, options)
+				progress.Lock()
+				completed++
+				if options.Progress != nil {
+					options.Progress(completed, len(mutants))
+				}
+				progress.Unlock()
+			}
+		}()
+	}
+	for index := range mutants {
+		indexes <- index
+	}
+	close(indexes)
+	workers.Wait()
+	return results
+}
+
+func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
+	seed := mutationSeed{mutant: mutant, reaching: reachingTargets(mutant.Path, targets)}
+	if len(seed.reaching) == 0 {
+		seed.evaluation.addFinding(mutant, "unreached-mutant", "no top-level test or fuzz target reaches this mutation", options.Accepted)
+		seed.resolved = true
+		return seed
+	}
+	for _, target := range seed.reaching {
+		result, err := session.Exec(ctx, seedRequest(mutant, target, options.Timeout))
+		if err != nil {
+			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, target.Target.Name, err)
+			return seed
+		}
+		switch result.Outcome {
+		case gomutants.OutcomeKilled:
+			seed.evaluation.addKill(mutant, target.Target.Name)
+			seed.resolved = true
+		case gomutants.OutcomeSurvived:
+			// Continue through every demonstrably relevant target.
+		case gomutants.OutcomeTimedOut:
+			seed.evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active", options.Accepted)
+			seed.resolved = true
+		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome", options.Accepted)
+			seed.resolved = true
+		default:
+			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
+			return seed
+		}
+		if seed.resolved {
+			return seed
+		}
+	}
+	return seed
+}
+
+func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
+	evaluation.Evidence = append(evaluation.Evidence, other.Evidence...)
+	evaluation.Findings = append(evaluation.Findings, other.Findings...)
+	evaluation.Repairs = append(evaluation.Repairs, other.Repairs...)
+	evaluation.Applied = evaluation.Applied || other.Applied
 }
 
 func reachingTargets(path string, targets []TargetEvidence) []TargetEvidence {

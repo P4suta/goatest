@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,91 @@ func (session *fakeSession) Catalog() gomutants.Catalog { return session.catalog
 func (session *fakeSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.requests = append(session.requests, request)
 	return session.exec(request)
+}
+
+type parallelSession struct {
+	catalog   gomutants.Catalog
+	started   chan string
+	completed chan string
+	releaseA  chan struct{}
+	releaseB  chan struct{}
+	mu        sync.Mutex
+	active    int
+	maximum   int
+}
+
+func (session *parallelSession) Catalog() gomutants.Catalog { return session.catalog }
+
+func (session *parallelSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	session.mu.Lock()
+	session.active++
+	if session.active > session.maximum {
+		session.maximum = session.active
+	}
+	session.mu.Unlock()
+	session.started <- request.Mutant
+	if request.Mutant == "mutant-a" {
+		<-session.releaseA
+	} else {
+		<-session.releaseB
+	}
+	session.completed <- request.Mutant
+	session.mu.Lock()
+	session.active--
+	session.mu.Unlock()
+	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+}
+
+func TestEvaluateRunsSeedMutantsConcurrentlyAndKeepsCatalogOrder(t *testing.T) {
+	first, second := acceptedMutant(), acceptedMutant()
+	first.ID, first.DisplayID = "mutant-a", "a"
+	second.ID, second.DisplayID = "mutant-b", "b"
+	session := &parallelSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{first, second}},
+		started: make(chan string, 2), completed: make(chan string, 2),
+		releaseA: make(chan struct{}), releaseB: make(chan struct{}),
+	}
+	type outcome struct {
+		result assure.MutationEvaluation
+		err    error
+	}
+	root := t.TempDir()
+	progress := make(chan int, 2)
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
+			Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"},
+		}}, assure.MutationOptions{
+			Root: root, Contract: "standard-v1", Jobs: 2,
+			Progress: func(completed, _ int) { progress <- completed },
+		})
+		done <- outcome{result: result, err: err}
+	}()
+	for range 2 {
+		select {
+		case <-session.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("seed mutants did not overlap")
+		}
+	}
+	close(session.releaseB)
+	if got := <-session.completed; got != "mutant-b" {
+		t.Fatalf("first completion = %q, want mutant-b", got)
+	}
+	close(session.releaseA)
+	got := <-done
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if session.maximum != 2 {
+		t.Fatalf("maximum concurrent executions = %d, want 2", session.maximum)
+	}
+	if len(got.result.Evidence) != 2 || got.result.Evidence[0].ID != "mutant-a" || got.result.Evidence[1].ID != "mutant-b" {
+		t.Fatalf("evidence order = %+v", got.result.Evidence)
+	}
+	if first, second := <-progress, <-progress; first != 1 || second != 2 {
+		t.Fatalf("progress = [%d %d], want [1 2]", first, second)
+	}
 }
 
 func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
