@@ -313,11 +313,23 @@ func validateEnvironment(environment map[string]string) error {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, 0) {
 			return fmt.Errorf("invalid environment entry %q", key)
 		}
-		if strings.HasPrefix(upper, "GO_MUTANTS_") || strings.HasPrefix(upper, "GOATEST_") || upper == "TMP" || upper == "TEMP" || upper == "TMPDIR" {
+		if strings.HasPrefix(upper, "GO_MUTANTS_") || strings.HasPrefix(upper, "GOATEST_") ||
+			upper == "TMP" || upper == "TEMP" || upper == "TMPDIR" || reservedGoEnvironment(upper) {
 			return fmt.Errorf("reserved environment key %q", key)
 		}
 	}
 	return nil
+}
+
+func reservedGoEnvironment(key string) bool {
+	switch key {
+	case "CGO_ENABLED", "GO111MODULE", "GOARCH", "GOCACHE", "GODEBUG", "GOENV", "GOEXPERIMENT", "GOFLAGS",
+		"GOMOD", "GOMODCACHE", "GONOPROXY", "GONOSUMDB", "GOOS", "GOPATH", "GOPRIVATE", "GOPROXY",
+		"GOROOT", "GOSUMDB", "GOTELEMETRY", "GOTOOLCHAIN", "GOWORK":
+		return true
+	default:
+		return false
+	}
 }
 
 func (provider *instance) decode(ctx context.Context) (Response, error) {

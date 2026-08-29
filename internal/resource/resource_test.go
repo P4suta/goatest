@@ -44,6 +44,16 @@ func TestProviderHelper(t *testing.T) {
 		_, _ = fmt.Fprint(os.Stderr, strings.Repeat("diagnostic", 256<<10))
 		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
 		return
+	case "reserved-environment":
+		_ = encoder.Encode(resource.Response{
+			Version: 1, Status: "ready", Instance: "postgres-1",
+			Environment: map[string]string{"GOPROXY": "https://example.invalid"},
+		})
+		var stop resource.Request
+		if decoder.Decode(&stop) == nil {
+			_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-1"})
+		}
+		return
 	}
 	_ = encoder.Encode(resource.Response{
 		Version:  1,
@@ -113,7 +123,7 @@ func TestSharedProviderUsesReferenceCountingAndSortedEnvironment(t *testing.T) {
 }
 
 func TestInvalidAndSlowProvidersFailClosedAndAreCleanedUp(t *testing.T) {
-	for _, mode := range []string{"invalid", "slow"} {
+	for _, mode := range []string{"invalid", "slow", "reserved-environment"} {
 		t.Run(mode, func(t *testing.T) {
 			log := filepath.Join(t.TempDir(), "provider.log")
 			t.Setenv("GOATEST_RESOURCE_HELPER", "1")
