@@ -148,6 +148,28 @@ func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
 	}
 }
 
+func TestEvaluateTriesTheShortestMeasuredReachingTargetFirst(t *testing.T) {
+	mutant := acceptedMutant()
+	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
+	}
+	targets := []assure.TargetEvidence{
+		{Target: target("TestSlowE2E", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: 90 * time.Second},
+		{Target: target("TestUnknownDuration", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}},
+		{Target: target("TestFastUnit", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: 25 * time.Millisecond},
+	}
+	_, err := assure.EvaluateMutations(t.Context(), session, targets, assure.MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || !hasArg(session.requests[0].Args, "-test.run=^TestFastUnit$") {
+		t.Fatalf("requests = %+v, want only the shortest measured target", session.requests)
+	}
+}
+
 func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
 	mutant := acceptedMutant()
 	for _, testCase := range []struct {

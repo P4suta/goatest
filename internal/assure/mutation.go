@@ -6,6 +6,7 @@
 package assure
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -250,6 +251,16 @@ func reachingTargets(path string, targets []TargetEvidence) []TargetEvidence {
 			result = append(result, target)
 		}
 	}
+	slices.SortStableFunc(result, func(first, second TargetEvidence) int {
+		firstMeasured, secondMeasured := first.Duration > 0, second.Duration > 0
+		if firstMeasured != secondMeasured {
+			if firstMeasured {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(first.Duration, second.Duration)
+	})
 	return result
 }
 
