@@ -35,16 +35,21 @@ type listedPackage struct {
 	}
 }
 
+var relativePackagePath = filepath.Rel
+
 func DecodePackages(reader io.Reader) (Model, error) {
 	decoder := json.NewDecoder(reader)
 	var listed []listedPackage
+
+decode:
 	for {
 		var item listedPackage
 		err := decoder.Decode(&item)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
+		switch err {
+		case nil:
+		case io.EOF:
+			break decode
+		default:
 			return Model{}, fmt.Errorf("goatest: decode go list package: %w", err)
 		}
 		if item.Module != nil {
@@ -61,7 +66,7 @@ func DecodePackages(reader io.Reader) (Model, error) {
 		if item.Module.Path != modulePath || item.Module.Dir != moduleDir {
 			continue
 		}
-		relative, err := filepath.Rel(moduleDir, item.Dir)
+		relative, err := relativePackagePath(moduleDir, item.Dir)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return Model{}, fmt.Errorf("goatest: package %s is outside module directory", item.ImportPath)
 		}
