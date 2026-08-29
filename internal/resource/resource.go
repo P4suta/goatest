@@ -5,6 +5,7 @@
 package resource
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,8 @@ import (
 )
 
 const protocolVersion = 1
+
+const protocolOutputLimit = 1 << 20
 
 type Request struct {
 	Version    int    `json:"version"`
@@ -47,12 +50,13 @@ type Spec struct {
 }
 
 type Manager struct {
-	mu     sync.Mutex
-	specs  map[string]Spec
-	shared map[string]*instance
-	active map[*instance]bool
-	nextID uint64
-	closed bool
+	mu      sync.Mutex
+	specs   map[string]Spec
+	shared  map[string]*instance
+	active  map[*instance]bool
+	nextID  uint64
+	closed  bool
+	changed chan struct{}
 }
 
 type Lease struct {
@@ -73,8 +77,8 @@ type instance struct {
 	tree        *processtree.Tree
 	stdin       io.WriteCloser
 	encoder     *json.Encoder
-	decoder     *json.Decoder
-	stderr      *bytes.Buffer
+	stdout      *bufio.Reader
+	stderr      *limitedBuffer
 	environment map[string]string
 	stopOnce    sync.Once
 	stopErr     error
@@ -86,7 +90,7 @@ func New(specs map[string]Spec) *Manager {
 		spec.Command = slices.Clone(spec.Command)
 		cloned[name] = spec
 	}
-	return &Manager{specs: cloned, shared: make(map[string]*instance), active: make(map[*instance]bool)}
+	return &Manager{specs: cloned, shared: make(map[string]*instance), active: make(map[*instance]bool), changed: make(chan struct{})}
 }
 
 func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease, error) {
@@ -94,14 +98,35 @@ func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease,
 		return nil, errors.New("goatest: nil resource manager")
 	}
 	manager.mu.Lock()
+	var spec Spec
+	for {
+		if manager.closed {
+			manager.mu.Unlock()
+			return nil, errors.New("goatest: resource manager is closed")
+		}
+		var ok bool
+		spec, ok = manager.specs[capability]
+		if !ok {
+			manager.mu.Unlock()
+			return nil, fmt.Errorf("goatest: no provider for capability %q", capability)
+		}
+		if spec.Shared && spec.Exclusive {
+			manager.mu.Unlock()
+			return nil, fmt.Errorf("goatest: resource %q cannot be shared and exclusive", capability)
+		}
+		if !spec.Exclusive || !manager.capabilityActive(capability) {
+			break
+		}
+		changed := manager.changed
+		manager.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("goatest: wait for exclusive resource %q: %w", capability, ctx.Err())
+		case <-changed:
+		}
+		manager.mu.Lock()
+	}
 	defer manager.mu.Unlock()
-	if manager.closed {
-		return nil, errors.New("goatest: resource manager is closed")
-	}
-	spec, ok := manager.specs[capability]
-	if !ok {
-		return nil, fmt.Errorf("goatest: no provider for capability %q", capability)
-	}
 	if spec.Shared {
 		if existing := manager.shared[capability]; existing != nil {
 			existing.refs++
@@ -150,12 +175,18 @@ func (manager *Manager) release(target *instance) error {
 		manager.mu.Unlock()
 		return nil
 	}
-	delete(manager.active, target)
 	if manager.shared[target.capability] == target {
 		delete(manager.shared, target.capability)
 	}
 	manager.mu.Unlock()
-	return target.stop()
+	stopErr := target.stop()
+	manager.mu.Lock()
+	if manager.active[target] {
+		delete(manager.active, target)
+		manager.notifyLocked()
+	}
+	manager.mu.Unlock()
+	return stopErr
 }
 
 func (manager *Manager) Close() error {
@@ -174,12 +205,29 @@ func (manager *Manager) Close() error {
 	}
 	clear(manager.active)
 	clear(manager.shared)
+	manager.notifyLocked()
 	manager.mu.Unlock()
 	var closeErr error
 	for _, provider := range active {
 		closeErr = errors.Join(closeErr, provider.stop())
 	}
 	return closeErr
+}
+
+func (manager *Manager) capabilityActive(capability string) bool {
+	for provider := range manager.active {
+		if provider.capability == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func (manager *Manager) notifyLocked() {
+	if manager.changed != nil {
+		close(manager.changed)
+	}
+	manager.changed = make(chan struct{})
 }
 
 func start(parent context.Context, capability, requestID string, spec Spec) (*instance, error) {
@@ -201,7 +249,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		_ = stdin.Close()
 		return nil, err
 	}
-	stderr := &bytes.Buffer{}
+	stderr := &limitedBuffer{remaining: protocolOutputLimit}
 	cmd.Stderr = stderr
 	provider := &instance{
 		capability: capability,
@@ -210,10 +258,9 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		cmd:        cmd,
 		stdin:      stdin,
 		encoder:    json.NewEncoder(stdin),
-		decoder:    json.NewDecoder(stdout),
+		stdout:     bufio.NewReaderSize(stdout, protocolOutputLimit+1),
 		stderr:     stderr,
 	}
-	provider.decoder.DisallowUnknownFields()
 	tree, err := processtree.Start(cmd)
 	if err != nil {
 		_ = stdin.Close()
@@ -281,7 +328,23 @@ func (provider *instance) decode(ctx context.Context) (Response, error) {
 	resultChannel := make(chan result, 1)
 	go func() {
 		var response Response
-		err := provider.decoder.Decode(&response)
+		line, err := provider.stdout.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) || len(line) > protocolOutputLimit {
+			err = errors.New("goatest: resource response exceeded output limit")
+		}
+		if err == nil {
+			decoder := json.NewDecoder(bytes.NewReader(line))
+			decoder.DisallowUnknownFields()
+			err = decoder.Decode(&response)
+			if err == nil {
+				err = decoder.Decode(&struct{}{})
+				if errors.Is(err, io.EOF) {
+					err = nil
+				} else if err == nil {
+					err = errors.New("goatest: resource response has trailing data")
+				}
+			}
+		}
 		resultChannel <- result{response: response, err: err}
 	}()
 	select {
@@ -293,6 +356,38 @@ func (provider *instance) decode(ctx context.Context) (Response, error) {
 	case <-ctx.Done():
 		return Response{}, ctx.Err()
 	}
+}
+
+type limitedBuffer struct {
+	mu        sync.Mutex
+	buffer    bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (buffer *limitedBuffer) Write(data []byte) (int, error) {
+	written := len(data)
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	if len(data) > buffer.remaining {
+		data = data[:max(buffer.remaining, 0)]
+		buffer.truncated = true
+	}
+	if len(data) > 0 {
+		_, _ = buffer.buffer.Write(data)
+		buffer.remaining -= len(data)
+	}
+	return written, nil
+}
+
+func (buffer *limitedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	result := buffer.buffer.String()
+	if buffer.truncated {
+		result += "\n[goatest: provider stderr truncated]"
+	}
+	return result
 }
 
 func (provider *instance) abort(cause error) error {

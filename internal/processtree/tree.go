@@ -51,6 +51,6 @@ func (tree *Tree) Close() error {
 	if tree == nil {
 		return nil
 	}
-	tree.once.Do(func() { tree.err = closeHandle(tree.handle) })
+	tree.once.Do(func() { tree.err = closeTree(tree.command, tree.handle) })
 	return tree.err
 }

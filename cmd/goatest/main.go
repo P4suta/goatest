@@ -22,7 +22,7 @@ func main() {
 
 func realMain(arguments []string) int {
 	if len(arguments) == 1 && arguments[0] == "--version" {
-		fmt.Fprintf(os.Stdout, "goatest %s\n", assure.GoatestVersion)
+		_, _ = fmt.Fprintf(os.Stdout, "goatest %s\n", assure.GoatestVersion)
 		return cli.ExitAssured
 	}
 	ctx, cancel := context.WithCancel(context.Background())

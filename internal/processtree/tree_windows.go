@@ -59,7 +59,7 @@ func kill(command *exec.Cmd, handle platformHandle) error {
 	return result
 }
 
-func closeHandle(handle platformHandle) error {
+func closeTree(_ *exec.Cmd, handle platformHandle) error {
 	if handle == 0 {
 		return nil
 	}

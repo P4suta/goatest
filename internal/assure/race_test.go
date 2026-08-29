@@ -4,6 +4,7 @@
 package assure_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,6 +12,25 @@ import (
 	"github.com/P4suta/goatest/internal/assure"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
+
+func TestRelevantRacePackagesSelectsOwnersOfTestsThatReachConcurrency(t *testing.T) {
+	model := goanalysis.Model{Packages: []goanalysis.Package{
+		{ImportPath: "fixture/app", RelativeDir: "app"},
+		{ImportPath: "fixture/plain", RelativeDir: "plain"},
+		{ImportPath: "fixture/worker", RelativeDir: "worker"},
+	}}
+	targets := []assure.TargetEvidence{
+		{Target: target("TestApp", goanalysis.KindTest), CoveredFiles: []string{"app/app.go", "worker/worker.go"}},
+		{Target: goanalysis.Target{Name: "TestPlain", Package: "fixture/plain"}, CoveredFiles: []string{"plain/plain.go"}},
+		{Target: goanalysis.Target{Name: "TestWorker", Package: "fixture/worker"}, CoveredFiles: []string{"worker/worker.go"}},
+	}
+	targets[0].Target.Package = "fixture/app"
+	got := assure.RelevantRacePackages(model, []string{"fixture/worker"}, targets)
+	want := []string{"fixture/app", "fixture/worker"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("race packages = %v, want %v", got, want)
+	}
+}
 
 func TestCollectRaceSelectsConcurrentPackagesOrAllPackagesForDeep(t *testing.T) {
 	model := goanalysis.Model{Packages: []goanalysis.Package{
@@ -46,6 +66,19 @@ func TestCollectRaceReturnsDefectOnlyForDetectedRace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(result.Findings) != 1 || result.Findings[0].Kind != "data-race" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestCollectRaceReturnsDefectForTestFailureUnderRace(t *testing.T) {
+	workspace := &fakeWorkspace{run: func(gomutants.Command) gomutants.CommandResult {
+		return gomutants.CommandResult{ExitCode: 1, Output: []byte("--- FAIL: TestWorker (0.01s)\n    worker_test.go:12: corrupted shared state\nFAIL")}
+	}}
+	result, err := assure.CollectRace(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/worker"}, "standard-v1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Kind != "race-test-failure" {
 		t.Fatalf("result = %+v", result)
 	}
 }

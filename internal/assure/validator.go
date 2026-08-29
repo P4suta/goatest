@@ -159,6 +159,9 @@ func (validator *repositoryValidator) withCandidate(ctx context.Context, candida
 }
 
 func copyRepository(source, destination string) error {
+	if err := validateCopyRoots(source, destination); err != nil {
+		return err
+	}
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -204,6 +207,25 @@ func copyRepository(source, destination string) error {
 		_, copyErr := io.Copy(output, input)
 		return errors.Join(copyErr, output.Close(), input.Close())
 	})
+}
+
+func validateCopyRoots(source, destination string) error {
+	canonicalSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return fmt.Errorf("goatest: resolve candidate source: %w", err)
+	}
+	canonicalDestination, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		return fmt.Errorf("goatest: resolve candidate destination: %w", err)
+	}
+	inside := func(root, path string) bool {
+		relative, relErr := filepath.Rel(root, path)
+		return relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	if inside(canonicalSource, canonicalDestination) || inside(canonicalDestination, canonicalSource) {
+		return errors.New("goatest: candidate source and destination must be separate trees")
+	}
+	return nil
 }
 
 func writeCandidate(root string, candidate provider.Candidate) error {

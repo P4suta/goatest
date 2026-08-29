@@ -82,7 +82,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		}
 		reaching := reachingTargets(mutant.Path, targets)
 		if len(reaching) == 0 {
-			evaluation.addFinding(mutant, "unreached-mutant", "no top-level test or fuzz target reaches this mutation")
+			evaluation.addFinding(mutant, "unreached-mutant", "no top-level test or fuzz target reaches this mutation", options.Accepted)
 			continue
 		}
 
@@ -100,10 +100,10 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			case gomutants.OutcomeSurvived:
 				// Continue through every demonstrably relevant target.
 			case gomutants.OutcomeTimedOut:
-				evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active")
+				evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active", options.Accepted)
 				blocked = true
 			case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-				evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome")
+				evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome", options.Accepted)
 				blocked = true
 			default:
 				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
@@ -127,7 +127,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			switch result.Outcome {
 			case gomutants.OutcomeKilled:
 				if options.NoApply {
-					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input, but --no-apply left it outside the corpus")
+					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input, but --no-apply left it outside the corpus", options.Accepted)
 					killed = true
 					break
 				}
@@ -136,7 +136,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 					return MutationEvaluation{}, err
 				}
 				if !promoted {
-					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input")
+					evaluation.addFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input", options.Accepted)
 				} else {
 					evaluation.Applied = true
 				}
@@ -144,10 +144,10 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			case gomutants.OutcomeSurvived:
 				// Try another covering fuzz target, if present.
 			case gomutants.OutcomeTimedOut:
-				evaluation.addFinding(mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout")
+				evaluation.addFinding(mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout", options.Accepted)
 				blocked = true
 			case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-				evaluation.addFinding(mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome")
+				evaluation.addFinding(mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome", options.Accepted)
 				blocked = true
 			default:
 				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown fuzz outcome %q", mutant.DisplayID, result.Outcome)
@@ -160,14 +160,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
-		finding := mutationFinding(mutant, "surviving-mutant", "all reaching tests passed with this mutation active")
-		if options.Accepted[finding.ID] {
-			evaluation.Evidence = append(evaluation.Evidence, report.Evidence{
-				Kind: "mutation", ID: mutant.ID, Status: "accepted", Detail: finding.ID,
-			})
-			continue
-		}
-		evaluation.Findings = append(evaluation.Findings, finding)
+		evaluation.addFinding(mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
 	}
 	return evaluation, nil
 }
@@ -247,8 +240,15 @@ func (evaluation *MutationEvaluation) addKill(mutant gomutants.Mutant, target st
 	})
 }
 
-func (evaluation *MutationEvaluation) addFinding(mutant gomutants.Mutant, kind, summary string) {
-	evaluation.Findings = append(evaluation.Findings, mutationFinding(mutant, kind, summary))
+func (evaluation *MutationEvaluation) addFinding(mutant gomutants.Mutant, kind, summary string, accepted map[string]bool) {
+	finding := mutationFinding(mutant, kind, summary)
+	if accepted[finding.ID] {
+		evaluation.Evidence = append(evaluation.Evidence, report.Evidence{
+			Kind: "mutation", ID: mutant.ID, Status: "accepted", Detail: finding.ID,
+		})
+		return
+	}
+	evaluation.Findings = append(evaluation.Findings, finding)
 }
 
 func mutationFinding(mutant gomutants.Mutant, kind, summary string) report.Finding {

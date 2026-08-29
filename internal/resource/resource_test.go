@@ -34,6 +34,16 @@ func TestProviderHelper(t *testing.T) {
 	case "invalid":
 		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
 		return
+	case "oversized-ready":
+		_ = encoder.Encode(resource.Response{
+			Version: 1, Status: "ready", Instance: "postgres-1",
+			Environment: map[string]string{"DATABASE_URL": strings.Repeat("x", 2<<20)},
+		})
+		return
+	case "oversized-stderr":
+		_, _ = fmt.Fprint(os.Stderr, strings.Repeat("diagnostic", 256<<10))
+		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
+		return
 	}
 	_ = encoder.Encode(resource.Response{
 		Version:  1,
@@ -49,6 +59,9 @@ func TestProviderHelper(t *testing.T) {
 		os.Exit(21)
 	}
 	appendLog(os.Getenv("GOATEST_RESOURCE_LOG"), stop.Action)
+	if os.Getenv("GOATEST_RESOURCE_MODE") == "delay-stop" {
+		time.Sleep(500 * time.Millisecond)
+	}
 	_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-1"})
 }
 
@@ -127,6 +140,30 @@ func TestInvalidAndSlowProvidersFailClosedAndAreCleanedUp(t *testing.T) {
 	}
 }
 
+func TestProviderOutputIsBoundedAndFailsClosed(t *testing.T) {
+	for _, mode := range []string{"oversized-ready", "oversized-stderr"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("GOATEST_RESOURCE_HELPER", "1")
+			t.Setenv("GOATEST_RESOURCE_LOG", filepath.Join(t.TempDir(), "provider.log"))
+			t.Setenv("GOATEST_RESOURCE_MODE", mode)
+			manager := resource.New(map[string]resource.Spec{
+				"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second},
+			})
+			lease, err := manager.Acquire(t.Context(), "postgres")
+			if lease != nil {
+				_ = lease.Release()
+			}
+			_ = manager.Close()
+			if err == nil {
+				t.Fatal("oversized provider output was accepted")
+			}
+			if len(err.Error()) > (1<<20)+(64<<10) {
+				t.Fatalf("provider diagnostic was not bounded: %d bytes", len(err.Error()))
+			}
+		})
+	}
+}
+
 func TestUnknownCapabilityAndClosedManagerAreErrors(t *testing.T) {
 	manager := resource.New(nil)
 	if _, err := manager.Acquire(t.Context(), "missing"); err == nil {
@@ -137,6 +174,99 @@ func TestUnknownCapabilityAndClosedManagerAreErrors(t *testing.T) {
 	}
 	if _, err := manager.Acquire(t.Context(), "missing"); err == nil {
 		t.Fatal("closed manager accepted work")
+	}
+}
+
+func TestExclusiveProviderSerializesLeases(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "provider.log")
+	t.Setenv("GOATEST_RESOURCE_HELPER", "1")
+	t.Setenv("GOATEST_RESOURCE_LOG", log)
+	manager := resource.New(map[string]resource.Spec{
+		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
+	})
+	t.Cleanup(func() { _ = manager.Close() })
+	first, err := manager.Acquire(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquired struct {
+		lease *resource.Lease
+		err   error
+	}
+	secondResult := make(chan acquired, 1)
+	go func() {
+		lease, acquireErr := manager.Acquire(t.Context(), "postgres")
+		secondResult <- acquired{lease: lease, err: acquireErr}
+	}()
+	select {
+	case result := <-secondResult:
+		if result.lease != nil {
+			_ = result.lease.Release()
+		}
+		t.Fatalf("exclusive second lease did not wait: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-secondResult:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if err := result.lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exclusive second lease was not awakened")
+	}
+}
+
+func TestExclusiveProviderWaitsUntilPreviousProviderHasStopped(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "provider.log")
+	t.Setenv("GOATEST_RESOURCE_HELPER", "1")
+	t.Setenv("GOATEST_RESOURCE_LOG", log)
+	t.Setenv("GOATEST_RESOURCE_MODE", "delay-stop")
+	manager := resource.New(map[string]resource.Spec{
+		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
+	})
+	t.Cleanup(func() { _ = manager.Close() })
+	first, err := manager.Acquire(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquired struct {
+		lease *resource.Lease
+		err   error
+	}
+	secondResult := make(chan acquired, 1)
+	go func() {
+		lease, acquireErr := manager.Acquire(t.Context(), "postgres")
+		secondResult <- acquired{lease: lease, err: acquireErr}
+	}()
+	releaseResult := make(chan error, 1)
+	go func() { releaseResult <- first.Release() }()
+	select {
+	case result := <-secondResult:
+		if result.lease != nil {
+			_ = result.lease.Release()
+		}
+		t.Fatalf("second provider started while the first was stopping: %v", result.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := <-releaseResult; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-secondResult:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if err := result.lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second provider was not started after the first stopped")
 	}
 }
 

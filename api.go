@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/gen"
@@ -37,6 +38,9 @@ func Unit() TestScope { return TestScope{Kind: ScopeUnit} }
 // it against the environment the caller already supplied; the goatest CLI can
 // arrange that environment through a configured resource provider.
 func Integration(capability string) TestScope {
+	if strings.TrimSpace(capability) == "" {
+		panic("goatest: integration capability must not be blank")
+	}
 	return TestScope{Kind: ScopeIntegration, Capability: capability}
 }
 

@@ -6,6 +6,7 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/cli"
@@ -18,6 +19,24 @@ type service struct {
 	id      string
 	report  report.Report
 	err     error
+}
+
+func TestHelpListsPublicSurfaceWithoutRunningService(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		fake := &service{}
+		var stdout, stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), []string{flag}, &stdout, &stderr, fake); exit != cli.ExitAssured {
+			t.Fatalf("%s exit = %d, stderr = %q", flag, exit, stderr.String())
+		}
+		for _, expected := range []string{"--changed[=REF]", "--contract=standard-v1|deep-v1", "init", "explain ID", "replay ID", "accept ID", "report"} {
+			if !strings.Contains(stdout.String(), expected) {
+				t.Errorf("%s help omitted %q:\n%s", flag, expected, stdout.String())
+			}
+		}
+		if fake.command != "" {
+			t.Errorf("%s ran service command %q", flag, fake.command)
+		}
+	}
 }
 
 func (s *service) Execute(_ context.Context, command cli.Command, request cli.Request, id string) (report.Report, error) {

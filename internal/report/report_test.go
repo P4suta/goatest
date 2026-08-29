@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func fixture() report.Report {
@@ -24,9 +25,10 @@ func fixture() report.Report {
 			{Kind: "baseline", ID: "e1", Status: "passed"},
 		},
 		Findings: []report.Finding{
-			{ID: "f2", Kind: "survivor", Path: "z.go", Summary: "survived"},
+			{ID: "f2", Kind: "survivor", Path: "z.go", Summary: "survived", Mutant: "lt-to-le: < -> <=", Replay: "goatest replay f2"},
 			{ID: "f1", Kind: "coverage", Path: "a.go", Summary: "unreached"},
 		},
+		Repairs:       []report.Repair{{ID: "r1", Finding: "f2", Path: "z_test.go", Status: "applied"}},
 		ResidualRisks: []string{"z risk", "a risk"},
 	}
 }
@@ -47,9 +49,14 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 		t.Errorf("findings are not canonically ordered:\n%s", first)
 	}
 	want := "INSUFFICIENT standard-v1 snapshot=abc123\n" +
-		"evidence 2  findings 2  repairs 0  risks 2\n" +
+		"evidence 2  findings 2  repairs 1  risks 2\n" +
 		"FINDING f1 coverage a.go: unreached\n" +
-		"FINDING f2 survivor z.go: survived\n"
+		"FINDING f2 survivor z.go: survived\n" +
+		"  MUTANT lt-to-le: < -> <=\n" +
+		"  REPLAY goatest replay f2\n" +
+		"REPAIR r1 applied z_test.go finding=f2\n" +
+		"RISK a risk\n" +
+		"RISK z risk\n"
 	if got := report.Lines(fixture()); got != want {
 		t.Errorf("lines =\n%s\nwant\n%s", got, want)
 	}
@@ -68,6 +75,11 @@ func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
 	}
 	if !strings.Contains(text, "<!doctype html>") || !strings.Contains(text, "insufficient") {
 		t.Errorf("HTML is incomplete: %s", html)
+	}
+	for _, required := range []string{"lt-to-le: &lt; -&gt; &lt;=", "goatest replay f2", "z_test.go", "a risk", "z risk"} {
+		if !strings.Contains(text, required) {
+			t.Errorf("HTML omitted %q: %s", required, html)
+		}
 	}
 }
 
@@ -119,5 +131,44 @@ func TestSARIFJUnitAndSchemaAreDeterministicAndWellFormed(t *testing.T) {
 	var document map[string]any
 	if err := json.Unmarshal(schema, &document); err != nil || document["$id"] != report.SchemaV1 || document["additionalProperties"] != false {
 		t.Fatalf("schema = %+v, %v\n%s", document, err, schema)
+	}
+}
+
+func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) {
+	schemaBytes, err := report.JSONSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	if err := compiler.AddResource("https://goatest.invalid/assurance-report-v1.schema.json", document); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile("https://goatest.invalid/assurance-report-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := report.JSON(fixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compiled.Validate(instance); err != nil {
+		t.Fatalf("valid assurance report was rejected: %v", err)
+	}
+	var invalid map[string]any
+	if err := json.Unmarshal(valid, &invalid); err != nil {
+		t.Fatal(err)
+	}
+	invalid["unknown"] = true
+	if err := compiled.Validate(invalid); err == nil {
+		t.Fatal("unknown report field passed assurance schema")
 	}
 }

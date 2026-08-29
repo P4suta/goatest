@@ -14,6 +14,7 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/report"
 )
 
 type fakeSession struct {
@@ -76,6 +77,27 @@ func TestEvaluateFailsClosedWhenNoTargetReachesMutant(t *testing.T) {
 	}
 	if len(result.Findings) != 1 || result.Findings[0].Kind != "unreached-mutant" {
 		t.Fatalf("findings = %+v", result.Findings)
+	}
+}
+
+func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
+	mutant := acceptedMutant()
+	session := &fakeSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			t.Fatal("accepted unreachable mutant must not run a target")
+			return gomutants.MutantResult{}, nil
+		},
+	}
+	findingID := report.FindingID("mutation", mutant.ID)
+	result, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Accepted: map[string]bool{findingID: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Evidence[0].Status != "accepted" || result.Evidence[0].Detail != findingID {
+		t.Fatalf("result = %+v", result)
 	}
 }
 

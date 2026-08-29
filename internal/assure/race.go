@@ -20,6 +20,61 @@ type RaceResult struct {
 	Findings []report.Finding
 }
 
+// RelevantRacePackages returns the packages whose top-level tests exercise a
+// package containing concurrency. Running the concurrent dependency's own
+// tests alone can miss a race that is only driven through a caller.
+func RelevantRacePackages(model goanalysis.Model, concurrentPackages []string, targets []TargetEvidence) []string {
+	concurrent := make(map[string]bool, len(concurrentPackages))
+	for _, importPath := range concurrentPackages {
+		concurrent[importPath] = true
+	}
+	selected := make(map[string]bool)
+	for _, target := range targets {
+		reaches := concurrent[target.Target.Package]
+		if !reaches {
+			for _, dependency := range target.Target.Dependencies {
+				if concurrent[dependency] {
+					reaches = true
+					break
+				}
+			}
+		}
+		if !reaches {
+			for _, covered := range target.CoveredFiles {
+				if concurrent[packageForFile(model.Packages, covered)] {
+					reaches = true
+					break
+				}
+			}
+		}
+		if reaches {
+			selected[target.Target.Package] = true
+		}
+	}
+	result := make([]string, 0, len(selected))
+	for importPath := range selected {
+		result = append(result, importPath)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func packageForFile(packages []goanalysis.Package, path string) string {
+	path = strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "./")
+	bestPath, bestPackage := "", ""
+	for _, pkg := range packages {
+		directory := strings.Trim(strings.ReplaceAll(pkg.RelativeDir, `\`, "/"), "/")
+		if directory == "." {
+			directory = ""
+		}
+		inside := directory == "" && !strings.Contains(path, "/") || directory != "" && strings.HasPrefix(path, directory+"/")
+		if inside && len(directory) >= len(bestPath) {
+			bestPath, bestPackage = directory, pkg.ImportPath
+		}
+	}
+	return bestPackage
+}
+
 func CollectRace(ctx context.Context, workspace CommandWorkspace, model goanalysis.Model, concurrentPackages []string, contract string, environment []string) (RaceResult, error) {
 	packages := slices.Clone(concurrentPackages)
 	if contract == "deep-v1" {
@@ -50,6 +105,13 @@ func CollectRace(ctx context.Context, workspace CommandWorkspace, model goanalys
 			id := report.FindingID("data-race", strings.Join(packages, "\x00"))
 			return RaceResult{Findings: []report.Finding{{
 				ID: id, Kind: "data-race", Summary: "Go race detector reproduced a data race: " + summarize(run.Output),
+				Replay: "go test -race -count=1 " + strings.Join(packages, " "),
+			}}}, nil
+		}
+		if strings.Contains(output, "--- FAIL:") || strings.Contains(output, "\npanic:") {
+			id := report.FindingID("race-test-failure", strings.Join(packages, "\x00"))
+			return RaceResult{Findings: []report.Finding{{
+				ID: id, Kind: "race-test-failure", Summary: "a test failed under the Go race detector: " + summarize(run.Output),
 				Replay: "go test -race -count=1 " + strings.Join(packages, " "),
 			}}}, nil
 		}

@@ -47,25 +47,40 @@ type Service interface {
 	Execute(context.Context, Command, Request, string) (report.Report, error)
 }
 
+const help = `Usage:
+  goatest [--changed[=REF]] [--contract=standard-v1|deep-v1] [--no-apply] [--json] [--no-tui]
+  goatest init
+  goatest explain ID
+  goatest replay ID
+  goatest accept ID
+  goatest report
+
+Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
+`
+
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		_, _ = io.WriteString(stdout, help)
+		return ExitAssured
+	}
 	command, request, id, err := parse(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "goatest: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "goatest: %v\n", err)
 		return ExitError
 	}
 	result, err := service.Execute(ctx, command, request, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			fmt.Fprintln(stderr, "goatest: interrupted")
+			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
 			return ExitInterrupted
 		}
-		fmt.Fprintf(stderr, "goatest: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "goatest: %v\n", err)
 		return ExitError
 	}
 	if request.JSON {
 		data, encodeErr := report.JSON(result)
 		if encodeErr != nil {
-			fmt.Fprintf(stderr, "goatest: encode report: %v\n", encodeErr)
+			_, _ = fmt.Fprintf(stderr, "goatest: encode report: %v\n", encodeErr)
 			return ExitError
 		}
 		_, _ = stdout.Write(data)

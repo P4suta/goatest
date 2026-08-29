@@ -34,4 +34,12 @@ func kill(command *exec.Cmd, _ platformHandle) error {
 	return nil
 }
 
-func closeHandle(platformHandle) error { return nil }
+func closeTree(command *exec.Cmd, _ platformHandle) error {
+	if command == nil || command.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}

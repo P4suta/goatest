@@ -4,20 +4,74 @@
 package assure_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/resource"
 )
+
+func TestRunResourceProviderHelper(t *testing.T) {
+	if os.Getenv("GOATEST_ASSURE_RESOURCE_HELPER") != "1" {
+		return
+	}
+	decoder := json.NewDecoder(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	var start resource.Request
+	if err := decoder.Decode(&start); err != nil {
+		os.Exit(40)
+	}
+	appendFixtureLog(os.Getenv("GOATEST_ASSURE_RESOURCE_LOG"), start.Action)
+	if err := encoder.Encode(resource.Response{
+		Version: 1, Status: "ready", Instance: "postgres-e2e",
+		Environment: map[string]string{"DATABASE_URL": "postgres://managed/test"},
+	}); err != nil {
+		os.Exit(41)
+	}
+	var stop resource.Request
+	if err := decoder.Decode(&stop); err != nil {
+		os.Exit(42)
+	}
+	appendFixtureLog(os.Getenv("GOATEST_ASSURE_RESOURCE_LOG"), stop.Action)
+	_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-e2e"})
+}
+
+func TestRunGenerationProviderHelper(t *testing.T) {
+	if os.Getenv("GOATEST_ASSURE_GENERATION_HELPER") != "1" {
+		return
+	}
+	var request provider.Request
+	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+		os.Exit(44)
+	}
+	content, err := os.ReadFile(os.Getenv("GOATEST_ASSURE_GENERATION_CONTENT"))
+	if err != nil {
+		os.Exit(45)
+	}
+	response := provider.Response{
+		Version: provider.ProtocolVersion, FindingID: request.Finding.ID,
+		Candidates: []provider.Candidate{{
+			Kind: "patch", Path: "boundary_test.go",
+			PreimageSHA256: os.Getenv("GOATEST_ASSURE_GENERATION_PREIMAGE"), Content: content,
+		}},
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
+		os.Exit(46)
+	}
+	os.Exit(0)
+}
 
 func TestRunAssuresRepositoryAndWarmCacheStartsNoTestOrMutant(t *testing.T) {
 	root := t.TempDir()
@@ -298,14 +352,156 @@ func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) 
 	}
 }
 
+func TestRunManagesIntegrationResourceAcrossBaselineAndMutants(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(t.TempDir(), "resource.log")
+	t.Setenv("GOATEST_ASSURE_RESOURCE_HELPER", "1")
+	t.Setenv("GOATEST_ASSURE_RESOURCE_LOG", log)
+	configuration := fmt.Sprintf(`version = 1
+contract = "standard-v1"
+
+[resources.postgres]
+command = [%s, "-test.run=^TestRunResourceProviderHelper$"]
+timeout = "10s"
+shared = true
+`, strconv.Quote(os.Args[0]))
+	writeFixture(t, root, ".goatest.toml", configuration)
+	writeFixture(t, root, "go.mod", "module github.com/P4suta/goatest\n\ngo 1.26.0\n")
+	writeFixture(t, root, "api.go", `package goatest
+
+import "testing"
+
+type TestScope struct{ Capability string }
+func Integration(capability string) TestScope { return TestScope{Capability: capability} }
+type T struct{ *testing.T }
+func Run(t *testing.T, _ TestScope, body func(*T)) { body(&T{T: t}) }
+`)
+	writeFixture(t, root, "subject/boundary.go", `package subject
+
+func Boundary(value int) int {
+	if value < 10 { return value }
+	return 9
+}
+`)
+	writeFixture(t, root, "subject/boundary_test.go", `package subject
+
+import (
+	"os"
+	"testing"
+	goatest "github.com/P4suta/goatest"
+)
+
+func TestManagedPostgres(t *testing.T) {
+	goatest.Run(t, goatest.Integration("postgres"), func(gt *goatest.T) {
+		if os.Getenv("DATABASE_URL") != "postgres://managed/test" { gt.Fatal("managed environment missing") }
+		for _, value := range []int{5, 10} {
+			want := value
+			if value >= 10 { want = 9 }
+			if got := Boundary(value); got != want { gt.Fatalf("got %d, want %d", got, want) }
+		}
+	})
+}
+`)
+	result, err := assure.Run(t.Context(), assure.Options{
+		Root: root, Contract: "standard-v1", GoBinary: goBinary(t), TempDirectory: t.TempDir(),
+		MutationOperators: []string{"comparison"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Verdict != report.VerdictAssured {
+		t.Fatalf("report = %+v", result)
+	}
+	file, err := os.Open(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	var actions []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		actions = append(actions, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(actions, ",") != "start,stop" {
+		t.Fatalf("resource lifecycle = %v", actions)
+	}
+}
+
+func appendFixtureLog(path, action string) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		os.Exit(43)
+	}
+	_, _ = fmt.Fprintln(file, action)
+	_ = file.Close()
+}
+
+func TestRunUsesExternalGenerationProtocolAndProductionValidator(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "go.mod", "module fixture.example/provider-e2e\n\ngo 1.26.0\n")
+	writeFixture(t, root, "boundary.go", `package providere2e
+
+func Boundary(value int) int {
+	if value < 10 { return value }
+	return 9
+}
+`)
+	writeFixture(t, root, "boundary_test.go", `package providere2e
+
+import "testing"
+
+func TestBoundaryWeak(t *testing.T) {
+	if got := Boundary(5); got != 5 { t.Fatalf("got %d", got) }
+}
+`)
+	preimage, err := os.ReadFile(filepath.Join(root, "boundary_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(preimage)
+	contentPath := filepath.Join(t.TempDir(), "candidate.go")
+	writeFixture(t, filepath.Dir(contentPath), filepath.Base(contentPath), `package providere2e
+
+import "testing"
+
+func TestBoundaryWeak(t *testing.T) {
+	for _, value := range []int{5, 10} {
+		want := value
+		if value >= 10 { want = 9 }
+		if got := Boundary(value); got != want { t.Fatalf("got %d, want %d", got, want) }
+	}
+}
+`)
+	t.Setenv("GOATEST_ASSURE_GENERATION_HELPER", "1")
+	t.Setenv("GOATEST_ASSURE_GENERATION_CONTENT", contentPath)
+	t.Setenv("GOATEST_ASSURE_GENERATION_PREIMAGE", hex.EncodeToString(sum[:]))
+	configuration := fmt.Sprintf(`version = 1
+contract = "standard-v1"
+
+[generation]
+command = [%s, "-test.run=^TestRunGenerationProviderHelper$"]
+allowed_paths = ["boundary_test.go"]
+`, strconv.Quote(os.Args[0]))
+	writeFixture(t, root, ".goatest.toml", configuration)
+	result, err := assure.Run(t.Context(), assure.Options{
+		Root: root, Contract: "standard-v1", GoBinary: goBinary(t), TempDirectory: t.TempDir(),
+		MutationOperators: []string{"comparison"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Verdict != report.VerdictAssured || len(result.Repairs) != 1 || result.Repairs[0].Status != "applied" {
+		t.Fatalf("report = %+v", result)
+	}
+}
+
 func goBinary(t *testing.T) string {
 	t.Helper()
-	name := "go"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	path := filepath.Join(runtime.GOROOT(), "bin", name)
-	if _, err := os.Stat(path); err != nil {
+	path, err := exec.LookPath("go")
+	if err != nil {
 		t.Skipf("Go binary unavailable: %v", err)
 	}
 	return path

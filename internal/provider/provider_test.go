@@ -21,7 +21,11 @@ func TestGenerationProviderHelper(t *testing.T) {
 		return
 	}
 	if os.Getenv("GOATEST_GENERATION_CHILD") == "1" {
-		time.Sleep(time.Second)
+		delay := time.Second
+		if configured, err := time.ParseDuration(os.Getenv("GOATEST_GENERATION_CHILD_DELAY")); err == nil && configured > 0 {
+			delay = configured
+		}
+		time.Sleep(delay)
 		_ = os.WriteFile(os.Getenv("GOATEST_GENERATION_MARKER"), []byte("descendant survived"), 0o600)
 		os.Exit(0)
 	}
@@ -39,6 +43,12 @@ func TestGenerationProviderHelper(t *testing.T) {
 			os.Exit(31)
 		}
 		time.Sleep(30 * time.Second)
+	case "tree-parent-success":
+		child := exec.Command(os.Args[0], "-test.run=^TestGenerationProviderHelper$")
+		child.Env = append(os.Environ(), "GOATEST_GENERATION_CHILD=1")
+		if err := child.Start(); err != nil {
+			os.Exit(31)
+		}
 	case "wrong":
 		request.Finding.ID = "another-finding"
 	}
@@ -50,6 +60,22 @@ func TestGenerationProviderHelper(t *testing.T) {
 		}},
 	})
 	os.Exit(0)
+}
+
+func TestGenerationSuccessCleansUpDescendantProcessTree(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "descendant-marker")
+	t.Setenv("GOATEST_GENERATION_HELPER", "1")
+	t.Setenv("GOATEST_GENERATION_MODE", "tree-parent-success")
+	t.Setenv("GOATEST_GENERATION_MARKER", marker)
+	t.Setenv("GOATEST_GENERATION_CHILD_DELAY", "5s")
+	client := provider.Client{Command: []string{os.Args[0], "-test.run=^TestGenerationProviderHelper$"}, Timeout: 5 * time.Second}
+	if _, err := client.Generate(t.Context(), provider.Request{Version: 1, Finding: report.Finding{ID: "finding-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(6 * time.Second)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("descendant survived successful provider exit: %v", statErr)
+	}
 }
 
 func TestGenerationTimeoutCleansUpDescendantProcessTree(t *testing.T) {

@@ -27,6 +27,15 @@ func TestRunPreservesTestingTAndScope(t *testing.T) {
 	}
 }
 
+func TestIntegrationRejectsBlankCapability(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Integration accepted a blank capability")
+		}
+	}()
+	_ = goatest.Integration(" \t")
+}
+
 func TestDrawIsDeterministicAndLabelsTheReplayTrace(t *testing.T) {
 	var firstValue, firstToken string
 	goatest.Run(t, goatest.Unit(), func(gt *goatest.T) {

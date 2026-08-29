@@ -123,6 +123,18 @@ func Lines(input Report) string {
 			location += ": "
 		}
 		fmt.Fprintf(&output, "FINDING %s %s %s%s\n", finding.ID, finding.Kind, location, finding.Summary)
+		if finding.Mutant != "" {
+			fmt.Fprintf(&output, "  MUTANT %s\n", finding.Mutant)
+		}
+		if finding.Replay != "" {
+			fmt.Fprintf(&output, "  REPLAY %s\n", finding.Replay)
+		}
+	}
+	for _, repair := range report.Repairs {
+		fmt.Fprintf(&output, "REPAIR %s %s %s finding=%s\n", repair.ID, repair.Status, repair.Path, repair.Finding)
+	}
+	for _, risk := range report.ResidualRisks {
+		fmt.Fprintf(&output, "RISK %s\n", risk)
 	}
 	return output.String()
 }
@@ -133,11 +145,13 @@ var page = template.Must(template.New("report").Parse(`<!doctype html>
 body{font:15px/1.5 system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#17212b;background:#fff}
 h1{letter-spacing:.04em}.meta{color:#52606d}table{border-collapse:collapse;width:100%}th,td{padding:.5rem;border-bottom:1px solid #d9e2ec;text-align:left}code{font-family:ui-monospace,monospace}
 </style></head><body><h1>{{.Verdict}}</h1><p class="meta">Contract {{.Contract}} · snapshot <code>{{.Snapshot}}</code></p>
-<h2>Findings</h2><table><thead><tr><th>ID</th><th>Kind</th><th>Location</th><th>Summary</th></tr></thead><tbody>
-{{range .Findings}}<tr><td><code>{{.ID}}</code></td><td>{{.Kind}}</td><td>{{.Path}}{{if .Line}}:{{.Line}}{{end}}</td><td>{{.Summary}}</td></tr>{{end}}
-</tbody></table><h2>Evidence</h2><table><thead><tr><th>Kind</th><th>ID</th><th>Status</th></tr></thead><tbody>
-{{range .Evidence}}<tr><td>{{.Kind}}</td><td><code>{{.ID}}</code></td><td>{{.Status}}</td></tr>{{end}}
-</tbody></table></body></html>`))
+<h2>Findings</h2><table><thead><tr><th>ID</th><th>Kind</th><th>Location</th><th>Summary and replay</th></tr></thead><tbody>
+{{range .Findings}}<tr><td><code>{{.ID}}</code></td><td>{{.Kind}}</td><td>{{.Path}}{{if .Line}}:{{.Line}}{{end}}</td><td>{{.Summary}}{{if .Mutant}}<br><code>{{.Mutant}}</code>{{end}}{{if .Replay}}<br><code>{{.Replay}}</code>{{end}}</td></tr>{{end}}
+</tbody></table><h2>Evidence</h2><table><thead><tr><th>Kind</th><th>ID</th><th>Status</th><th>Detail</th></tr></thead><tbody>
+{{range .Evidence}}<tr><td>{{.Kind}}</td><td><code>{{.ID}}</code></td><td>{{.Status}}</td><td>{{.Detail}}</td></tr>{{end}}
+</tbody></table><h2>Repairs</h2><table><thead><tr><th>ID</th><th>Finding</th><th>Path</th><th>Status</th></tr></thead><tbody>
+{{range .Repairs}}<tr><td><code>{{.ID}}</code></td><td><code>{{.Finding}}</code></td><td>{{.Path}}</td><td>{{.Status}}</td></tr>{{end}}
+</tbody></table><h2>Residual risks</h2><ul>{{range .ResidualRisks}}<li>{{.}}</li>{{end}}</ul></body></html>`))
 
 // HTML renders one self-contained offline document.
 func HTML(input Report) ([]byte, error) {

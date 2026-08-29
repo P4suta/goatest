@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	GoMutantsVersion = "v0.1.0"
+	GoMutantsVersion = "v0.1.2"
 	maximumRounds    = 3
 )
 
@@ -183,8 +183,13 @@ func Run(ctx context.Context, options Options) (report.Report, error) {
 			_ = closeRound()
 			return report.Report{}, err
 		}
-		emit(options, "race", fmt.Sprintf("%d packages", len(concurrentPackages)))
-		raceResult, err := CollectRace(ctx, workspace, metadata.model, concurrentPackages, contract, resourceEnv)
+		racePackages := RelevantRacePackages(metadata.model, concurrentPackages, baseline.Targets)
+		raceCount := len(racePackages)
+		if contract == "deep-v1" {
+			raceCount = len(metadata.model.Packages)
+		}
+		emit(options, "race", fmt.Sprintf("%d packages", raceCount))
+		raceResult, err := CollectRace(ctx, workspace, metadata.model, racePackages, contract, resourceEnv)
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
@@ -557,13 +562,6 @@ func repositoryRoot(root string) (string, error) {
 		return "", fmt.Errorf("goatest: repository root %s is not a directory", absolute)
 	}
 	return absolute, nil
-}
-
-func cloneEnvironment(environment []string) []string {
-	if environment == nil {
-		return nil
-	}
-	return slices.Clone(environment)
 }
 
 func executionEnvironment(input []string) []string {
