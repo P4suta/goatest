@@ -19,6 +19,23 @@ import (
 
 type Store struct{ root string }
 
+type cacheWritableFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+var (
+	readCacheFile   = os.ReadFile
+	mkdirCacheAll   = os.MkdirAll
+	createCacheTemp = func(directory, pattern string) (cacheWritableFile, error) {
+		return os.CreateTemp(directory, pattern)
+	}
+	removeCacheFile = os.Remove
+	renameCacheFile = os.Rename
+)
+
 func New(root string) *Store { return &Store{root: root} }
 
 func (store *Store) Get(digest string) (report.Report, bool, error) {
@@ -26,7 +43,7 @@ func (store *Store) Get(digest string) (report.Report, bool, error) {
 	if err != nil {
 		return report.Report{}, false, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readCacheFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return report.Report{}, false, nil
 	}
@@ -57,15 +74,15 @@ func (store *Store) Put(digest string, result report.Report) error {
 		return err
 	}
 	data := report.JSON(result)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := mkdirCacheAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".report-*.tmp")
+	temporary, err := createCacheTemp(filepath.Dir(path), ".report-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
+	defer func() { _ = removeCacheFile(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -77,11 +94,11 @@ func (store *Store) Put(digest string, result report.Report) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := renameCacheFile(temporaryPath, path); err != nil {
+		if removeErr := removeCacheFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		if retryErr := os.Rename(temporaryPath, path); retryErr != nil {
+		if retryErr := renameCacheFile(temporaryPath, path); retryErr != nil {
 			return retryErr
 		}
 	}
