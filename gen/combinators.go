@@ -42,9 +42,7 @@ func Filter[T any](base Generator[T], predicate func(T) bool, fallback T, attemp
 	if !predicate(fallback) {
 		panic("gen: Filter fallback does not satisfy its predicate")
 	}
-	if attempts < 1 {
-		attempts = 1
-	}
+	attempts = max(attempts, 1)
 	return generator[T]{
 		generate: func(source Source) T {
 			for range attempts {
@@ -70,12 +68,8 @@ func Filter[T any](base Generator[T], predicate func(T) bool, fallback T, attemp
 
 // SliceOf generates a slice whose length is within the inclusive range.
 func SliceOf[T any](element Generator[T], minimum, maximum int) Generator[[]T] {
-	if minimum < 0 {
-		minimum = 0
-	}
-	if maximum < minimum {
-		maximum = minimum
-	}
+	minimum = max(minimum, 0)
+	maximum = max(maximum, minimum)
 	lengths := IntRange(minimum, maximum)
 	return generator[[]T]{
 		generate: func(source Source) []T {
@@ -94,7 +88,7 @@ func SliceOf[T any](element Generator[T], minimum, maximum int) Generator[[]T] {
 			seen := make(map[int]bool, len(lengths))
 			shrinks := make([][]T, 0, len(lengths))
 			for _, length := range lengths {
-				if length >= len(values) || seen[length] {
+				if seen[length] {
 					continue
 				}
 				seen[length] = true
@@ -110,9 +104,7 @@ func SliceOf[T any](element Generator[T], minimum, maximum int) Generator[[]T] {
 // the shallower generator as an alternative, so the same trace naturally
 // produces both leaves and branches.
 func Recursive[T any](base Generator[T], maximumDepth int, extend func(Generator[T]) Generator[T]) Generator[T] {
-	if maximumDepth < 0 {
-		maximumDepth = 0
-	}
+	maximumDepth = max(maximumDepth, 0)
 	current := base
 	for range maximumDepth {
 		shallower := current
