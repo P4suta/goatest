@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+var marshalGraphJSON = json.MarshalIndent
+
 type Target struct {
 	ID           string   `json:"id"`
 	Package      string   `json:"package"`
@@ -33,7 +35,7 @@ func (graph Graph) Affected(changed []string) Impact {
 		all = append(all, target.ID)
 	}
 	slices.Sort(all)
-	selected := make(map[string]bool)
+	selected := make(map[string]struct{})
 	for _, rawPath := range changed {
 		path := filepathSlash(rawPath)
 		changedPackage, known := graph.FilePackages[path]
@@ -43,7 +45,7 @@ func (graph Graph) Affected(changed []string) Impact {
 		for _, target := range graph.Targets {
 			testStructureChanged := strings.HasSuffix(path, "_test.go") && target.Package == changedPackage
 			if testStructureChanged || slices.Contains(target.Dependencies, changedPackage) || slices.Contains(target.CoveredFiles, path) {
-				selected[target.ID] = true
+				selected[target.ID] = struct{}{}
 			}
 		}
 	}
@@ -72,7 +74,7 @@ func (graph Graph) canonical() Graph {
 }
 
 func (graph Graph) JSON() ([]byte, error) {
-	data, err := json.MarshalIndent(graph.canonical(), "", "  ")
+	data, err := marshalGraphJSON(graph.canonical(), "", "  ")
 	if err != nil {
 		return nil, err
 	}

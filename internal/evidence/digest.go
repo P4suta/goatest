@@ -31,6 +31,13 @@ type Inputs struct {
 	GoMutantsVersion string
 }
 
+var (
+	walkEvidenceRoot     = filepath.WalkDir
+	relativeEvidencePath = filepath.Rel
+	digestEvidenceFile   = fileDigest
+	openEvidenceFile     = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+)
+
 func (inputs Inputs) Clone() Inputs {
 	return Inputs{
 		Files:            cloneMap(inputs.Files),
@@ -102,11 +109,11 @@ func write(h hash.Hash, fields ...string) {
 func Scan(root string) (map[string]string, map[string]string, error) {
 	files := make(map[string]string)
 	corpus := make(map[string]string)
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := walkEvidenceRoot(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		relative, err := filepath.Rel(root, path)
+		relative, err := relativeEvidencePath(root, path)
 		if err != nil {
 			return err
 		}
@@ -127,7 +134,7 @@ func Scan(root string) (map[string]string, map[string]string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("goatest: evidence refuses irregular file %s", relative)
 		}
-		digest, err := fileDigest(path, info.Mode())
+		digest, err := digestEvidenceFile(path, info.Mode())
 		if err != nil {
 			return err
 		}
@@ -154,7 +161,7 @@ func isCorpus(relative string) bool {
 }
 
 func fileDigest(path string, mode fs.FileMode) (string, error) {
-	file, err := os.Open(path)
+	file, err := openEvidenceFile(path)
 	if err != nil {
 		return "", err
 	}
