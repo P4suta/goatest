@@ -57,6 +57,27 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 	}
 }
 
+func TestNoTUIWritesDeterministicProgressImmediately(t *testing.T) {
+	root := t.TempDir()
+	var progress bytes.Buffer
+	service := app.Service{
+		Root: root, Progress: &progress,
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			if options.Progress == nil {
+				t.Fatal("--no-tui disabled progress")
+			}
+			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
+			if got, want := progress.String(), "goatest: snapshot           captured\n"; got != want {
+				t.Fatalf("progress before runner returned = %q, want %q", got, want)
+			}
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{NoTUI: true}, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {

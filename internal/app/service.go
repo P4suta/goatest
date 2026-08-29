@@ -131,7 +131,7 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		Changed: request.Changed, ChangedRef: request.ChangedRef,
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment,
 	}
-	if !request.NoTUI && service.Progress != nil {
+	if service.Progress != nil {
 		var mutex sync.Mutex
 		options.Progress = func(event assure.Event) {
 			mutex.Lock()
