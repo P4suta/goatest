@@ -25,16 +25,36 @@ type impactSelection struct {
 	prior   *evidence.GraphRecord
 }
 
+const changedFilesTimeout = 30 * time.Second
+
+var (
+	loadImpactGraph    = evidence.LoadGraph
+	changedImpactFiles = changedFiles
+	runImpactGitNames  = runGitNames
+	gitNamesOutput     = func(ctx context.Context, root string, arguments []string) ([]byte, error) {
+		command := exec.CommandContext(ctx, "git", arguments...)
+		command.Dir = root
+		command.Env = os.Environ()
+		return command.Output()
+	}
+)
+
 func selectImpact(ctx context.Context, root string, model goanalysis.Model, targets []goanalysis.Target, options Options) impactSelection {
 	if !options.Changed {
 		return impactSelection{targets: slices.Clone(targets), broad: true}
 	}
 	path := filepath.Join(root, ".goatest", "graph-v1.json")
-	record, found, err := evidence.LoadGraph(path)
-	if err != nil || !found || record.ModulePath != model.ModulePath {
+	record, found, err := loadImpactGraph(path)
+	if err != nil {
 		return impactSelection{targets: slices.Clone(targets), broad: true}
 	}
-	changed, known := changedFiles(ctx, root, options.ChangedRef)
+	if !found {
+		return impactSelection{targets: slices.Clone(targets), broad: true}
+	}
+	if record.ModulePath != model.ModulePath {
+		return impactSelection{targets: slices.Clone(targets), broad: true}
+	}
+	changed, known := changedImpactFiles(ctx, root, options.ChangedRef)
 	if !known || len(changed) == 0 {
 		return impactSelection{targets: slices.Clone(targets), changed: changed, broad: true, prior: &record}
 	}
@@ -71,17 +91,17 @@ func dependsOnChanged(dependencies []string, changed map[string]bool) bool {
 }
 
 func changedFiles(parent context.Context, root, reference string) ([]string, bool) {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, changedFilesTimeout)
 	defer cancel()
 	base := reference
 	if base == "" {
 		base = "HEAD"
 	}
-	diff, ok := runGitNames(ctx, root, []string{"diff", "--no-ext-diff", "--name-only", "--diff-filter=ACMRD", base, "--"})
+	diff, ok := runImpactGitNames(ctx, root, []string{"diff", "--no-ext-diff", "--name-only", "--diff-filter=ACMRD", "-z", base, "--"})
 	if !ok {
 		return nil, false
 	}
-	untracked, ok := runGitNames(ctx, root, []string{"ls-files", "--others", "--exclude-standard", "--"})
+	untracked, ok := runImpactGitNames(ctx, root, []string{"ls-files", "--others", "--exclude-standard", "-z", "--"})
 	if !ok {
 		return nil, false
 	}
@@ -98,32 +118,25 @@ func changedFiles(parent context.Context, root, reference string) ([]string, boo
 }
 
 func runGitNames(ctx context.Context, root string, arguments []string) ([]string, bool) {
-	command := exec.CommandContext(ctx, "git", arguments...)
-	command.Dir = root
-	command.Env = os.Environ()
-	output, err := command.Output()
+	output, err := gitNamesOutput(ctx, root, arguments)
 	if err != nil || ctx.Err() != nil {
 		return nil, false
 	}
-	lines := bytes.Split(output, []byte{'\n'})
-	result := make([]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(strings.TrimSuffix(string(line), "\r"))
-		if trimmed != "" {
-			result = append(result, trimmed)
+	names := bytes.Split(output, []byte{0})
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if len(name) != 0 {
+			result = append(result, string(name))
 		}
 	}
 	return result, true
 }
 
 func safeChangedPath(path string) (string, bool) {
-	if path == "" || strings.ContainsRune(path, '\\') {
+	if path == "" || strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\\:\x00\r\n") {
 		return "", false
 	}
 	native := filepath.FromSlash(path)
-	if filepath.IsAbs(native) || filepath.VolumeName(native) != "" {
-		return "", false
-	}
 	clean := filepath.Clean(native)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", false
@@ -134,10 +147,7 @@ func safeChangedPath(path string) (string, bool) {
 func buildGraph(root string, model goanalysis.Model, targetEvidence []TargetEvidence) (evidence.Graph, error) {
 	graph := evidence.Graph{FilePackages: make(map[string]string)}
 	for _, pkg := range model.Packages {
-		directory := root
-		if pkg.RelativeDir != "." && pkg.RelativeDir != "" {
-			directory = filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
-		}
+		directory := filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
 		entries, err := os.ReadDir(directory)
 		if err != nil {
 			return evidence.Graph{}, fmt.Errorf("goatest: build graph for %s: %w", pkg.ImportPath, err)
