@@ -52,4 +52,11 @@ run = "goreleaser release --snapshot --clean"
 
 [tasks.dogfood]
 description = "Run goatest against its own repository"
-run = "go run ./cmd/goatest --no-tui"
+run = [
+  "go build -o ./dist/dogfood/goatest ./cmd/goatest",
+  "./dist/dogfood/goatest --no-tui",
+]
+run_windows = [
+  "go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
+  '.\dist\dogfood\goatest.exe --no-tui',
+]
