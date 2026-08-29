@@ -25,6 +25,10 @@ func realMain(arguments []string) int {
 		_, _ = fmt.Fprintf(os.Stdout, "goatest %s\n", assure.GoatestVersion)
 		return cli.ExitAssured
 	}
+	return runWithService(arguments, app.Service{Root: ".", Progress: os.Stderr})
+}
+
+func runWithService(arguments []string, service cli.Service) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signals := make(chan os.Signal, 1)
@@ -43,7 +47,6 @@ func realMain(arguments []string) int {
 		case <-done:
 		}
 	}()
-	service := app.Service{Root: ".", Progress: os.Stderr}
 	code := cli.Run(ctx, arguments, os.Stdout, os.Stderr, service)
 	var receivedSignal os.Signal
 	if value := received.Load(); value != 0 {

@@ -4,6 +4,7 @@
 package gen_test
 
 import (
+	"encoding/binary"
 	"math"
 	"slices"
 	"testing"
@@ -109,4 +110,30 @@ func TestGeneratorsAndShrinksPreserveExtremeRangeConstraints(t *testing.T) {
 			t.Fatalf("string shrink escaped length range: %q", boundedText.Shrink("abcdef"))
 		}
 	}
+}
+
+func FuzzGeneratorRangeAndShrinkConstraints(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte("goatest-generator-v1"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		var choices [16]byte
+		copy(choices[:], input)
+		minimum := int(int32(binary.LittleEndian.Uint32(choices[0:4])))
+		maximum := int(int32(binary.LittleEndian.Uint32(choices[4:8])))
+		lower, upper := minimum, maximum
+		if upper < lower {
+			lower, upper = upper, lower
+		}
+		values := source{binary.LittleEndian.Uint64(choices[8:16])}
+		generator := gen.IntRange(minimum, maximum)
+		value := generator.Generate(&values)
+		if value < lower || value > upper {
+			t.Fatalf("generated %d outside [%d,%d]", value, lower, upper)
+		}
+		for _, candidate := range generator.Shrink(value) {
+			if candidate < lower || candidate > upper || candidate == value {
+				t.Fatalf("shrink %d from %d outside [%d,%d] or unchanged", candidate, value, lower, upper)
+			}
+		}
+	})
 }

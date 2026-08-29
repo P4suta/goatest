@@ -4,6 +4,7 @@
 package goatest_test
 
 import (
+	"encoding/base64"
 	"slices"
 	"testing"
 
@@ -58,4 +59,32 @@ func TestReplayRejectsUnknownVersionsAndMalformedPayloads(t *testing.T) {
 			t.Errorf("ParseReplayToken(%q) succeeded", token)
 		}
 	}
+}
+
+func FuzzReplayParserAndShrinker(f *testing.F) {
+	f.Add([]byte(`{"input":"AQID","draws":["value"],"classifications":["seed"]}`))
+	f.Add([]byte(`{}`))
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		token := "goatest-replay-v1:" + base64.RawURLEncoding.EncodeToString(payload)
+		replay, err := goatest.ParseReplayToken(token)
+		if err != nil {
+			return
+		}
+		candidates, err := goatest.ShrinkReplayToken(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, candidate := range candidates {
+			shrunk, err := goatest.ParseReplayToken(candidate)
+			if err != nil {
+				t.Fatalf("generated invalid shrink: %v", err)
+			}
+			if len(shrunk.Input) >= len(replay.Input) {
+				t.Fatalf("shrink length = %d, input length = %d", len(shrunk.Input), len(replay.Input))
+			}
+			if !slices.Equal(shrunk.Draws, replay.Draws) || !slices.Equal(shrunk.Classifications, replay.Classifications) {
+				t.Fatalf("shrink changed trace metadata: %+v -> %+v", replay, shrunk)
+			}
+		}
+	})
 }
