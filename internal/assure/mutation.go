@@ -23,8 +23,13 @@ import (
 )
 
 const (
-	standardFuzzExecutions = 10_000
-	deepFuzzExecutions     = 100_000
+	standardFuzzExecutions       = 10_000
+	deepFuzzExecutions           = 100_000
+	minimumMutationTimeout       = 30 * time.Second
+	mutationTimeoutOverhead      = 5 * time.Second
+	standardMutationTimeoutLimit = 30 * time.Minute
+	deepMutationTimeoutLimit     = 5 * time.Hour
+	mutationTimeoutMultiplier    = 5
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
@@ -41,6 +46,7 @@ type TargetEvidence struct {
 	Target       goanalysis.Target
 	CoveredFiles []string
 	Environment  []string
+	Duration     time.Duration
 }
 
 type MutationOptions struct {
@@ -101,7 +107,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
 			}
-			result, err := session.Exec(ctx, fuzzRequest(seed.mutant, target, executions, options.Timeout))
+			result, err := session.Exec(ctx, fuzzRequest(seed.mutant, target, executions, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)))
 			if err != nil {
 				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", seed.mutant.DisplayID, target.Target.Name, err)
 			}
@@ -201,7 +207,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		return seed
 	}
 	for _, target := range seed.reaching {
-		result, err := session.Exec(ctx, seedRequest(mutant, target, options.Timeout))
+		result, err := session.Exec(ctx, seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)))
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, target.Target.Name, err)
 			return seed
@@ -276,6 +282,27 @@ func fuzzExecutions(contract string, requested int) int {
 		return maximum
 	}
 	return requested
+}
+
+func calibratedMutationTimeout(contract string, baseline, override time.Duration) time.Duration {
+	if override != 0 {
+		return override
+	}
+	maximum := standardMutationTimeoutLimit
+	if contract == "deep-v1" {
+		maximum = deepMutationTimeoutLimit
+	}
+	if baseline <= 0 {
+		return minimumMutationTimeout
+	}
+	if baseline > (maximum-mutationTimeoutOverhead)/mutationTimeoutMultiplier {
+		return maximum
+	}
+	timeout := baseline*mutationTimeoutMultiplier + mutationTimeoutOverhead
+	if timeout < minimumMutationTimeout {
+		return minimumMutationTimeout
+	}
+	return min(timeout, maximum)
 }
 
 func promoteTargetArtifacts(root string, mutant gomutants.Mutant, targetName string, artifacts []gomutants.Artifact, evaluation *MutationEvaluation) (bool, error) {

@@ -140,7 +140,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				return BaselineResult{}, fmt.Errorf("goatest: coverage for %s: %w", target.Target.Name, err)
 			}
 			result.Targets = append(result.Targets, TargetEvidence{
-				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment),
+				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment), Duration: first.Duration,
 			})
 			result.Evidence = append(result.Evidence, report.Evidence{
 				Kind: "target", ID: target.Target.ID, Status: "passed", Detail: target.Target.Name,
