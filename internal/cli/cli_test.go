@@ -6,6 +6,7 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -96,5 +97,16 @@ func TestVerdictsMapToStableExitCodes(t *testing.T) {
 		if got := cli.Run(t.Context(), nil, &bytes.Buffer{}, &bytes.Buffer{}, fake); got != want {
 			t.Errorf("%s => %d, want %d", verdict, got, want)
 		}
+	}
+}
+
+func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
+	fake := &service{err: errors.New("failed\nFINDING forged\x1b[31m")}
+	var stderr bytes.Buffer
+	if exit := cli.Run(t.Context(), nil, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
+		t.Fatalf("exit = %d", exit)
+	}
+	if got, want := stderr.String(), "goatest: failed\\nFINDING forged\\u001b[31m\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }

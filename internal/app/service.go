@@ -136,7 +136,7 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		options.Progress = func(event assure.Event) {
 			mutex.Lock()
 			defer mutex.Unlock()
-			_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", event.Kind, event.Detail)
+			_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", report.LineText(event.Kind), report.LineText(event.Detail))
 		}
 	}
 	return runner(ctx, options)

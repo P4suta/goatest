@@ -15,6 +15,7 @@ import (
 	"html/template"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 const SchemaV1 = "assurance-report-v1"
@@ -111,30 +112,54 @@ func JSON(input Report) ([]byte, error) {
 func Lines(input Report) string {
 	report := canonical(input)
 	var output strings.Builder
-	fmt.Fprintf(&output, "%s %s snapshot=%s\n", report.Verdict, report.Contract, report.Snapshot)
+	fmt.Fprintf(&output, "%s %s snapshot=%s\n", LineText(string(report.Verdict)), LineText(report.Contract), LineText(report.Snapshot))
 	fmt.Fprintf(&output, "evidence %d  findings %d  repairs %d  risks %d\n",
 		len(report.Evidence), len(report.Findings), len(report.Repairs), len(report.ResidualRisks))
 	for _, finding := range report.Findings {
 		location := finding.Path
+		location = LineText(location)
 		if finding.Line > 0 {
 			location += fmt.Sprintf(":%d", finding.Line)
 		}
 		if location != "" {
 			location += ": "
 		}
-		fmt.Fprintf(&output, "FINDING %s %s %s%s\n", finding.ID, finding.Kind, location, finding.Summary)
+		fmt.Fprintf(&output, "FINDING %s %s %s%s\n", LineText(finding.ID), LineText(finding.Kind), location, LineText(finding.Summary))
 		if finding.Mutant != "" {
-			fmt.Fprintf(&output, "  MUTANT %s\n", finding.Mutant)
+			fmt.Fprintf(&output, "  MUTANT %s\n", LineText(finding.Mutant))
 		}
 		if finding.Replay != "" {
-			fmt.Fprintf(&output, "  REPLAY %s\n", finding.Replay)
+			fmt.Fprintf(&output, "  REPLAY %s\n", LineText(finding.Replay))
 		}
 	}
 	for _, repair := range report.Repairs {
-		fmt.Fprintf(&output, "REPAIR %s %s %s finding=%s\n", repair.ID, repair.Status, repair.Path, repair.Finding)
+		fmt.Fprintf(&output, "REPAIR %s %s %s finding=%s\n", LineText(repair.ID), LineText(repair.Status), LineText(repair.Path), LineText(repair.Finding))
 	}
 	for _, risk := range report.ResidualRisks {
-		fmt.Fprintf(&output, "RISK %s\n", risk)
+		fmt.Fprintf(&output, "RISK %s\n", LineText(risk))
+	}
+	return output.String()
+}
+
+// LineText escapes terminal control characters without changing printable
+// Unicode, keeping every diagnostic or report field on one physical line.
+func LineText(input string) string {
+	var output strings.Builder
+	for _, character := range input {
+		switch character {
+		case '\n':
+			output.WriteString(`\n`)
+		case '\r':
+			output.WriteString(`\r`)
+		case '\t':
+			output.WriteString(`\t`)
+		default:
+			if unicode.IsControl(character) {
+				_, _ = fmt.Fprintf(&output, `\u%04x`, character)
+			} else {
+				output.WriteRune(character)
+			}
+		}
 	}
 	return output.String()
 }

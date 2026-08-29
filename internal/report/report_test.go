@@ -62,6 +62,29 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 	}
 }
 
+func TestLineRendererEscapesControlCharactersAndCannotForgeRecords(t *testing.T) {
+	input := report.Report{
+		Verdict: report.VerdictDefect, Contract: "standard-v1", Snapshot: "snapshot",
+		Findings: []report.Finding{{
+			ID: "finding", Kind: "baseline", Path: "fixture.go\rRISK forged",
+			Summary: "failed\nFINDING forged\x1b[31m", Mutant: "change\tforged", Replay: "goatest\nreplay",
+		}},
+		ResidualRisks: []string{"risk\nREPAIR forged"},
+	}
+	lines := report.Lines(input)
+	if strings.Count(lines, "\nFINDING ") != 1 {
+		t.Fatalf("control characters forged renderer records:\n%s", lines)
+	}
+	if strings.ContainsAny(lines, "\r\x1b\t") {
+		t.Fatalf("renderer retained terminal control characters: %q", lines)
+	}
+	for _, escaped := range []string{`fixture.go\rRISK forged`, `failed\nFINDING forged\u001b[31m`, `change\tforged`, `goatest\nreplay`, `risk\nREPAIR forged`} {
+		if !strings.Contains(lines, escaped) {
+			t.Errorf("renderer omitted escaped text %q: %q", escaped, lines)
+		}
+	}
+}
+
 func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
 	html, err := report.HTML(fixture())
 	if err != nil {

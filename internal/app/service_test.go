@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,29 @@ func TestNoTUIWritesDeterministicProgressImmediately(t *testing.T) {
 	}
 	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{NoTUI: true}, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
+	var progress bytes.Buffer
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress,
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			options.Progress(assure.Event{Kind: "phase\nforged", Detail: "detail\x1b[31m"})
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{NoTUI: true}, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := progress.String()
+	if strings.Count(got, "\n") != 1 || strings.ContainsAny(got, "\r\x1b\t") {
+		t.Fatalf("progress retained terminal control characters: %q", got)
+	}
+	for _, escaped := range []string{`phase\nforged`, `detail\u001b[31m`} {
+		if !strings.Contains(got, escaped) {
+			t.Errorf("progress omitted escaped text %q: %q", escaped, got)
+		}
 	}
 }
 

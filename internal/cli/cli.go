@@ -65,7 +65,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	}
 	command, request, id, err := parse(args)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "goatest: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(err.Error()))
 		return ExitError
 	}
 	result, err := service.Execute(ctx, command, request, id)
@@ -74,13 +74,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
 			return ExitInterrupted
 		}
-		_, _ = fmt.Fprintf(stderr, "goatest: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(err.Error()))
 		return ExitError
 	}
 	if request.JSON {
 		data, encodeErr := report.JSON(result)
 		if encodeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "goatest: encode report: %v\n", encodeErr)
+			_, _ = fmt.Fprintf(stderr, "goatest: encode report: %s\n", report.LineText(encodeErr.Error()))
 			return ExitError
 		}
 		_, _ = stdout.Write(data)
