@@ -6,6 +6,7 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -55,8 +56,25 @@ func TestDefaultCommandAndGlobalFlags(t *testing.T) {
 	if !fake.request.Changed || fake.request.ChangedRef != "origin/main" || fake.request.Contract != "deep-v1" || !fake.request.NoApply || !fake.request.JSON || !fake.request.NoTUI {
 		t.Errorf("request = %+v", fake.request)
 	}
-	if stdout.Len() == 0 || stderr.Len() != 0 {
+	var rendered report.Report
+	if err := json.Unmarshal(stdout.Bytes(), &rendered); err != nil || rendered.Verdict != report.VerdictAssured || rendered.Contract != "deep-v1" {
+		t.Fatalf("JSON output = %+v, %v\n%s", rendered, err, stdout.Bytes())
+	}
+	if stderr.Len() != 0 {
 		t.Errorf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
+	changed := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"--changed"}, &bytes.Buffer{}, &bytes.Buffer{}, changed); exit != cli.ExitAssured || !changed.request.Changed || changed.request.ChangedRef != "" {
+		t.Fatalf("bare changed = exit %d request %+v", exit, changed.request)
+	}
+
+	cancelled := &service{err: context.Canceled}
+	var stderr bytes.Buffer
+	if exit := cli.Run(t.Context(), nil, &bytes.Buffer{}, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" {
+		t.Fatalf("cancellation = exit %d stderr %q", exit, stderr.String())
 	}
 }
 
@@ -78,7 +96,10 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 			t.Errorf("%v => %d/%s/%q", test.args, exit, fake.command, fake.id)
 		}
 	}
-	for _, args := range [][]string{{"explain"}, {"accept"}, {"unknown"}, {"--contract=bad"}} {
+	for _, args := range [][]string{
+		{"explain"}, {"accept"}, {"unknown"}, {"--contract=bad"}, {"--unknown"},
+		{"init", "extra"}, {"report", "extra"}, {"replay", ""},
+	} {
 		var stderr bytes.Buffer
 		if exit := cli.Run(t.Context(), args, &bytes.Buffer{}, &stderr, &service{}); exit != cli.ExitError || stderr.Len() == 0 {
 			t.Errorf("%v => exit %d stderr %q", args, exit, stderr.String())

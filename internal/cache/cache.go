@@ -56,10 +56,7 @@ func (store *Store) Put(digest string, result report.Report) error {
 	if err != nil {
 		return err
 	}
-	data, err := report.JSON(result)
-	if err != nil {
-		return err
-	}
+	data := report.JSON(result)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

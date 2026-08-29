@@ -61,7 +61,7 @@ Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 t
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, _ = io.WriteString(stdout, help)
-		return ExitAssured
+		return 0
 	}
 	command, request, id, err := parse(args)
 	if err != nil {
@@ -78,12 +78,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 		return ExitError
 	}
 	if request.JSON {
-		data, encodeErr := report.JSON(result)
-		if encodeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "goatest: encode report: %s\n", report.LineText(encodeErr.Error()))
-			return ExitError
-		}
-		_, _ = stdout.Write(data)
+		_, _ = stdout.Write(report.JSON(result))
 	} else {
 		_, _ = io.WriteString(stdout, report.Lines(result))
 	}
@@ -141,7 +136,7 @@ func parse(args []string) (Command, Request, string, error) {
 func exitCode(verdict report.Verdict) int {
 	switch verdict {
 	case report.VerdictAssured:
-		return ExitAssured
+		return 0
 	case report.VerdictDefect:
 		return ExitDefect
 	case report.VerdictInsufficient:

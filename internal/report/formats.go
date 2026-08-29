@@ -68,11 +68,11 @@ type sarifRegion struct {
 }
 
 // SARIF projects findings to deterministic SARIF 2.1.0 bytes.
-func SARIF(input Report) ([]byte, error) {
+func SARIF(input Report) []byte {
 	canonical := canonical(input)
-	kinds := make(map[string]bool)
+	kinds := make(map[string]struct{})
 	for _, finding := range canonical.Findings {
-		kinds[finding.Kind] = true
+		kinds[finding.Kind] = struct{}{}
 	}
 	names := make([]string, 0, len(kinds))
 	for kind := range kinds {
@@ -108,11 +108,8 @@ func SARIF(input Report) ([]byte, error) {
 			Properties: map[string]any{"contract": canonical.Contract, "snapshot": canonical.Snapshot, "verdict": canonical.Verdict},
 		}},
 	}
-	data, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
+	data, _ := json.MarshalIndent(document, "", "  ")
+	return append(data, '\n')
 }
 
 type junitSuite struct {
@@ -142,7 +139,7 @@ type junitFailure struct {
 }
 
 // JUnit projects all evidence as passing cases and findings as failing cases.
-func JUnit(input Report) ([]byte, error) {
+func JUnit(input Report) []byte {
 	canonical := canonical(input)
 	suite := junitSuite{
 		Name: "goatest", Tests: len(canonical.Evidence) + len(canonical.Findings), Failures: len(canonical.Findings),
@@ -161,15 +158,12 @@ func JUnit(input Report) ([]byte, error) {
 			Failure: &junitFailure{Message: finding.Summary, Type: finding.Kind, Body: finding.Path},
 		})
 	}
-	data, err := xml.MarshalIndent(suite, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append([]byte(xml.Header), append(data, '\n')...), nil
+	data, _ := xml.MarshalIndent(suite, "", "  ")
+	return append([]byte(xml.Header), append(data, '\n')...)
 }
 
 // JSONSchema returns the self-contained assurance-report-v1 JSON Schema.
-func JSONSchema() ([]byte, error) {
+func JSONSchema() []byte {
 	stringType := map[string]any{"type": "string"}
 	document := map[string]any{
 		"$schema":              "https://json-schema.org/draft/2020-12/schema",
@@ -197,11 +191,8 @@ func JSONSchema() ([]byte, error) {
 			"repair": objectSchema([]string{"id", "finding", "path", "status"}, map[string]any{"id": stringType, "finding": stringType, "path": stringType, "status": stringType}),
 		},
 	}
-	data, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
+	data, _ := json.MarshalIndent(document, "", "  ")
+	return append(data, '\n')
 }
 
 func objectSchema(required []string, properties map[string]any) map[string]any {

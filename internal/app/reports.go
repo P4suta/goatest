@@ -12,29 +12,38 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
+type atomicReportFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Chmod(os.FileMode) error
+	Close() error
+}
+
+type atomicWriteOperations struct {
+	mkdirAll   func(string, os.FileMode) error
+	createTemp func(string, string) (atomicReportFile, error)
+	remove     func(string) error
+	rename     func(string, string) error
+}
+
+var operatingSystemAtomicWrites = atomicWriteOperations{
+	mkdirAll: os.MkdirAll,
+	createTemp: func(directory, pattern string) (atomicReportFile, error) {
+		return os.CreateTemp(directory, pattern)
+	},
+	remove: os.Remove,
+	rename: os.Rename,
+}
+
 // WriteReports atomically projects one verdict to every supported report
 // format and to the latest-report index used by explain/replay/accept.
 func WriteReports(root string, input report.Report) error {
-	jsonReport, err := report.JSON(input)
-	if err != nil {
-		return err
-	}
-	htmlReport, err := report.HTML(input)
-	if err != nil {
-		return err
-	}
-	sarifReport, err := report.SARIF(input)
-	if err != nil {
-		return err
-	}
-	junitReport, err := report.JUnit(input)
-	if err != nil {
-		return err
-	}
-	schema, err := report.JSONSchema()
-	if err != nil {
-		return err
-	}
+	jsonReport := report.JSON(input)
+	htmlReport := report.HTML(input)
+	sarifReport := report.SARIF(input)
+	junitReport := report.JUnit(input)
+	schema := report.JSONSchema()
 	artifacts := []struct {
 		path string
 		data []byte
@@ -55,15 +64,19 @@ func WriteReports(root string, input report.Report) error {
 }
 
 func atomicWrite(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	return atomicWriteWith(path, data, operatingSystemAtomicWrites)
+}
+
+func atomicWriteWith(path string, data []byte, operations atomicWriteOperations) error {
+	if err := operations.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".goatest-report-*.tmp")
+	temporary, err := operations.createTemp(filepath.Dir(path), ".goatest-report-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
+	defer func() { _ = operations.remove(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -79,11 +92,11 @@ func atomicWrite(path string, data []byte) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := operations.rename(temporaryPath, path); err != nil {
+		if removeErr := operations.remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		return os.Rename(temporaryPath, path)
+		return operations.rename(temporaryPath, path)
 	}
 	return nil
 }

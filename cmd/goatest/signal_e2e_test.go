@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,18 +55,22 @@ func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {
 			if err := command.Start(); err != nil {
 				t.Fatal(err)
 			}
-			if err := waitForReady(ready, 20*time.Second); err != nil {
+			wait := make(chan error, 1)
+			exited := make(chan struct{})
+			go func() {
+				wait <- command.Wait()
+				close(exited)
+			}()
+			if err := waitForReady(ready, exited, 20*time.Second); err != nil {
 				_ = command.Process.Kill()
-				_ = command.Wait()
-				t.Fatalf("helper did not become ready: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+				processErr := <-wait
+				t.Fatalf("helper did not become ready: %v (process: %v)\nstdout=%s\nstderr=%s", err, processErr, stdout.String(), stderr.String())
 			}
 			if err := sendProcessSignal(command.Process.Pid, testCase.signal); err != nil {
 				_ = command.Process.Kill()
-				_ = command.Wait()
+				<-wait
 				t.Fatal(err)
 			}
-			wait := make(chan error, 1)
-			go func() { wait <- command.Wait() }()
 			select {
 			case err := <-wait:
 				var exit *exec.ExitError
@@ -80,7 +85,20 @@ func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {
 	}
 }
 
-func waitForReady(path string, timeout time.Duration) error {
+func TestWaitForReadyStopsWhenTheHelperExits(t *testing.T) {
+	exited := make(chan struct{})
+	close(exited)
+	start := time.Now()
+	err := waitForReady(filepath.Join(t.TempDir(), "never-created"), exited, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "helper exited") {
+		t.Fatalf("wait error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("helper exit took %v to detect", elapsed)
+	}
+}
+
+func waitForReady(path string, exited <-chan struct{}, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -92,6 +110,8 @@ func waitForReady(path string, timeout time.Duration) error {
 			return err
 		}
 		select {
+		case <-exited:
+			return errors.New("helper exited before readiness")
 		case <-deadline.C:
 			return errors.New("timed out")
 		case <-ticker.C:

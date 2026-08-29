@@ -33,6 +33,7 @@ type Service struct {
 	Progress      io.Writer
 	Run           RunFunc
 	Now           func() time.Time
+	absolute      func(string) (string, error)
 }
 
 func (service Service) Execute(ctx context.Context, command cli.Command, request cli.Request, id string) (report.Report, error) {
@@ -40,7 +41,11 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 	if root == "" {
 		root = "."
 	}
-	absolute, err := filepath.Abs(root)
+	resolveAbsolute := service.absolute
+	if resolveAbsolute == nil {
+		resolveAbsolute = filepath.Abs
+	}
+	absolute, err := resolveAbsolute(root)
 	if err != nil {
 		return report.Report{}, err
 	}
