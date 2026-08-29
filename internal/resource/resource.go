@@ -74,7 +74,7 @@ type instance struct {
 	timeout     time.Duration
 	refs        int
 	cmd         *exec.Cmd
-	tree        *processtree.Tree
+	tree        resourceProcessTree
 	stdin       io.WriteCloser
 	encoder     *json.Encoder
 	stdout      *bufio.Reader
@@ -83,6 +83,23 @@ type instance struct {
 	stopOnce    sync.Once
 	stopErr     error
 }
+
+type resourceProcessTree interface {
+	Kill() error
+	Close() error
+}
+
+var (
+	startResource         = start
+	stopResource          = func(provider *instance) error { return provider.stop() }
+	resourceStdinPipe     = func(command *exec.Cmd) (io.WriteCloser, error) { return command.StdinPipe() }
+	resourceStdoutPipe    = func(command *exec.Cmd) (io.ReadCloser, error) { return command.StdoutPipe() }
+	startResourceProcess  = func(command *exec.Cmd) (resourceProcessTree, error) { return processtree.Start(command) }
+	encodeResourceRequest = func(encoder *json.Encoder, request Request) error {
+		return encoder.Encode(request)
+	}
+	waitResourceProcess = func(command *exec.Cmd) error { return command.Wait() }
+)
 
 func New(specs map[string]Spec) *Manager {
 	cloned := make(map[string]Spec, len(specs))
@@ -114,7 +131,10 @@ func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease,
 			manager.mu.Unlock()
 			return nil, fmt.Errorf("goatest: resource %q cannot be shared and exclusive", capability)
 		}
-		if !spec.Exclusive || !manager.capabilityActive(capability) {
+		if !spec.Exclusive {
+			break
+		}
+		if !manager.capabilityActive(capability) {
 			break
 		}
 		changed := manager.changed
@@ -135,7 +155,7 @@ func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease,
 	}
 	manager.nextID++
 	requestID := fmt.Sprintf("resource-%06d", manager.nextID)
-	started, err := start(ctx, capability, requestID, spec)
+	started, err := startResource(ctx, capability, requestID, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +199,7 @@ func (manager *Manager) release(target *instance) error {
 		delete(manager.shared, target.capability)
 	}
 	manager.mu.Unlock()
-	stopErr := target.stop()
+	stopErr := stopResource(target)
 	manager.mu.Lock()
 	if manager.active[target] {
 		delete(manager.active, target)
@@ -209,7 +229,7 @@ func (manager *Manager) Close() error {
 	manager.mu.Unlock()
 	var closeErr error
 	for _, provider := range active {
-		closeErr = errors.Join(closeErr, provider.stop())
+		closeErr = errors.Join(closeErr, stopResource(provider))
 	}
 	return closeErr
 }
@@ -240,11 +260,11 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 	}
 	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
 	cmd.Env = os.Environ()
-	stdin, err := cmd.StdinPipe()
+	stdin, err := resourceStdinPipe(cmd)
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := resourceStdoutPipe(cmd)
 	if err != nil {
 		_ = stdin.Close()
 		return nil, err
@@ -261,13 +281,13 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		stdout:     bufio.NewReaderSize(stdout, protocolOutputLimit+1),
 		stderr:     stderr,
 	}
-	tree, err := processtree.Start(cmd)
+	tree, err := startResourceProcess(cmd)
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("goatest: start resource %q: %w", capability, err)
 	}
 	provider.tree = tree
-	if err := provider.encoder.Encode(Request{
+	if err := encodeResourceRequest(provider.encoder, Request{
 		Version: protocolVersion, Action: "start", Capability: capability, RequestID: requestID,
 	}); err != nil {
 		return nil, provider.abort(fmt.Errorf("goatest: send resource start: %w", err))
@@ -385,10 +405,8 @@ func (buffer *limitedBuffer) Write(data []byte) (int, error) {
 		data = data[:max(buffer.remaining, 0)]
 		buffer.truncated = true
 	}
-	if len(data) > 0 {
-		_, _ = buffer.buffer.Write(data)
-		buffer.remaining -= len(data)
-	}
+	_, _ = buffer.buffer.Write(data)
+	buffer.remaining -= len(data)
 	return written, nil
 }
 
@@ -404,25 +422,22 @@ func (buffer *limitedBuffer) String() string {
 
 func (provider *instance) abort(cause error) error {
 	_ = provider.stdin.Close()
-	if provider.tree != nil {
-		_ = provider.tree.Kill()
-	} else if provider.cmd.Process != nil {
-		_ = provider.cmd.Process.Kill()
-	}
-	waitErr := provider.cmd.Wait()
-	var closeErr error
-	if provider.tree != nil {
-		closeErr = provider.tree.Close()
-	}
+	_ = provider.tree.Kill()
+	waitErr := waitResourceProcess(provider.cmd)
+	closeErr := provider.tree.Close()
 	message := strings.TrimSpace(provider.stderr.String())
 	provider.environment = nil
 	if message != "" {
 		cause = fmt.Errorf("%w: %s", cause, message)
 	}
-	if waitErr != nil && !errors.Is(waitErr, os.ErrProcessDone) {
-		return errors.Join(cause, waitErr, closeErr)
+	return errors.Join(cause, normalizeResourceWaitError(waitErr), closeErr)
+}
+
+func normalizeResourceWaitError(err error) error {
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
 	}
-	return errors.Join(cause, closeErr)
+	return err
 }
 
 func (provider *instance) stop() error {
@@ -430,41 +445,49 @@ func (provider *instance) stop() error {
 		defer func() { provider.environment = nil }()
 		ctx, cancel := context.WithTimeout(context.Background(), provider.timeout)
 		defer cancel()
-		if err := provider.encoder.Encode(Request{
+		if err := encodeResourceRequest(provider.encoder, Request{
 			Version: protocolVersion, Action: "stop", Capability: provider.capability,
 			RequestID: provider.requestID, Instance: provider.instanceID,
 		}); err != nil {
 			provider.stopErr = provider.abort(fmt.Errorf("goatest: send resource stop: %w", err))
 			return
 		}
-		response, err := provider.decode(ctx)
-		if err != nil || response.Version != protocolVersion || response.Status != "stopped" || response.Instance != provider.instanceID {
-			if err == nil {
-				err = fmt.Errorf("invalid stopped response: version=%d status=%q instance=%q", response.Version, response.Status, response.Instance)
-			}
-			provider.stopErr = provider.abort(fmt.Errorf("goatest: stop resource %q: %w", provider.capability, err))
+		response, decodeErr := provider.decode(ctx)
+		if decodeErr != nil {
+			provider.stopErr = provider.abort(fmt.Errorf("goatest: stop resource %q: %w", provider.capability, decodeErr))
+			return
+		}
+		if validationErr := validateStoppedResponse(response, provider.instanceID); validationErr != nil {
+			provider.stopErr = provider.abort(fmt.Errorf("goatest: stop resource %q: %w", provider.capability, validationErr))
 			return
 		}
 		_ = provider.stdin.Close()
 		wait := make(chan error, 1)
-		go func() { wait <- provider.cmd.Wait() }()
+		go func() { wait <- waitResourceProcess(provider.cmd) }()
 		select {
 		case err := <-wait:
-			if provider.tree != nil {
-				err = errors.Join(err, provider.tree.Close())
-			}
+			err = errors.Join(err, provider.tree.Close())
 			if err != nil {
 				provider.stopErr = fmt.Errorf("goatest: resource %q exit: %w", provider.capability, err)
 			}
 		case <-ctx.Done():
-			if provider.tree != nil {
-				_ = provider.tree.Kill()
-				_ = provider.tree.Close()
-			} else if provider.cmd.Process != nil {
-				_ = provider.cmd.Process.Kill()
-			}
+			_ = provider.tree.Kill()
+			_ = provider.tree.Close()
 			provider.stopErr = fmt.Errorf("goatest: resource %q stop timeout: %w", provider.capability, ctx.Err())
 		}
 	})
 	return provider.stopErr
+}
+
+func validateStoppedResponse(response Response, instanceID string) error {
+	if response.Version != protocolVersion {
+		return fmt.Errorf("invalid stopped response: version=%d status=%q instance=%q", response.Version, response.Status, response.Instance)
+	}
+	if response.Status != "stopped" {
+		return fmt.Errorf("invalid stopped response: version=%d status=%q instance=%q", response.Version, response.Status, response.Instance)
+	}
+	if response.Instance != instanceID {
+		return fmt.Errorf("invalid stopped response: version=%d status=%q instance=%q", response.Version, response.Status, response.Instance)
+	}
+	return nil
 }

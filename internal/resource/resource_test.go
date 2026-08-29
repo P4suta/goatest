@@ -5,6 +5,7 @@ package resource_test
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,7 +31,7 @@ func TestProviderHelper(t *testing.T) {
 	appendLog(os.Getenv("GOATEST_RESOURCE_LOG"), start.Action)
 	switch os.Getenv("GOATEST_RESOURCE_MODE") {
 	case "slow":
-		time.Sleep(30 * time.Second)
+		time.Sleep(resourceHelperDelay())
 	case "invalid":
 		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
 		return
@@ -75,6 +76,13 @@ func TestProviderHelper(t *testing.T) {
 	_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-1"})
 }
 
+func resourceHelperDelay() time.Duration {
+	if configured, err := time.ParseDuration(os.Getenv("GOATEST_RESOURCE_DELAY")); err == nil && configured > 0 {
+		return configured
+	}
+	return time.Second
+}
+
 func appendLog(path, value string) {
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -93,11 +101,11 @@ func TestSharedProviderUsesReferenceCountingAndSortedEnvironment(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = manager.Close() })
 
-	first, err := manager.Acquire(t.Context(), "postgres")
+	first, err := acquireResource(t, manager, "postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.Acquire(t.Context(), "postgres")
+	second, err := acquireResource(t, manager, "postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,12 +140,13 @@ func TestInvalidAndSlowProvidersFailClosedAndAreCleanedUp(t *testing.T) {
 			timeout := 5 * time.Second
 			if mode == "slow" {
 				timeout = 150 * time.Millisecond
+				t.Setenv("GOATEST_RESOURCE_DELAY", "1s")
 			}
 			manager := resource.New(map[string]resource.Spec{
 				"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: timeout},
 			})
 			started := time.Now()
-			if _, err := manager.Acquire(t.Context(), "postgres"); err == nil {
+			if _, err := acquireResource(t, manager, "postgres"); err == nil {
 				t.Fatal("Acquire succeeded")
 			}
 			if elapsed := time.Since(started); elapsed > 5*time.Second {
@@ -159,7 +168,7 @@ func TestProviderOutputIsBoundedAndFailsClosed(t *testing.T) {
 			manager := resource.New(map[string]resource.Spec{
 				"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second},
 			})
-			lease, err := manager.Acquire(t.Context(), "postgres")
+			lease, err := acquireResource(t, manager, "postgres")
 			if lease != nil {
 				_ = lease.Release()
 			}
@@ -176,14 +185,36 @@ func TestProviderOutputIsBoundedAndFailsClosed(t *testing.T) {
 
 func TestUnknownCapabilityAndClosedManagerAreErrors(t *testing.T) {
 	manager := resource.New(nil)
-	if _, err := manager.Acquire(t.Context(), "missing"); err == nil {
+	if _, err := acquireResource(t, manager, "missing"); err == nil {
 		t.Fatal("unknown capability was accepted")
 	}
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Acquire(t.Context(), "missing"); err == nil {
+	if _, err := acquireResource(t, manager, "missing"); err == nil {
 		t.Fatal("closed manager accepted work")
+	}
+}
+
+func TestProviderUsesDefaultTimeoutForNonPositiveValues(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			t.Setenv("GOATEST_RESOURCE_HELPER", "1")
+			t.Setenv("GOATEST_RESOURCE_LOG", filepath.Join(t.TempDir(), "provider.log"))
+			manager := resource.New(map[string]resource.Spec{
+				"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: timeout},
+			})
+			lease, err := acquireResource(t, manager, "postgres")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lease.Release(); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -195,7 +226,7 @@ func TestExclusiveProviderSerializesLeases(t *testing.T) {
 		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
 	})
 	t.Cleanup(func() { _ = manager.Close() })
-	first, err := manager.Acquire(t.Context(), "postgres")
+	first, err := acquireResource(t, manager, "postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +236,7 @@ func TestExclusiveProviderSerializesLeases(t *testing.T) {
 	}
 	secondResult := make(chan acquired, 1)
 	go func() {
-		lease, acquireErr := manager.Acquire(t.Context(), "postgres")
+		lease, acquireErr := acquireResource(t, manager, "postgres")
 		secondResult <- acquired{lease: lease, err: acquireErr}
 	}()
 	select {
@@ -241,7 +272,7 @@ func TestExclusiveProviderWaitsUntilPreviousProviderHasStopped(t *testing.T) {
 		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
 	})
 	t.Cleanup(func() { _ = manager.Close() })
-	first, err := manager.Acquire(t.Context(), "postgres")
+	first, err := acquireResource(t, manager, "postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +282,7 @@ func TestExclusiveProviderWaitsUntilPreviousProviderHasStopped(t *testing.T) {
 	}
 	secondResult := make(chan acquired, 1)
 	go func() {
-		lease, acquireErr := manager.Acquire(t.Context(), "postgres")
+		lease, acquireErr := acquireResource(t, manager, "postgres")
 		secondResult <- acquired{lease: lease, err: acquireErr}
 	}()
 	releaseResult := make(chan error, 1)
@@ -296,4 +327,11 @@ func readLog(t *testing.T, path string) []string {
 		t.Fatal(err)
 	}
 	return lines
+}
+
+func acquireResource(t *testing.T, manager *resource.Manager, capability string) (*resource.Lease, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	return manager.Acquire(ctx, capability)
 }
