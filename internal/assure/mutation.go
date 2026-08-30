@@ -102,8 +102,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
-		killed := false
-		blocked := false
+		var killed, blocked bool
 		for _, target := range seed.reaching {
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
@@ -162,18 +161,12 @@ type mutationSeed struct {
 }
 
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
-	results := make([]mutationSeed, len(mutants))
 	if len(mutants) == 0 {
-		return results
+		return nil
 	}
-	jobs := options.Jobs
-	if jobs <= 0 {
-		jobs = 1
-	}
-	if jobs > len(mutants) {
-		jobs = len(mutants)
-	}
-	indexes := make(chan int)
+	results := make([]mutationSeed, len(mutants))
+	jobs := min(max(options.Jobs, 1), len(mutants))
+	indexes := make(chan int, len(mutants))
 	var workers sync.WaitGroup
 	var progress sync.Mutex
 	completed := 0
@@ -245,23 +238,22 @@ func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
 
 func reachingTargets(path string, targets []TargetEvidence) []TargetEvidence {
 	normalized := filepath.ToSlash(path)
-	result := make([]TargetEvidence, 0)
+	measured := make([]TargetEvidence, 0)
+	unmeasured := make([]TargetEvidence, 0)
 	for _, target := range targets {
-		if slices.Contains(target.CoveredFiles, normalized) {
-			result = append(result, target)
+		if !slices.Contains(target.CoveredFiles, normalized) {
+			continue
+		}
+		if target.Duration > 0 {
+			measured = append(measured, target)
+		} else {
+			unmeasured = append(unmeasured, target)
 		}
 	}
-	slices.SortStableFunc(result, func(first, second TargetEvidence) int {
-		firstMeasured, secondMeasured := first.Duration > 0, second.Duration > 0
-		if firstMeasured != secondMeasured {
-			if firstMeasured {
-				return -1
-			}
-			return 1
-		}
+	slices.SortStableFunc(measured, func(first, second TargetEvidence) int {
 		return cmp.Compare(first.Duration, second.Duration)
 	})
-	return result
+	return append(measured, unmeasured...)
 }
 
 func seedRequest(mutant gomutants.Mutant, target TargetEvidence, timeout time.Duration) gomutants.ExecRequest {
@@ -289,35 +281,27 @@ func fuzzExecutions(contract string, requested int) int {
 	if contract == "deep-v1" {
 		maximum = deepFuzzExecutions
 	}
-	if requested <= 0 || requested > maximum {
+	if requested <= 0 {
 		return maximum
 	}
-	return requested
+	return min(requested, maximum)
 }
 
 func calibratedMutationTimeout(contract string, baseline, override time.Duration) time.Duration {
-	if override != 0 {
+	if override > 0 {
 		return override
 	}
 	maximum := standardMutationTimeoutLimit
 	if contract == "deep-v1" {
 		maximum = deepMutationTimeoutLimit
 	}
-	if baseline <= 0 {
-		return minimumMutationTimeout
-	}
-	if baseline > (maximum-mutationTimeoutOverhead)/mutationTimeoutMultiplier {
-		return maximum
-	}
-	timeout := baseline*mutationTimeoutMultiplier + mutationTimeoutOverhead
-	if timeout < minimumMutationTimeout {
-		return minimumMutationTimeout
-	}
-	return min(timeout, maximum)
+	boundedBaseline := min(max(baseline, 0), maximum)
+	timeout := boundedBaseline*mutationTimeoutMultiplier + mutationTimeoutOverhead
+	return min(max(timeout, minimumMutationTimeout), maximum)
 }
 
 func promoteTargetArtifacts(root string, mutant gomutants.Mutant, targetName string, artifacts []gomutants.Artifact, evaluation *MutationEvaluation) (bool, error) {
-	promoted := false
+	var promoted bool
 	marker := "/testdata/fuzz/" + targetName + "/"
 	rootMarker := "testdata/fuzz/" + targetName + "/"
 	for _, artifact := range artifacts {

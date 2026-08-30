@@ -111,8 +111,15 @@ func TestEvaluateRunsSeedMutantsConcurrentlyAndKeepsCatalogOrder(t *testing.T) {
 	if len(got.result.Evidence) != 2 || got.result.Evidence[0].ID != "mutant-a" || got.result.Evidence[1].ID != "mutant-b" {
 		t.Fatalf("evidence order = %+v", got.result.Evidence)
 	}
-	if first, second := <-progress, <-progress; first != 1 || second != 2 {
-		t.Fatalf("progress = [%d %d], want [1 2]", first, second)
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-progress:
+			if got != want {
+				t.Fatalf("progress %d = %d, want %d", want, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for progress %d", want)
+		}
 	}
 }
 
