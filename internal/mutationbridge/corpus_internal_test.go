@@ -143,7 +143,7 @@ func TestPromoteCorpusRejectsExistingDifferentBytesAndNonDirectoryParents(t *tes
 
 func TestSafeTargetRequiresCanonicalPathAndRealRoot(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	for _, relative := range []string{"", "./testdata/fuzz/FuzzX/seed", "testdata/fuzz/FuzzX/seed/extra"} {
 		if _, err := safeTarget(root, relative); err == nil {
 			t.Errorf("safeTarget accepted %q", relative)
@@ -235,7 +235,7 @@ func TestSafeTargetRejectsSymbolicLinksAndNonRegularFinalEntries(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			preserveCorpusHooks(t)
-			root := t.TempDir()
+			root := resolvedTempDir(t)
 			parent := filepath.Join(root, "testdata", "fuzz", "FuzzX")
 			if err := os.MkdirAll(parent, 0o755); err != nil {
 				t.Fatal(err)
@@ -267,7 +267,7 @@ func TestPromoteCorpusPropagatesEveryAtomicStageAndCleansTemporaryFile(t *testin
 	for _, stage := range []string{"read", "mkdir", "create", "write", "short write", "sync", "chmod", "close", "link"} {
 		t.Run(stage, func(t *testing.T) {
 			preserveCorpusHooks(t)
-			root := t.TempDir()
+			root := resolvedTempDir(t)
 			sentinel := errors.New(stage + " failed")
 			file := &fakeCorpusFile{name: filepath.Join(root, "temporary"), failure: stage, err: sentinel}
 			removed := ""
@@ -421,4 +421,15 @@ func preserveCorpusHooks(t *testing.T) {
 		statCorpusPath, lstatCorpusPath, readCorpusFile = stat, lstat, read
 		mkdirCorpusAll, createCorpusTemp, removeCorpusFile, linkCorpusFile = mkdir, create, remove, link
 	})
+}
+
+// resolvedTempDir returns t.TempDir() with symbolic links and short names
+// resolved, matching the root that safeTarget canonicalizes before joining.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

@@ -48,7 +48,7 @@ func TestNormalizeCanonicalizesLocalPathsAndRejectsEveryEscapeForm(t *testing.T)
 
 func TestConfinedPathHandlesMissingFinalPathsAndRejectsNonDirectories(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	want := filepath.Join(root, "new", "value_test.go")
 	got, err := confinedPath(root, "new/value_test.go")
 	if err != nil || got != want {
@@ -354,4 +354,15 @@ func preserveRepairHooks(t *testing.T) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// resolvedTempDir returns t.TempDir() with symbolic links and short names
+// resolved, matching the root that confinedPath canonicalizes before joining.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
