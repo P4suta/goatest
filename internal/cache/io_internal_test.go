@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -164,6 +165,23 @@ func TestPutSuccessWritesSyncsClosesAndRenames(t *testing.T) {
 	}
 	if got := string(file.written); got != string(report.JSON(cachedReport())) {
 		t.Fatalf("written = %q", got)
+	}
+}
+
+func TestPutTreatsPostCommitCollectionAsBestEffort(t *testing.T) {
+	previous := collectCache
+	t.Cleanup(func() { collectCache = previous })
+	collectCache = func(string, int64, time.Duration, time.Time) (GCResult, error) {
+		return GCResult{}, errors.New("collection failed after commit")
+	}
+	root := t.TempDir()
+	store := NewWithPolicy(root, 1, time.Hour)
+	if err := store.Put("digest-a", cachedReport()); err != nil {
+		t.Fatalf("Put reported post-commit collection failure: %v", err)
+	}
+	got, found, err := store.Get("digest-a")
+	if err != nil || !found || got.Snapshot != "digest-a" {
+		t.Fatalf("committed cache entry = (%+v, %t, %v)", got, found, err)
 	}
 }
 

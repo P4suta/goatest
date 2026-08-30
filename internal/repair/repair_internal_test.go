@@ -239,10 +239,98 @@ func TestArtifactMarshalAndApplyFailuresArePropagated(t *testing.T) {
 	})
 }
 
+func TestApplyCandidatesCommitsAllFilesAndRejectsDuplicatePaths(t *testing.T) {
+	root := t.TempDir()
+	applications := []Application{
+		{Finding: report.Finding{ID: "finding-a"}, Candidate: provider.Candidate{Kind: "patch", Path: "a_test.go", Content: []byte("package fixture\n")}},
+		{Finding: report.Finding{ID: "finding-b"}, Candidate: provider.Candidate{Kind: "corpus", Path: "testdata/fuzz/FuzzValue/seed", Content: []byte("go test fuzz v1\nstring(\"seed\")\n")}},
+	}
+	results, err := ApplyCandidates(root, applications)
+	if err != nil || len(results) != 2 || results[0].Status != StatusApplied || results[1].Status != StatusApplied {
+		t.Fatalf("ApplyCandidates = (%+v, %v)", results, err)
+	}
+	for index, application := range applications {
+		data, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(application.Candidate.Path)))
+		if readErr != nil || !slices.Equal(data, application.Candidate.Content) {
+			t.Fatalf("applied file %d = %q, %v", index, data, readErr)
+		}
+	}
+	_, err = ApplyCandidates(root, []Application{
+		{Finding: report.Finding{ID: "finding-a"}, Candidate: provider.Candidate{Kind: "patch", Path: "same_test.go"}},
+		{Finding: report.Finding{ID: "finding-b"}, Candidate: provider.Candidate{Kind: "patch", Path: "SAME_test.go"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate path") {
+		t.Fatalf("duplicate batch error = %v", err)
+	}
+}
+
+func TestApplyCandidatesPreimageMismatchAppliesNothing(t *testing.T) {
+	root := t.TempDir()
+	originalA, originalB := []byte("package fixture\n// a\n"), []byte("package fixture\n// user edit\n")
+	if err := os.WriteFile(filepath.Join(root, "a_test.go"), originalA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b_test.go"), originalB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	results, err := ApplyCandidates(root, []Application{
+		{Finding: report.Finding{ID: "finding-a"}, Candidate: provider.Candidate{Kind: "patch", Path: "a_test.go", PreimageSHA256: sha256Hex(originalA), Content: []byte("new a")}},
+		{Finding: report.Finding{ID: "finding-b"}, Candidate: provider.Candidate{Kind: "patch", Path: "b_test.go", PreimageSHA256: sha256Hex([]byte("stale b")), Content: []byte("new b")}},
+	})
+	if err != nil || results[0].Status != StatusCandidate || results[1].Status != StatusArtifact || results[1].Artifact == "" {
+		t.Fatalf("ApplyCandidates = (%+v, %v)", results, err)
+	}
+	for path, want := range map[string][]byte{"a_test.go": originalA, "b_test.go": originalB} {
+		got, readErr := os.ReadFile(filepath.Join(root, path))
+		if readErr != nil || !slices.Equal(got, want) {
+			t.Fatalf("%s changed = %q, %v", path, got, readErr)
+		}
+	}
+}
+
+func TestApplyCandidatesRollsBackEarlierWritesAfterLaterFailure(t *testing.T) {
+	preserveRepairHooks(t)
+	root := t.TempDir()
+	originalA, originalB := []byte("package fixture\n// a\n"), []byte("package fixture\n// b\n")
+	for path, content := range map[string][]byte{"a_test.go": originalA, "b_test.go": originalB} {
+		if err := os.WriteFile(filepath.Join(root, path), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sentinel := errors.New("second commit failed")
+	originalRename := renameRepairFile
+	renames := 0
+	renameRepairFile = func(source, target string) error {
+		renames++
+		if renames == 2 {
+			return sentinel
+		}
+		return originalRename(source, target)
+	}
+	results, err := ApplyCandidates(root, []Application{
+		{Finding: report.Finding{ID: "finding-a"}, Candidate: provider.Candidate{Kind: "patch", Path: "a_test.go", PreimageSHA256: sha256Hex(originalA), Content: []byte("new a")}},
+		{Finding: report.Finding{ID: "finding-b"}, Candidate: provider.Candidate{Kind: "patch", Path: "b_test.go", PreimageSHA256: sha256Hex(originalB), Content: []byte("new b")}},
+	})
+	if !errors.Is(err, sentinel) || results[0].Status != StatusCandidate || renames != 3 {
+		t.Fatalf("ApplyCandidates = (%+v, %v), renames=%d", results, err, renames)
+	}
+	for path, want := range map[string][]byte{"a_test.go": originalA, "b_test.go": originalB} {
+		got, readErr := os.ReadFile(filepath.Join(root, path))
+		if readErr != nil || !slices.Equal(got, want) {
+			t.Fatalf("%s after rollback = %q, %v", path, got, readErr)
+		}
+	}
+}
+
 func TestValidateAndApplyRechecksConfinementAfterValidation(t *testing.T) {
 	root := t.TempDir()
 	moved := root + "-moved"
-	validator := callbackValidator{suite: func() error { return os.Rename(root, moved) }}
+	validator := callbackValidator{suite: func() error {
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatalf("move repair root: %v", err)
+		}
+		return nil
+	}}
 	t.Cleanup(func() { _ = os.Rename(moved, root) })
 	_, err := ValidateAndApply(context.Background(), root, report.Finding{ID: "finding-a"}, provider.Candidate{
 		Kind: "patch", Path: "value_test.go", Content: []byte("package fixture\n"),

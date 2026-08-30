@@ -23,6 +23,7 @@ import (
 
 type mutationUnitSession struct {
 	catalog  gomutants.Catalog
+	mu       sync.Mutex
 	requests []gomutants.ExecRequest
 	exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
 }
@@ -30,7 +31,12 @@ type mutationUnitSession struct {
 func (session *mutationUnitSession) Catalog() gomutants.Catalog { return session.catalog }
 
 func (session *mutationUnitSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	session.mu.Lock()
 	session.requests = append(session.requests, request)
+	session.mu.Unlock()
+	if session.exec == nil {
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}
 	return session.exec(request)
 }
 
@@ -47,11 +53,17 @@ func TestEvaluateMutationsValidatesInputsFiltersCatalogAndRecordsRejections(t *t
 		t.Fatalf("empty root = (%+v, %v)", evaluation, err)
 	}
 	session.catalog = gomutants.Catalog{
-		Mutants:    []gomutants.Mutant{{ID: "not-validated", Accepted: false}},
+		Mutants:    []gomutants.Mutant{{ID: "rejected-id", Accepted: false}},
 		Rejections: []gomutants.Rejection{{ID: "rejected-id", Diagnostic: "does not compile"}},
 	}
 	evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{Root: root})
-	want := MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: "rejected-id", Status: "compile-equivalent", Detail: "does not compile"}}}
+	want := MutationEvaluation{
+		Evidence:   []report.Evidence{{Kind: "mutation", ID: "rejected-id", Status: "compile-rejected", Detail: "does not compile"}},
+		Accounting: report.MutantAccounting{Discovered: 1, Selected: 1, CompileRejected: 1},
+		Mutants: []report.MutantDisposition{{
+			ID: "rejected-id", Status: report.MutantCompileRejected, Detail: "does not compile",
+		}},
+	}
 	if err != nil || !reflect.DeepEqual(evaluation, want) || len(session.requests) != 0 {
 		t.Fatalf("catalog evaluation = (%+v, %v), want %+v", evaluation, err, want)
 	}
@@ -63,7 +75,7 @@ func TestEvaluateMutationsReplaysOnlyRequestedMutantAndFailsClosedWhenAbsent(t *
 	progress := make([][2]int, 0, 1)
 	session := &mutationUnitSession{
 		catalog: gomutants.Catalog{
-			Mutants:    []gomutants.Mutant{first, second},
+			Mutants:    []gomutants.Mutant{first, second, {ID: "rejected-other", Accepted: false}},
 			Rejections: []gomutants.Rejection{{ID: "rejected-other", Diagnostic: "compile equivalent"}},
 		},
 		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {

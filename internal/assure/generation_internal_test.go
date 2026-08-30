@@ -53,7 +53,6 @@ func TestAttemptGeneratedRepairsSkipsDisabledEmptyAndUnconfiguredGeneration(t *t
 		findings []report.Finding
 		options  GenerationOptions
 	}{
-		{name: "no apply", findings: []report.Finding{finding}, options: GenerationOptions{NoApply: true}},
 		{name: "empty", options: GenerationOptions{Generate: func(context.Context, provider.Request) (provider.Response, error) {
 			t.Fatal("generator called without findings")
 			return provider.Response{}, nil
@@ -84,28 +83,67 @@ func TestAttemptGeneratedRepairsSkipsDisabledEmptyAndUnconfiguredGeneration(t *t
 	}
 }
 
+func TestAttemptGeneratedRepairsNoApplyStoresValidatedCandidateWithoutChangingSource(t *testing.T) {
+	root := t.TempDir()
+	finding := generationFinding("finding-read-only")
+	candidate := provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")}
+	repairID := generatedRepairID("snapshot-read-only", finding, candidate)
+
+	evaluation, err := AttemptGeneratedRepairs(t.Context(), root, []report.Finding{finding}, GenerationOptions{
+		Snapshot: "snapshot-read-only", NoApply: true, AllowedPaths: []string{"generated_test.go"}, Validator: generationValidator{},
+		Generate: func(context.Context, provider.Request) (provider.Response, error) {
+			return provider.Response{Version: provider.ProtocolVersion, FindingID: finding.ID, Candidates: []provider.Candidate{candidate}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRepairs := []report.Repair{{
+		ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "candidate",
+		Validation: "passed", Provenance: "snapshot=snapshot-read-only",
+	}}
+	if evaluation.Applied || !reflect.DeepEqual(evaluation.Repairs, wantRepairs) {
+		t.Fatalf("evaluation = %+v, want repairs %+v", evaluation, wantRepairs)
+	}
+	if _, err := os.Stat(filepath.Join(root, candidate.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only verification changed source: %v", err)
+	}
+	record, err := repair.LoadCandidate(root, repairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Snapshot != "snapshot-read-only" || record.Finding != finding || !reflect.DeepEqual(record.Candidate, candidate) || record.Validation != "passed" {
+		t.Fatalf("candidate record = %+v", record)
+	}
+}
+
 func TestAttemptGeneratedRepairsUsesClonedCommandOnlyWithoutDirectGenerator(t *testing.T) {
 	previous := generationFromCommand
 	t.Cleanup(func() { generationFromCommand = previous })
 
 	called := 0
-	generationFromCommand = func(command []string) func(context.Context, provider.Request) (provider.Response, error) {
+	generationFromCommand = func(command, environment []string) func(context.Context, provider.Request) (provider.Response, error) {
 		called++
 		if !slices.Equal(command, []string{"generator", "--json"}) {
 			t.Fatalf("command = %v", command)
 		}
+		if !slices.Equal(environment, []string{"PROVIDER_TOKEN=redacted-test-value"}) {
+			t.Fatalf("environment = %v", environment)
+		}
 		command[0] = "mutated by factory"
+		environment[0] = "MUTATED=yes"
 		return func(_ context.Context, request provider.Request) (provider.Response, error) {
 			return provider.Response{Version: provider.ProtocolVersion, FindingID: request.Finding.ID}, nil
 		}
 	}
 	command := []string{"generator", "--json"}
+	environment := []string{"PROVIDER_TOKEN=redacted-test-value"}
 	finding := generationFinding("finding-command")
 	evaluation, err := AttemptGeneratedRepairs(t.Context(), t.TempDir(), []report.Finding{finding}, GenerationOptions{
-		Command: command, Validator: generationValidator{},
+		Command: command, ProviderEnvironment: environment, Validator: generationValidator{},
 	})
-	if err != nil || called != 1 || command[0] != "generator" || !reflect.DeepEqual(evaluation.Findings, []report.Finding{finding}) {
-		t.Fatalf("command generation = (%+v, %v), calls=%d command=%v", evaluation, err, called, command)
+	if err != nil || called != 1 || command[0] != "generator" || environment[0] != "PROVIDER_TOKEN=redacted-test-value" || !reflect.DeepEqual(evaluation.Findings, []report.Finding{finding}) {
+		t.Fatalf("command generation = (%+v, %v), calls=%d command=%v environment=%v", evaluation, err, called, command, environment)
 	}
 
 	called = 0
@@ -208,7 +246,7 @@ func TestAttemptGeneratedRepairsUsesDefaultValidatorAndAppliesFirstPassingCandid
 		},
 	})
 	wantRepair := report.Repair{
-		ID:      report.FindingID("generated", finding.ID, candidate.Kind, candidate.Path, candidate.PreimageSHA256),
+		ID:      generatedRepairID("", finding, candidate),
 		Finding: finding.ID, Path: candidate.Path, Status: "applied",
 	}
 	contents, readErr := os.ReadFile(filepath.Join(root, candidate.Path))
@@ -253,7 +291,7 @@ func TestAttemptGeneratedRepairsRecordsEveryRejectionAndArtifactBeforeApplying(t
 	wantPaths := []string{"unsafe.go", "rejected_test.go", "conflict_test.go", "applied_test.go"}
 	for index, got := range evaluation.Repairs {
 		candidate := candidates[index]
-		wantID := report.FindingID("generated", findings[0].ID, candidate.Kind, candidate.Path, candidate.PreimageSHA256)
+		wantID := generatedRepairID("", findings[0], candidate)
 		if got.ID != wantID || got.Finding != findings[0].ID || got.Path != wantPaths[index] || got.Status != wantStatuses[index] {
 			t.Errorf("repair %d = %+v", index, got)
 		}

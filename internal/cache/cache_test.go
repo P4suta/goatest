@@ -80,7 +80,7 @@ func TestGetRejectsReadStrictnessAndIdentityFailures(t *testing.T) {
 		{name: "malformed", data: []byte("{"), want: "cache decode"},
 		{name: "unknown-field", data: []byte(`{"schema":"assurance-report-v1","snapshot":"digest-a","extra":true}`), want: "cache decode"},
 		{name: "trailing", data: append(report.JSON(report.Report{Schema: report.SchemaV1, Snapshot: "digest-a"}), []byte("{}")...), want: "trailing data"},
-		{name: "wrong-schema", data: report.JSON(report.Report{Schema: "future-v2", Snapshot: "digest-a"}), want: "identity mismatch"},
+		{name: "wrong-schema", data: report.JSON(report.Report{Schema: "future-schema", Snapshot: "digest-a"}), want: "identity mismatch"},
 		{name: "wrong-snapshot", data: report.JSON(report.Report{Schema: report.SchemaV1, Snapshot: "digest-b"}), want: "identity mismatch"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

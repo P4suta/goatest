@@ -21,6 +21,7 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/evidence"
+	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -93,6 +94,34 @@ func TestInspectWorkspaceReturnsCompleteMetadataAndExactCommands(t *testing.T) {
 	}
 }
 
+func TestInspectSelectedPackagesUsesConfiguredCommandTimeout(t *testing.T) {
+	t.Parallel()
+	timeout := 17 * time.Second
+	for _, test := range []struct {
+		name     string
+		patterns []string
+		tags     []string
+		wantArgv []string
+	}{
+		{name: "explicit packages", patterns: []string{"./pkg/..."}, tags: []string{"integration", "sqlite"}, wantArgv: []string{"go", "list", "-json", "-tags=integration,sqlite", "./pkg/..."}},
+		{name: "build tags default to all packages", tags: []string{"integration"}, wantArgv: []string{"go", "list", "-json", "-tags=integration", "./..."}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{{
+				Output: listedPackageJSON(t, t.TempDir()),
+			}}}
+			model, err := inspectSelectedPackages(t.Context(), workspace, test.patterns, test.tags, timeout)
+			if err != nil || model.ModulePath != "fixture.example/module" || len(workspace.commands) != 1 {
+				t.Fatalf("inspectSelectedPackages = (%+v, %v), commands=%+v", model, err, workspace.commands)
+			}
+			command := workspace.commands[0]
+			if !slices.Equal(command.Argv, test.wantArgv) || command.Timeout != timeout || command.OutputLimit != 32<<20 {
+				t.Fatalf("selected package command = %+v, want argv=%v timeout=%s", command, test.wantArgv, timeout)
+			}
+		})
+	}
+}
+
 func TestInspectWorkspaceRejectsEveryCommandFailureAndMalformedOutput(t *testing.T) {
 	moduleRoot := t.TempDir()
 	validList := listedPackageJSON(t, moduleRoot)
@@ -118,6 +147,9 @@ func TestInspectWorkspaceRejectsEveryCommandFailureAndMalformedOutput(t *testing
 		{name: "modules timeout", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {TimedOut: true}}, wantCalls: 3, wantDetail: "go list -m failed"},
 		{name: "malformed modules", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: []byte("{")}}, wantCalls: 3, wantDetail: "decode module graph"},
 		{name: "empty module path", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{})}}, wantCalls: 3, wantDetail: "empty path"},
+		{name: "no main module", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module"})}}, wantCalls: 3, wantDetail: "no main module"},
+		{name: "different main module", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "other.example/module", Main: true})}}, wantCalls: 3, wantDetail: "does not match main module"},
+		{name: "multiple main modules", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module", Main: true}, listedModule{Path: "other.example/module", Main: true})}}, wantCalls: 3, wantDetail: "refusing partial assurance"},
 		{name: "valid control", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: validModules}}, wantCalls: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -198,11 +230,15 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 	root := t.TempDir()
 	writeRunHelperFile(t, root, "value.go", "package fixture\n")
 	writeRunHelperFile(t, root, "testdata/fuzz/FuzzValue/seed", "go test fuzz v1\nint(1)\n")
-	loaded := config.Config{Resources: map[string]config.Resource{
-		"postgres": {Command: []string{"provider", "postgres"}, Timeout: 7 * time.Second, Shared: true},
-	}}
+	loaded := config.Config{
+		Execution: config.Execution{Environment: []string{"A", "B"}},
+		Resources: map[string]config.Resource{
+			"postgres": {Command: []string{"provider", "postgres"}, Timeout: 7 * time.Second, Shared: true},
+		},
+	}
 	options := Options{NoApply: true, Changed: true, ChangedRef: "HEAD~1", Environment: []string{
-		"B=2", "a=1", "TEMP=unstable", "GO_MUTANTS_INTERNAL=unstable",
+		"B=2", "a=1", "GOFLAGS=-trimpath", "UNDECLARED_SECRET=must-not-be-hashed",
+		"TEMP=unstable", "GO_MUTANTS_INTERNAL=unstable",
 	}}
 	metadata := roundMetadata{
 		toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"},
@@ -213,7 +249,12 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 		inputs.Dependencies["dependency"] != "digest" || inputs.Resources["postgres"] == "" || len(inputs.Files) == 0 || len(inputs.Corpus) == 0 {
 		t.Fatalf("assuranceInputs = (%+v, %q, %v)", inputs, digest, err)
 	}
-	for _, unstable := range []string{"TEMP=unstable", "GO_MUTANTS_INTERNAL=unstable"} {
+	for _, expected := range []string{"B=2", "a=1", "GOFLAGS=-trimpath", "GOTOOLCHAIN=local"} {
+		if !slices.Contains(inputs.Environment, expected) {
+			t.Fatalf("selected environment missing %q: %v", expected, inputs.Environment)
+		}
+	}
+	for _, unstable := range []string{"TEMP=unstable", "GO_MUTANTS_INTERNAL=unstable", "UNDECLARED_SECRET=must-not-be-hashed"} {
 		if slices.Contains(inputs.Environment, unstable) {
 			t.Fatalf("unstable environment retained: %v", inputs.Environment)
 		}
@@ -228,6 +269,7 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 		{Command: []string{"provider", "postgres"}, Timeout: 8 * time.Second, Shared: true},
 		{Command: []string{"provider", "postgres"}, Timeout: 7 * time.Second, Shared: false},
 		{Command: []string{"provider", "postgres"}, Timeout: 7 * time.Second, Shared: true, Exclusive: true},
+		{Command: []string{"provider", "postgres"}, Timeout: 7 * time.Second, Shared: true, Environment: []string{"PROVIDER_MODE"}},
 	}
 	for _, variant := range variants {
 		changed := config.Config{Resources: map[string]config.Resource{"postgres": variant}}
@@ -251,12 +293,25 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{NoApply: true, ReplayMutantID: "mutant-a"}); got != ";apply=false;changed=false;ref=;replay=mutant-a" {
 		t.Fatalf("replay mode identity = %q", got)
 	}
+	if got := modeIdentity(Options{NoApply: true, ReplayFindingID: "finding-a"}); got != ";apply=false;changed=false;ref=;replay-finding=finding-a" {
+		t.Fatalf("finding replay mode identity = %q", got)
+	}
 	environment := stableEnvironment([]string{
 		"B=2", "a=1", "bad", "TMP=x", "temp=y", "TmpDir=z", "go_mutants_x=1", "A=2",
 		"STARSHIP_SESSION_KEY=volatile", "__mise_session=volatile",
 	})
 	if !slices.Equal(environment, []string{"A=2", "B=2", "a=1"}) {
 		t.Fatalf("stableEnvironment = %v", environment)
+	}
+	selected := selectedEnvironment([]string{"B=2", "A=1", "SECRET=hidden", "GOFLAGS=-trimpath"}, []string{"B"})
+	if !slices.Equal(selected, []string{"B=2", "GOFLAGS=-trimpath"}) {
+		t.Fatalf("selectedEnvironment = %v", selected)
+	}
+	providerEnvironment := generationProviderEnvironment(
+		[]string{"Path=C:/tools", "TEMP=C:/temp", "TOKEN=allowed", "SECRET=hidden"}, []string{"TOKEN"},
+	)
+	if !slices.Equal(providerEnvironment, []string{"Path=C:/tools", "TEMP=C:/temp", "TOKEN=allowed"}) {
+		t.Fatalf("generationProviderEnvironment = %v", providerEnvironment)
 	}
 
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
@@ -284,6 +339,35 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 		if got := cachedAcceptanceValid(test.report, test.accepted); got != test.want {
 			t.Errorf("%s cachedAcceptanceValid = %t, want %t", test.name, got, test.want)
 		}
+	}
+}
+
+func TestProjectExcludeMatchingAndLimitationsAreExplicit(t *testing.T) {
+	patterns := []string{"generated/**", "**/*_generated.go", "exact_test.go"}
+	for path, want := range map[string]bool{
+		"generated/value_test.go": true,
+		"pkg/value_generated.go":  true,
+		"exact_test.go":           true,
+		"pkg/value_test.go":       false,
+	} {
+		if got := projectPathExcluded(path, patterns); got != want {
+			t.Errorf("projectPathExcluded(%q) = %t, want %t", path, got, want)
+		}
+	}
+	targets := []goanalysis.Target{{Path: "generated/a_test.go"}, {Path: "pkg/a_test.go"}}
+	if got := includedProjectTargets(targets, patterns); len(got) != 1 || got[0].Path != "pkg/a_test.go" {
+		t.Fatalf("included targets = %+v", got)
+	}
+	packages := []goanalysis.Package{
+		{ImportPath: "example/generated", RelativeDir: "generated"},
+		{ImportPath: "example/pkg", RelativeDir: "pkg"},
+	}
+	if got := includedProjectPackages(packages, patterns); len(got) != 1 || got[0].ImportPath != "example/pkg" {
+		t.Fatalf("included packages = %+v", got)
+	}
+	limitations := projectExcludeLimitations(patterns)
+	if len(limitations) != len(patterns) || limitations[0].Code != "project-exclude" || !strings.Contains(limitations[0].Summary, patterns[0]) {
+		t.Fatalf("exclude limitations = %+v", limitations)
 	}
 }
 
@@ -341,7 +425,10 @@ func TestMergeAndValidationEnvironmentHandleCaseConflictsAndOverlay(t *testing.T
 func TestBaselineVerdictRepositoryRootExecutionEnvironmentAndEmit(t *testing.T) {
 	if baselineVerdict(nil) != report.VerdictInsufficient || baselineVerdict([]report.Finding{{Kind: "other"}}) != report.VerdictInsufficient ||
 		baselineVerdict([]report.Finding{{Kind: "other"}, {Kind: "baseline-failure"}}) != report.VerdictDefect ||
-		baselineVerdict([]report.Finding{{Kind: "baseline-timeout"}}) != report.VerdictDefect {
+		baselineVerdict([]report.Finding{{Kind: "baseline-timeout"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "vet-failure"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "build-failure"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "test-binary-build-failure"}}) != report.VerdictDefect {
 		t.Fatal("baselineVerdict matrix failed")
 	}
 

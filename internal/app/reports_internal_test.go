@@ -105,6 +105,14 @@ func TestWriteReportsNamesTheArtifactWhoseAtomicWriteFailed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "write report") || !strings.Contains(err.Error(), ".goatest") {
 		t.Fatalf("WriteReports error = %v", err)
 	}
+	artifacts, readErr := os.ReadDir(filepath.Join(root, "reports", "runs", "fixture-run"))
+	if readErr != nil || len(artifacts) != 5 {
+		t.Fatalf("complete immutable history was not published before index failure: entries=%d error=%v", len(artifacts), readErr)
+	}
+	runs, readErr := os.ReadDir(filepath.Join(root, "reports", "runs"))
+	if readErr != nil || len(runs) != 1 || runs[0].Name() != "fixture-run" {
+		t.Fatalf("history contains staging residue: entries=%v error=%v", runs, readErr)
+	}
 }
 
 func sequenceErrors(errors ...error) func(string, string) error {
@@ -120,5 +128,16 @@ func sequenceErrors(errors ...error) func(string, string) error {
 }
 
 func validReportFixture() report.Report {
-	return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}
+	return report.Report{
+		Schema: report.SchemaV1, RunID: "fixture-run", RunKind: report.RunFull, Verdict: report.VerdictAssured,
+		Contract: "standard-v1", Snapshot: "fixture-snapshot",
+		Scope: report.Scope{
+			Requested: report.ScopeSpec{Kind: "full", Project: "."},
+			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
+		},
+		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
+		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
+		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
+		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
+	}
 }

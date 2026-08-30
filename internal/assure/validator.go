@@ -32,6 +32,10 @@ type RepositoryValidatorOptions struct {
 	TempDirectory     string
 	Environment       []string
 	MutationOperators []string
+	Packages          []string
+	BuildTags         []string
+	TestArgs          []string
+	Timeout           time.Duration
 }
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
@@ -51,17 +55,22 @@ type validationWriteCloser interface {
 	Close() error
 }
 
+func defaultPrepareValidationSession(ctx context.Context, workspace validationWorkspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
+	mutationWorkspace, ok := workspace.(*mutationbridge.Workspace)
+	if !ok {
+		return nil, fmt.Errorf("goatest: unsupported validation workspace %T", workspace)
+	}
+	return mutationWorkspace.Prepare(ctx, options)
+}
+
 var (
 	openValidationWorkspace = func(ctx context.Context, root string, options mutationbridge.Options) (validationWorkspace, error) {
 		return mutationbridge.Open(ctx, root, options)
 	}
-	prepareValidationSession = func(ctx context.Context, workspace validationWorkspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
-		session, err := workspace.(*mutationbridge.Workspace).Prepare(ctx, options)
-		return session, err
-	}
+	prepareValidationSession      = defaultPrepareValidationSession
 	decodeValidationPackages      = goanalysis.DecodePackages
 	concurrencyValidationPackages = goanalysis.ConcurrencyPackages
-	collectValidationRace         = CollectRace
+	collectValidationRace         = CollectRaceWithOptions
 	makeCandidateTemp             = os.MkdirTemp
 	removeCandidateTemp           = os.RemoveAll
 	copyCandidateRepository       = copyRepository
@@ -82,6 +91,9 @@ var (
 func NewRepositoryValidator(options RepositoryValidatorOptions) *repositoryValidator {
 	options.Environment = slices.Clone(options.Environment)
 	options.MutationOperators = slices.Clone(options.MutationOperators)
+	options.Packages = slices.Clone(options.Packages)
+	options.BuildTags = slices.Clone(options.BuildTags)
+	options.TestArgs = slices.Clone(options.TestArgs)
 	return &repositoryValidator{options: options}
 }
 
@@ -92,7 +104,7 @@ func (validator *repositoryValidator) OriginalStable(ctx context.Context, candid
 			return err
 		}
 		defer func() { _ = workspace.Close() }()
-		return runPassing(ctx, workspace, []string{"go", "test", "-count=1", "./..."}, "generated candidate on original code")
+		return runPassing(ctx, workspace, validator.testArgv(false), "generated candidate on original code", validator.timeout())
 	})
 }
 
@@ -108,7 +120,8 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 		defer func() { _ = workspace.Close() }()
 		session, err := prepareValidationSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract: validator.options.Contract, Operators: slices.Clone(validator.options.MutationOperators),
-			VerifyArgv: []string{"go", "test", "-run=^$", "./..."},
+			Packages: slices.Clone(validator.options.Packages), VerifyArgv: validator.testArgv(true),
+			BuildTimeout: validator.timeout(), MutantTimeout: validator.mutantTimeout(), VerifyTimeout: validator.timeout(),
 		})
 		if err != nil {
 			return err
@@ -125,7 +138,7 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 			return fmt.Errorf("goatest: target mutant %s is absent after applying candidate", finding.MutantID)
 		}
 		result, err := session.Exec(ctx, gomutants.ExecRequest{
-			Mutant: mutant.ID, Package: mutant.Package, Timeout: 30 * time.Second,
+			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(validator.options.TestArgs), Timeout: validator.mutantTimeout(),
 		})
 		if err != nil {
 			return err
@@ -144,10 +157,15 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 			return err
 		}
 		defer func() { _ = workspace.Close() }()
-		if err := runPassing(ctx, workspace, []string{"go", "test", "-count=1", "./..."}, "related suite"); err != nil {
+		if err := runPassing(ctx, workspace, validator.testArgv(false), "related suite", validator.timeout()); err != nil {
 			return err
 		}
-		listed, err := workspace.Exec(ctx, gomutants.Command{Argv: []string{"go", "list", "-json", "./..."}, Timeout: 5 * time.Minute})
+		listArgv := []string{"go", "list", "-json"}
+		if len(validator.options.BuildTags) != 0 {
+			listArgv = append(listArgv, "-tags="+strings.Join(validator.options.BuildTags, ","))
+		}
+		listArgv = append(listArgv, validator.packages()...)
+		listed, err := workspace.Exec(ctx, gomutants.Command{Argv: listArgv, Timeout: validator.timeout()})
 		if err != nil || listed.ExitCode != 0 || listed.TimedOut {
 			return commandError("candidate go list", listed, err)
 		}
@@ -159,7 +177,11 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 		if err != nil {
 			return err
 		}
-		raceResult, err := collectValidationRace(ctx, workspace, model, concurrent, validator.options.Contract, nil)
+		raceResult, err := collectValidationRace(ctx, workspace, model, concurrent, validator.options.Contract, RaceOptions{
+			Environment: slices.Clone(validator.options.Environment),
+			TestArgs:    slices.Clone(validator.options.TestArgs),
+			BuildTags:   slices.Clone(validator.options.BuildTags),
+		})
 		if err != nil {
 			return err
 		}
@@ -171,14 +193,57 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 }
 
 func (validator *repositoryValidator) open(ctx context.Context, root string) (validationWorkspace, error) {
+	environment := slices.Clone(validator.options.Environment)
+	if len(validator.options.BuildTags) != 0 {
+		environment = mutationEnvironment(environment, validator.options.BuildTags)
+	}
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
-		ReportDirectory: ".goatest", Environment: slices.Clone(validator.options.Environment),
+		ReportDirectory: ".goatest", Environment: environment,
 	})
 }
 
-func runPassing(ctx context.Context, workspace CommandWorkspace, argv []string, purpose string) error {
-	result, err := workspace.Exec(ctx, gomutants.Command{Argv: argv, Timeout: 10 * time.Minute})
+func (validator *repositoryValidator) packages() []string {
+	if len(validator.options.Packages) == 0 {
+		return []string{"./..."}
+	}
+	return slices.Clone(validator.options.Packages)
+}
+
+func (validator *repositoryValidator) timeout() time.Duration {
+	if validator.options.Timeout > 0 {
+		return validator.options.Timeout
+	}
+	return 10 * time.Minute
+}
+
+func (validator *repositoryValidator) mutantTimeout() time.Duration {
+	if validator.options.Timeout > 0 {
+		return validator.options.Timeout
+	}
+	return 30 * time.Second
+}
+
+func (validator *repositoryValidator) testArgv(compileOnly bool) []string {
+	argv := []string{"go", "test"}
+	if len(validator.options.BuildTags) != 0 {
+		argv = append(argv, "-tags="+strings.Join(validator.options.BuildTags, ","))
+	}
+	if compileOnly {
+		argv = append(argv, "-run=^$")
+	} else {
+		argv = append(argv, "-count=1")
+	}
+	argv = append(argv, validator.packages()...)
+	if len(validator.options.TestArgs) != 0 {
+		argv = append(argv, "-args")
+		argv = append(argv, validator.options.TestArgs...)
+	}
+	return argv
+}
+
+func runPassing(ctx context.Context, workspace CommandWorkspace, argv []string, purpose string, timeout time.Duration) error {
+	result, err := workspace.Exec(ctx, gomutants.Command{Argv: argv, Timeout: timeout})
 	if err != nil {
 		return err
 	}

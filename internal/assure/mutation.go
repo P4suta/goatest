@@ -20,6 +20,8 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
+	"github.com/P4suta/goatest/internal/provider"
+	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -38,8 +40,9 @@ const (
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
-// by the assurance evaluator. The interface also keeps scheduler tests free of
-// subprocesses.
+// by the assurance evaluator. Exec must permit concurrent calls, matching the
+// go-mutants Session contract. The interface also keeps scheduler tests free
+// of subprocesses.
 type MutationSession interface {
 	Catalog() gomutants.Catalog
 	Exec(context.Context, gomutants.ExecRequest) (gomutants.MutantResult, error)
@@ -55,22 +58,27 @@ type TargetEvidence struct {
 }
 
 type MutationOptions struct {
-	Root           string
-	Contract       string
-	NoApply        bool
-	ReplayMutantID string
-	FuzzExecutions int
-	Timeout        time.Duration
-	Jobs           int
-	Accepted       map[string]bool
-	Progress       func(completed, total int)
+	Root            string
+	Snapshot        string
+	Contract        string
+	NoApply         bool
+	ReplayMutantID  string
+	TestArgs        []string
+	FuzzExecutions  int
+	Timeout         time.Duration
+	Jobs            int
+	Accepted        map[string]bool
+	Progress        func(completed, total int)
+	OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
 }
 
 type MutationEvaluation struct {
-	Evidence []report.Evidence
-	Findings []report.Finding
-	Repairs  []report.Repair
-	Applied  bool
+	Evidence   []report.Evidence
+	Findings   []report.Finding
+	Repairs    []report.Repair
+	Accounting report.MutantAccounting
+	Mutants    []report.MutantDisposition
+	Applied    bool
 }
 
 // EvaluateMutations selects only targets that baseline coverage proves can
@@ -85,6 +93,9 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	}
 	executions := fuzzExecutions(options.Contract, options.FuzzExecutions)
 	catalog := session.Catalog()
+	if err := validateMutationCatalog(catalog); err != nil {
+		return MutationEvaluation{}, err
+	}
 	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
 	for _, mutant := range catalog.Mutants {
 		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
@@ -101,7 +112,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 		evaluation.Evidence = append(evaluation.Evidence, report.Evidence{
-			Kind: "mutation", ID: rejection.ID, Status: "compile-equivalent", Detail: rejection.Diagnostic,
+			Kind: "mutation", ID: rejection.ID, Status: "compile-rejected", Detail: rejection.Diagnostic,
 		})
 	}
 	seeds := evaluateMutationSeeds(ctx, session, mutants, targets, options)
@@ -119,14 +130,34 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
 			}
-			result, err := session.Exec(ctx, fuzzRequest(seed.mutant, target, executions, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)))
+			request := fuzzRequest(seed.mutant, target, executions, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
+			request.Args = append(request.Args, options.TestArgs...)
+			result, err := session.Exec(ctx, request)
 			if err != nil {
 				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", seed.mutant.DisplayID, target.Target.Name, err)
 			}
 			switch result.Outcome {
 			case gomutants.OutcomeKilled:
+				confirmed, confirmFinding, confirmedResult, confirmErr := confirmMutationKill(ctx, session, seed.mutant, request, result, options)
+				if confirmErr != nil {
+					return MutationEvaluation{}, confirmErr
+				}
+				if !confirmed {
+					evaluation.addFinding(seed.mutant, confirmFinding.kind, confirmFinding.summary, options.Accepted)
+					blocked = true
+					break
+				}
+				result = confirmedResult
 				if options.NoApply {
-					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input, but --no-apply left it outside the corpus", options.Accepted)
+					stored, storeErr := storeTargetArtifacts(options.Root, options.Snapshot, seed.mutant, target.Target.Name, result.Artifacts, &evaluation)
+					if storeErr != nil {
+						return MutationEvaluation{}, storeErr
+					}
+					summary := "targeted fuzzing found a killing input, but no promotable standard corpus artifact was returned"
+					if stored {
+						summary = "targeted fuzzing found a killing input; a validated corpus candidate was stored for explicit fix --apply"
+					}
+					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", summary, options.Accepted)
 					killed = true
 					break
 				}
@@ -161,7 +192,116 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 
 		evaluation.addFinding(seed.mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
 	}
+	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation)
 	return evaluation, nil
+}
+
+func validateMutationCatalog(catalog gomutants.Catalog) error {
+	mutants := make(map[string]gomutants.Mutant, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		if mutant.ID == "" {
+			return fmt.Errorf("goatest: mutation catalog contains an empty mutant ID")
+		}
+		if _, duplicate := mutants[mutant.ID]; duplicate {
+			return fmt.Errorf("goatest: mutation catalog contains duplicate mutant %s", mutant.ID)
+		}
+		mutants[mutant.ID] = mutant
+	}
+	rejections := make(map[string]bool, len(catalog.Rejections))
+	for _, rejection := range catalog.Rejections {
+		mutant, exists := mutants[rejection.ID]
+		if !exists {
+			return fmt.Errorf("goatest: compile rejection %s is absent from the mutation catalog", rejection.ID)
+		}
+		if rejections[rejection.ID] {
+			return fmt.Errorf("goatest: mutation catalog contains duplicate rejection %s", rejection.ID)
+		}
+		if mutant.Accepted {
+			return fmt.Errorf("goatest: mutant %s is both executable and compile-rejected", rejection.ID)
+		}
+		rejections[rejection.ID] = true
+	}
+	for _, mutant := range catalog.Mutants {
+		if !mutant.Accepted && !rejections[mutant.ID] {
+			return fmt.Errorf("goatest: non-executable mutant %s has no compile rejection", mutant.ID)
+		}
+	}
+	return nil
+}
+
+func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation) (report.MutantAccounting, []report.MutantDisposition) {
+	accounting := report.MutantAccounting{Discovered: len(catalog.Mutants)}
+	selected := make(map[string]bool)
+	for _, mutant := range catalog.Mutants {
+		if mutant.Accepted && (replayID == "" || mutant.ID == replayID) {
+			selected[mutant.ID] = true
+		}
+	}
+	for _, rejection := range catalog.Rejections {
+		if replayID == "" || rejection.ID == replayID {
+			selected[rejection.ID] = true
+		}
+	}
+	accounting.Selected = len(selected)
+	accounting.OutOfScope = accounting.Discovered - accounting.Selected
+	statuses := make(map[string]report.MutantStatus, len(selected))
+	details := make(map[string]string, len(selected))
+	for _, item := range evaluation.Evidence {
+		if !selected[item.ID] || item.Kind != "mutation" {
+			continue
+		}
+		switch item.Status {
+		case "killed", "compile-rejected", "accepted":
+			statuses[item.ID] = report.MutantStatus(item.Status)
+			details[item.ID] = item.Detail
+		}
+	}
+	for _, finding := range evaluation.Findings {
+		if !selected[finding.MutantID] {
+			continue
+		}
+		if finding.Kind == "surviving-mutant" || finding.Kind == "unreached-mutant" {
+			statuses[finding.MutantID] = report.MutantSurvived
+		} else {
+			statuses[finding.MutantID] = report.MutantInconclusive
+		}
+		details[finding.MutantID] = finding.Summary
+	}
+	dispositions := make([]report.MutantDisposition, 0, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		status := report.MutantOutOfScope
+		detail := "outside the resolved mutation scope"
+		if selected[mutant.ID] {
+			status = statuses[mutant.ID]
+			detail = details[mutant.ID]
+			if status == "" {
+				status = report.MutantUnknown
+				detail = "selected mutant has no terminal disposition"
+			}
+		}
+		dispositions = append(dispositions, report.MutantDisposition{
+			ID: mutant.ID, Status: status, Path: mutant.Path, Line: mutant.Line,
+			Package: mutant.Package, Rule: mutant.Rule, Detail: detail,
+		})
+		switch status {
+		case report.MutantKilled:
+			accounting.Killed++
+			accounting.Executed++
+		case report.MutantSurvived:
+			accounting.Survived++
+			accounting.Executed++
+		case report.MutantInconclusive:
+			accounting.Inconclusive++
+			accounting.Executed++
+		case report.MutantCompileRejected:
+			accounting.CompileRejected++
+		case report.MutantAccepted:
+			accounting.Accepted++
+		case report.MutantUnknown:
+			accounting.Unknown++
+		}
+	}
+	return accounting, dispositions
 }
 
 type mutationSeed struct {
@@ -213,7 +353,36 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	seed := mutationSeed{mutant: mutant, reaching: reachingTargets(mutant.Path, targets)}
 	if len(seed.reaching) == 0 {
-		seed.evaluation.addFinding(mutant, "unreached-mutant", "no top-level test or fuzz target reaches this mutation", options.Accepted)
+		request := gomutants.ExecRequest{
+			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(options.TestArgs),
+			Timeout: calibratedMutationTimeout(options.Contract, 0, options.Timeout),
+		}
+		result, err := session.Exec(ctx, request)
+		if err != nil {
+			seed.err = fmt.Errorf("goatest: execute unreached mutant %s: %w", mutant.DisplayID, err)
+			return seed
+		}
+		switch result.Outcome {
+		case gomutants.OutcomeKilled:
+			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, request, result, options)
+			if confirmErr != nil {
+				seed.err = confirmErr
+				return seed
+			}
+			if confirmed {
+				seed.evaluation.addKill(mutant, mutant.Package+" package suite")
+			} else {
+				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
+			}
+		case gomutants.OutcomeSurvived:
+			seed.evaluation.addFinding(mutant, "unreached-mutant", "no measured top-level target reached this mutation; its package suite survived", options.Accepted)
+		case gomutants.OutcomeTimedOut:
+			seed.evaluation.addFinding(mutant, "mutation-timeout", "package suite timed out while confirming an unreached mutation", options.Accepted)
+		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "package suite could not establish an outcome for an unreached mutation", options.Accepted)
+		default:
+			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
+		}
 		seed.resolved = true
 		return seed
 	}
@@ -225,7 +394,20 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		}
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
-			seed.evaluation.addKill(mutant, execution.detail)
+			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
+			if confirmErr != nil {
+				seed.err = confirmErr
+				return seed
+			}
+			if confirmed {
+				detail := execution.detail
+				if options.OriginalControl != nil {
+					detail += " (paired confirmation)"
+				}
+				seed.evaluation.addKill(mutant, detail)
+			} else {
+				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
+			}
 			seed.resolved = true
 		case gomutants.OutcomeSurvived:
 			// Continue through every demonstrably relevant target.
@@ -246,19 +428,53 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	return seed
 }
 
+type confirmationFinding struct {
+	kind    string
+	summary string
+}
+
+func confirmMutationKill(ctx context.Context, session MutationSession, mutant gomutants.Mutant, request gomutants.ExecRequest, first gomutants.MutantResult, options MutationOptions) (bool, confirmationFinding, gomutants.MutantResult, error) {
+	if options.OriginalControl == nil {
+		return true, confirmationFinding{}, first, nil
+	}
+	control, err := options.OriginalControl(ctx, request)
+	if err != nil {
+		return false, confirmationFinding{}, gomutants.MutantResult{}, fmt.Errorf("goatest: original control for mutant %s: %w", mutant.DisplayID, err)
+	}
+	if control.TimedOut || control.ExitCode != 0 {
+		return false, confirmationFinding{
+			kind: "flaky-mutation-control", summary: "the original control failed immediately before kill confirmation: " + summarize(control.Output),
+		}, gomutants.MutantResult{}, nil
+	}
+	second, err := session.Exec(ctx, request)
+	if err != nil {
+		return false, confirmationFinding{}, gomutants.MutantResult{}, fmt.Errorf("goatest: confirm mutant %s: %w", mutant.DisplayID, err)
+	}
+	if second.Outcome != gomutants.OutcomeKilled {
+		return false, confirmationFinding{
+			kind: "flaky-mutation-kill", summary: "the mutation kill did not reproduce in paired confirmation",
+		}, second, nil
+	}
+	return true, confirmationFinding{}, second, nil
+}
+
 func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {
 	individual := min(len(targets), individualMutationTargetLimit)
 	executions := make([]mutationSeedExecution, 0, individual+len(targets[individual:]))
 	for _, target := range targets[:individual] {
+		request := seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
+		request.Args = append(request.Args, options.TestArgs...)
 		executions = append(executions, mutationSeedExecution{
-			request: seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)),
+			request: request,
 			detail:  target.Target.Name,
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
 		duration := batchMutationDuration(batch)
+		request := batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout))
+		request.Args = append(request.Args, options.TestArgs...)
 		executions = append(executions, mutationSeedExecution{
-			request: batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout)),
+			request: request,
 			detail:  batchMutationDetail(batch),
 		})
 	}
@@ -418,6 +634,37 @@ func promoteTargetArtifacts(root string, mutant gomutants.Mutant, targetName str
 		})
 	}
 	return promoted, nil
+}
+
+func storeTargetArtifacts(root, snapshot string, mutant gomutants.Mutant, targetName string, artifacts []gomutants.Artifact, evaluation *MutationEvaluation) (bool, error) {
+	var stored bool
+	marker := "/testdata/fuzz/" + targetName + "/"
+	rootMarker := "testdata/fuzz/" + targetName + "/"
+	finding := mutationFinding(mutant, "unpersisted-fuzz-kill", "targeted fuzzing found a killing input")
+	for _, artifact := range artifacts {
+		artifactPath := filepath.ToSlash(artifact.Path)
+		if !strings.HasPrefix(artifactPath, rootMarker) && !strings.Contains(artifactPath, marker) {
+			continue
+		}
+		path, data, err := mutationbridge.CorpusCandidate(artifact)
+		if err != nil {
+			return false, fmt.Errorf("goatest: preserve fuzz artifact for mutant %s: %w", mutant.DisplayID, err)
+		}
+		candidate := provider.Candidate{Kind: "corpus", Path: path, Content: data}
+		identifier := generatedRepairID(snapshot, finding, candidate)
+		if _, err := repair.StoreCandidate(root, repair.CandidateRecord{
+			Version: repair.CandidateVersion, ID: identifier, Snapshot: snapshot,
+			Finding: finding, Candidate: candidate, Validation: "paired-fuzz-confirmed",
+		}); err != nil {
+			return false, err
+		}
+		evaluation.Repairs = append(evaluation.Repairs, report.Repair{
+			ID: identifier, Finding: finding.ID, Path: path, Status: string(repair.StatusCandidate),
+			Validation: "paired-fuzz-confirmed", Provenance: "snapshot=" + snapshot,
+		})
+		stored = true
+	}
+	return stored, nil
 }
 
 func (evaluation *MutationEvaluation) addKill(mutant gomutants.Mutant, target string) {

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/P4suta/goatest/internal/config"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
@@ -53,11 +54,11 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 		dependencies.closeWorkspace == nil || dependencies.inspectWorkspace == nil || dependencies.assuranceInputs == nil || dependencies.digestInputs == nil ||
 		dependencies.discoverTargets == nil || dependencies.selectImpact == nil || dependencies.acquireResources == nil || dependencies.makeBaselineScratch == nil ||
 		dependencies.removeBaselineScratch == nil || dependencies.collectBaseline == nil || dependencies.concurrencyPackages == nil || dependencies.relevantRacePackages == nil ||
-		dependencies.collectRace == nil || dependencies.prepareSession == nil || dependencies.evaluateMutations == nil || dependencies.attemptRepairs == nil ||
+		dependencies.collectRaceWithOptions == nil || dependencies.prepareSession == nil || dependencies.evaluateMutations == nil || dependencies.attemptRepairs == nil ||
 		dependencies.buildGraph == nil || dependencies.mergeGraph == nil || dependencies.saveGraph == nil {
 		t.Fatal("production dependencies contain a nil function")
 	}
-	store := dependencies.newCache(t.TempDir())
+	store := dependencies.newCache(t.TempDir(), config.Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour})
 	if store == nil {
 		t.Fatal("production cache is nil")
 	}
@@ -87,7 +88,7 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 	t.Cleanup(func() { newRunResourceManager = previousManager })
 	manager := &scriptedRunResourceManager{environments: map[string][]string{"postgres": {"DB=ready"}}}
 	newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-	closer, baseline, evidenceItems, environment, err := dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{ID: "target", Capability: "postgres"}})
+	closer, baseline, evidenceItems, environment, err := dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{ID: "target", Capability: "postgres"}}, nil)
 	if err != nil || closer != manager || len(baseline) != 1 || baseline[0].Target.ID != "target" ||
 		!reflect.DeepEqual(evidenceItems, []report.Evidence{{Kind: "resource", ID: "postgres", Status: "ready"}}) || !slices.Equal(environment, []string{"DB=ready"}) {
 		t.Fatalf("resource delegation = (%T, %+v, %+v, %v, %v)", closer, baseline, evidenceItems, environment, err)
@@ -96,7 +97,7 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 	resourceCause := errors.New("acquire failed")
 	manager = &scriptedRunResourceManager{errors: map[string]error{"postgres": resourceCause}}
 	newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-	closer, baseline, evidenceItems, environment, err = dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "postgres"}})
+	closer, baseline, evidenceItems, environment, err = dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "postgres"}}, nil)
 	if !errors.Is(err, resourceCause) || closer != nil || baseline != nil || evidenceItems != nil || environment != nil {
 		t.Fatalf("resource error delegation = (%T, %+v, %+v, %v, %v)", closer, baseline, evidenceItems, environment, err)
 	}

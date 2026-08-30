@@ -1,127 +1,199 @@
 # goatest
 
-`goatest` is a mutation-driven assurance runner for Go 1.26 and newer. It asks
-a stricter question than “what is the mutation score?”: which changed or
-reachable behaviours still lack durable evidence, and can an existing test,
-property, fuzz target, integration resource, or generated test close that gap?
+`goatest` is an audit-oriented assurance runner for Go 1.26 and newer. It
+connects native Go tests and fuzz targets with coverage routing, mutation
+testing, targeted native fuzzing, race checks, explicit integration resources,
+and reviewable repair candidates.
 
-The default command verifies the whole module under `standard-v1`. It runs
-build and vet checks, compiles one covered test binary per package, maps
-top-level test coverage, runs relevant race checks, executes the `strong`
-`go-mutants` profile against only proven-reaching targets, and promotes a
-mutation-killing fuzz input into Go's standard corpus before starting over from
-a fresh snapshot. An unresolved survivor is never converted into success by a
-fuzzing timeout or a percentage threshold.
+This repository has not published a release yet. The current code is a
+pre-release alpha; `v1` is the first intended public contract and is defined
+directly, without a legacy compatibility layer.
 
-The primary result is one of `ASSURED`, `DEFECT`, `INSUFFICIENT`, or `ERROR`.
-No telemetry is emitted. Core execution is offline by default (`GOPROXY=off`,
-`GOSUMDB=off`, `GOTELEMETRY=off`, and `GOTOOLCHAIN=local`); configured resource
-and generation providers are explicit local processes using versioned JSON.
+The goal is narrower than proving program correctness. `ASSURED` means that a
+recorded full-project scope completed its configured fault model without
+missing evidence. A changeset or package run receives a scope-specific verdict
+and can never overwrite the latest full-project result.
 
-## Install and run
+## What a verification does
+
+For `standard-v1`, goatest:
+
+1. freezes an exact input identity covering source, tests, corpus, dependencies,
+   toolchain, platform, declared environment, configuration, and tool versions;
+2. classifies native `TestX`, `FuzzX`, and `ExampleX` results through
+   `test2json`, including skips and setup failures;
+3. routes tests by coverage blocks and mutant spans;
+4. runs relevant race checks (reported as a static estimate in
+   `standard-v1`; `deep-v1` races every package);
+5. evaluates every selected `go-mutants` mutant, with a passing original
+   control immediately before a repeated kill confirmation;
+6. records survivors, inconclusive/flaky outcomes, compile rejections,
+   acceptances, and out-of-scope mutants as a complete ID-level inventory; and
+7. stores any killing corpus or generated test as a candidate. `verify` never
+   changes source or corpus.
+
+`deep-v1` expands operators and exploration limits and requires race execution
+for every resolved package.
+
+## Build and try the unreleased CLI
+
+There is no `@latest` installation path until the first tag is published.
+From a checkout:
 
 ```console
-go install github.com/P4suta/goatest/cmd/goatest@latest
-goatest
-goatest --changed=origin/main
-goatest --contract=deep-v1 --no-apply --json --no-tui
+go build -o goatest ./cmd/goatest
+./goatest doctor
+./goatest plan ./...
+./goatest verify ./...
+./goatest verify --changed=origin/main ./... -- -short
+./goatest verify --contract=deep-v1 ./...
 ```
 
-Commands:
+On Windows, run `goatest.exe` instead of `./goatest`.
 
-- `goatest init`
-- `goatest explain FINDING_ID`
-- `goatest replay FINDING_ID`
-- `goatest accept FINDING_ID`
-- `goatest report`
+The command surface is:
 
-Exit codes are stable: `0` assured, `1` reproduced defect, `2` insufficient
-evidence, `3` configuration/infrastructure error, `130` interrupt, and `143`
-termination. Terminal, pipe, JSON, and CI modes all use the same report verdict.
+```text
+goatest verify [packages...] [flags] [-- test-binary-args...]
+goatest plan [packages...]
+goatest doctor
+goatest init
+goatest explain ID
+goatest replay ID
+goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
+goatest fix [ID...] [--apply]
+goatest report [--latest-full|--run=ID]
+goatest cache status|gc
+```
 
-Every verification writes deterministic artifacts beneath `reports/`:
-`assurance-report-v1.json`, a self-contained offline HTML report, SARIF 2.1.0,
-JUnit XML, and the JSON Schema. `.goatest/report.json` is the local index for
-`explain`, `replay`, and `accept`.
+Use `--ui=auto|plain|jsonl`; `--json` emits the report object. Exit codes are
+`0` for an assured/resolved/completed operation, `1` for `DEFECT` or
+`REPRODUCED`, `2` for `INSUFFICIENT`, `3` for configuration/tool errors, and
+`130`/`143` for interruption/termination.
 
-## Existing tests remain ordinary Go tests
+## Verdicts and report history
 
-No wrapper is required. Existing `TestX` and `FuzzX` targets are discovered and
-run unchanged. The small public API is for resource metadata and shared typed
-property/fuzz definitions:
+- `ASSURED`: the resolved scope is the configured full project.
+- `CHANGE_ASSURED`: the requested and resolved changeset scope completed.
+- `SCOPE_ASSURED`: an explicit package scope completed.
+- `REPRODUCED` / `RESOLVED`: replay operation outcome.
+- `DEFECT`: user code failed a baseline, race, build, vet, or test contract.
+- `INSUFFICIENT`: execution completed but evidence gaps remain.
+- `ERROR`: evidence is incomplete or a tool/provider/filesystem failure stopped
+  the run.
+
+Every completed verification writes immutable artifacts to
+`reports/runs/<run-id>/`: JSON, self-contained searchable HTML, SARIF, JUnit,
+and the report v1 JSON Schema. `reports/latest-any.json` and
+`.goatest/latest-any.json` follow every run. `latest-full.json` advances only
+for a full run, so a 13-mutant changeset report cannot replace a 2,396-mutant
+full report.
+
+See [the assurance contract](docs/assurance-contract.md) and
+[report v1](docs/report-v1.md) for the exact invariants.
+
+## Existing tests stay ordinary Go tests
+
+Native `TestX`, `FuzzX`, `ExampleX`, subtests, external test packages, and
+custom `TestMain` flags remain standard Go. goatest does not provide an
+assertion, mock, property, or container framework.
+
+The optional Go API only attaches resource metadata:
 
 ```go
 func TestRepository(t *testing.T) {
-	goatest.Run(t, goatest.Integration("postgres"), func(t *goatest.T) {
+	goatest.Run(t, goatest.Integration("postgres", "redis"), func(t *goatest.T) {
 		// t embeds *testing.T.
-	})
-}
-
-func FuzzRoundTrip(f *testing.F) {
-	goatest.Check(f, goatest.Unit(), func(t *goatest.T) {
-		input := goatest.Draw(t, "input", gen.String())
-		_ = input // property under test
 	})
 }
 ```
 
-`Check` exposes exactly one `[]byte` to Go's standard fuzz engine. Normal seed
-execution, `go test -fuzz`, typed generation, replay tokens, and
-mutation-guided fuzzing therefore share the same standard corpus. Package
-`gen` includes typed ranges, constraints, combinators, recursive values, state
-machines, deterministic shrinking, classification, and versioned replay.
+Projects do not have to import this package. The equivalent directive is:
 
-## Optional `.goatest.toml` v1
+```go
+//goatest:resources postgres redis
+func TestRepository(t *testing.T) { /* ... */ }
+```
 
-Unknown keys and unsupported versions are errors.
+Use Go's native `FuzzX` functions or a mature property library such as Rapid;
+see [property testing](docs/property-testing.md).
+
+## Strict `.goatest.toml` v1
+
+Configuration is optional. Unknown keys and versions other than `1` fail
+closed.
 
 ```toml
 version = 1
 contract = "standard-v1"
 
+[project]
+packages = ["./..."]
+exclude = ["generated/**"]
+
+[execution]
+build_tags = ["integration"]
+test_binary_args = ["-short"]
+environment = ["FEATURE_MODE"]
+timeout = "10m"
+jobs = 4
+
+[cache]
+max_bytes = 5368709120
+ttl = "720h"
+
 [resources.postgres]
 command = ["./tools/postgres-provider"]
 timeout = "30s"
 shared = true
+environment = ["POSTGRES_IMAGE"]
 
 [generation]
 command = ["./tools/test-generator"]
 allowed_paths = ["**/*_test.go", "**/testdata/fuzz/**"]
+environment = ["GENERATOR_TOKEN"]
 
 [[acceptance]]
 id = "0123456789abcdef"
 reason = "reviewed equivalent boundary"
-expires = "2026-09-30T00:00:00Z"
+expires = "2026-12-31T00:00:00Z"
+owner = "quality-team"
+ticket = "QA-123"
 ```
 
-A resource provider stays alive for `start → ready → stop` messages and returns
-test-only environment variables. `goatest` owns sharing, exclusivity,
-reference counts, timeouts, signals, and process-tree cleanup. A generation
-provider receives one finding, its snapshot identity, and allowed paths; it
-returns candidate full-file test patches or standard corpus files. Core has no
-LLM SDK or network client.
+Environment entries are names, never `KEY=value`. Only explicitly named
+variables (plus the minimum process-launch environment) reach resource or
+generation providers. Values are not written to reports.
 
-Generated changes are limited to `_test.go` and `testdata/fuzz/**`. Before an
-atomic application, a candidate must pass three original-code stability runs,
-kill the target mutant twice, pass the related suite and required race checks,
-and still match its preimage hash. Concurrent user edits are preserved and the
-candidate is written under `.goatest/patches/` instead.
+See [configuration and protocols](docs/configuration.md) for details.
 
-## Contracts and cache
+## Repair boundary
 
-`standard-v1` requires the baseline, declared resources, relevant race checks,
-code reachability, and every selected `strong` mutant to be killed or covered
-by an unexpired explicit acceptance. Targeted fuzzing stops after 10,000
-executions without a kill; the hard safety ceiling is one million executions
-or 30 minutes per target. `deep-v1` uses all operators, races every package,
-and expands exploration limits by ten.
+Targeted fuzz corpus and generated tests share one candidate model under
+`.goatest/candidates/`. Candidates include snapshot provenance, content,
+preimage identity, validation status, and a report diff. Preview with
+`goatest fix`; only `goatest fix --apply` may change the worktree. Application
+revalidates in an isolated copy, checks every preimage, commits the batch, and
+rolls back earlier files if a later write fails. Concurrent edits are
+preserved as artifacts under `.goatest/patches/`.
 
-Evidence reuse is exact, not heuristic. Source, tests, dependency content,
-toolchain, platform, effective environment, resource configuration, corpus,
-contract, and both tool versions contribute to the digest. A warm exact run
-starts no child test or mutant process. `--changed` reuses a previously assured
-top-level coverage/dependency graph; an unknown path or dependency always
-broadens execution.
+## Current limitations
+
+The implementation deliberately fails closed where support is incomplete:
+
+- a `go.work` containing multiple main modules is rejected rather than partly
+  assured;
+- symbolic links in the evidence tree are rejected;
+- cache coordination is process-local, and interrupted runs do not yet resume
+  from target-level checkpoints;
+- the resource protocol currently supports start/ready/stop and shared or
+  exclusive instances, but not health/reset/log-artifact operations;
+- `--ui=auto` currently renders deterministic plain output rather than a TTY
+  dashboard; and
+- external-repository compatibility and performance gates have not yet been
+  demonstrated, so this project does not claim proof or production readiness.
+
+The complete list is maintained in [limitations](docs/limitations.md).
 
 ## Development
 
@@ -133,6 +205,9 @@ go vet ./...
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the `mise`-based workflow, pull
 request rules, and source conventions.
+
+Architecture, assurance contracts, protocols, limitations, and CI notes live
+under [`docs/`](docs/).
 
 Development is test-driven. The suite includes the full weak-test → survivor →
 targeted fuzz → corpus promotion → fresh-session kill flow, exact-cache and

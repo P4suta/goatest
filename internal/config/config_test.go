@@ -6,6 +6,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,10 +31,15 @@ contract = "deep-v1"
 command = ["provider", "postgres"]
 timeout = "45s"
 shared = true
+environment = ["DOCKER_HOST"]
 
 [generation]
 command = ["generator"]
 allowed_paths = ["internal/**"]
+environment = ["GENERATION_API_TOKEN"]
+
+[execution]
+environment = ["FEATURE_MODE"]
 
 [[acceptance]]
 id = "finding-a"
@@ -50,27 +56,79 @@ expires = "2026-12-31T00:00:00Z"
 	if loaded.Contract != "deep-v1" || loaded.Resources["postgres"].Timeout != 45*time.Second || !loaded.Resources["postgres"].Shared {
 		t.Errorf("loaded = %+v", loaded)
 	}
+	if !slices.Equal(loaded.Resources["postgres"].Environment, []string{"DOCKER_HOST"}) {
+		t.Errorf("resource environment = %v", loaded.Resources["postgres"].Environment)
+	}
 	if len(loaded.Acceptance) != 1 || loaded.Acceptance[0].ID != "finding-a" {
 		t.Errorf("acceptance = %+v", loaded.Acceptance)
+	}
+	if !slices.Equal(loaded.Execution.Environment, []string{"FEATURE_MODE"}) || !slices.Equal(loaded.Generation.Environment, []string{"GENERATION_API_TOKEN"}) {
+		t.Errorf("environment allowlists = execution %v generation %v", loaded.Execution.Environment, loaded.Generation.Environment)
+	}
+}
+
+func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
+	root := t.TempDir()
+	contents := "version = 1\n[execution]\ntest_binary_args = [\"-short\", \"-custom=value\"]\n"
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := loaded.Execution.TestBinaryArgs, []string{"-test.short=true", "-custom=value"}; !slices.Equal(got, want) {
+		t.Fatalf("test binary args = %v, want %v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
+	for _, test := range []struct {
+		name, section, values, want string
+	}{
+		{name: "execution assignment", section: "execution", values: `"TOKEN=value"`, want: `execution environment name "TOKEN=value" is invalid`},
+		{name: "generation punctuation", section: "generation", values: `"TOKEN-NAME"`, want: `generation environment name "TOKEN-NAME" is invalid`},
+		{name: "case duplicate", section: "generation", values: `"Token", "TOKEN"`, want: `generation environment name "TOKEN" is duplicated`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			contents := "version = 1\n[" + test.section + "]\nenvironment = [" + test.values + "]\n"
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	root := t.TempDir()
+	contents := "version = 1\n[resources.db]\ncommand = [\"provider\"]\nenvironment = [\"TOKEN=value\"]\n"
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), `resource "db" environment name "TOKEN=value" is invalid`) {
+		t.Fatalf("resource environment error = %v", err)
 	}
 }
 
 func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
 	for name, contents := range map[string]string{
-		"unknown":              "version = 1\ncontrcat = \"standard-v1\"\n",
-		"version":              "version = 2\n",
-		"contract":             "version = 1\ncontract = \"shallow\"\n",
-		"resource-name":        "version = 1\n[resources.\"\"]\ncommand = [\"provider\"]\n",
-		"resource-command":     "version = 1\n[resources.db]\ncommand = []\n",
-		"resource-first-arg":   "version = 1\n[resources.db]\ncommand = [\"\"]\n",
-		"resource-timeout":     "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"later\"\n",
-		"resource-zero":        "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"0s\"\n",
-		"resource-negative":    "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"-1s\"\n",
-		"resource-mode":        "version = 1\n[resources.db]\ncommand = [\"provider\"]\nshared = true\nexclusive = true\n",
-		"acceptance-id":        "version = 1\n[[acceptance]]\nreason = \"reviewed\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
-		"acceptance-reason":    "version = 1\n[[acceptance]]\nid = \"finding\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
-		"acceptance-expires":   "version = 1\n[[acceptance]]\nid = \"finding\"\nreason = \"reviewed\"\n",
-		"acceptance-timestamp": "version = 1\n[[acceptance]]\nid = \"finding\"\nreason = \"reviewed\"\nexpires = \"tomorrow\"\n",
+		"unknown":               "version = 1\ncontrcat = \"standard-v1\"\n",
+		"version":               "version = 2\n",
+		"contract":              "version = 1\ncontract = \"shallow\"\n",
+		"resource-name":         "version = 1\n[resources.\"\"]\ncommand = [\"provider\"]\n",
+		"resource-command":      "version = 1\n[resources.db]\ncommand = []\n",
+		"resource-first-arg":    "version = 1\n[resources.db]\ncommand = [\"\"]\n",
+		"resource-timeout":      "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"later\"\n",
+		"resource-zero":         "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"0s\"\n",
+		"resource-negative":     "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"-1s\"\n",
+		"resource-mode":         "version = 1\n[resources.db]\ncommand = [\"provider\"]\nshared = true\nexclusive = true\n",
+		"acceptance-id":         "version = 1\n[[acceptance]]\nreason = \"reviewed\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
+		"acceptance-reason":     "version = 1\n[[acceptance]]\nid = \"finding\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
+		"acceptance-expires":    "version = 1\n[[acceptance]]\nid = \"finding\"\nreason = \"reviewed\"\n",
+		"acceptance-timestamp":  "version = 1\n[[acceptance]]\nid = \"finding\"\nreason = \"reviewed\"\nexpires = \"tomorrow\"\n",
+		"acceptance-duplicate":  "version = 1\n[[acceptance]]\nid = \"finding\"\nreason = \"one\"\nexpires = \"2026-12-31T00:00:00Z\"\n[[acceptance]]\nid = \"finding\"\nreason = \"two\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
+		"acceptance-whitespace": "version = 1\n[[acceptance]]\nid = \" finding\"\nreason = \"reviewed\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
@@ -81,6 +139,23 @@ func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
 				t.Fatal("Load succeeded, want strict rejection")
 			}
 		})
+	}
+}
+
+func TestLoadRejectsUnsafeMalformedAndDuplicateProjectExcludes(t *testing.T) {
+	for _, pattern := range []string{"", "../secret", "/absolute", `windows\\path`, "[", "generated/**", "generated/**"} {
+		root := t.TempDir()
+		patterns := `"` + pattern + `"`
+		if pattern == "generated/**" {
+			patterns = `"generated/**", "generated/**"`
+		}
+		contents := "version = 1\n[project]\nexclude = [" + patterns + "]\n"
+		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), "project exclude pattern") {
+			t.Fatalf("exclude %q error = %v", pattern, err)
+		}
 	}
 }
 

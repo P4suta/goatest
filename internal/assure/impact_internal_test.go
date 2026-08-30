@@ -264,7 +264,7 @@ func TestSelectImpactFallsBackBroadAndSelectsCoveredPackageDependents(t *testing
 		wantTargets []string
 	}{
 		{name: "unknown changes", known: false, wantBroad: true, wantTargets: []string{"target-a", "target-b", "target-c", "target-new-a", "target-new-dependent"}},
-		{name: "empty changes", known: true, wantBroad: true, wantTargets: []string{"target-a", "target-b", "target-c", "target-new-a", "target-new-dependent"}},
+		{name: "empty changes", known: true},
 		{name: "unknown file", changed: []string{"unknown.go"}, known: true, wantBroad: true, wantTargets: []string{"target-a", "target-b", "target-c", "target-new-a", "target-new-dependent"}},
 		{name: "covered production", changed: []string{"a/a.go"}, known: true, wantTargets: []string{"target-a", "target-b"}},
 		{name: "test structure", changed: []string{"a/a_test.go"}, known: true, wantTargets: []string{"target-a", "target-b", "target-new-a", "target-new-dependent"}},

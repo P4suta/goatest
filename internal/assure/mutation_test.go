@@ -15,6 +15,7 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -214,16 +215,18 @@ func TestEvaluateFailsClosedWhenNoTargetReachesMutant(t *testing.T) {
 	mutant := acceptedMutant()
 	session := &fakeSession{
 		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
-		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
-			t.Fatal("unreachable mutant must not run a target")
-			return gomutants.MutantResult{}, nil
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			if request.Package != mutant.Package {
+				t.Fatalf("fallback package = %q", request.Package)
+			}
+			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
 		},
 	}
 	result, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{Root: t.TempDir(), Contract: "standard-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Findings) != 1 || result.Findings[0].Kind != "unreached-mutant" {
+	if len(result.Findings) != 1 || result.Findings[0].Kind != "unreached-mutant" || len(session.requests) != 1 {
 		t.Fatalf("findings = %+v", result.Findings)
 	}
 }
@@ -232,9 +235,8 @@ func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
 	mutant := acceptedMutant()
 	session := &fakeSession{
 		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
-		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
-			t.Fatal("accepted unreachable mutant must not run a target")
-			return gomutants.MutantResult{}, nil
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
 		},
 	}
 	findingID := report.FindingID("mutation", mutant.ID)
@@ -244,7 +246,7 @@ func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Evidence[0].Status != "accepted" || result.Evidence[0].Detail != findingID {
+	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Evidence[0].Status != "accepted" || result.Evidence[0].Detail != findingID || len(session.requests) != 1 {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -288,6 +290,7 @@ func TestEvaluatePromotesTargetedFuzzArtifactAndRequestsFreshRound(t *testing.T)
 }
 
 func TestEvaluateNoApplyLeavesFuzzKillInsufficient(t *testing.T) {
+	root := t.TempDir()
 	mutant := acceptedMutant()
 	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
 	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -300,12 +303,19 @@ func TestEvaluateNoApplyLeavesFuzzKillInsufficient(t *testing.T) {
 	}
 	result, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
 		Target: target("FuzzBoundary", goanalysis.KindFuzz), CoveredFiles: []string{"boundary.go"},
-	}}, assure.MutationOptions{Root: t.TempDir(), Contract: "standard-v1", NoApply: true})
+	}}, assure.MutationOptions{Root: root, Snapshot: "snapshot-a", Contract: "standard-v1", NoApply: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Applied || len(result.Findings) != 1 || result.Findings[0].Kind != "unpersisted-fuzz-kill" {
+	if result.Applied || len(result.Findings) != 1 || result.Findings[0].Kind != "unpersisted-fuzz-kill" || len(result.Repairs) != 1 || result.Repairs[0].Status != "candidate" {
 		t.Fatalf("result = %+v", result)
+	}
+	record, err := repair.LoadCandidate(root, result.Repairs[0].ID)
+	if err != nil || record.Snapshot != "snapshot-a" || record.Candidate.Kind != "corpus" || record.Validation != "paired-fuzz-confirmed" {
+		t.Fatalf("stored candidate = %+v, %v", record, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, record.Candidate.Path)); !os.IsNotExist(err) {
+		t.Fatalf("read-only mutation changed corpus: %v", err)
 	}
 }
 

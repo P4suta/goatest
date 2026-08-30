@@ -83,6 +83,8 @@ type runCoordinatorHarness struct {
 	mutationOptions   MutationOptions
 	generationOptions GenerationOptions
 	racePackages      []string
+	raceModel         goanalysis.Model
+	raceOptions       RaceOptions
 	baselineOptions   BaselineOptions
 }
 
@@ -128,7 +130,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			}
 			return harness.loaded, nil
 		},
-		newCache: func(path string) runCache {
+		newCache: func(path string, _ config.Cache) runCache {
 			if path != filepath.Join(harness.root, ".goatest", "cache") {
 				t.Fatalf("cache path = %q", path)
 			}
@@ -169,7 +171,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		selectImpact: func(_ context.Context, _ string, _ goanalysis.Model, targets []goanalysis.Target, _ Options) impactSelection {
 			return impactSelection{targets: slices.Clone(targets), broad: true}
 		},
-		acquireResources: func(_ context.Context, _ config.Config, targets []goanalysis.Target) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
+		acquireResources: func(_ context.Context, _ config.Config, targets []goanalysis.Target, _ []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
 			harness.resourceCalls++
 			baselineTargets := make([]BaselineTarget, len(targets))
 			for index, target := range targets {
@@ -201,11 +203,13 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		relevantRacePackages: func(goanalysis.Model, []string, []TargetEvidence) []string {
 			return []string{"fixture.example/module"}
 		},
-		collectRace: func(_ context.Context, _ CommandWorkspace, _ goanalysis.Model, packages []string, _ string, environment []string) (RaceResult, error) {
+		collectRaceWithOptions: func(_ context.Context, _ CommandWorkspace, model goanalysis.Model, packages []string, _ string, options RaceOptions) (RaceResult, error) {
 			harness.raceCalls++
+			harness.raceModel = model
 			harness.racePackages = slices.Clone(packages)
-			if !slices.Equal(environment, []string{"DB=ready"}) {
-				t.Fatalf("race environment = %v", environment)
+			harness.raceOptions = options
+			if !slices.Equal(options.Environment, []string{"DB=ready"}) {
+				t.Fatalf("race options = %+v", options)
 			}
 			return harness.race, nil
 		},
@@ -254,10 +258,12 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	harness.catalog.Mutants = append(harness.catalog.Mutants, gomutants.Mutant{ID: "mutant-b", Accepted: true})
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	harness.loaded.Acceptance = []config.Acceptance{{ID: "accepted-a", Expires: now.Add(time.Hour)}}
+	harness.loaded.Project.Exclude = []string{"generated/**"}
 	result, err := harness.run(Options{
 		Now: func() time.Time { return now }, NoApply: true, GoBinary: "go-custom", TempDirectory: "scratch-parent",
 		Environment: []string{"A=1"}, MutationOperators: []string{"comparison"}, FuzzExecutions: 123, MutationJobs: 3,
-		Changed: true, ChangedRef: "origin/main", ReplayMutantID: "mutant-a",
+		CommandTimeout: 7 * time.Minute,
+		Changed:        true, ChangedRef: "origin/main", ReplayMutantID: "mutant-a",
 	})
 	if err != nil || result.Verdict != report.VerdictAssured || result.Schema != report.SchemaV1 || result.Contract != "standard-v1" || result.Snapshot != harness.digest ||
 		len(result.Evidence) != 4 || len(result.Findings) != 0 || len(harness.cache.puts) != 1 || harness.workspaceCloses != 1 || harness.manager.calls != 1 ||
@@ -266,12 +272,14 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		t.Fatalf("result = (%+v, %v), harness=%+v", result, err, harness)
 	}
 	if harness.preparedOptions.Contract != "standard-v1" || !slices.Equal(harness.preparedOptions.Operators, []string{"comparison"}) ||
-		!harness.preparedOptions.Changed || harness.preparedOptions.ChangedRef != "origin/main" ||
+		!slices.Equal(harness.preparedOptions.Exclude, []string{"generated/**"}) ||
+		harness.preparedOptions.Jobs != 3 || harness.preparedOptions.BuildTimeout != 7*time.Minute ||
+		harness.preparedOptions.MutantTimeout != 7*time.Minute || harness.preparedOptions.VerifyTimeout != 7*time.Minute ||
 		!slices.Equal(harness.preparedOptions.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || !slices.Equal(harness.preparedOptions.VerifyEnv, []string{"DB=ready"}) {
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
 	if harness.mutationOptions.Root != harness.root || harness.mutationOptions.Contract != "standard-v1" || !harness.mutationOptions.NoApply ||
-		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
+		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Timeout != 7*time.Minute || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
 		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
 		t.Fatalf("mutation options = %+v", harness.mutationOptions)
 	}
@@ -302,22 +310,6 @@ func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
 	}
 	if got := mutationTargetCount(catalog, "selected-a"); got != 1 {
 		t.Fatalf("replay mutationTargetCount = %d, want 1", got)
-	}
-}
-
-func TestMutationChangedRefDefaultsBareChangedToHEAD(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		options Options
-		want    string
-	}{
-		{options: Options{}, want: ""},
-		{options: Options{Changed: true}, want: "HEAD"},
-		{options: Options{Changed: true, ChangedRef: "origin/main"}, want: "origin/main"},
-	} {
-		if got := mutationChangedRef(test.options); got != test.want {
-			t.Errorf("mutationChangedRef(%+v) = %q, want %q", test.options, got, test.want)
-		}
 	}
 }
 
@@ -384,6 +376,34 @@ func TestRunCoordinatorCacheHitRequiresCurrentAcceptanceAndClosesSnapshot(t *tes
 			t.Fatalf("expired cache = (%+v, %v), discovers=%d", result, err, harness.discoverCalls)
 		}
 	})
+	t.Run("expired unused acceptance metadata", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.cache.found = true
+		harness.cache.getReport = report.Report{
+			Verdict:     report.VerdictAssured,
+			Acceptances: []report.Acceptance{{ID: "expired-unused", Reason: "reviewed", Expires: now.Add(-time.Hour).Format(time.RFC3339)}},
+		}
+		result, err := harness.run(Options{Now: func() time.Time { return now }})
+		if err != nil || result.Snapshot != harness.digest || harness.discoverCalls != 1 {
+			t.Fatalf("expired unused acceptance cache = (%+v, %v), discovers=%d", result, err, harness.discoverCalls)
+		}
+	})
+	t.Run("configured resources disable cache reuse", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.loaded.Resources = map[string]config.Resource{"db": {Command: []string{"provider"}}}
+		harness.cache.found, harness.cache.getReport = true, cached
+		result, err := harness.run(Options{})
+		if err != nil || result.Snapshot != harness.digest || len(harness.cache.gets) != 0 || harness.discoverCalls != 1 {
+			t.Fatalf("resource cache policy = (%+v, %v), harness=%+v", result, err, harness)
+		}
+		found := false
+		for _, limitation := range result.Limitations {
+			found = found || limitation.Code == "resource-cache-disabled"
+		}
+		if !found {
+			t.Fatalf("resource cache limitation missing: %+v", result.Limitations)
+		}
+	})
 	t.Run("get error", func(t *testing.T) {
 		harness := newRunCoordinatorHarness(t)
 		cause := errors.New("cache read failed")
@@ -411,19 +431,23 @@ func TestRunCoordinatorEmitsChangedImpactModeOnlyWhenRequested(t *testing.T) {
 		changed bool
 		broad   bool
 		kind    string
+		verdict report.Verdict
 	}{
-		{name: "unchanged", broad: true},
-		{name: "broad", changed: true, broad: true, kind: "impact-broad"},
-		{name: "targeted", changed: true, kind: "impact-targeted"},
+		{name: "unchanged", broad: true, verdict: report.VerdictAssured},
+		{name: "broad", changed: true, broad: true, kind: "impact-broad", verdict: report.VerdictAssured},
+		{name: "empty changeset", changed: true, kind: "impact-targeted", verdict: report.VerdictChangeAssured},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newRunCoordinatorHarness(t)
 			harness.dependencies.selectImpact = func(_ context.Context, _ string, _ goanalysis.Model, targets []goanalysis.Target, _ Options) impactSelection {
 				return impactSelection{targets: slices.Clone(targets), broad: test.broad}
 			}
-			_, err := harness.run(Options{Changed: test.changed})
+			result, err := harness.run(Options{Changed: test.changed})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if result.Verdict != test.verdict {
+				t.Fatalf("verdict = %q, want %q", result.Verdict, test.verdict)
 			}
 			found := ""
 			for _, event := range harness.events {

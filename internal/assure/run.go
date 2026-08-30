@@ -13,14 +13,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/config"
+	envselect "github.com/P4suta/goatest/internal/environment"
 	"github.com/P4suta/goatest/internal/evidence"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
@@ -28,10 +31,11 @@ import (
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
+	"github.com/P4suta/goatest/internal/testargs"
 )
 
 const (
-	GoMutantsVersion = "v0.1.3-0.20260830114003-07032fae7ce2"
+	GoMutantsVersion = "v0.1.2"
 	maximumRounds    = 3
 )
 
@@ -55,10 +59,17 @@ type Options struct {
 	NoApply                bool
 	Changed                bool
 	ChangedRef             string
+	Packages               []string
+	PackageScope           bool
+	TestArgs               []string
+	BuildTags              []string
+	CommandTimeout         time.Duration
+	TargetTimeout          time.Duration
 	GoBinary               string
 	Environment            []string
 	TempDirectory          string
 	MutationOperators      []string
+	ReplayFindingID        string
 	ReplayMutantID         string
 	FuzzExecutions         int
 	MutationJobs           int
@@ -90,29 +101,29 @@ type runResourceManager interface {
 }
 
 type runDependencies struct {
-	repositoryRoot        func(string) (string, error)
-	loadConfig            func(string) (config.Config, error)
-	newCache              func(string) runCache
-	openWorkspace         func(context.Context, string, mutationbridge.Options) (*mutationbridge.Workspace, error)
-	closeWorkspace        func(*mutationbridge.Workspace) error
-	inspectWorkspace      func(context.Context, CommandWorkspace) (roundMetadata, error)
-	assuranceInputs       func(string, string, Options, config.Config, roundMetadata) (evidence.Inputs, string, error)
-	digestInputs          func(evidence.Inputs) string
-	discoverTargets       func(string, []goanalysis.Package) ([]goanalysis.Target, error)
-	selectImpact          func(context.Context, string, goanalysis.Model, []goanalysis.Target, Options) impactSelection
-	acquireResources      func(context.Context, config.Config, []goanalysis.Target) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error)
-	makeBaselineScratch   func(string, string) (string, error)
-	removeBaselineScratch func(string) error
-	collectBaseline       func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error)
-	concurrencyPackages   func(string, []goanalysis.Package) ([]string, error)
-	relevantRacePackages  func(goanalysis.Model, []string, []TargetEvidence) []string
-	collectRace           func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, []string) (RaceResult, error)
-	prepareSession        func(context.Context, *mutationbridge.Workspace, mutationbridge.PrepareOptions) (MutationSession, error)
-	evaluateMutations     func(context.Context, MutationSession, []TargetEvidence, MutationOptions) (MutationEvaluation, error)
-	attemptRepairs        func(context.Context, string, []report.Finding, GenerationOptions) (GenerationEvaluation, error)
-	buildGraph            func(string, goanalysis.Model, []TargetEvidence) (evidence.Graph, error)
-	mergeGraph            func(evidence.Graph, *evidence.GraphRecord, impactSelection) evidence.Graph
-	saveGraph             func(string, evidence.GraphRecord) error
+	repositoryRoot         func(string) (string, error)
+	loadConfig             func(string) (config.Config, error)
+	newCache               func(string, config.Cache) runCache
+	openWorkspace          func(context.Context, string, mutationbridge.Options) (*mutationbridge.Workspace, error)
+	closeWorkspace         func(*mutationbridge.Workspace) error
+	inspectWorkspace       func(context.Context, CommandWorkspace) (roundMetadata, error)
+	assuranceInputs        func(string, string, Options, config.Config, roundMetadata) (evidence.Inputs, string, error)
+	digestInputs           func(evidence.Inputs) string
+	discoverTargets        func(string, []goanalysis.Package) ([]goanalysis.Target, error)
+	selectImpact           func(context.Context, string, goanalysis.Model, []goanalysis.Target, Options) impactSelection
+	acquireResources       func(context.Context, config.Config, []goanalysis.Target, []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error)
+	makeBaselineScratch    func(string, string) (string, error)
+	removeBaselineScratch  func(string) error
+	collectBaseline        func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error)
+	concurrencyPackages    func(string, []goanalysis.Package) ([]string, error)
+	relevantRacePackages   func(goanalysis.Model, []string, []TargetEvidence) []string
+	collectRaceWithOptions func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, RaceOptions) (RaceResult, error)
+	prepareSession         func(context.Context, *mutationbridge.Workspace, mutationbridge.PrepareOptions) (MutationSession, error)
+	evaluateMutations      func(context.Context, MutationSession, []TargetEvidence, MutationOptions) (MutationEvaluation, error)
+	attemptRepairs         func(context.Context, string, []report.Finding, GenerationOptions) (GenerationEvaluation, error)
+	buildGraph             func(string, goanalysis.Model, []TargetEvidence) (evidence.Graph, error)
+	mergeGraph             func(evidence.Graph, *evidence.GraphRecord, impactSelection) evidence.Graph
+	saveGraph              func(string, evidence.GraphRecord) error
 }
 
 // Run verifies a repository from a frozen snapshot. It repeats from a new
@@ -130,6 +141,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	if err != nil {
 		return report.Report{}, err
 	}
+	applyExecutionDefaults(&options, loaded)
 	contract := options.Contract
 	if contract == "" {
 		contract = loaded.Contract
@@ -137,19 +149,25 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	if contract != "standard-v1" && contract != "deep-v1" {
 		return report.Report{}, fmt.Errorf("goatest: contract %q is unknown", contract)
 	}
+	normalizedTestArgs, err := testargs.Normalize(options.TestArgs)
+	if err != nil {
+		return report.Report{}, err
+	}
+	options.TestArgs = normalizedTestArgs
 	now := time.Now
 	if options.Now != nil {
 		now = options.Now
 	}
 	accepted := activeAcceptance(loaded, now())
-	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"))
+	acceptances := activeAcceptanceMetadata(loaded, now())
+	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"), loaded.Cache)
 	var appliedRepairs []report.Repair
 
 	for round := 0; ; round++ {
 		emit(options, "snapshot", fmt.Sprintf("repair round %d", round+1))
 		workspace, err := dependencies.openWorkspace(ctx, root, mutationbridge.Options{
 			GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
-			ReportDirectory: ".goatest", Environment: executionEnvironment(options.Environment),
+			ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
 		})
 		if err != nil {
 			return report.Report{}, err
@@ -159,12 +177,20 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
+		if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
+			selectedModel, selectErr := inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags, options.CommandTimeout)
+			if selectErr != nil {
+				_ = dependencies.closeWorkspace(workspace)
+				return report.Report{}, selectErr
+			}
+			metadata.model = selectedModel
+		}
 		inputs, digest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
 		if err != nil {
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
-		if round == 0 {
+		if round == 0 && len(loaded.Resources) == 0 {
 			cached, found, cacheErr := cacheStore.Get(digest)
 			if cacheErr != nil {
 				_ = dependencies.closeWorkspace(workspace)
@@ -184,6 +210,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
+		allTargets := slices.Clone(targets)
+		targets = includedProjectTargets(targets, loaded.Project.Exclude)
 		selection := dependencies.selectImpact(ctx, root, metadata.model, targets, options)
 		if options.Changed {
 			if selection.broad {
@@ -193,12 +221,61 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 		}
 		targets = selection.targets
-		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets)
+		if options.Changed && !selection.broad && len(selection.changed) == 0 {
+			result := report.Report{
+				Schema: report.SchemaV1, Verdict: report.VerdictChangeAssured, Contract: contract, Snapshot: digest,
+				Scope:      reportScope(options, metadata.model, selection),
+				Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
+				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
+				Accounting: report.Accounting{
+					Targets: report.CountAccounting{Discovered: len(allTargets), Excluded: len(allTargets)},
+					Race:    report.CountAccounting{Discovered: len(metadata.model.Packages), Excluded: len(metadata.model.Packages)},
+				},
+				Evidence:    []report.Evidence{{Kind: "changeset", ID: "changed-files", Status: "empty"}},
+				Acceptances: slices.Clone(acceptances),
+				Limitations: projectExcludeLimitations(loaded.Project.Exclude),
+			}
+			if closeErr := dependencies.closeWorkspace(workspace); closeErr != nil {
+				return report.Report{}, closeErr
+			}
+			if err := cacheStore.Put(digest, result); err != nil {
+				return report.Report{}, err
+			}
+			return result, nil
+		}
+		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets, options.Environment)
 		if err != nil {
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
-		closeRound := func() error { return errors.Join(manager.Close(), dependencies.closeWorkspace(workspace)) }
+		var controlMutex sync.Mutex
+		var controlWorkspace *mutationbridge.Workspace
+		originalControl := func(controlContext context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+			controlMutex.Lock()
+			defer controlMutex.Unlock()
+			if controlWorkspace == nil {
+				opened, openErr := dependencies.openWorkspace(controlContext, root, mutationbridge.Options{
+					GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
+					ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
+				})
+				if openErr != nil {
+					return gomutants.CommandResult{}, openErr
+				}
+				controlWorkspace = opened
+			}
+			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags)
+		}
+		closeControl := func() error {
+			controlMutex.Lock()
+			defer controlMutex.Unlock()
+			if controlWorkspace == nil {
+				return nil
+			}
+			return dependencies.closeWorkspace(controlWorkspace)
+		}
+		closeRound := func() error {
+			return errors.Join(closeControl(), manager.Close(), dependencies.closeWorkspace(workspace))
+		}
 
 		artifactDirectory, err := dependencies.makeBaselineScratch(options.TempDirectory, "goatest-baseline-")
 		if err != nil {
@@ -208,7 +285,12 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		for _, target := range targets {
 			emit(options, "baseline-target", target.Name+":"+target.ID)
 		}
-		baseline, err := dependencies.collectBaseline(ctx, workspace, metadata.model, baselineTargets, BaselineOptions{ArtifactDirectory: artifactDirectory})
+		baseline, err := dependencies.collectBaseline(ctx, workspace, metadata.model, baselineTargets, BaselineOptions{
+			ArtifactDirectory: artifactDirectory, Packages: slices.Clone(options.Packages),
+			BuildTags: slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
+			ClassifyUserFailures: true,
+			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout,
+		})
 		removeErr := dependencies.removeBaselineScratch(artifactDirectory)
 		if err != nil || removeErr != nil {
 			_ = closeRound()
@@ -217,9 +299,31 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		baseReport := report.Report{
 			Schema: report.SchemaV1, Contract: contract, Snapshot: digest,
 			Evidence: append(resourceEvidence, baseline.Evidence...), Findings: baseline.Findings,
+			Scope:      reportScope(options, metadata.model, selection),
+			Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
+			Toolchain: report.Toolchain{
+				Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion,
+				OS: runtime.GOOS, Arch: runtime.GOARCH,
+			},
+			Accounting: report.Accounting{Targets: report.CountAccounting{
+				Discovered: len(allTargets), Selected: len(targets),
+				Executed: baseline.Executed, Skipped: baseline.Skipped, Excluded: len(allTargets) - len(targets),
+			}, Race: report.CountAccounting{
+				Discovered: len(metadata.model.Packages), Excluded: len(metadata.model.Packages),
+			}},
+			Acceptances: slices.Clone(acceptances),
+		}
+		baseReport.Limitations = append(baseReport.Limitations, projectExcludeLimitations(loaded.Project.Exclude)...)
+		if len(loaded.Resources) != 0 {
+			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
+				Code: "resource-cache-disabled", Summary: "exact cache reuse is disabled because configured resources have runtime state",
+			})
 		}
 		if len(baseline.Findings) != 0 {
 			baseReport.Verdict = baselineVerdict(baseline.Findings)
+			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
+				Code: "later-phases-not-run", Summary: "race and mutation phases were not run because baseline verification did not pass",
+			})
 			if closeErr := closeRound(); closeErr != nil {
 				return report.Report{}, closeErr
 			}
@@ -245,13 +349,27 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
+		raceModel := metadata.model
 		racePackages := dependencies.relevantRacePackages(metadata.model, concurrentPackages, baseline.Targets)
-		raceCount := len(racePackages)
 		if contract == "deep-v1" {
-			raceCount = len(metadata.model.Packages)
+			raceModel.Packages = includedProjectPackages(metadata.model.Packages, loaded.Project.Exclude)
+			racePackages = modelPackagePaths(raceModel)
+		} else {
+			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
+				Code:      "race-scope-static-estimate",
+				Summary:   "standard-v1 selects race packages using static concurrency and observed reachability",
+				Estimated: true,
+			})
+		}
+		raceCount := len(racePackages)
+		baseReport.Accounting.Race = report.CountAccounting{
+			Discovered: len(metadata.model.Packages), Selected: raceCount,
+			Executed: raceCount, Excluded: len(metadata.model.Packages) - raceCount,
 		}
 		emit(options, "race", fmt.Sprintf("%d packages", raceCount))
-		raceResult, err := dependencies.collectRace(ctx, workspace, metadata.model, racePackages, contract, resourceEnv)
+		raceResult, err := dependencies.collectRaceWithOptions(ctx, workspace, raceModel, racePackages, contract, RaceOptions{
+			Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
+		})
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
@@ -271,14 +389,18 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 
 		emit(options, "mutation-prepare", contract)
 		include, packages := mutationScope(selection)
+		if !defaultPackagePatterns(options.Packages) && !options.Changed {
+			packages = slices.Clone(options.Packages)
+		}
+		verifyArgv := plannedVerifyArgv(options)
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
-			Contract:   contract,
-			Operators:  slices.Clone(options.MutationOperators),
-			Include:    include,
-			Changed:    options.Changed,
-			ChangedRef: mutationChangedRef(options),
-			Packages:   packages,
-			VerifyArgv: []string{"go", "test", "-run=^$", "./..."}, VerifyEnv: resourceEnv,
+			Contract:  contract,
+			Operators: slices.Clone(options.MutationOperators),
+			Include:   include,
+			Exclude:   slices.Clone(loaded.Project.Exclude),
+			Packages:  packages,
+			Jobs:      mutationJobLimit(options, loaded), BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
+			VerifyArgv: verifyArgv, VerifyEnv: resourceEnv, VerifyTimeout: options.CommandTimeout,
 		})
 		if err != nil {
 			_ = closeRound()
@@ -291,25 +413,32 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		emit(options, "mutation-target", mutationDetail)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
-			Root: root, Contract: contract, NoApply: options.NoApply,
+			Root: root, Snapshot: digest, Contract: contract, NoApply: options.NoApply,
 			ReplayMutantID: options.ReplayMutantID,
-			FuzzExecutions: options.FuzzExecutions, Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
-			Progress: mutationProgress(options),
+			TestArgs:       slices.Clone(options.TestArgs),
+			FuzzExecutions: options.FuzzExecutions, Timeout: options.CommandTimeout,
+			Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
+			Progress:        mutationProgress(options),
+			OriginalControl: originalControl,
 		})
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
 		}
+		baseReport.Accounting.Mutants = mutation.Accounting
+		baseReport.Mutants = slices.Clone(mutation.Mutants)
 		generated := GenerationEvaluation{Findings: slices.Clone(mutation.Findings)}
 		if !mutation.Applied {
 			generated, err = dependencies.attemptRepairs(ctx, root, mutation.Findings, GenerationOptions{
 				Snapshot: digest, NoApply: options.NoApply, Generate: options.Generate,
-				Command:      loaded.Generation.Command,
-				AllowedPaths: generationPaths(options, loaded), Validator: options.Validator,
+				Command:             loaded.Generation.Command,
+				ProviderEnvironment: generationProviderEnvironment(options.Environment, loaded.Generation.Environment),
+				AllowedPaths:        generationPaths(options, loaded), Validator: options.Validator,
 				RepositoryValidator: RepositoryValidatorOptions{
 					Root: root, Contract: contract, GoBinary: options.GoBinary,
 					TempDirectory: options.TempDirectory, Environment: validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
-					MutationOperators: options.MutationOperators,
+					MutationOperators: options.MutationOperators, Packages: options.Packages,
+					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
 				},
 			})
 			if err != nil {
@@ -337,7 +466,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			continue
 		}
 
-		finalInputs, finalDigest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
+		_, finalDigest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
 		if err != nil {
 			return report.Report{}, err
 		}
@@ -348,19 +477,107 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Schema: report.SchemaV1, Contract: contract, Snapshot: finalDigest,
 			Evidence: append(baseReport.Evidence, mutation.Evidence...),
 			Findings: generated.Findings, Repairs: append(slices.Clone(appliedRepairs), roundRepairs...),
+			Scope: baseReport.Scope, Repository: baseReport.Repository, Toolchain: baseReport.Toolchain,
+			Accounting: baseReport.Accounting, Mutants: slices.Clone(baseReport.Mutants),
+			Acceptances: slices.Clone(baseReport.Acceptances), Limitations: slices.Clone(baseReport.Limitations),
 		}
-		_ = finalInputs
+		result.Accounting.Mutants = mutation.Accounting
 		if len(result.Findings) == 0 {
 			result.Verdict = report.VerdictAssured
 		} else {
 			result.Verdict = report.VerdictInsufficient
-			result.ResidualRisks = []string{"unresolved mutation evidence gaps remain"}
+			result.Limitations = append(result.Limitations, report.Limitation{
+				Code: "unresolved-mutation-gaps", Summary: "Unresolved mutation evidence gaps remain",
+			})
+		}
+		if result.Accounting.Mutants.Unknown != 0 {
+			result.Verdict = report.VerdictError
+			result.Findings = append(result.Findings, report.Finding{
+				ID: report.FindingID("mutation-accounting", finalDigest), Kind: "mutation-accounting",
+				Summary: "one or more discovered mutants have no auditable disposition",
+			})
 		}
 		if err := cacheStore.Put(finalDigest, result); err != nil {
 			return report.Report{}, err
 		}
 		return result, nil
 	}
+}
+
+func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string) (gomutants.CommandResult, error) {
+	argv := []string{"go", "test", "-count=1"}
+	if len(buildTags) != 0 {
+		argv = append(argv, "-tags="+strings.Join(buildTags, ","))
+	}
+	if request.Package == "" {
+		argv = append(argv, "./...")
+	} else {
+		argv = append(argv, request.Package)
+	}
+	arguments := slices.Clone(request.Args)
+	if hasTestArgument(arguments, "-test.fuzz") && !hasTestArgument(arguments, "-test.fuzzcachedir") {
+		cacheDirectory, err := os.MkdirTemp("", "goatest-control-fuzz-")
+		if err != nil {
+			return gomutants.CommandResult{}, fmt.Errorf("goatest: create original-control fuzz cache: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(cacheDirectory) }()
+		arguments = append(arguments, "-test.fuzzcachedir="+cacheDirectory)
+	}
+	if len(arguments) != 0 {
+		argv = append(argv, "-args")
+		argv = append(argv, arguments...)
+	}
+	return workspace.Exec(ctx, gomutants.Command{
+		Argv: argv, Env: slices.Clone(request.Env), Timeout: request.Timeout, OutputLimit: 32 << 20,
+	})
+}
+
+func hasTestArgument(arguments []string, name string) bool {
+	for _, argument := range arguments {
+		if argument == name || strings.HasPrefix(argument, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func reportScope(options Options, model goanalysis.Model, selection impactSelection) report.Scope {
+	kind := report.RunFull
+	switch {
+	case options.ReplayFindingID != "" || options.ReplayMutantID != "":
+		kind = report.RunReplay
+	case options.Changed:
+		kind = report.RunChangeset
+	case options.PackageScope:
+		kind = report.RunPackage
+	}
+	requested := report.ScopeSpec{
+		Kind: string(kind), Project: ".", Modules: []string{model.ModulePath},
+		Packages: slices.Clone(options.Packages), Ref: options.ChangedRef,
+	}
+	resolved := requested
+	if options.Changed {
+		requested.Files = slices.Clone(selection.changed)
+		resolved.Files = slices.Clone(selection.changed)
+		if selection.broad {
+			resolved.Kind = string(report.RunFull)
+			resolved.Packages = modelPackagePaths(model)
+			resolved.Files = nil
+		}
+	} else if kind == report.RunFull {
+		requested.Packages = modelPackagePaths(model)
+		resolved.Packages = modelPackagePaths(model)
+	}
+	return report.Scope{Requested: requested, Resolved: resolved}
+}
+
+func modelPackagePaths(model goanalysis.Model) []string {
+	packages := make([]string, 0, len(model.Packages))
+	for _, pkg := range model.Packages {
+		packages = append(packages, pkg.ImportPath)
+	}
+	slices.Sort(packages)
+	return slices.Compact(packages)
 }
 
 func mutationTargetCount(catalog gomutants.Catalog, replayMutantID string) int {
@@ -371,16 +588,6 @@ func mutationTargetCount(catalog gomutants.Catalog, replayMutantID string) int {
 		}
 	}
 	return count
-}
-
-func mutationChangedRef(options Options) string {
-	if !options.Changed {
-		return ""
-	}
-	if options.ChangedRef == "" {
-		return "HEAD"
-	}
-	return options.ChangedRef
 }
 
 func inspectWorkspace(ctx context.Context, workspace CommandWorkspace) (roundMetadata, error) {
@@ -400,11 +607,38 @@ func inspectWorkspace(ctx context.Context, workspace CommandWorkspace) (roundMet
 	if err != nil || modules.ExitCode != 0 || modules.TimedOut {
 		return roundMetadata{}, commandError("go list -m", modules, err)
 	}
+	if err := validateWorkspaceModuleGraph(modules.Output, model.ModulePath); err != nil {
+		return roundMetadata{}, err
+	}
 	dependencies, err := dependencyDigests(modules.Output)
 	if err != nil {
 		return roundMetadata{}, err
 	}
 	return roundMetadata{model: model, toolchain: strings.TrimSpace(string(version.Output)), dependencies: dependencies}, nil
+}
+
+func inspectSelectedPackages(ctx context.Context, workspace CommandWorkspace, patterns, tags []string, timeout time.Duration) (goanalysis.Model, error) {
+	argv := []string{"go", "list", "-json"}
+	if len(tags) != 0 {
+		argv = append(argv, "-tags="+strings.Join(tags, ","))
+	}
+	if len(patterns) == 0 {
+		patterns = []string{"./..."}
+	}
+	argv = append(argv, patterns...)
+	listed, err := workspace.Exec(ctx, command(argv, timeout))
+	if err != nil || listed.ExitCode != 0 || listed.TimedOut {
+		return goanalysis.Model{}, commandError("go list selected packages", listed, err)
+	}
+	model, err := goanalysis.DecodePackages(bytes.NewReader(listed.Output))
+	if err != nil {
+		return goanalysis.Model{}, err
+	}
+	return model, nil
+}
+
+func defaultPackagePatterns(patterns []string) bool {
+	return len(patterns) == 0 || len(patterns) == 1 && patterns[0] == "./..."
 }
 
 func command(argv []string, timeout time.Duration) gomutants.Command {
@@ -426,6 +660,40 @@ type listedModule struct {
 	Dir      string
 	Main     bool
 	Replace  *listedModule
+}
+
+func validateWorkspaceModuleGraph(data []byte, selectedModule string) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var mainModules []string
+	for {
+		var module listedModule
+		err := decoder.Decode(&module)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("goatest: decode module graph: %w", err)
+		}
+		if module.Path == "" {
+			return errors.New("goatest: module graph contains an empty path")
+		}
+		if module.Main {
+			mainModules = append(mainModules, module.Path)
+		}
+	}
+	slices.Sort(mainModules)
+	mainModules = slices.Compact(mainModules)
+	switch len(mainModules) {
+	case 0:
+		return errors.New("goatest: module graph contains no main module")
+	case 1:
+		if mainModules[0] != selectedModule {
+			return fmt.Errorf("goatest: selected package module %q does not match main module %q", selectedModule, mainModules[0])
+		}
+		return nil
+	default:
+		return fmt.Errorf("goatest: workspace has multiple main modules (%s); refusing partial assurance", strings.Join(mainModules, ", "))
+	}
 }
 
 func dependencyDigests(data []byte) (map[string]string, error) {
@@ -468,11 +736,14 @@ func assuranceInputs(root, contract string, options Options, loaded config.Confi
 	resources := make(map[string]string, len(loaded.Resources))
 	for name, spec := range loaded.Resources {
 		encoded, _ := json.Marshal(struct {
-			Command   []string
-			Timeout   string
-			Shared    bool
-			Exclusive bool
-		}{spec.Command, spec.Timeout.String(), spec.Shared, spec.Exclusive})
+			Command             []string
+			Timeout             string
+			Shared              bool
+			Exclusive           bool
+			Environment         []string
+			ProviderEnvironment []string
+		}{spec.Command, spec.Timeout.String(), spec.Shared, spec.Exclusive, spec.Environment,
+			envselect.Provider(options.Environment, spec.Environment)})
 		sum := sha256.Sum256(encoded)
 		resources[name] = hex.EncodeToString(sum[:])
 	}
@@ -480,7 +751,7 @@ func assuranceInputs(root, contract string, options Options, loaded config.Confi
 	inputs := evidence.Inputs{
 		Files: files, Corpus: corpus, Dependencies: metadata.dependencies,
 		Toolchain: metadata.toolchain, Platform: runtime.GOOS + "/" + runtime.GOARCH,
-		Environment: stableEnvironment(environment), Resources: resources,
+		Environment: selectedEnvironment(environment, loaded.Execution.Environment), Resources: resources,
 		Contract: contract + modeIdentity(options), GoatestVersion: GoatestVersion, GoMutantsVersion: GoMutantsVersion,
 	}
 	return inputs, evidence.Digest(inputs), nil
@@ -491,7 +762,33 @@ func modeIdentity(options Options) string {
 	if options.ReplayMutantID != "" {
 		identity += ";replay=" + options.ReplayMutantID
 	}
-	return identity
+	if options.ReplayFindingID != "" {
+		identity += ";replay-finding=" + options.ReplayFindingID
+	}
+	hasExtended := len(options.Packages) != 0 || options.PackageScope || len(options.TestArgs) != 0 ||
+		len(options.BuildTags) != 0 || len(options.MutationOperators) != 0 || options.FuzzExecutions != 0 ||
+		options.MutationJobs != 0 || options.CommandTimeout != 0 || options.TargetTimeout != 0
+	if !hasExtended {
+		return identity
+	}
+	encoded, _ := json.Marshal(struct {
+		Packages          []string
+		PackageScope      bool
+		TestArgs          []string
+		BuildTags         []string
+		MutationOperators []string
+		FuzzExecutions    int
+		MutationJobs      int
+		CommandTimeout    string
+		TargetTimeout     string
+	}{
+		Packages: slices.Clone(options.Packages), PackageScope: options.PackageScope,
+		TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
+		MutationOperators: slices.Clone(options.MutationOperators),
+		FuzzExecutions:    options.FuzzExecutions, MutationJobs: options.MutationJobs,
+		CommandTimeout: options.CommandTimeout.String(), TargetTimeout: options.TargetTimeout.String(),
+	})
+	return identity + ";execution=" + string(encoded)
 }
 
 func stableEnvironment(environment []string) []string {
@@ -509,6 +806,86 @@ func stableEnvironment(environment []string) []string {
 	return result
 }
 
+var buildEnvironmentNames = []string{
+	"AR", "CC", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_ENABLED", "CGO_FFLAGS", "CGO_LDFLAGS",
+	"CXX", "FC", "GCCGO", "GODEBUG", "GOENV", "GOEXPERIMENT", "GOFLAGS", "GO386", "GOAMD64", "GOARM",
+	"GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOTOOLCHAIN", "GOWASM", "GOWORK", "PKG_CONFIG",
+}
+
+func selectedEnvironment(environment, configured []string) []string {
+	return envselect.Select(environment, append(slices.Clone(buildEnvironmentNames), configured...))
+}
+
+func generationProviderEnvironment(input, configured []string) []string {
+	return envselect.Provider(input, configured)
+}
+
+func includedProjectTargets(targets []goanalysis.Target, excludes []string) []goanalysis.Target {
+	if len(excludes) == 0 {
+		return slices.Clone(targets)
+	}
+	result := make([]goanalysis.Target, 0, len(targets))
+	for _, target := range targets {
+		if !projectPathExcluded(target.Path, excludes) {
+			result = append(result, target)
+		}
+	}
+	return result
+}
+
+func includedProjectPackages(packages []goanalysis.Package, excludes []string) []goanalysis.Package {
+	result := make([]goanalysis.Package, 0, len(packages))
+	for _, pkg := range packages {
+		if !projectPathExcluded(pkg.RelativeDir, excludes) {
+			result = append(result, pkg)
+		}
+	}
+	return result
+}
+
+func projectPathExcluded(candidate string, patterns []string) bool {
+	candidate = strings.TrimPrefix(strings.ReplaceAll(candidate, `\`, "/"), "./")
+	for _, pattern := range patterns {
+		pattern = strings.TrimPrefix(pattern, "./")
+		if pattern == "**" {
+			return true
+		}
+		if strings.HasSuffix(pattern, "/**") {
+			prefix := strings.TrimSuffix(pattern, "/**")
+			if candidate == prefix || strings.HasPrefix(candidate, prefix+"/") {
+				return true
+			}
+		}
+		if strings.HasPrefix(pattern, "**/") {
+			remainder := strings.TrimPrefix(pattern, "**/")
+			for suffix := candidate; ; {
+				if matched, _ := path.Match(remainder, suffix); matched {
+					return true
+				}
+				_, next, found := strings.Cut(suffix, "/")
+				if !found {
+					break
+				}
+				suffix = next
+			}
+		}
+		if matched, _ := path.Match(pattern, candidate); matched {
+			return true
+		}
+	}
+	return false
+}
+
+func projectExcludeLimitations(excludes []string) []report.Limitation {
+	result := make([]report.Limitation, 0, len(excludes))
+	for _, pattern := range excludes {
+		result = append(result, report.Limitation{
+			Code: "project-exclude", Summary: fmt.Sprintf("paths matching %q are outside the configured assurance boundary", pattern),
+		})
+	}
+	return result
+}
+
 func activeAcceptance(loaded config.Config, now time.Time) map[string]bool {
 	result := make(map[string]bool)
 	for _, acceptance := range loaded.Acceptance {
@@ -519,7 +896,27 @@ func activeAcceptance(loaded config.Config, now time.Time) map[string]bool {
 	return result
 }
 
+func activeAcceptanceMetadata(loaded config.Config, now time.Time) []report.Acceptance {
+	result := make([]report.Acceptance, 0, len(loaded.Acceptance))
+	for _, acceptance := range loaded.Acceptance {
+		if !acceptance.Expires.After(now) {
+			continue
+		}
+		result = append(result, report.Acceptance{
+			ID: acceptance.ID, Reason: acceptance.Reason, Expires: acceptance.Expires.UTC().Format(time.RFC3339),
+			Owner: acceptance.Owner, Ticket: acceptance.Ticket,
+		})
+	}
+	slices.SortFunc(result, func(a, b report.Acceptance) int { return strings.Compare(a.ID, b.ID) })
+	return result
+}
+
 func cachedAcceptanceValid(cached report.Report, accepted map[string]bool) bool {
+	for _, item := range cached.Acceptances {
+		if !accepted[item.ID] {
+			return false
+		}
+	}
 	for _, item := range cached.Evidence {
 		if item.Kind == "mutation" && item.Status == "accepted" && !accepted[item.Detail] {
 			return false
@@ -528,16 +925,19 @@ func cachedAcceptanceValid(cached report.Report, accepted map[string]bool) bool 
 	return true
 }
 
-func acquireResources(ctx context.Context, loaded config.Config, targets []goanalysis.Target) (runResourceManager, []BaselineTarget, []report.Evidence, []string, error) {
+func acquireResources(ctx context.Context, loaded config.Config, targets []goanalysis.Target, baseEnvironment []string) (runResourceManager, []BaselineTarget, []report.Evidence, []string, error) {
 	specs := make(map[string]resource.Spec, len(loaded.Resources))
 	for name, spec := range loaded.Resources {
-		specs[name] = resource.Spec{Command: spec.Command, Timeout: spec.Timeout, Shared: spec.Shared, Exclusive: spec.Exclusive}
+		specs[name] = resource.Spec{
+			Command: spec.Command, Timeout: spec.Timeout, Shared: spec.Shared, Exclusive: spec.Exclusive,
+			Environment: envselect.Provider(baseEnvironment, spec.Environment),
+		}
 	}
 	manager := newRunResourceManager(specs)
 	capabilities := make(map[string]struct{})
 	for _, target := range targets {
-		if target.Capability != "" {
-			capabilities[target.Capability] = struct{}{}
+		for _, capability := range targetResourceCapabilities(target) {
+			capabilities[capability] = struct{}{}
 		}
 	}
 	names := make([]string, 0, len(capabilities))
@@ -565,9 +965,33 @@ func acquireResources(ctx context.Context, loaded config.Config, targets []goana
 	}
 	baseline := make([]BaselineTarget, len(targets))
 	for i, target := range targets {
-		baseline[i] = BaselineTarget{Target: target, Environment: slices.Clone(environments[target.Capability])}
+		capabilities := targetResourceCapabilities(target)
+		if len(capabilities) == 1 {
+			baseline[i] = BaselineTarget{Target: target, Environment: slices.Clone(environments[capabilities[0]])}
+			continue
+		}
+		var targetEnvironment []string
+		for _, capability := range capabilities {
+			merged, mergeErr := mergeEnvironment(targetEnvironment, environments[capability])
+			if mergeErr != nil {
+				_ = manager.Close()
+				return nil, nil, nil, nil, fmt.Errorf("goatest: target %s resources: %w", target.Name, mergeErr)
+			}
+			targetEnvironment = merged
+		}
+		baseline[i] = BaselineTarget{Target: target, Environment: targetEnvironment}
 	}
 	return manager, baseline, evidenceItems, allEnvironment, nil
+}
+
+func targetResourceCapabilities(target goanalysis.Target) []string {
+	if len(target.Capabilities) != 0 {
+		return slices.Clone(target.Capabilities)
+	}
+	if target.Capability != "" {
+		return []string{target.Capability}
+	}
+	return nil
 }
 
 func mutationJobLimit(options Options, loaded config.Config) int {
@@ -645,7 +1069,9 @@ func validationEnvironment(base, overlay []string) []string {
 
 func baselineVerdict(findings []report.Finding) report.Verdict {
 	for _, finding := range findings {
-		if finding.Kind == "baseline-failure" || finding.Kind == "baseline-timeout" {
+		if finding.Kind == "baseline-failure" || finding.Kind == "baseline-timeout" ||
+			finding.Kind == "vet-failure" || finding.Kind == "build-failure" ||
+			finding.Kind == "test-binary-build-failure" {
 			return report.VerdictDefect
 		}
 	}
@@ -700,6 +1126,29 @@ func executionEnvironment(input []string) []string {
 	}
 	slices.Sort(result)
 	return result
+}
+
+func mutationEnvironment(input, buildTags []string) []string {
+	environment := executionEnvironment(input)
+	if len(buildTags) == 0 {
+		return environment
+	}
+	flag := "-tags=" + strings.Join(buildTags, ",")
+	for index, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(key, "GOFLAGS") {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				value += " "
+			}
+			environment[index] = key + "=" + value + flag
+			slices.Sort(environment)
+			return environment
+		}
+	}
+	environment = append(environment, "GOFLAGS="+flag)
+	slices.Sort(environment)
+	return environment
 }
 
 func ephemeralEnvironmentKey(upper string) bool {

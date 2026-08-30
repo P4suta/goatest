@@ -46,14 +46,12 @@ func TestDecodePackagesRejectsMalformedAndEmptyStreams(t *testing.T) {
 	}
 }
 
-func TestDecodePackagesFiltersOtherModulesAndCanonicalizesPackages(t *testing.T) {
+func TestDecodePackagesCanonicalizesPackages(t *testing.T) {
 	t.Parallel()
 	moduleDir := filepath.Join(t.TempDir(), "module")
 	stream := packageStream(t,
 		listedPackage("example.com/sample/z", filepath.Join(moduleDir, "z"), "example.com/sample", moduleDir, "zdep", "adep", "zdep"),
 		listedPackage("standard/library", moduleDir, "", ""),
-		listedPackage("other.example/path", moduleDir, "other.example", moduleDir),
-		listedPackage("example.com/sample/other-checkout", moduleDir, "example.com/sample", filepath.Join(moduleDir, "other")),
 		listedPackage("example.com/sample", moduleDir, "example.com/sample", moduleDir),
 	)
 
@@ -75,6 +73,25 @@ func TestDecodePackagesFiltersOtherModulesAndCanonicalizesPackages(t *testing.T)
 	}
 	if !slices.Equal(model.Packages[1].Dependencies, []string{"adep", "zdep"}) {
 		t.Errorf("Dependencies = %v", model.Packages[1].Dependencies)
+	}
+}
+
+func TestDecodePackagesRejectsMultipleModuleRoots(t *testing.T) {
+	t.Parallel()
+	moduleDir := filepath.Join(t.TempDir(), "module")
+	for _, other := range []map[string]any{
+		listedPackage("other.example/path", moduleDir, "other.example", moduleDir),
+		listedPackage("example.com/sample/other-checkout", moduleDir, "example.com/sample", filepath.Join(moduleDir, "other")),
+	} {
+		stream := packageStream(t,
+			listedPackage("example.com/sample", moduleDir, "example.com/sample", moduleDir),
+			other,
+		)
+		_, err := gotest.DecodePackages(stream)
+		const want = "goatest: go list returned packages from multiple module roots; refusing partial package discovery"
+		if err == nil || err.Error() != want {
+			t.Fatalf("DecodePackages error = %v, want %q", err, want)
+		}
 	}
 }
 

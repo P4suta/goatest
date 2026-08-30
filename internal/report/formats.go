@@ -6,6 +6,7 @@ package report
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"slices"
 )
 
@@ -104,8 +105,16 @@ func SARIF(input Report) []byte {
 			Tool: sarifTool{Driver: sarifDriver{
 				Name: "goatest", InformationURI: "https://github.com/P4suta/goatest", SemanticVersion: "0.1.0", Rules: rules,
 			}},
-			Results:    results,
-			Properties: map[string]any{"contract": canonical.Contract, "snapshot": canonical.Snapshot, "verdict": canonical.Verdict},
+			Results: results,
+			Properties: map[string]any{
+				"runId": canonical.RunID, "runKind": canonical.RunKind, "contract": canonical.Contract,
+				"snapshot": canonical.Snapshot, "verdict": canonical.Verdict,
+				"requestedScope": canonical.Scope.Requested.Kind, "resolvedScope": canonical.Scope.Resolved.Kind,
+				"scope": canonical.Scope, "repository": canonical.Repository, "configuration": canonical.Configuration,
+				"toolchain": canonical.Toolchain, "timing": canonical.Timing, "cache": canonical.Cache,
+				"accounting": canonical.Accounting, "mutants": canonical.Mutants,
+				"acceptances": canonical.Acceptances, "limitations": canonical.Limitations,
+			},
 		}},
 	}
 	data, _ := json.MarshalIndent(document, "", "  ")
@@ -144,9 +153,21 @@ func JUnit(input Report) []byte {
 	suite := junitSuite{
 		Name: "goatest", Tests: len(canonical.Evidence) + len(canonical.Findings), Failures: len(canonical.Findings),
 		Properties: []junitProperty{
+			{Name: "run_id", Value: canonical.RunID},
+			{Name: "run_kind", Value: string(canonical.RunKind)},
 			{Name: "contract", Value: canonical.Contract},
 			{Name: "snapshot", Value: canonical.Snapshot},
 			{Name: "verdict", Value: string(canonical.Verdict)},
+			{Name: "requested_scope", Value: canonical.Scope.Requested.Kind},
+			{Name: "resolved_scope", Value: canonical.Scope.Resolved.Kind},
+			{Name: "repository_module", Value: canonical.Repository.Module},
+			{Name: "git_commit", Value: canonical.Repository.Git.Commit},
+			{Name: "git_dirty", Value: fmt.Sprint(canonical.Repository.Git.Dirty)},
+			{Name: "configuration_digest", Value: canonical.Configuration.Digest},
+			{Name: "go_version", Value: canonical.Toolchain.Go},
+			{Name: "goatest_version", Value: canonical.Toolchain.Goatest},
+			{Name: "go_mutants_version", Value: canonical.Toolchain.GoMutants},
+			{Name: "cache_derived", Value: fmt.Sprint(canonical.Cache.Derived)},
 		},
 	}
 	for _, item := range canonical.Evidence {
@@ -165,30 +186,115 @@ func JUnit(input Report) []byte {
 // JSONSchema returns the self-contained assurance-report-v1 JSON Schema.
 func JSONSchema() []byte {
 	stringType := map[string]any{"type": "string"}
+	nonEmptyString := map[string]any{"type": "string", "minLength": 1}
+	digestType := map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}
+	integerType := map[string]any{"type": "integer", "minimum": 0}
 	document := map[string]any{
 		"$schema":              "https://json-schema.org/draft/2020-12/schema",
 		"$id":                  SchemaV1,
 		"title":                "goatest assurance report v1",
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"schema", "verdict", "evidence", "findings", "repairs", "residual_risks"},
+		"required": []string{
+			"schema", "run_id", "run_kind", "verdict", "contract", "snapshot", "scope", "repository",
+			"configuration", "toolchain", "timing", "cache", "accounting", "mutants", "acceptances", "evidence", "findings",
+			"repairs", "limitations",
+		},
 		"properties": map[string]any{
-			"schema":         map[string]any{"const": SchemaV1},
-			"verdict":        map[string]any{"enum": []string{string(VerdictAssured), string(VerdictDefect), string(VerdictInsufficient), string(VerdictError)}},
-			"contract":       stringType,
-			"snapshot":       stringType,
-			"evidence":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/evidence"}},
-			"findings":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/finding"}},
-			"repairs":        map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/repair"}},
-			"residual_risks": map[string]any{"type": "array", "items": stringType},
+			"schema":   map[string]any{"const": SchemaV1},
+			"run_id":   nonEmptyString,
+			"run_kind": map[string]any{"enum": []string{string(RunFull), string(RunChangeset), string(RunPackage), string(RunReplay), string(RunOperation)}},
+			"verdict": map[string]any{"enum": []string{
+				string(VerdictAssured), string(VerdictChangeAssured), string(VerdictScopeAssured),
+				string(VerdictDefect), string(VerdictInsufficient), string(VerdictError),
+				string(VerdictReproduced), string(VerdictResolved), string(VerdictCompleted),
+			}},
+			"contract":      nonEmptyString,
+			"snapshot":      nonEmptyString,
+			"scope":         map[string]any{"$ref": "#/$defs/scope"},
+			"repository":    map[string]any{"$ref": "#/$defs/repository"},
+			"configuration": map[string]any{"$ref": "#/$defs/configuration"},
+			"toolchain":     map[string]any{"$ref": "#/$defs/toolchain"},
+			"timing":        map[string]any{"$ref": "#/$defs/timing"},
+			"cache":         map[string]any{"$ref": "#/$defs/cache"},
+			"accounting":    map[string]any{"$ref": "#/$defs/accounting"},
+			"mutants":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/mutantDisposition"}},
+			"acceptances":   map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/acceptance"}},
+			"evidence":      map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/evidence"}},
+			"findings":      map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/finding"}},
+			"repairs":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/repair"}},
+			"limitations":   map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/limitation"}},
 		},
 		"$defs": map[string]any{
+			"scope": objectSchema([]string{"requested", "resolved"}, map[string]any{
+				"requested": map[string]any{"$ref": "#/$defs/scopeSpec"},
+				"resolved":  map[string]any{"$ref": "#/$defs/scopeSpec"},
+			}),
+			"scopeSpec": objectSchema([]string{"kind", "project", "modules", "packages", "files"}, map[string]any{
+				"kind": nonEmptyString, "project": nonEmptyString,
+				"modules":  map[string]any{"type": "array", "items": stringType},
+				"packages": map[string]any{"type": "array", "items": stringType},
+				"files":    map[string]any{"type": "array", "items": stringType},
+				"ref":      stringType,
+			}),
+			"git": objectSchema([]string{"available", "commit", "dirty", "merge_base", "changed_files"}, map[string]any{
+				"available": map[string]any{"type": "boolean"}, "commit": nonEmptyString,
+				"dirty": map[string]any{"type": "boolean"}, "merge_base": nonEmptyString,
+				"changed_files": map[string]any{"type": "array", "items": stringType},
+			}),
+			"repository": objectSchema([]string{"module", "packages", "git"}, map[string]any{
+				"module": nonEmptyString, "packages": map[string]any{"type": "array", "items": stringType}, "git": map[string]any{"$ref": "#/$defs/git"},
+			}),
+			"configuration": objectSchema([]string{"digest"}, map[string]any{"digest": digestType}),
+			"toolchain": objectSchema([]string{"go", "goatest", "go_mutants", "os", "arch"}, map[string]any{
+				"go": nonEmptyString, "goatest": nonEmptyString, "go_mutants": nonEmptyString, "os": nonEmptyString, "arch": nonEmptyString,
+			}),
+			"timing": objectSchema([]string{"started_at", "finished_at", "duration_ms"}, map[string]any{
+				"started_at": stringType, "finished_at": stringType, "duration_ms": integerType,
+			}),
+			"cache": objectSchema([]string{"derived"}, map[string]any{
+				"derived": map[string]any{"type": "boolean"}, "source_run_id": stringType,
+			}),
+			"accounting": objectSchema([]string{"targets", "mutants", "race"}, map[string]any{
+				"targets": map[string]any{"$ref": "#/$defs/countAccounting"},
+				"mutants": map[string]any{"$ref": "#/$defs/mutantAccounting"},
+				"race":    map[string]any{"$ref": "#/$defs/countAccounting"},
+			}),
+			"countAccounting": objectSchema([]string{"discovered", "selected", "executed", "skipped", "excluded"}, map[string]any{
+				"discovered": integerType, "selected": integerType, "executed": integerType, "skipped": integerType, "excluded": integerType,
+			}),
+			"mutantAccounting": objectSchema([]string{
+				"discovered", "selected", "executed", "killed", "survived", "inconclusive",
+				"compile_rejected", "accepted", "out_of_scope", "unknown",
+			}, map[string]any{
+				"discovered": integerType, "selected": integerType, "executed": integerType,
+				"killed": integerType, "survived": integerType, "inconclusive": integerType,
+				"compile_rejected": integerType, "accepted": integerType, "out_of_scope": integerType, "unknown": integerType,
+			}),
+			"mutantDisposition": objectSchema([]string{"id", "status", "path", "line", "package", "rule"}, map[string]any{
+				"id": nonEmptyString,
+				"status": map[string]any{"enum": []string{
+					string(MutantKilled), string(MutantSurvived), string(MutantInconclusive), string(MutantCompileRejected),
+					string(MutantAccepted), string(MutantOutOfScope), string(MutantUnknown),
+				}},
+				"path": stringType, "line": integerType, "package": stringType, "rule": stringType, "detail": stringType,
+			}),
+			"acceptance": objectSchema([]string{"id", "reason", "expires"}, map[string]any{
+				"id": nonEmptyString, "reason": nonEmptyString, "expires": nonEmptyString,
+				"owner": stringType, "ticket": stringType,
+			}),
 			"evidence": objectSchema([]string{"kind", "id", "status"}, map[string]any{"kind": stringType, "id": stringType, "status": stringType, "detail": stringType}),
 			"finding": objectSchema([]string{"id", "kind", "summary"}, map[string]any{
 				"id": stringType, "kind": stringType, "path": stringType, "line": map[string]any{"type": "integer", "minimum": 0},
 				"summary": stringType, "replay": stringType, "mutant": stringType, "mutant_id": stringType,
 			}),
-			"repair": objectSchema([]string{"id", "finding", "path", "status"}, map[string]any{"id": stringType, "finding": stringType, "path": stringType, "status": stringType}),
+			"repair": objectSchema([]string{"id", "finding", "path", "status"}, map[string]any{
+				"id": stringType, "finding": stringType, "path": stringType, "status": stringType,
+				"diff": stringType, "validation": stringType, "reason": stringType, "provenance": stringType,
+			}),
+			"limitation": objectSchema([]string{"code", "summary"}, map[string]any{
+				"code": stringType, "summary": stringType, "estimated": map[string]any{"type": "boolean"},
+			}),
 		},
 	}
 	data, _ := json.MarshalIndent(document, "", "  ")

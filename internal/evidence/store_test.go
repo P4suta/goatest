@@ -60,7 +60,7 @@ func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
 		{name: "malformed", data: "{", want: "decode evidence graph"},
 		{name: "unknown", data: `{"schema":"evidence-graph-v1","module_path":"example/module","graph":{},"extra":true}`, want: "decode evidence graph"},
 		{name: "trailing", data: `{"schema":"evidence-graph-v1","module_path":"example/module","graph":{}} {}`, want: "trailing data"},
-		{name: "schema", data: `{"schema":"future-v2","module_path":"example/module","graph":{}}`, want: "identity mismatch"},
+		{name: "schema", data: `{"schema":"future-schema","module_path":"example/module","graph":{}}`, want: "identity mismatch"},
 		{name: "module", data: `{"schema":"evidence-graph-v1","module_path":"","graph":{}}`, want: "identity mismatch"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -40,7 +40,7 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 		"beta":  {"CACHE=ready", "common=same"},
 	}}
 	loaded := config.Config{Resources: map[string]config.Resource{
-		"alpha":  {Command: []string{"provider", "alpha"}, Timeout: 3 * time.Second, Shared: true},
+		"alpha":  {Command: []string{"provider", "alpha"}, Timeout: 3 * time.Second, Shared: true, Environment: []string{"TOKEN"}},
 		"beta":   {Command: []string{"provider", "beta"}, Timeout: 4 * time.Second, Exclusive: true},
 		"unused": {Command: []string{"provider", "unused"}},
 	}}
@@ -53,6 +53,14 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 			if !slices.Equal(got.Command, configured.Command) || got.Timeout != configured.Timeout || got.Shared != configured.Shared || got.Exclusive != configured.Exclusive {
 				t.Errorf("resource spec %s = %+v, want %+v", name, got, configured)
 			}
+			wantEnvironment := []string{"Path=C:/tools"}
+			if name == "alpha" {
+				wantEnvironment = append(wantEnvironment, "TOKEN=allowed")
+			}
+			slices.Sort(wantEnvironment)
+			if !slices.Equal(got.Environment, wantEnvironment) {
+				t.Errorf("resource spec %s environment = %v, want %v", name, got.Environment, wantEnvironment)
+			}
 		}
 		return manager
 	}
@@ -61,8 +69,11 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 		{ID: "ordinary"},
 		{ID: "alpha-a", Capability: "alpha"},
 		{ID: "alpha-b", Capability: "alpha"},
+		{ID: "alpha-beta", Capability: "alpha", Capabilities: []string{"alpha", "beta"}},
 	}
-	gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), loaded, targets)
+	gotManager, baseline, evidenceItems, environment, err := acquireResources(
+		t.Context(), loaded, targets, []string{"Path=C:/tools", "TOKEN=allowed", "SECRET=hidden"},
+	)
 	wantEvidence := []report.Evidence{{Kind: "resource", ID: "alpha", Status: "ready"}, {Kind: "resource", ID: "beta", Status: "ready"}}
 	if err != nil || gotManager != manager || !slices.Equal(manager.acquired, []string{"alpha", "beta"}) || !reflect.DeepEqual(evidenceItems, wantEvidence) ||
 		!slices.Equal(environment, []string{"CACHE=ready", "COMMON=same", "DB=ready"}) || len(baseline) != len(targets) {
@@ -70,6 +81,7 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 	}
 	wantTargetEnvironment := [][]string{
 		{"CACHE=ready", "common=same"}, nil, {"DB=ready", "COMMON=same"}, {"DB=ready", "COMMON=same"},
+		{"CACHE=ready", "COMMON=same", "DB=ready"},
 	}
 	for index := range baseline {
 		if baseline[index].Target.ID != targets[index].ID || !slices.Equal(baseline[index].Environment, wantTargetEnvironment[index]) {
@@ -89,7 +101,7 @@ func TestAcquireResourcesHandlesNoCapabilitiesAcquireFailureAndEnvironmentConfli
 		manager := &scriptedRunResourceManager{}
 		newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
 		targets := []goanalysis.Target{{ID: "ordinary"}}
-		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, targets)
+		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, targets, nil)
 		if err != nil || gotManager != manager || len(baseline) != 1 || baseline[0].Target.ID != "ordinary" || baseline[0].Environment != nil ||
 			evidenceItems != nil || environment != nil || len(manager.acquired) != 0 || manager.closed != 0 {
 			t.Fatalf("no capability = (%T, %+v, %+v, %v, %v), manager=%+v", gotManager, baseline, evidenceItems, environment, err, manager)
@@ -99,7 +111,7 @@ func TestAcquireResourcesHandlesNoCapabilitiesAcquireFailureAndEnvironmentConfli
 		cause := errors.New("resource failed")
 		manager := &scriptedRunResourceManager{errors: map[string]error{"alpha": cause}}
 		newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "alpha"}})
+		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "alpha"}}, nil)
 		if !errors.Is(err, cause) || gotManager != nil || baseline != nil || evidenceItems != nil || environment != nil || manager.closed != 1 {
 			t.Fatalf("acquire failure = (%T, %+v, %+v, %v, %v), closed=%d", gotManager, baseline, evidenceItems, environment, err, manager.closed)
 		}
@@ -107,7 +119,7 @@ func TestAcquireResourcesHandlesNoCapabilitiesAcquireFailureAndEnvironmentConfli
 	t.Run("environment conflict", func(t *testing.T) {
 		manager := &scriptedRunResourceManager{environments: map[string][]string{"alpha": {"TOKEN=one"}, "beta": {"token=two"}}}
 		newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "beta"}, {Capability: "alpha"}})
+		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "beta"}, {Capability: "alpha"}}, nil)
 		if err == nil || !strings.Contains(err.Error(), "resource beta") || gotManager != nil || baseline != nil || evidenceItems != nil || environment != nil || manager.closed != 1 ||
 			!slices.Equal(manager.acquired, []string{"alpha", "beta"}) {
 			t.Fatalf("conflict = (%T, %+v, %+v, %v, %v), manager=%+v", gotManager, baseline, evidenceItems, environment, err, manager)

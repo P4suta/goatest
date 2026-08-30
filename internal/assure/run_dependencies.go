@@ -45,8 +45,8 @@ func productionRunDependencies() runDependencies {
 	return runDependencies{
 		repositoryRoot: repositoryRoot,
 		loadConfig:     config.Load,
-		newCache: func(path string) runCache {
-			return cache.New(path)
+		newCache: func(path string, policy config.Cache) runCache {
+			return cache.NewWithPolicy(path, policy.MaxBytes, policy.TTL)
 		},
 		openWorkspace: mutationbridge.Open,
 		closeWorkspace: func(workspace *mutationbridge.Workspace) error {
@@ -57,16 +57,16 @@ func productionRunDependencies() runDependencies {
 		digestInputs:     evidence.Digest,
 		discoverTargets:  goanalysis.DiscoverTargets,
 		selectImpact:     selectImpact,
-		acquireResources: func(ctx context.Context, loaded config.Config, targets []goanalysis.Target) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
-			manager, baseline, evidenceItems, environment, err := acquireResources(ctx, loaded, targets)
+		acquireResources: func(ctx context.Context, loaded config.Config, targets []goanalysis.Target, baseEnvironment []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
+			manager, baseline, evidenceItems, environment, err := acquireResources(ctx, loaded, targets, baseEnvironment)
 			return manager, baseline, evidenceItems, environment, err
 		},
-		makeBaselineScratch:   os.MkdirTemp,
-		removeBaselineScratch: os.RemoveAll,
-		collectBaseline:       CollectBaseline,
-		concurrencyPackages:   goanalysis.ConcurrencyPackages,
-		relevantRacePackages:  RelevantRacePackages,
-		collectRace:           CollectRace,
+		makeBaselineScratch:    os.MkdirTemp,
+		removeBaselineScratch:  os.RemoveAll,
+		collectBaseline:        CollectBaseline,
+		concurrencyPackages:    goanalysis.ConcurrencyPackages,
+		relevantRacePackages:   RelevantRacePackages,
+		collectRaceWithOptions: CollectRaceWithOptions,
 		prepareSession: func(ctx context.Context, workspace *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
 			return workspace.Prepare(ctx, options)
 		},
