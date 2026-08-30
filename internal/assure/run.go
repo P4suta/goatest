@@ -223,7 +223,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		targets = selection.targets
 		if options.Changed && !selection.broad && len(selection.changed) == 0 {
 			result := report.Report{
-				Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: contract, Snapshot: digest,
+				Schema: report.SchemaV1, Verdict: report.VerdictChangeAssured, Contract: contract, Snapshot: digest,
 				Scope:      reportScope(options, metadata.model, selection),
 				Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
 				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
@@ -350,9 +350,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			return report.Report{}, err
 		}
 		racePackages := dependencies.relevantRacePackages(metadata.model, concurrentPackages, baseline.Targets)
-		raceCount := len(racePackages)
 		if contract == "deep-v1" {
-			raceCount = len(metadata.model.Packages)
+			racePackages = modelPackagePaths(metadata.model)
 		} else {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
 				Code:      "race-scope-static-estimate",
@@ -360,6 +359,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Estimated: true,
 			})
 		}
+		raceCount := len(racePackages)
 		baseReport.Accounting.Race = report.CountAccounting{
 			Discovered: len(metadata.model.Packages), Selected: raceCount,
 			Executed: raceCount, Excluded: len(metadata.model.Packages) - raceCount,

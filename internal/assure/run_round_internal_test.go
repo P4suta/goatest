@@ -162,7 +162,7 @@ func TestRunCoordinatorUsesRelevantRaceScopeAndHandlesConcurrencyFailures(t *tes
 		wantDetail   string
 	}{
 		{contract: "standard-v1", wantPackages: []string{"fixture.example/module"}, wantDetail: "1 packages"},
-		{contract: "deep-v1", wantPackages: []string{"fixture.example/module"}, wantDetail: "2 packages"},
+		{contract: "deep-v1", wantPackages: []string{"fixture.example/module", "fixture.example/other"}, wantDetail: "2 packages"},
 	} {
 		t.Run(test.contract, func(t *testing.T) {
 			harness := newRunCoordinatorHarness(t)

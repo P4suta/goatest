@@ -429,19 +429,23 @@ func TestRunCoordinatorEmitsChangedImpactModeOnlyWhenRequested(t *testing.T) {
 		changed bool
 		broad   bool
 		kind    string
+		verdict report.Verdict
 	}{
-		{name: "unchanged", broad: true},
-		{name: "broad", changed: true, broad: true, kind: "impact-broad"},
-		{name: "targeted", changed: true, kind: "impact-targeted"},
+		{name: "unchanged", broad: true, verdict: report.VerdictAssured},
+		{name: "broad", changed: true, broad: true, kind: "impact-broad", verdict: report.VerdictAssured},
+		{name: "empty changeset", changed: true, kind: "impact-targeted", verdict: report.VerdictChangeAssured},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newRunCoordinatorHarness(t)
 			harness.dependencies.selectImpact = func(_ context.Context, _ string, _ goanalysis.Model, targets []goanalysis.Target, _ Options) impactSelection {
 				return impactSelection{targets: slices.Clone(targets), broad: test.broad}
 			}
-			_, err := harness.run(Options{Changed: test.changed})
+			result, err := harness.run(Options{Changed: test.changed})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if result.Verdict != test.verdict {
+				t.Fatalf("verdict = %q, want %q", result.Verdict, test.verdict)
 			}
 			found := ""
 			for _, event := range harness.events {
