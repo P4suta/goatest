@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -53,6 +54,54 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 		"RISK z risk\n"
 	if got := report.Lines(fixture()); got != want {
 		t.Errorf("lines =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestCanonicalReportDefaultsSchemaPreservesExplicitSchemaAndOrdersEveryCollection(t *testing.T) {
+	input := report.Report{
+		Evidence: []report.Evidence{
+			{Kind: "z-kind", ID: "a-id"},
+			{Kind: "a-kind", ID: "z-id"},
+			{Kind: "a-kind", ID: "a-id"},
+		},
+		Findings: []report.Finding{{ID: "z-finding"}, {ID: "a-finding"}, {ID: "m-finding"}},
+		Repairs:  []report.Repair{{ID: "z-repair"}, {ID: "a-repair"}, {ID: "m-repair"}},
+	}
+	var canonical report.Report
+	if err := json.Unmarshal(report.JSON(input), &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Schema != report.SchemaV1 {
+		t.Fatalf("default schema = %q", canonical.Schema)
+	}
+	wantEvidence := []report.Evidence{
+		{Kind: "a-kind", ID: "a-id"},
+		{Kind: "a-kind", ID: "z-id"},
+		{Kind: "z-kind", ID: "a-id"},
+	}
+	if !reflect.DeepEqual(canonical.Evidence, wantEvidence) {
+		t.Fatalf("evidence order = %+v, want %+v", canonical.Evidence, wantEvidence)
+	}
+	wantFindings := []string{"a-finding", "m-finding", "z-finding"}
+	for index, want := range wantFindings {
+		if canonical.Findings[index].ID != want {
+			t.Fatalf("finding order = %+v", canonical.Findings)
+		}
+	}
+	wantRepairs := []string{"a-repair", "m-repair", "z-repair"}
+	for index, want := range wantRepairs {
+		if canonical.Repairs[index].ID != want {
+			t.Fatalf("repair order = %+v", canonical.Repairs)
+		}
+	}
+
+	explicit := input
+	explicit.Schema = "future-schema"
+	if err := json.Unmarshal(report.JSON(explicit), &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Schema != "future-schema" {
+		t.Fatalf("explicit schema overwritten with %q", canonical.Schema)
 	}
 }
 
