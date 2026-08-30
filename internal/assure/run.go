@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	GoMutantsVersion = "v0.1.3-0.20260830081807-df41b68c0c1e"
+	GoMutantsVersion = "v0.1.3-0.20260830114003-07032fae7ce2"
 	maximumRounds    = 3
 )
 
@@ -272,18 +272,19 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		emit(options, "mutation-prepare", contract)
 		include, packages := mutationScope(selection)
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
-			Contract: contract, Operators: slices.Clone(options.MutationOperators),
-			Include: include, Packages: packages,
+			Contract:   contract,
+			Operators:  slices.Clone(options.MutationOperators),
+			Include:    include,
+			Changed:    options.Changed,
+			ChangedRef: mutationChangedRef(options),
+			Packages:   packages,
 			VerifyArgv: []string{"go", "test", "-run=^$", "./..."}, VerifyEnv: resourceEnv,
 		})
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
 		}
-		mutationCount := len(session.Catalog().Mutants)
-		if options.ReplayMutantID != "" {
-			mutationCount = 1
-		}
+		mutationCount := mutationTargetCount(session.Catalog(), options.ReplayMutantID)
 		mutationDetail := fmt.Sprintf("%d mutants", mutationCount)
 		if mutationCount == 1 {
 			mutationDetail = "1 mutant"
@@ -360,6 +361,26 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		return result, nil
 	}
+}
+
+func mutationTargetCount(catalog gomutants.Catalog, replayMutantID string) int {
+	count := 0
+	for _, mutant := range catalog.Mutants {
+		if mutant.Accepted && (replayMutantID == "" || mutant.ID == replayMutantID) {
+			count++
+		}
+	}
+	return count
+}
+
+func mutationChangedRef(options Options) string {
+	if !options.Changed {
+		return ""
+	}
+	if options.ChangedRef == "" {
+		return "HEAD"
+	}
+	return options.ChangedRef
 }
 
 func inspectWorkspace(ctx context.Context, workspace CommandWorkspace) (roundMetadata, error) {

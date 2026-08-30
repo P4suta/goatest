@@ -257,7 +257,7 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	result, err := harness.run(Options{
 		Now: func() time.Time { return now }, NoApply: true, GoBinary: "go-custom", TempDirectory: "scratch-parent",
 		Environment: []string{"A=1"}, MutationOperators: []string{"comparison"}, FuzzExecutions: 123, MutationJobs: 3,
-		ReplayMutantID: "mutant-a",
+		Changed: true, ChangedRef: "origin/main", ReplayMutantID: "mutant-a",
 	})
 	if err != nil || result.Verdict != report.VerdictAssured || result.Schema != report.SchemaV1 || result.Contract != "standard-v1" || result.Snapshot != harness.digest ||
 		len(result.Evidence) != 4 || len(result.Findings) != 0 || len(harness.cache.puts) != 1 || harness.workspaceCloses != 1 || harness.manager.calls != 1 ||
@@ -266,6 +266,7 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		t.Fatalf("result = (%+v, %v), harness=%+v", result, err, harness)
 	}
 	if harness.preparedOptions.Contract != "standard-v1" || !slices.Equal(harness.preparedOptions.Operators, []string{"comparison"}) ||
+		!harness.preparedOptions.Changed || harness.preparedOptions.ChangedRef != "origin/main" ||
 		!slices.Equal(harness.preparedOptions.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || !slices.Equal(harness.preparedOptions.VerifyEnv, []string{"DB=ready"}) {
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
@@ -278,13 +279,44 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		harness.generationOptions.RepositoryValidator.Contract != "standard-v1" || harness.generationOptions.RepositoryValidator.GoBinary != "go-custom" {
 		t.Fatalf("generation options = %+v", harness.generationOptions)
 	}
-	wantKinds := []string{"snapshot", "baseline-target", "race", "mutation-prepare", "mutation-target"}
+	wantKinds := []string{"snapshot", "impact-broad", "baseline-target", "race", "mutation-prepare", "mutation-target"}
 	gotKinds := make([]string, len(harness.events))
 	for index, event := range harness.events {
 		gotKinds[index] = event.Kind
 	}
-	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[2].Detail != "1 packages" || harness.events[4].Detail != "1 mutant" {
+	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[3].Detail != "1 packages" || harness.events[5].Detail != "1 mutant" {
 		t.Fatalf("events = %+v", harness.events)
+	}
+}
+
+func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
+	t.Parallel()
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{
+		{ID: "selected-a", Accepted: true},
+		{ID: "changed-out", Accepted: false},
+		{ID: "selected-b", Accepted: true},
+	}}
+	if got := mutationTargetCount(catalog, ""); got != 2 {
+		t.Fatalf("mutationTargetCount = %d, want 2", got)
+	}
+	if got := mutationTargetCount(catalog, "selected-a"); got != 1 {
+		t.Fatalf("replay mutationTargetCount = %d, want 1", got)
+	}
+}
+
+func TestMutationChangedRefDefaultsBareChangedToHEAD(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		options Options
+		want    string
+	}{
+		{options: Options{}, want: ""},
+		{options: Options{Changed: true}, want: "HEAD"},
+		{options: Options{Changed: true, ChangedRef: "origin/main"}, want: "origin/main"},
+	} {
+		if got := mutationChangedRef(test.options); got != test.want {
+			t.Errorf("mutationChangedRef(%+v) = %q, want %q", test.options, got, test.want)
+		}
 	}
 }
 

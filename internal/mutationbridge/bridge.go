@@ -25,6 +25,8 @@ type PrepareOptions struct {
 	Operators     []string
 	Include       []string
 	Exclude       []string
+	Changed       bool
+	ChangedRef    string
 	Packages      []string
 	Jobs          int
 	BuildTimeout  time.Duration
@@ -90,6 +92,8 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 		Operators:     append([]string(nil), options.Operators...),
 		Include:       append([]string(nil), options.Include...),
 		Exclude:       append([]string(nil), options.Exclude...),
+		Changed:       options.Changed,
+		ChangedRef:    options.ChangedRef,
 		Packages:      append([]string(nil), options.Packages...),
 		Jobs:          options.Jobs,
 		BuildTimeout:  options.BuildTimeout,
