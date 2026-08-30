@@ -106,15 +106,27 @@ func changedFiles(parent context.Context, root, reference string) ([]string, boo
 		return nil, false
 	}
 	paths := append(diff, untracked...)
-	for i, path := range paths {
+	changed := make([]string, 0, len(paths))
+	for _, path := range paths {
 		normalized, valid := safeChangedPath(path)
 		if !valid {
 			return nil, false
 		}
-		paths[i] = normalized
+		if generatedImpactPath(normalized) {
+			continue
+		}
+		changed = append(changed, normalized)
 	}
-	slices.Sort(paths)
-	return slices.Compact(paths), true
+	slices.Sort(changed)
+	return slices.Compact(changed), true
+}
+
+func generatedImpactPath(path string) bool {
+	root, rest, nested := strings.Cut(path, "/")
+	if !nested || rest == "" {
+		return false
+	}
+	return root == ".goatest" || root == "reports" || root == "dist"
 }
 
 func runGitNames(ctx context.Context, root string, arguments []string) ([]string, bool) {

@@ -100,16 +100,25 @@ func TestChangedFilesCombinesSortsAndValidatesDiffAndUntrackedNames(t *testing.T
 				if !slices.Equal(arguments, want) {
 					t.Fatalf("diff arguments = %v, want %v", arguments, want)
 				}
-				return []string{"pkg/b.go", "./pkg/../pkg/a.go"}, true
+				return []string{
+					"pkg/b.go", "./pkg/../pkg/a.go", ".goatest.toml",
+					"pkg/.goatest/state.go", "reports.go", "distribution/value.go",
+				}, true
 			}
 			want := []string{"ls-files", "--others", "--exclude-standard", "-z", "--"}
 			if !slices.Equal(arguments, want) {
 				t.Fatalf("untracked arguments = %v, want %v", arguments, want)
 			}
-			return []string{"pkg/a.go", "pkg/c.go"}, true
+			return []string{
+				"pkg/a.go", "pkg/c.go",
+				".goatest/graph-v1.json", "reports/assurance-report-v1.json", "dist/goatest",
+			}, true
 		}
 		got, known := changedFiles(context.Background(), root, "")
-		want := []string{"pkg/a.go", "pkg/b.go", "pkg/c.go"}
+		want := []string{
+			".goatest.toml", "distribution/value.go", "pkg/.goatest/state.go",
+			"pkg/a.go", "pkg/b.go", "pkg/c.go", "reports.go",
+		}
 		if !known || !slices.Equal(got, want) || calls != 2 {
 			t.Fatalf("changedFiles = (%v, %t), calls=%d", got, known, calls)
 		}
