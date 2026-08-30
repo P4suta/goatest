@@ -34,6 +34,7 @@ const (
 	individualMutationTargetLimit   = 8
 	maximumMutationBatchTargets     = 64
 	maximumMutationRunArgumentBytes = 8 << 10
+	maximumMutationBatchDuration    = time.Second
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
@@ -265,7 +266,8 @@ func mutationTargetBatches(targets []TargetEvidence) [][]TargetEvidence {
 		full := ok && len(batches[index]) == maximumMutationBatchTargets
 		if ok && !full && len(batches[index]) != 0 {
 			candidate := append(slices.Clone(batches[index]), target)
-			full = len(batchRunArgument(candidate)) > maximumMutationRunArgumentBytes
+			full = len(batchRunArgument(candidate)) > maximumMutationRunArgumentBytes ||
+				batchMutationDuration(candidate) > maximumMutationBatchDuration
 		}
 		if !ok || full {
 			index = len(batches)

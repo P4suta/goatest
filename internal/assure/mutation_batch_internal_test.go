@@ -111,6 +111,26 @@ func TestMutationTargetBatchesKeepAnArgumentExactlyAtTheByteLimit(t *testing.T) 
 	}
 }
 
+func TestMutationTargetBatchesKeepSlowTargetsOutOfFastBatches(t *testing.T) {
+	targets := []TargetEvidence{
+		internalTarget("TestFastA", goanalysis.KindTest, 500*time.Millisecond),
+		internalTarget("TestFastB", goanalysis.KindTest, 500*time.Millisecond),
+		internalTarget("TestOverBoundary", goanalysis.KindTest, 500*time.Millisecond),
+		internalTarget("TestSlowE2E", goanalysis.KindTest, 2*time.Second),
+	}
+
+	batches := mutationTargetBatches(targets)
+	wantSizes := []int{2, 1, 1}
+	if len(batches) != len(wantSizes) {
+		t.Fatalf("batch count = %d, want %d", len(batches), len(wantSizes))
+	}
+	for index, want := range wantSizes {
+		if got := len(batches[index]); got != want {
+			t.Fatalf("batch %d size = %d, want %d", index, got, want)
+		}
+	}
+}
+
 func TestMutationSeedExecutionsHandleARemainderLargerThanTheIndividualPrefix(t *testing.T) {
 	mutant := internalMutation("mutant-a")
 	targets := make([]TargetEvidence, 0, individualMutationTargetLimit*2+1)
