@@ -59,6 +59,7 @@ type Options struct {
 	Environment            []string
 	TempDirectory          string
 	MutationOperators      []string
+	ReplayMutantID         string
 	FuzzExecutions         int
 	MutationJobs           int
 	Generate               func(context.Context, provider.Request) (provider.Response, error)
@@ -279,9 +280,18 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
-		emit(options, "mutation-target", fmt.Sprintf("%d mutants", len(session.Catalog().Mutants)))
+		mutationCount := len(session.Catalog().Mutants)
+		if options.ReplayMutantID != "" {
+			mutationCount = 1
+		}
+		mutationDetail := fmt.Sprintf("%d mutants", mutationCount)
+		if mutationCount == 1 {
+			mutationDetail = "1 mutant"
+		}
+		emit(options, "mutation-target", mutationDetail)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
 			Root: root, Contract: contract, NoApply: options.NoApply,
+			ReplayMutantID: options.ReplayMutantID,
 			FuzzExecutions: options.FuzzExecutions, Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
 			Progress: mutationProgress(options),
 		})
@@ -456,7 +466,11 @@ func assuranceInputs(root, contract string, options Options, loaded config.Confi
 }
 
 func modeIdentity(options Options) string {
-	return fmt.Sprintf(";apply=%t;changed=%t;ref=%s", !options.NoApply, options.Changed, options.ChangedRef)
+	identity := fmt.Sprintf(";apply=%t;changed=%t;ref=%s", !options.NoApply, options.Changed, options.ChangedRef)
+	if options.ReplayMutantID != "" {
+		identity += ";replay=" + options.ReplayMutantID
+	}
+	return identity
 }
 
 func stableEnvironment(environment []string) []string {

@@ -248,6 +248,9 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{NoApply: true, Changed: true, ChangedRef: "base"}); got != ";apply=false;changed=true;ref=base" {
 		t.Fatalf("selected mode identity = %q", got)
 	}
+	if got := modeIdentity(Options{NoApply: true, ReplayMutantID: "mutant-a"}); got != ";apply=false;changed=false;ref=;replay=mutant-a" {
+		t.Fatalf("replay mode identity = %q", got)
+	}
 	environment := stableEnvironment([]string{
 		"B=2", "a=1", "bad", "TMP=x", "temp=y", "TmpDir=z", "go_mutants_x=1", "A=2",
 		"STARSHIP_SESSION_KEY=volatile", "__mise_session=volatile",

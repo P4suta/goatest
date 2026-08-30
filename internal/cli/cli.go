@@ -35,12 +35,13 @@ const (
 )
 
 type Request struct {
-	Changed    bool
-	ChangedRef string
-	Contract   string
-	NoApply    bool
-	JSON       bool
-	NoTUI      bool
+	Changed        bool
+	ChangedRef     string
+	Contract       string
+	NoApply        bool
+	JSON           bool
+	NoTUI          bool
+	ReplayMutantID string
 }
 
 type Service interface {

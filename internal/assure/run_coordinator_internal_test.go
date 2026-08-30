@@ -254,6 +254,7 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	result, err := harness.run(Options{
 		Now: func() time.Time { return now }, NoApply: true, GoBinary: "go-custom", TempDirectory: "scratch-parent",
 		Environment: []string{"A=1"}, MutationOperators: []string{"comparison"}, FuzzExecutions: 123, MutationJobs: 3,
+		ReplayMutantID: "mutant-a",
 	})
 	if err != nil || result.Verdict != report.VerdictAssured || result.Schema != report.SchemaV1 || result.Contract != "standard-v1" || result.Snapshot != harness.digest ||
 		len(result.Evidence) != 4 || len(result.Findings) != 0 || len(harness.cache.puts) != 1 || harness.workspaceCloses != 1 || harness.manager.calls != 1 ||
@@ -266,7 +267,8 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
 	if harness.mutationOptions.Root != harness.root || harness.mutationOptions.Contract != "standard-v1" || !harness.mutationOptions.NoApply ||
-		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Jobs != 3 || !harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
+		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
+		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
 		t.Fatalf("mutation options = %+v", harness.mutationOptions)
 	}
 	if harness.generationOptions.Snapshot != harness.digest || !harness.generationOptions.NoApply || harness.generationOptions.RepositoryValidator.Root != harness.root ||
@@ -278,7 +280,7 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	for index, event := range harness.events {
 		gotKinds[index] = event.Kind
 	}
-	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[2].Detail != "1 packages" {
+	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[2].Detail != "1 packages" || harness.events[4].Detail != "1 mutant" {
 		t.Fatalf("events = %+v", harness.events)
 	}
 }

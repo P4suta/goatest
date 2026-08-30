@@ -44,6 +44,30 @@ func TestSafeChangedPathCanonicalizesLocalFilesAndRejectsEveryEscapeForm(t *test
 	}
 }
 
+func TestGeneratedImpactPathMatchesOnlyOwnedTopLevelDescendants(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: ".goatest/graph-v1.json", want: true},
+		{path: "reports/assurance-report-v1.json", want: true},
+		{path: "dist/goatest", want: true},
+		{path: ".goatest"},
+		{path: ".goatest/"},
+		{path: ".goatest.toml"},
+		{path: "reports"},
+		{path: "reports/"},
+		{path: "reports.go"},
+		{path: "distribution/value.go"},
+		{path: "pkg/.goatest/state.go"},
+	} {
+		if got := generatedImpactPath(test.path); got != test.want {
+			t.Errorf("generatedImpactPath(%q) = %t, want %t", test.path, got, test.want)
+		}
+	}
+}
+
 func TestRunGitNamesUsesNULTerminatedNamesAndFailsClosed(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		preserveImpactHooks(t)

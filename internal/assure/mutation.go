@@ -58,6 +58,7 @@ type MutationOptions struct {
 	Root           string
 	Contract       string
 	NoApply        bool
+	ReplayMutantID string
 	FuzzExecutions int
 	Timeout        time.Duration
 	Jobs           int
@@ -83,18 +84,25 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		return MutationEvaluation{}, fmt.Errorf("goatest: mutation evaluation requires a repository root")
 	}
 	executions := fuzzExecutions(options.Contract, options.FuzzExecutions)
-	var evaluation MutationEvaluation
 	catalog := session.Catalog()
+	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
+			continue
+		}
+		mutants = append(mutants, mutant)
+	}
+	if options.ReplayMutantID != "" && len(mutants) == 0 {
+		return MutationEvaluation{}, fmt.Errorf("goatest: replay mutant %s is absent from prepared catalog", options.ReplayMutantID)
+	}
+	var evaluation MutationEvaluation
 	for _, rejection := range catalog.Rejections {
+		if options.ReplayMutantID != "" && rejection.ID != options.ReplayMutantID {
+			continue
+		}
 		evaluation.Evidence = append(evaluation.Evidence, report.Evidence{
 			Kind: "mutation", ID: rejection.ID, Status: "compile-equivalent", Detail: rejection.Diagnostic,
 		})
-	}
-	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
-	for _, mutant := range catalog.Mutants {
-		if mutant.Accepted {
-			mutants = append(mutants, mutant)
-		}
 	}
 	seeds := evaluateMutationSeeds(ctx, session, mutants, targets, options)
 	for _, seed := range seeds {

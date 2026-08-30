@@ -57,6 +57,40 @@ func TestEvaluateMutationsValidatesInputsFiltersCatalogAndRecordsRejections(t *t
 	}
 }
 
+func TestEvaluateMutationsReplaysOnlyRequestedMutantAndFailsClosedWhenAbsent(t *testing.T) {
+	first, second := internalMutation("mutant-a"), internalMutation("mutant-b")
+	target := internalTarget("TestValue", goanalysis.KindTest, time.Second)
+	progress := make([][2]int, 0, 1)
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{first, second}},
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Jobs: 2, ReplayMutantID: second.ID,
+		Progress: func(completed, total int) { progress = append(progress, [2]int{completed, total}) },
+	})
+	if err != nil || len(evaluation.Evidence) != 1 || evaluation.Evidence[0].ID != second.ID || len(session.requests) != 1 ||
+		session.requests[0].Mutant != second.ID || !reflect.DeepEqual(progress, [][2]int{{1, 1}}) {
+		t.Fatalf("replay evaluation = (%+v, %v), requests=%+v progress=%v", evaluation, err, session.requests, progress)
+	}
+
+	absent := &mutationUnitSession{
+		catalog: session.catalog,
+		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			t.Fatal("absent replay mutant executed")
+			return gomutants.MutantResult{}, nil
+		},
+	}
+	evaluation, err = EvaluateMutations(t.Context(), absent, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), ReplayMutantID: "missing",
+	})
+	if err == nil || !strings.Contains(err.Error(), "replay mutant missing is absent") || !reflect.DeepEqual(evaluation, MutationEvaluation{}) || len(absent.requests) != 0 {
+		t.Fatalf("absent replay = (%+v, %v), requests=%+v", evaluation, err, absent.requests)
+	}
+}
+
 func TestEvaluateMutationsReturnsSeedExecutionErrorWithoutPartialEvidence(t *testing.T) {
 	cause := errors.New("seed execution failed")
 	mutant := internalMutation("mutant-a")

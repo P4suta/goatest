@@ -169,7 +169,10 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 	}
 	original := report.Report{
 		Schema: report.SchemaV1, Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot-a",
-		Findings: []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "one"}, {ID: "finding-b", Kind: "coverage", Summary: "two"}},
+		Findings: []report.Finding{
+			{ID: "finding-a", Kind: "survivor", Summary: "one"},
+			{ID: "finding-b", Kind: "coverage", Summary: "two", MutantID: "mutant-b"},
+		},
 		Repairs: []report.Repair{
 			{ID: "repair-a", Finding: "finding-a", Path: "a_test.go", Status: "applied"},
 			{ID: "repair-b", Finding: "finding-b", Path: "b_test.go", Status: "candidate"},
@@ -179,8 +182,8 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		Root: root,
 		Now:  func() time.Time { return time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC) },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
-			if !options.NoApply {
-				t.Fatal("replay did not disable application")
+			if !options.NoApply || options.ReplayMutantID != "mutant-b" {
+				t.Fatalf("replay options = %+v", options)
 			}
 			return original, nil
 		},

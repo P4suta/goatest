@@ -100,10 +100,12 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		if err != nil {
 			return report.Report{}, err
 		}
-		if _, ok := find(latest, id); !ok {
+		finding, ok := find(latest, id)
+		if !ok {
 			return report.Report{}, fmt.Errorf("goatest: finding %q is absent from the latest report", id)
 		}
 		request.NoApply = true
+		request.ReplayMutantID = finding.MutantID
 		return service.runAndWrite(ctx, absolute, request)
 	case cli.CommandVerify:
 		return service.runAndWrite(ctx, absolute, request)
@@ -154,7 +156,8 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 	options := assure.Options{
 		Root: root, Contract: request.Contract, NoApply: request.NoApply,
 		Changed: request.Changed, ChangedRef: request.ChangedRef,
-		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment,
+		ReplayMutantID: request.ReplayMutantID,
+		GoBinary:       service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment,
 	}
 	if service.Progress != nil {
 		var mutex sync.Mutex
