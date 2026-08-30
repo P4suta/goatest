@@ -62,7 +62,10 @@ func TestEvaluateMutationsReplaysOnlyRequestedMutantAndFailsClosedWhenAbsent(t *
 	target := internalTarget("TestValue", goanalysis.KindTest, time.Second)
 	progress := make([][2]int, 0, 1)
 	session := &mutationUnitSession{
-		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{first, second}},
+		catalog: gomutants.Catalog{
+			Mutants:    []gomutants.Mutant{first, second},
+			Rejections: []gomutants.Rejection{{ID: "rejected-other", Diagnostic: "compile equivalent"}},
+		},
 		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 		},

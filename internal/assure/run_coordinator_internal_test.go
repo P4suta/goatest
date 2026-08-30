@@ -60,6 +60,7 @@ type runCoordinatorHarness struct {
 	race         RaceResult
 	mutation     MutationEvaluation
 	generation   GenerationEvaluation
+	catalog      gomutants.Catalog
 	inputs       evidence.Inputs
 	digest       string
 	events       []Event
@@ -110,6 +111,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		race:       RaceResult{Evidence: []report.Evidence{{Kind: "race", ID: "race-a", Status: "passed"}}},
 		mutation:   MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}}},
 		generation: GenerationEvaluation{},
+		catalog:    gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-a", Accepted: true}}},
 		inputs:     evidence.Inputs{Contract: "digest-a"},
 		digest:     "digest-a",
 	}
@@ -210,7 +212,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		prepareSession: func(_ context.Context, _ *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
 			harness.prepareCalls++
 			harness.preparedOptions = options
-			return &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-a", Accepted: true}}}}, nil
+			return &mutationUnitSession{catalog: harness.catalog}, nil
 		},
 		evaluateMutations: func(_ context.Context, _ MutationSession, _ []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
 			harness.mutationCalls++
@@ -249,6 +251,7 @@ func (harness *runCoordinatorHarness) run(options Options) (report.Report, error
 
 func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants = append(harness.catalog.Mutants, gomutants.Mutant{ID: "mutant-b", Accepted: true})
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	harness.loaded.Acceptance = []config.Acceptance{{ID: "accepted-a", Expires: now.Add(time.Hour)}}
 	result, err := harness.run(Options{
