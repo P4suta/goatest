@@ -248,7 +248,10 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{NoApply: true, Changed: true, ChangedRef: "base"}); got != ";apply=false;changed=true;ref=base" {
 		t.Fatalf("selected mode identity = %q", got)
 	}
-	environment := stableEnvironment([]string{"B=2", "a=1", "bad", "TMP=x", "temp=y", "TmpDir=z", "go_mutants_x=1", "A=2"})
+	environment := stableEnvironment([]string{
+		"B=2", "a=1", "bad", "TMP=x", "temp=y", "TmpDir=z", "go_mutants_x=1", "A=2",
+		"STARSHIP_SESSION_KEY=volatile", "__mise_session=volatile",
+	})
 	if !slices.Equal(environment, []string{"A=2", "B=2", "a=1"}) {
 		t.Fatalf("stableEnvironment = %v", environment)
 	}
@@ -365,11 +368,17 @@ func TestBaselineVerdictRepositoryRootExecutionEnvironmentAndEmit(t *testing.T) 
 		t.Fatalf("default root = (%q, %v)", got, err)
 	}
 
-	input := []string{"b=2", "A=1", "a=last", "invalid", "=empty", "GOPROXY=network", "GOSUMDB=network", "GOTELEMETRY=on", "GOTOOLCHAIN=auto"}
+	input := []string{
+		"b=2", "A=1", "a=last", "invalid", "=empty",
+		"GOPROXY=network", "GOSUMDB=network", "GOTELEMETRY=on", "GOTOOLCHAIN=auto",
+		"STARSHIP_SESSION_KEY=changes-every-shell", "__mise_session=changes-every-shell",
+	}
 	environment := executionEnvironment(input)
 	if !slices.IsSorted(environment) || !containsEnvironment(environment, "a", "last") || !containsEnvironment(environment, "b", "2") ||
 		!containsEnvironment(environment, "GOPROXY", "off") || !containsEnvironment(environment, "GOSUMDB", "off") ||
 		!containsEnvironment(environment, "GOTELEMETRY", "off") || !containsEnvironment(environment, "GOTOOLCHAIN", "local") ||
+		containsEnvironment(environment, "STARSHIP_SESSION_KEY", "changes-every-shell") ||
+		containsEnvironment(environment, "__MISE_SESSION", "changes-every-shell") ||
 		slices.Contains(environment, "invalid=") || slices.Contains(environment, "=empty") {
 		t.Fatalf("executionEnvironment = %v", environment)
 	}

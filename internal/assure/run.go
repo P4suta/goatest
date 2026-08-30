@@ -464,7 +464,8 @@ func stableEnvironment(environment []string) []string {
 	for _, entry := range environment {
 		key, _, ok := strings.Cut(entry, "=")
 		upper := strings.ToUpper(key)
-		if !ok || upper == "TMP" || upper == "TEMP" || upper == "TMPDIR" || strings.HasPrefix(upper, "GO_MUTANTS_") {
+		if !ok || upper == "TMP" || upper == "TEMP" || upper == "TMPDIR" ||
+			strings.HasPrefix(upper, "GO_MUTANTS_") || ephemeralEnvironmentKey(upper) {
 			continue
 		}
 		result = append(result, entry)
@@ -646,6 +647,9 @@ func executionEnvironment(input []string) []string {
 			continue
 		}
 		upper := strings.ToUpper(key)
+		if ephemeralEnvironmentKey(upper) {
+			continue
+		}
 		values[upper] = value
 		names[upper] = key
 	}
@@ -661,6 +665,10 @@ func executionEnvironment(input []string) []string {
 	}
 	slices.Sort(result)
 	return result
+}
+
+func ephemeralEnvironmentKey(upper string) bool {
+	return upper == "STARSHIP_SESSION_KEY" || upper == "__MISE_SESSION"
 }
 
 func emit(options Options, kind, detail string) {

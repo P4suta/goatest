@@ -98,6 +98,8 @@ func TestBoundary(t *testing.T) {
 	options := assure.Options{
 		Root: root, Contract: "standard-v1", GoBinary: goBinary(t),
 		TempDirectory: t.TempDir(), MutationOperators: []string{"comparison"},
+		Environment: append(os.Environ(),
+			"STARSHIP_SESSION_KEY=first-shell", "__MISE_SESSION=first-shell"),
 	}
 	first, err := assure.Run(t.Context(), options)
 	if err != nil {
@@ -108,6 +110,8 @@ func TestBoundary(t *testing.T) {
 	}
 
 	var events []assure.Event
+	options.Environment = append(os.Environ(),
+		"STARSHIP_SESSION_KEY=second-shell", "__MISE_SESSION=second-shell")
 	options.Progress = func(event assure.Event) { events = append(events, event) }
 	second, err := assure.Run(t.Context(), options)
 	if err != nil {
