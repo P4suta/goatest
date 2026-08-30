@@ -622,6 +622,9 @@ func inspectSelectedPackages(ctx context.Context, workspace CommandWorkspace, pa
 	if len(tags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(tags, ","))
 	}
+	if len(patterns) == 0 {
+		patterns = []string{"./..."}
+	}
 	argv = append(argv, patterns...)
 	listed, err := workspace.Exec(ctx, command(argv, timeout))
 	if err != nil || listed.ExitCode != 0 || listed.TimedOut {

@@ -97,17 +97,28 @@ func TestInspectWorkspaceReturnsCompleteMetadataAndExactCommands(t *testing.T) {
 func TestInspectSelectedPackagesUsesConfiguredCommandTimeout(t *testing.T) {
 	t.Parallel()
 	timeout := 17 * time.Second
-	workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{{
-		Output: listedPackageJSON(t, t.TempDir()),
-	}}}
-	model, err := inspectSelectedPackages(t.Context(), workspace, []string{"./pkg/..."}, []string{"integration", "sqlite"}, timeout)
-	if err != nil || model.ModulePath != "fixture.example/module" || len(workspace.commands) != 1 {
-		t.Fatalf("inspectSelectedPackages = (%+v, %v), commands=%+v", model, err, workspace.commands)
-	}
-	wantArgv := []string{"go", "list", "-json", "-tags=integration,sqlite", "./pkg/..."}
-	command := workspace.commands[0]
-	if !slices.Equal(command.Argv, wantArgv) || command.Timeout != timeout || command.OutputLimit != 32<<20 {
-		t.Fatalf("selected package command = %+v, want argv=%v timeout=%s", command, wantArgv, timeout)
+	for _, test := range []struct {
+		name     string
+		patterns []string
+		tags     []string
+		wantArgv []string
+	}{
+		{name: "explicit packages", patterns: []string{"./pkg/..."}, tags: []string{"integration", "sqlite"}, wantArgv: []string{"go", "list", "-json", "-tags=integration,sqlite", "./pkg/..."}},
+		{name: "build tags default to all packages", tags: []string{"integration"}, wantArgv: []string{"go", "list", "-json", "-tags=integration", "./..."}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{{
+				Output: listedPackageJSON(t, t.TempDir()),
+			}}}
+			model, err := inspectSelectedPackages(t.Context(), workspace, test.patterns, test.tags, timeout)
+			if err != nil || model.ModulePath != "fixture.example/module" || len(workspace.commands) != 1 {
+				t.Fatalf("inspectSelectedPackages = (%+v, %v), commands=%+v", model, err, workspace.commands)
+			}
+			command := workspace.commands[0]
+			if !slices.Equal(command.Argv, test.wantArgv) || command.Timeout != timeout || command.OutputLimit != 32<<20 {
+				t.Fatalf("selected package command = %+v, want argv=%v timeout=%s", command, test.wantArgv, timeout)
+			}
+		})
 	}
 }
 
