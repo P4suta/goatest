@@ -24,13 +24,16 @@ import (
 )
 
 const (
-	standardFuzzExecutions       = 10_000
-	deepFuzzExecutions           = 100_000
-	minimumMutationTimeout       = 30 * time.Second
-	mutationTimeoutOverhead      = 5 * time.Second
-	standardMutationTimeoutLimit = 30 * time.Minute
-	deepMutationTimeoutLimit     = 5 * time.Hour
-	mutationTimeoutMultiplier    = 5
+	standardFuzzExecutions          = 10_000
+	deepFuzzExecutions              = 100_000
+	minimumMutationTimeout          = 30 * time.Second
+	mutationTimeoutOverhead         = 5 * time.Second
+	standardMutationTimeoutLimit    = 30 * time.Minute
+	deepMutationTimeoutLimit        = 5 * time.Hour
+	mutationTimeoutMultiplier       = 5
+	individualMutationTargetLimit   = 8
+	maximumMutationBatchTargets     = 64
+	maximumMutationRunArgumentBytes = 8 << 10
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
@@ -160,6 +163,11 @@ type mutationSeed struct {
 	err        error
 }
 
+type mutationSeedExecution struct {
+	request gomutants.ExecRequest
+	detail  string
+}
+
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
 	if len(mutants) == 0 {
 		return nil
@@ -200,15 +208,15 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		seed.resolved = true
 		return seed
 	}
-	for _, target := range seed.reaching {
-		result, err := session.Exec(ctx, seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)))
+	for _, execution := range mutationSeedExecutions(mutant, seed.reaching, options) {
+		result, err := session.Exec(ctx, execution.request)
 		if err != nil {
-			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, target.Target.Name, err)
+			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
 		}
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
-			seed.evaluation.addKill(mutant, target.Target.Name)
+			seed.evaluation.addKill(mutant, execution.detail)
 			seed.resolved = true
 		case gomutants.OutcomeSurvived:
 			// Continue through every demonstrably relevant target.
@@ -227,6 +235,62 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		}
 	}
 	return seed
+}
+
+func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {
+	individual := min(len(targets), individualMutationTargetLimit)
+	executions := make([]mutationSeedExecution, 0, individual+len(targets[individual:]))
+	for _, target := range targets[:individual] {
+		executions = append(executions, mutationSeedExecution{
+			request: seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout)),
+			detail:  target.Target.Name,
+		})
+	}
+	for _, batch := range mutationTargetBatches(targets[individual:]) {
+		duration := batchMutationDuration(batch)
+		executions = append(executions, mutationSeedExecution{
+			request: batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout)),
+			detail:  batchMutationDetail(batch),
+		})
+	}
+	return executions
+}
+
+func mutationTargetBatches(targets []TargetEvidence) [][]TargetEvidence {
+	batches := make([][]TargetEvidence, 0)
+	byExecutionEnvironment := make(map[string]int)
+	for _, target := range targets {
+		key := target.Target.Package + "\x00" + strings.Join(target.Environment, "\x00")
+		index, ok := byExecutionEnvironment[key]
+		full := ok && len(batches[index]) == maximumMutationBatchTargets
+		if ok && !full && len(batches[index]) != 0 {
+			candidate := append(slices.Clone(batches[index]), target)
+			full = len(batchRunArgument(candidate)) > maximumMutationRunArgumentBytes
+		}
+		if !ok || full {
+			index = len(batches)
+			byExecutionEnvironment[key] = index
+			batches = append(batches, nil)
+		}
+		batches[index] = append(batches[index], target)
+	}
+	return batches
+}
+
+func batchMutationDuration(targets []TargetEvidence) time.Duration {
+	var total time.Duration
+	for _, target := range targets {
+		duration := min(max(target.Duration, 0), deepMutationTimeoutLimit)
+		total = min(total+duration, deepMutationTimeoutLimit)
+	}
+	return total
+}
+
+func batchMutationDetail(targets []TargetEvidence) string {
+	if len(targets) == 1 {
+		return targets[0].Target.Name
+	}
+	return fmt.Sprintf("%s (%d related targets)", targets[0].Target.Package, len(targets))
 }
 
 func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
@@ -262,6 +326,25 @@ func seedRequest(mutant gomutants.Mutant, target TargetEvidence, timeout time.Du
 		Args: []string{"-test.run=^" + regexp.QuoteMeta(target.Target.Name) + "$"},
 		Env:  slices.Clone(target.Environment), Timeout: timeout,
 	}
+}
+
+func batchSeedRequest(mutant gomutants.Mutant, targets []TargetEvidence, timeout time.Duration) gomutants.ExecRequest {
+	if len(targets) == 1 {
+		return seedRequest(mutant, targets[0], timeout)
+	}
+	return gomutants.ExecRequest{
+		Mutant: mutant.ID, Package: targets[0].Target.Package,
+		Args: []string{batchRunArgument(targets)},
+		Env:  slices.Clone(targets[0].Environment), Timeout: timeout,
+	}
+}
+
+func batchRunArgument(targets []TargetEvidence) string {
+	names := make([]string, len(targets))
+	for index, target := range targets {
+		names[index] = regexp.QuoteMeta(target.Target.Name)
+	}
+	return "-test.run=^(" + strings.Join(names, "|") + ")$"
 }
 
 func fuzzRequest(mutant gomutants.Mutant, target TargetEvidence, executions int, timeout time.Duration) gomutants.ExecRequest {
