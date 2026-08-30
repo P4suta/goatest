@@ -512,10 +512,6 @@ func appendLimitation(limitations []report.Limitation, item report.Limitation) [
 	return append(limitations, item)
 }
 
-func loadLatest(root string) (report.Report, error) {
-	return loadLatestAny(root)
-}
-
 func loadSelected(root string, request cli.Request) (report.Report, error) {
 	if request.ReportRunID != "" {
 		if !safeRunID(request.ReportRunID) {

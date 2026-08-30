@@ -85,7 +85,7 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 
 	selectedMutants := 0
 	compileRejected := 0
-	if !(options.Changed && !selection.broad && len(selection.changed) == 0) {
+	if !options.Changed || selection.broad || len(selection.changed) != 0 {
 		include, packages := mutationScope(selection)
 		if !defaultPackagePatterns(options.Packages) && !options.Changed {
 			packages = slices.Clone(options.Packages)

@@ -419,17 +419,23 @@ func validateEnvironmentNames(section string, names []string) error {
 }
 
 func validEnvironmentName(name string) bool {
-	if name == "" || !(name[0] == '_' || name[0] >= 'A' && name[0] <= 'Z' || name[0] >= 'a' && name[0] <= 'z') {
+	if name == "" || !validEnvironmentNameStart(name[0]) {
 		return false
 	}
 	for index := 1; index < len(name); index++ {
-		character := name[index]
-		if character != '_' && !(character >= 'A' && character <= 'Z') &&
-			!(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') {
+		if !validEnvironmentNameCharacter(name[index]) {
 			return false
 		}
 	}
 	return true
+}
+
+func validEnvironmentNameStart(character byte) bool {
+	return character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z'
+}
+
+func validEnvironmentNameCharacter(character byte) bool {
+	return validEnvironmentNameStart(character) || character >= '0' && character <= '9'
 }
 
 func validateProjectExcludes(patterns []string) error {

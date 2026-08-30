@@ -559,7 +559,7 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 		if err != nil {
 			return gomutants.CommandResult{}, fmt.Errorf("goatest: create original-control fuzz cache: %w", err)
 		}
-		defer os.RemoveAll(cacheDirectory)
+		defer func() { _ = os.RemoveAll(cacheDirectory) }()
 		arguments = append(arguments, "-test.fuzzcachedir="+cacheDirectory)
 	}
 	if len(arguments) != 0 {
