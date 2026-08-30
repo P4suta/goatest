@@ -59,6 +59,65 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 	}
 }
 
+func TestVerifyAndReplayPersistInfrastructureErrorReports(t *testing.T) {
+	for _, command := range []cli.Command{cli.CommandVerify, cli.CommandReplay} {
+		t.Run(string(command), func(t *testing.T) {
+			root := t.TempDir()
+			if command == cli.CommandReplay {
+				writeLatestFixture(t, root)
+			}
+			sentinel := errors.New("mutation workspace failed")
+			service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
+				return report.Report{
+					Contract: "deep-v1", Snapshot: "snapshot-before-failure",
+					Evidence: []report.Evidence{{Kind: "preflight", ID: "build", Status: "passed"}},
+				}, sentinel
+			}}
+
+			result, err := service.Execute(t.Context(), command, cli.Request{}, "finding-a")
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("%s error = %v, want runner error", command, err)
+			}
+			if result.Verdict != report.VerdictError || result.Schema != report.SchemaV1 {
+				t.Fatalf("%s result = %+v, want ERROR report", command, result)
+			}
+			if result.Contract != "deep-v1" || result.Snapshot != "snapshot-before-failure" || len(result.Evidence) != 1 {
+				t.Errorf("%s discarded partial evidence: %+v", command, result)
+			}
+			if len(result.Findings) != 1 || result.Findings[0].Kind != "infrastructure" || !strings.Contains(result.Findings[0].Summary, sentinel.Error()) {
+				t.Errorf("%s findings = %+v, want infrastructure diagnostic", command, result.Findings)
+			}
+
+			latest, loadErr := service.Execute(t.Context(), cli.CommandReport, cli.Request{}, "")
+			if loadErr != nil || latest.Verdict != report.VerdictError || len(latest.Findings) != 1 {
+				t.Fatalf("persisted %s report = %+v, %v", command, latest, loadErr)
+			}
+			for _, path := range []string{".goatest/report.json", "reports/assurance-report-v1.json", "reports/assurance-report-v1.html", "reports/assurance-report-v1.sarif", "reports/assurance-report-v1.junit.xml"} {
+				if data, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(path))); readErr != nil || len(data) == 0 {
+					t.Errorf("error report artifact %s = %d bytes, %v", path, len(data), readErr)
+				}
+			}
+		})
+	}
+}
+
+func TestCancelledRunDoesNotReplaceTheLatestCompletedReport(t *testing.T) {
+	root := t.TempDir()
+	writeLatestFixture(t, root)
+	service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
+		return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictError}, context.Canceled
+	}}
+
+	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+	if !errors.Is(err, context.Canceled) || result.Verdict != "" {
+		t.Fatalf("cancelled verify = %+v, %v", result, err)
+	}
+	latest, loadErr := service.Execute(t.Context(), cli.CommandReport, cli.Request{}, "")
+	if loadErr != nil || latest.Verdict != report.VerdictInsufficient || latest.Snapshot != "snapshot" {
+		t.Fatalf("latest after cancellation = %+v, %v", latest, loadErr)
+	}
+}
+
 func TestNoTUIWritesDeterministicProgressImmediately(t *testing.T) {
 	root := t.TempDir()
 	var progress bytes.Buffer
@@ -219,6 +278,20 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 		}}
 		if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err == nil {
 			t.Fatal("verify ignored report persistence failure")
+		}
+	})
+
+	t.Run("runner-error-report-write", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
+			return report.Report{}, sentinel
+		}}
+		result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+		if result.Verdict != report.VerdictError || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "write report") {
+			t.Fatalf("runner/write failure = %+v, %v", result, err)
 		}
 	})
 

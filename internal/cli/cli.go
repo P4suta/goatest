@@ -74,15 +74,22 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
 			return ExitInterrupted
 		}
+		if result.Verdict == report.VerdictError {
+			render(stdout, result, request.JSON)
+		}
 		_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(err.Error()))
 		return ExitError
 	}
-	if request.JSON {
-		_, _ = stdout.Write(report.JSON(result))
-	} else {
-		_, _ = io.WriteString(stdout, report.Lines(result))
-	}
+	render(stdout, result, request.JSON)
 	return exitCode(result.Verdict)
+}
+
+func render(output io.Writer, result report.Report, jsonOutput bool) {
+	if jsonOutput {
+		_, _ = output.Write(report.JSON(result))
+	} else {
+		_, _ = io.WriteString(output, report.Lines(result))
+	}
 }
 
 func parse(args []string) (Command, Request, string, error) {

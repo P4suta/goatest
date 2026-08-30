@@ -71,10 +71,11 @@ func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
 		t.Fatalf("bare changed = exit %d request %+v", exit, changed.request)
 	}
 
-	cancelled := &service{err: context.Canceled}
+	cancelled := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictError}, err: context.Canceled}
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if exit := cli.Run(t.Context(), nil, &bytes.Buffer{}, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" {
-		t.Fatalf("cancellation = exit %d stderr %q", exit, stderr.String())
+	if exit := cli.Run(t.Context(), nil, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" || stdout.Len() != 0 {
+		t.Fatalf("cancellation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 
@@ -129,5 +130,36 @@ func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 	}
 	if got, want := stderr.String(), "goatest: failed\\nFINDING forged\\u001b[31m\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestInfrastructureErrorsRenderTheirErrorReportBeforeTheDiagnostic(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lines", true: "json"}[jsonOutput], func(t *testing.T) {
+			result := report.Report{
+				Schema: report.SchemaV1, Verdict: report.VerdictError, Contract: "standard-v1",
+				Findings: []report.Finding{{ID: "infrastructure-error", Kind: "infrastructure", Summary: "workspace failed"}},
+			}
+			fake := &service{report: result, err: errors.New("workspace failed")}
+			var stdout, stderr bytes.Buffer
+			var arguments []string
+			if jsonOutput {
+				arguments = []string{"--json"}
+			}
+			if exit := cli.Run(t.Context(), arguments, &stdout, &stderr, fake); exit != cli.ExitError {
+				t.Fatalf("exit = %d", exit)
+			}
+			if jsonOutput {
+				var rendered report.Report
+				if err := json.Unmarshal(stdout.Bytes(), &rendered); err != nil || rendered.Verdict != report.VerdictError {
+					t.Fatalf("JSON ERROR report = %+v, %v\n%s", rendered, err, stdout.Bytes())
+				}
+			} else if !strings.HasPrefix(stdout.String(), "ERROR standard-v1") {
+				t.Fatalf("line ERROR report = %q", stdout.String())
+			}
+			if got, want := stderr.String(), "goatest: workspace failed\n"; got != want {
+				t.Fatalf("stderr = %q, want %q", got, want)
+			}
+		})
 	}
 }

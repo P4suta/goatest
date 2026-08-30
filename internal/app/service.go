@@ -104,26 +104,46 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 			return report.Report{}, fmt.Errorf("goatest: finding %q is absent from the latest report", id)
 		}
 		request.NoApply = true
-		result, err := service.run(ctx, absolute, request)
-		if err != nil {
-			return report.Report{}, err
-		}
-		if err := WriteReports(absolute, result); err != nil {
-			return report.Report{}, err
-		}
-		return result, nil
+		return service.runAndWrite(ctx, absolute, request)
 	case cli.CommandVerify:
-		result, err := service.run(ctx, absolute, request)
-		if err != nil {
-			return report.Report{}, err
-		}
-		if err := WriteReports(absolute, result); err != nil {
-			return report.Report{}, err
-		}
-		return result, nil
+		return service.runAndWrite(ctx, absolute, request)
 	default:
 		return report.Report{}, fmt.Errorf("goatest: command %q is unsupported", command)
 	}
+}
+
+func (service Service) runAndWrite(ctx context.Context, root string, request cli.Request) (report.Report, error) {
+	result, err := service.run(ctx, root, request)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return report.Report{}, err
+		}
+		result = infrastructureErrorReport(result, request, err)
+		if writeErr := WriteReports(root, result); writeErr != nil {
+			return result, errors.Join(err, writeErr)
+		}
+		return result, err
+	}
+	if err := WriteReports(root, result); err != nil {
+		return report.Report{}, err
+	}
+	return result, nil
+}
+
+func infrastructureErrorReport(partial report.Report, request cli.Request, cause error) report.Report {
+	result := partial
+	result.Schema = report.SchemaV1
+	result.Verdict = report.VerdictError
+	if result.Contract == "" {
+		result.Contract = request.Contract
+	}
+	result.Findings = append(result.Findings, report.Finding{
+		ID:      report.FindingID("infrastructure", "assurance-run"),
+		Kind:    "infrastructure",
+		Summary: cause.Error(),
+	})
+	result.ResidualRisks = append(result.ResidualRisks, "assurance stopped before the contract could be completed")
+	return result
 }
 
 func (service Service) run(ctx context.Context, root string, request cli.Request) (report.Report, error) {

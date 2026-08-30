@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	GoMutantsVersion = "v0.1.2"
+	GoMutantsVersion = "v0.1.3-0.20260830081807-df41b68c0c1e"
 	maximumRounds    = 3
 )
 
