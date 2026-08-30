@@ -48,8 +48,9 @@ func TestRunCoordinatorClosesRoundOnPrepareMutationGenerationAndCloseFailures(t 
 			harness := newRunCoordinatorHarness(t)
 			test.change(harness)
 			result, err := harness.run(Options{})
-			if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != 1 {
-				t.Fatalf("run = (%+v, %v), manager=%d workspace=%d", result, err, harness.manager.calls, harness.workspaceCloses)
+			if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != 1 ||
+				harness.buildGraphCalls != 1 || harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 {
+				t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 			}
 		})
 	}
@@ -120,7 +121,8 @@ func TestRunCoordinatorStopsAtThreeRepairRoundsWithExplicitFinding(t *testing.T)
 	result, err := harness.run(Options{})
 	if err != nil || result.Verdict != report.VerdictInsufficient || len(result.Repairs) != maximumRounds || len(result.Findings) != 1 ||
 		result.Findings[0].Kind != "repair-round-limit" || harness.openCalls != maximumRounds || harness.workspaceCloses != maximumRounds || harness.manager.calls != maximumRounds ||
-		harness.generationCalls != 0 || len(harness.cache.puts) != 0 || harness.buildGraphCalls != 0 {
+		harness.generationCalls != 0 || len(harness.cache.puts) != 0 || harness.buildGraphCalls != maximumRounds ||
+		harness.mergeGraphCalls != maximumRounds || harness.saveGraphCalls != maximumRounds {
 		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 	}
 }
@@ -137,7 +139,8 @@ func TestRunCoordinatorRejectsFinalInputErrorsAndRepositoryDrift(t *testing.T) {
 			return harness.inputs, harness.digest, nil
 		}
 		result, err := harness.run(Options{})
-		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.workspaceCloses != 1 || harness.inputCalls != 2 {
+		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.workspaceCloses != 1 || harness.inputCalls != 2 ||
+			harness.buildGraphCalls != 1 || harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 {
 			t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 		}
 	})
@@ -151,20 +154,22 @@ func TestRunCoordinatorRejectsFinalInputErrorsAndRepositoryDrift(t *testing.T) {
 			return harness.inputs, harness.digest, nil
 		}
 		result, err := harness.run(Options{})
-		if err == nil || !strings.Contains(err.Error(), "repository changed") || !reflect.DeepEqual(result, report.Report{}) || harness.buildGraphCalls != 0 || len(harness.cache.puts) != 0 {
+		if err == nil || !strings.Contains(err.Error(), "repository changed") || !reflect.DeepEqual(result, report.Report{}) ||
+			harness.buildGraphCalls != 1 || harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 || len(harness.cache.puts) != 0 {
 			t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 		}
 	})
 }
 
-func TestRunCoordinatorReportsResidualRiskWithoutWritingAssuredGraph(t *testing.T) {
+func TestRunCoordinatorReportsResidualRiskAfterCheckpointingImpactGraph(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
 	finding := report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "gap"}
 	harness.mutation.Findings = []report.Finding{finding}
 	harness.generation.Findings = []report.Finding{finding}
 	result, err := harness.run(Options{})
 	if err != nil || result.Verdict != report.VerdictInsufficient || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) ||
-		!reflect.DeepEqual(result.ResidualRisks, []string{"unresolved mutation evidence gaps remain"}) || harness.buildGraphCalls != 0 || harness.mergeGraphCalls != 0 || harness.saveGraphCalls != 0 || len(harness.cache.puts) != 1 {
+		!reflect.DeepEqual(result.ResidualRisks, []string{"unresolved mutation evidence gaps remain"}) || harness.buildGraphCalls != 1 ||
+		harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 || len(harness.cache.puts) != 1 {
 		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 	}
 }

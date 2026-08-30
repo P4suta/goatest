@@ -227,6 +227,18 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 			return baseReport, nil
 		}
+		currentGraph, err := dependencies.buildGraph(root, metadata.model, baseline.Targets)
+		if err != nil {
+			_ = closeRound()
+			return report.Report{}, err
+		}
+		currentGraph = dependencies.mergeGraph(currentGraph, selection.prior, selection)
+		if err := dependencies.saveGraph(filepath.Join(root, ".goatest", "graph-v1.json"), evidence.GraphRecord{
+			ModulePath: metadata.model.ModulePath, Graph: currentGraph,
+		}); err != nil {
+			_ = closeRound()
+			return report.Report{}, err
+		}
 		concurrentPackages, err := dependencies.concurrencyPackages(root, metadata.model.Packages)
 		if err != nil {
 			_ = closeRound()
@@ -332,18 +344,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		} else {
 			result.Verdict = report.VerdictInsufficient
 			result.ResidualRisks = []string{"unresolved mutation evidence gaps remain"}
-		}
-		if result.Verdict == report.VerdictAssured {
-			currentGraph, graphErr := dependencies.buildGraph(root, metadata.model, baseline.Targets)
-			if graphErr != nil {
-				return report.Report{}, graphErr
-			}
-			currentGraph = dependencies.mergeGraph(currentGraph, selection.prior, selection)
-			if graphErr := dependencies.saveGraph(filepath.Join(root, ".goatest", "graph-v1.json"), evidence.GraphRecord{
-				ModulePath: metadata.model.ModulePath, Graph: currentGraph,
-			}); graphErr != nil {
-				return report.Report{}, graphErr
-			}
 		}
 		if err := cacheStore.Put(finalDigest, result); err != nil {
 			return report.Report{}, err
