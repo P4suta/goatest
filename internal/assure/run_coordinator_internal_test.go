@@ -295,9 +295,10 @@ func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
 		{ID: "selected-a", Accepted: true},
 		{ID: "changed-out", Accepted: false},
 		{ID: "selected-b", Accepted: true},
+		{ID: "selected-c", Accepted: true},
 	}}
-	if got := mutationTargetCount(catalog, ""); got != 2 {
-		t.Fatalf("mutationTargetCount = %d, want 2", got)
+	if got := mutationTargetCount(catalog, ""); got != 3 {
+		t.Fatalf("mutationTargetCount = %d, want 3", got)
 	}
 	if got := mutationTargetCount(catalog, "selected-a"); got != 1 {
 		t.Fatalf("replay mutationTargetCount = %d, want 1", got)
