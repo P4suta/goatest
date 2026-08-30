@@ -54,6 +54,18 @@ type Client struct {
 	Timeout time.Duration
 }
 
+type generationProcessTree interface {
+	Kill() error
+	Close() error
+}
+
+var (
+	marshalGenerationRequest = json.Marshal
+	startGenerationProcess   = func(command *exec.Cmd) (generationProcessTree, error) {
+		return processtree.Start(command)
+	}
+)
+
 func (client Client) Generate(parent context.Context, request Request) (Response, error) {
 	if len(client.Command) == 0 || strings.TrimSpace(client.Command[0]) == "" {
 		return Response{}, errors.New("goatest: generation provider has no command")
@@ -67,7 +79,7 @@ func (client Client) Generate(parent context.Context, request Request) (Response
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	input, err := json.Marshal(request)
+	input, err := marshalGenerationRequest(request)
 	if err != nil {
 		return Response{}, err
 	}
@@ -76,7 +88,7 @@ func (client Client) Generate(parent context.Context, request Request) (Response
 	stdout := &limitedBuffer{remaining: outputLimit}
 	stderr := &limitedBuffer{remaining: outputLimit}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	tree, err := processtree.Start(cmd)
+	tree, err := startGenerationProcess(cmd)
 	if err != nil {
 		return Response{}, fmt.Errorf("goatest: generation provider start: %w", err)
 	}
@@ -122,10 +134,8 @@ type limitedBuffer struct {
 
 func (buffer *limitedBuffer) Write(data []byte) (int, error) {
 	if len(data) > buffer.remaining {
-		if buffer.remaining > 0 {
-			_, _ = buffer.buffer.Write(data[:buffer.remaining])
-			buffer.remaining = 0
-		}
+		_, _ = buffer.buffer.Write(data[:buffer.remaining])
+		buffer.remaining = 0
 		return 0, errors.New("goatest: provider output exceeded limit")
 	}
 	buffer.remaining -= len(data)

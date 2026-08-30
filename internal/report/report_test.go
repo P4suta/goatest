@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,14 +35,8 @@ func fixture() report.Report {
 }
 
 func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
-	first, err := report.JSON(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := report.JSON(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := report.JSON(fixture())
+	second := report.JSON(fixture())
 	if !bytes.Equal(first, second) {
 		t.Fatal("JSON bytes changed for the same report")
 	}
@@ -59,6 +54,54 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 		"RISK z risk\n"
 	if got := report.Lines(fixture()); got != want {
 		t.Errorf("lines =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestCanonicalReportDefaultsSchemaPreservesExplicitSchemaAndOrdersEveryCollection(t *testing.T) {
+	input := report.Report{
+		Evidence: []report.Evidence{
+			{Kind: "z-kind", ID: "a-id"},
+			{Kind: "a-kind", ID: "z-id"},
+			{Kind: "a-kind", ID: "a-id"},
+		},
+		Findings: []report.Finding{{ID: "z-finding"}, {ID: "a-finding"}, {ID: "m-finding"}},
+		Repairs:  []report.Repair{{ID: "z-repair"}, {ID: "a-repair"}, {ID: "m-repair"}},
+	}
+	var canonical report.Report
+	if err := json.Unmarshal(report.JSON(input), &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Schema != report.SchemaV1 {
+		t.Fatalf("default schema = %q", canonical.Schema)
+	}
+	wantEvidence := []report.Evidence{
+		{Kind: "a-kind", ID: "a-id"},
+		{Kind: "a-kind", ID: "z-id"},
+		{Kind: "z-kind", ID: "a-id"},
+	}
+	if !reflect.DeepEqual(canonical.Evidence, wantEvidence) {
+		t.Fatalf("evidence order = %+v, want %+v", canonical.Evidence, wantEvidence)
+	}
+	wantFindings := []string{"a-finding", "m-finding", "z-finding"}
+	for index, want := range wantFindings {
+		if canonical.Findings[index].ID != want {
+			t.Fatalf("finding order = %+v", canonical.Findings)
+		}
+	}
+	wantRepairs := []string{"a-repair", "m-repair", "z-repair"}
+	for index, want := range wantRepairs {
+		if canonical.Repairs[index].ID != want {
+			t.Fatalf("repair order = %+v", canonical.Repairs)
+		}
+	}
+
+	explicit := input
+	explicit.Schema = "future-schema"
+	if err := json.Unmarshal(report.JSON(explicit), &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Schema != "future-schema" {
+		t.Fatalf("explicit schema overwritten with %q", canonical.Schema)
 	}
 }
 
@@ -86,10 +129,7 @@ func TestLineRendererEscapesControlCharactersAndCannotForgeRecords(t *testing.T)
 }
 
 func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
-	html, err := report.HTML(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
+	html := report.HTML(fixture())
 	text := strings.ToLower(string(html))
 	for _, forbidden := range []string{"http://", "https://", "<script src=", "<link rel="} {
 		if strings.Contains(text, forbidden) {
@@ -116,11 +156,8 @@ func TestFindingIDIsStableAndInputSensitive(t *testing.T) {
 }
 
 func TestSARIFJUnitAndSchemaAreDeterministicAndWellFormed(t *testing.T) {
-	firstSARIF, err := report.SARIF(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondSARIF, _ := report.SARIF(fixture())
+	firstSARIF := report.SARIF(fixture())
+	secondSARIF := report.SARIF(fixture())
 	if !bytes.Equal(firstSARIF, secondSARIF) {
 		t.Fatal("SARIF bytes are not deterministic")
 	}
@@ -134,10 +171,7 @@ func TestSARIFJUnitAndSchemaAreDeterministicAndWellFormed(t *testing.T) {
 		t.Fatalf("SARIF = %+v, %v\n%s", sarif, err, firstSARIF)
 	}
 
-	junit, err := report.JUnit(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
+	junit := report.JUnit(fixture())
 	var suite struct {
 		XMLName  xml.Name `xml:"testsuite"`
 		Tests    int      `xml:"tests,attr"`
@@ -147,21 +181,100 @@ func TestSARIFJUnitAndSchemaAreDeterministicAndWellFormed(t *testing.T) {
 		t.Fatalf("JUnit = %+v, %v\n%s", suite, err, junit)
 	}
 
-	schema, err := report.JSONSchema()
-	if err != nil {
-		t.Fatal(err)
-	}
+	schema := report.JSONSchema()
 	var document map[string]any
 	if err := json.Unmarshal(schema, &document); err != nil || document["$id"] != report.SchemaV1 || document["additionalProperties"] != false {
 		t.Fatalf("schema = %+v, %v\n%s", document, err, schema)
 	}
 }
 
-func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) {
-	schemaBytes, err := report.JSONSchema()
-	if err != nil {
+func TestSARIFPreservesRulesLocationsAndPositiveLines(t *testing.T) {
+	input := report.Report{Findings: []report.Finding{
+		{ID: "without-location", Kind: "coverage", Summary: "none"},
+		{ID: "path-only", Kind: "survivor", Path: "path-only.go", Summary: "path"},
+		{ID: "with-line", Kind: "survivor", Path: "line.go", Line: 7, Summary: "line"},
+	}}
+	var document struct {
+		Runs []struct {
+			Tool struct {
+				Driver struct {
+					Rules []struct {
+						ID string `json:"id"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+			Results []struct {
+				Properties map[string]any `json:"properties"`
+				Locations  []struct {
+					Physical struct {
+						Artifact struct {
+							URI string `json:"uri"`
+						} `json:"artifactLocation"`
+						Region *struct {
+							StartLine int `json:"startLine"`
+						} `json:"region"`
+					} `json:"physicalLocation"`
+				} `json:"locations"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(report.SARIF(input), &document); err != nil {
 		t.Fatal(err)
 	}
+	if len(document.Runs) != 1 || len(document.Runs[0].Tool.Driver.Rules) != 2 || document.Runs[0].Tool.Driver.Rules[0].ID != "coverage" || document.Runs[0].Tool.Driver.Rules[1].ID != "survivor" {
+		t.Fatalf("SARIF rules = %+v", document.Runs)
+	}
+	results := make(map[string]struct {
+		locations int
+		uri       string
+		line      int
+		hasRegion bool
+	})
+	for _, result := range document.Runs[0].Results {
+		id, _ := result.Properties["findingId"].(string)
+		entry := struct {
+			locations int
+			uri       string
+			line      int
+			hasRegion bool
+		}{locations: len(result.Locations)}
+		if len(result.Locations) != 0 {
+			entry.uri = result.Locations[0].Physical.Artifact.URI
+			if result.Locations[0].Physical.Region != nil {
+				entry.hasRegion = true
+				entry.line = result.Locations[0].Physical.Region.StartLine
+			}
+		}
+		results[id] = entry
+	}
+	if got := results["without-location"]; got.locations != 0 {
+		t.Fatalf("locationless finding = %+v", got)
+	}
+	if got := results["path-only"]; got.locations != 1 || got.uri != "path-only.go" || got.hasRegion {
+		t.Fatalf("path-only finding = %+v", got)
+	}
+	if got := results["with-line"]; got.locations != 1 || got.uri != "line.go" || !got.hasRegion || got.line != 7 {
+		t.Fatalf("line finding = %+v", got)
+	}
+}
+
+func TestJUnitSanitizesInvalidXMLCharacters(t *testing.T) {
+	junit := report.JUnit(report.Report{Findings: []report.Finding{{ID: "invalid", Kind: "fixture", Summary: "bad\x00xml"}}})
+	if bytes.Contains(junit, []byte{0}) {
+		t.Fatal("JUnit retained an XML-forbidden control character")
+	}
+	var suite junitSuiteFixture
+	if err := xml.Unmarshal(junit, &suite); err != nil {
+		t.Fatalf("sanitized JUnit is not well formed: %v\n%s", err, junit)
+	}
+}
+
+type junitSuiteFixture struct {
+	XMLName xml.Name `xml:"testsuite"`
+}
+
+func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) {
+	schemaBytes := report.JSONSchema()
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
 	if err != nil {
 		t.Fatal(err)
@@ -175,10 +288,7 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid, err := report.JSON(fixture())
-	if err != nil {
-		t.Fatal(err)
-	}
+	valid := report.JSON(fixture())
 	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(valid))
 	if err != nil {
 		t.Fatal(err)
@@ -193,5 +303,16 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	invalid["unknown"] = true
 	if err := compiled.Validate(invalid); err == nil {
 		t.Fatal("unknown report field passed assurance schema")
+	}
+	for _, field := range []string{"evidence", "findings", "repairs"} {
+		var nested map[string]any
+		if err := json.Unmarshal(valid, &nested); err != nil {
+			t.Fatal(err)
+		}
+		items := nested[field].([]any)
+		items[0].(map[string]any)["unknown"] = true
+		if err := compiled.Validate(nested); err == nil {
+			t.Errorf("unknown %s item field passed assurance schema", field)
+		}
 	}
 }

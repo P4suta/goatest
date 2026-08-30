@@ -111,8 +111,15 @@ func TestEvaluateRunsSeedMutantsConcurrentlyAndKeepsCatalogOrder(t *testing.T) {
 	if len(got.result.Evidence) != 2 || got.result.Evidence[0].ID != "mutant-a" || got.result.Evidence[1].ID != "mutant-b" {
 		t.Fatalf("evidence order = %+v", got.result.Evidence)
 	}
-	if first, second := <-progress, <-progress; first != 1 || second != 2 {
-		t.Fatalf("progress = [%d %d], want [1 2]", first, second)
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-progress:
+			if got != want {
+				t.Fatalf("progress %d = %d, want %d", want, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for progress %d", want)
+		}
 	}
 }
 
@@ -145,6 +152,61 @@ func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
 	}
 	if strings.Join(request.Env, " ") != "DB_URL=fixture" {
 		t.Fatalf("request env = %v", request.Env)
+	}
+}
+
+func TestEvaluateTriesTheShortestMeasuredReachingTargetFirst(t *testing.T) {
+	mutant := acceptedMutant()
+	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
+	}
+	targets := []assure.TargetEvidence{
+		{Target: target("TestSlowE2E", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: 90 * time.Second},
+		{Target: target("TestUnknownDuration", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}},
+		{Target: target("TestFastUnit", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: 25 * time.Millisecond},
+	}
+	_, err := assure.EvaluateMutations(t.Context(), session, targets, assure.MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || !hasArg(session.requests[0].Args, "-test.run=^TestFastUnit$") {
+		t.Fatalf("requests = %+v, want only the shortest measured target", session.requests)
+	}
+}
+
+func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
+	mutant := acceptedMutant()
+	for _, testCase := range []struct {
+		name     string
+		contract string
+		duration time.Duration
+		override time.Duration
+		want     time.Duration
+	}{
+		{name: "minimum", contract: "standard-v1", duration: time.Second, want: 30 * time.Second},
+		{name: "measured", contract: "standard-v1", duration: 12 * time.Second, want: 65 * time.Second},
+		{name: "standard-cap", contract: "standard-v1", duration: 10 * time.Minute, want: 30 * time.Minute},
+		{name: "deep-cap", contract: "deep-v1", duration: 2 * time.Hour, want: 5 * time.Hour},
+		{name: "explicit-override", contract: "standard-v1", duration: time.Hour, override: 7 * time.Second, want: 7 * time.Second},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+			session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
+			}
+			_, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
+				Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: testCase.duration,
+			}}, assure.MutationOptions{Root: t.TempDir(), Contract: testCase.contract, Timeout: testCase.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(session.requests) != 1 || session.requests[0].Timeout != testCase.want {
+				t.Fatalf("requests = %+v, want timeout %s", session.requests, testCase.want)
+			}
+		})
 	}
 }
 

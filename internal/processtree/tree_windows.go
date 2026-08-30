@@ -16,31 +16,43 @@ import (
 
 type platformHandle windows.Handle
 
+var (
+	createWindowsJobObject   = windows.CreateJobObject
+	setWindowsJobInformation = func(job windows.Handle, class uint32, information *windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION, length uint32) (int, error) {
+		return windows.SetInformationJobObject(job, class, uintptr(unsafe.Pointer(information)), length)
+	}
+	openWindowsProcess        = windows.OpenProcess
+	assignWindowsProcessToJob = windows.AssignProcessToJobObject
+	closeWindowsHandle        = windows.CloseHandle
+	terminateWindowsJob       = windows.TerminateJobObject
+	killWindowsProcess        = func(process *os.Process) error { return process.Kill() }
+)
+
 func prepare(*exec.Cmd) {}
 
 func attach(command *exec.Cmd) (platformHandle, error) {
-	job, err := windows.CreateJobObject(nil, nil)
+	job, err := createWindowsJobObject(nil, nil)
 	if err != nil {
 		return 0, err
 	}
 	information := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	information.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-	if _, err := windows.SetInformationJobObject(
+	if _, err := setWindowsJobInformation(
 		job, windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&information)), uint32(unsafe.Sizeof(information)),
+		&information, uint32(unsafe.Sizeof(information)),
 	); err != nil {
-		_ = windows.CloseHandle(job)
+		_ = closeWindowsHandle(job)
 		return 0, err
 	}
-	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(command.Process.Pid))
+	process, err := openWindowsProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(command.Process.Pid))
 	if err != nil {
-		_ = windows.CloseHandle(job)
+		_ = closeWindowsHandle(job)
 		return 0, err
 	}
-	err = windows.AssignProcessToJobObject(job, process)
-	_ = windows.CloseHandle(process)
+	err = assignWindowsProcessToJob(job, process)
+	_ = closeWindowsHandle(process)
 	if err != nil {
-		_ = windows.CloseHandle(job)
+		_ = closeWindowsHandle(job)
 		return 0, err
 	}
 	return platformHandle(job), nil
@@ -49,10 +61,10 @@ func attach(command *exec.Cmd) (platformHandle, error) {
 func kill(command *exec.Cmd, handle platformHandle) error {
 	var result error
 	if handle != 0 {
-		result = windows.TerminateJobObject(windows.Handle(handle), 1)
+		result = terminateWindowsJob(windows.Handle(handle), 1)
 	}
 	if command.Process != nil {
-		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := killWindowsProcess(command.Process); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			result = errors.Join(result, err)
 		}
 	}
@@ -63,5 +75,5 @@ func closeTree(_ *exec.Cmd, handle platformHandle) error {
 	if handle == 0 {
 		return nil
 	}
-	return windows.CloseHandle(windows.Handle(handle))
+	return closeWindowsHandle(windows.Handle(handle))
 }

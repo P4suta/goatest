@@ -71,6 +71,26 @@ type rawAcceptance struct {
 	Expires string `toml:"expires"`
 }
 
+type configWritableFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Chmod(os.FileMode) error
+	Close() error
+}
+
+var (
+	openConfigFile = func(name string, flag int, mode os.FileMode) (configWritableFile, error) {
+		return os.OpenFile(name, flag, mode)
+	}
+	createConfigTemp = func(directory, pattern string) (configWritableFile, error) {
+		return os.CreateTemp(directory, pattern)
+	}
+	marshalConfig    = toml.Marshal
+	removeConfigFile = os.Remove
+	renameConfigFile = os.Rename
+)
+
 func defaults() Config {
 	return Config{Version: 1, Contract: "standard-v1", Resources: map[string]Resource{}}
 }
@@ -115,7 +135,10 @@ func Load(root string) (Config, error) {
 		timeout := 30 * time.Second
 		if rawResource.Timeout != "" {
 			parsed, parseErr := time.ParseDuration(rawResource.Timeout)
-			if parseErr != nil || parsed <= 0 {
+			if parseErr != nil {
+				return Config{}, fmt.Errorf("goatest: resource %q timeout %q is invalid: %w", name, rawResource.Timeout, parseErr)
+			}
+			if parsed <= 0 {
 				return Config{}, fmt.Errorf("goatest: resource %q timeout %q is not positive", name, rawResource.Timeout)
 			}
 			timeout = parsed
@@ -149,7 +172,7 @@ func Load(root string) (Config, error) {
 // existing file.
 func Init(root string) error {
 	path := filepath.Join(root, FileName)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	file, err := openConfigFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("goatest: %s already exists", FileName)
@@ -159,16 +182,16 @@ func Init(root string) error {
 	data := []byte("version = 1\ncontract = \"standard-v1\"\n")
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		_ = os.Remove(path)
+		_ = removeConfigFile(path)
 		return err
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		_ = os.Remove(path)
+		_ = removeConfigFile(path)
 		return err
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
+		_ = removeConfigFile(path)
 		return err
 	}
 	return nil
@@ -213,17 +236,17 @@ func save(root string, input Config) error {
 			ID: acceptance.ID, Reason: acceptance.Reason, Expires: acceptance.Expires.UTC().Format(time.RFC3339),
 		})
 	}
-	data, err := toml.Marshal(raw)
+	data, err := marshalConfig(raw)
 	if err != nil {
 		return fmt.Errorf("goatest: encode %s: %w", FileName, err)
 	}
 	path := filepath.Join(root, FileName)
-	temporary, err := os.CreateTemp(root, ".goatest-config-*.tmp")
+	temporary, err := createConfigTemp(root, ".goatest-config-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
+	defer func() { _ = removeConfigFile(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -239,11 +262,11 @@ func save(root string, input Config) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := renameConfigFile(temporaryPath, path); err != nil {
+		if removeErr := removeConfigFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		return os.Rename(temporaryPath, path)
+		return renameConfigFile(temporaryPath, path)
 	}
 	return nil
 }

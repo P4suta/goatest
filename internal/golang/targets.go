@@ -42,10 +42,7 @@ type Target struct {
 func DiscoverTargets(root string, packages []Package) ([]Target, error) {
 	var targets []Target
 	for _, pkg := range packages {
-		directory := root
-		if pkg.RelativeDir != "." {
-			directory = filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
-		}
+		directory := filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))
 		entries, err := os.ReadDir(directory)
 		if err != nil {
 			return nil, fmt.Errorf("goatest: read package %s: %w", pkg.ImportPath, err)
@@ -70,10 +67,7 @@ func DiscoverTargets(root string, packages []Package) ([]Target, error) {
 				if !ok || !testingSignature(function, testingAliases, kind) {
 					continue
 				}
-				relativePath := entry.Name()
-				if pkg.RelativeDir != "." {
-					relativePath = pkg.RelativeDir + "/" + entry.Name()
-				}
+				relativePath := filepath.ToSlash(filepath.Join(filepath.FromSlash(pkg.RelativeDir), entry.Name()))
 				line := fset.Position(function.Pos()).Line
 				targets = append(targets, Target{
 					ID:   TargetID(pkg.ImportPath, function.Name.Name, kind, relativePath, line),
@@ -98,10 +92,7 @@ func aliases(file *ast.File) (map[string]bool, map[string]bool) {
 	testingAliases := make(map[string]bool)
 	goatestAliases := make(map[string]bool)
 	for _, imported := range file.Imports {
-		path, err := strconv.Unquote(imported.Path.Value)
-		if err != nil {
-			continue
-		}
+		path, _ := strconv.Unquote(imported.Path.Value)
 		name := filepath.Base(path)
 		if imported.Name != nil {
 			name = imported.Name.Name
@@ -140,7 +131,11 @@ func testingSignature(function *ast.FuncDecl, testingAliases map[string]bool, ki
 	if function.Type.Params == nil || len(function.Type.Params.List) != 1 || function.Type.Results != nil && len(function.Type.Results.List) != 0 {
 		return false
 	}
-	pointer, ok := function.Type.Params.List[0].Type.(*ast.StarExpr)
+	parameter := function.Type.Params.List[0]
+	if len(parameter.Names) > 1 {
+		return false
+	}
+	pointer, ok := parameter.Type.(*ast.StarExpr)
 	if !ok {
 		return false
 	}
@@ -160,30 +155,41 @@ func testingSignature(function *ast.FuncDecl, testingAliases map[string]bool, ki
 }
 
 func capability(body *ast.BlockStmt, goatestAliases map[string]bool) string {
-	var found string
-	ast.Inspect(body, func(node ast.Node) bool {
-		if found != "" {
-			return false
-		}
-		call, ok := node.(*ast.CallExpr)
-		if !ok || len(call.Args) < 2 || !selectorIs(call.Fun, goatestAliases, "Run", "Check") {
-			return true
-		}
-		scope, ok := call.Args[1].(*ast.CallExpr)
-		if !ok || len(scope.Args) != 1 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
-			return true
-		}
-		literal, ok := scope.Args[0].(*ast.BasicLit)
-		if !ok || literal.Kind != token.STRING {
-			return true
-		}
-		value, err := strconv.Unquote(literal.Value)
-		if err == nil {
-			found = value
-		}
-		return true
-	})
-	return found
+	visitor := &capabilityVisitor{aliases: goatestAliases}
+	ast.Walk(visitor, body)
+	if len(visitor.values) == 0 {
+		return ""
+	}
+	return visitor.values[0]
+}
+
+type capabilityVisitor struct {
+	aliases map[string]bool
+	values  []string
+}
+
+func (visitor *capabilityVisitor) Visit(node ast.Node) ast.Visitor {
+	if value, ok := integrationCapability(node, visitor.aliases); ok {
+		visitor.values = append(visitor.values, value)
+	}
+	return visitor
+}
+
+func integrationCapability(node ast.Node, goatestAliases map[string]bool) (string, bool) {
+	call, ok := node.(*ast.CallExpr)
+	if !ok || len(call.Args) != 3 || !selectorIs(call.Fun, goatestAliases, "Run", "Check") {
+		return "", false
+	}
+	scope, ok := call.Args[1].(*ast.CallExpr)
+	if !ok || len(scope.Args) != 1 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
+		return "", false
+	}
+	literal, ok := scope.Args[0].(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return "", false
+	}
+	value, _ := strconv.Unquote(literal.Value)
+	return value, true
 }
 
 func selectorIs(expression ast.Expr, aliases map[string]bool, names ...string) bool {

@@ -25,6 +25,8 @@ type PrepareOptions struct {
 	Operators     []string
 	Include       []string
 	Exclude       []string
+	Changed       bool
+	ChangedRef    string
 	Packages      []string
 	Jobs          int
 	BuildTimeout  time.Duration
@@ -34,7 +36,17 @@ type PrepareOptions struct {
 	VerifyTimeout time.Duration
 }
 
-type Workspace struct{ inner *gomutants.Workspace }
+type mutationWorkspace interface {
+	Exec(context.Context, gomutants.Command) (gomutants.CommandResult, error)
+	Prepare(context.Context, gomutants.PrepareOptions) (*gomutants.Session, error)
+	Close() error
+}
+
+type Workspace struct{ inner mutationWorkspace }
+
+var openMutationWorkspace = func(ctx context.Context, root string, options gomutants.OpenOptions) (mutationWorkspace, error) {
+	return gomutants.Open(ctx, root, options)
+}
 
 func Profile(contract string) (string, error) {
 	switch contract {
@@ -48,11 +60,11 @@ func Profile(contract string) (string, error) {
 }
 
 func Open(ctx context.Context, root string, options Options) (*Workspace, error) {
-	inner, err := gomutants.Open(ctx, root, gomutants.OpenOptions{
+	inner, err := openMutationWorkspace(ctx, root, gomutants.OpenOptions{
 		GoBinary:        options.GoBinary,
 		TempDirectory:   options.TempDirectory,
 		ReportDirectory: options.ReportDirectory,
-		Env:             options.Environment,
+		Env:             append([]string(nil), options.Environment...),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("goatest: open mutation workspace: %w", err)
@@ -80,6 +92,8 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 		Operators:     append([]string(nil), options.Operators...),
 		Include:       append([]string(nil), options.Include...),
 		Exclude:       append([]string(nil), options.Exclude...),
+		Changed:       options.Changed,
+		ChangedRef:    options.ChangedRef,
 		Packages:      append([]string(nil), options.Packages...),
 		Jobs:          options.Jobs,
 		BuildTimeout:  options.BuildTimeout,

@@ -22,12 +22,8 @@ func StateMachine[S any](initial S, steps []MachineStep[S], minimum, maximum int
 	if len(steps) == 0 {
 		panic("gen: StateMachine requires at least one step")
 	}
-	if minimum < 0 {
-		minimum = 0
-	}
-	if maximum < minimum {
-		maximum = minimum
-	}
+	minimum = max(minimum, 0)
+	maximum = max(maximum, minimum)
 	lengths := IntRange(minimum, maximum)
 	build := func(commands []string) MachineTrace[S] {
 		state := initial
@@ -73,7 +69,7 @@ func StateMachine[S any](initial S, steps []MachineStep[S], minimum, maximum int
 			seen := make(map[int]bool, len(lengths))
 			shrinks := make([]MachineTrace[S], 0, len(lengths))
 			for _, length := range lengths {
-				if length >= len(trace.Commands) || seen[length] {
+				if seen[length] {
 					continue
 				}
 				seen[length] = true

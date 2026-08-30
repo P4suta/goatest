@@ -17,7 +17,7 @@ func CoverageFiles(profile []byte, modulePath string) ([]string, error) {
 	if !scanner.Scan() || !strings.HasPrefix(scanner.Text(), "mode: ") {
 		return nil, fmt.Errorf("goatest: coverage profile has no mode header")
 	}
-	files := make(map[string]bool)
+	files := make(map[string]struct{})
 	lines := 0
 	for scanner.Scan() {
 		lines++
@@ -39,7 +39,7 @@ func CoverageFiles(profile []byte, modulePath string) ([]string, error) {
 			return nil, fmt.Errorf("goatest: coverage path %q is outside module %q", path, modulePath)
 		}
 		if count > 0 {
-			files[strings.TrimPrefix(path, prefix)] = true
+			files[strings.TrimPrefix(path, prefix)] = struct{}{}
 		}
 	}
 	if err := scanner.Err(); err != nil {

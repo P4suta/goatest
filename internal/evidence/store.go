@@ -21,8 +21,27 @@ type GraphRecord struct {
 	Graph      Graph  `json:"graph"`
 }
 
+type evidenceWritableFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+var (
+	readGraphFile      = os.ReadFile
+	unmarshalGraphJSON = json.Unmarshal
+	marshalGraphRecord = json.MarshalIndent
+	mkdirGraphAll      = os.MkdirAll
+	createGraphTemp    = func(directory, pattern string) (evidenceWritableFile, error) {
+		return os.CreateTemp(directory, pattern)
+	}
+	removeGraphFile = os.Remove
+	renameGraphFile = os.Rename
+)
+
 func LoadGraph(path string) (GraphRecord, bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readGraphFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return GraphRecord{}, false, nil
 	}
@@ -54,24 +73,24 @@ func SaveGraph(path string, record GraphRecord) error {
 		return err
 	}
 	var canonicalGraph Graph
-	if err := json.Unmarshal(graphData, &canonicalGraph); err != nil {
+	if err := unmarshalGraphJSON(graphData, &canonicalGraph); err != nil {
 		return err
 	}
 	record.Graph = canonicalGraph
-	data, err := json.MarshalIndent(record, "", "  ")
+	data, err := marshalGraphRecord(record, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := mkdirGraphAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".graph-*.tmp")
+	temporary, err := createGraphTemp(filepath.Dir(path), ".graph-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
+	defer func() { _ = removeGraphFile(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -83,11 +102,11 @@ func SaveGraph(path string, record GraphRecord) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := renameGraphFile(temporaryPath, path); err != nil {
+		if removeErr := removeGraphFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		return os.Rename(temporaryPath, path)
+		return renameGraphFile(temporaryPath, path)
 	}
 	return nil
 }

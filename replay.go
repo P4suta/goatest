@@ -62,7 +62,7 @@ func ShrinkReplayToken(token string) ([]string, error) {
 	seen := make(map[int]bool, len(lengths))
 	tokens := make([]string, 0, len(lengths))
 	for _, length := range lengths {
-		if length < 0 || length >= len(replay.Input) || seen[length] {
+		if seen[length] {
 			continue
 		}
 		seen[length] = true

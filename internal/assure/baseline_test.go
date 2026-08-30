@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
@@ -38,7 +39,7 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 				}
 			}
 		}
-		return gomutants.CommandResult{}
+		return gomutants.CommandResult{Duration: 1375 * time.Millisecond}
 	}
 	model := goanalysis.Model{ModulePath: "fixture.example/module", Packages: []goanalysis.Package{{
 		ImportPath: "fixture.example/module", RelativeDir: ".", Dependencies: []string{"fmt"},
@@ -58,6 +59,9 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 	for _, target := range result.Targets {
 		if strings.Join(target.CoveredFiles, ",") != "boundary.go" {
 			t.Errorf("coverage for %s = %v", target.Target.Name, target.CoveredFiles)
+		}
+		if target.Duration != 1375*time.Millisecond {
+			t.Errorf("baseline duration for %s = %s", target.Target.Name, target.Duration)
 		}
 	}
 	compileCount := 0

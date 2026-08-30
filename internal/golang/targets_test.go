@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	gotest "github.com/P4suta/goatest/internal/golang"
@@ -62,4 +63,81 @@ func TestTargetIDsMoveWithSemanticLocationNotDiscoveryOrder(t *testing.T) {
 	if one != two || one == other || len(one) != 16 {
 		t.Fatalf("ids = %q %q %q", one, two, other)
 	}
+}
+
+func TestDiscoverTargetsCanonicalizesPackagesAndFiltersNonTargets(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "a/a_test.go", `package a
+import std "testing"
+var declaration = 1
+type suite struct{}
+func (suite) TestMethod(t *std.T) {}
+func TestDeclaration(t *std.T)
+func TestSame(t *std.T) {}
+func Testlower(t *std.T) {}
+func TestWrong(t std.T) {}
+`)
+	writeGo(t, root, "a/looks.go", "package a\nimport \"testing\"\nfunc TestHidden(t *testing.T) {}\n")
+	writeGo(t, root, "a/ignored_test.go/nested_test.go", "package ignored\nimport \"testing\"\nfunc TestHidden(t *testing.T) {}\n")
+	writeGo(t, root, "b/b_test.go", "package b\nimport \"testing\"\nfunc TestSame(t *testing.T) {}\n")
+
+	packages := []gotest.Package{
+		{ImportPath: "example.com/sample/b", RelativeDir: "b", Dependencies: []string{"dep/b"}},
+		{ImportPath: "example.com/sample/a", RelativeDir: "a", Dependencies: []string{"dep/a"}},
+	}
+	targets, err := gotest.DiscoverTargets(root, packages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	for index, wantPackage := range []string{"example.com/sample/a", "example.com/sample/b"} {
+		target := targets[index]
+		wantPath := string('a'+rune(index)) + "/" + string('a'+rune(index)) + "_test.go"
+		if target.Name != "TestSame" || target.Kind != gotest.KindTest || target.Package != wantPackage || target.RelativeDir != string('a'+rune(index)) || target.Path != wantPath || target.Line <= 0 {
+			t.Errorf("target[%d] = %+v", index, target)
+		}
+		if target.ID != gotest.TargetID(target.Package, target.Name, target.Kind, target.Path, target.Line) {
+			t.Errorf("target[%d] ID = %q", index, target.ID)
+		}
+	}
+	packages[0].Dependencies[0] = "mutated"
+	if !slices.Equal(targets[1].Dependencies, []string{"dep/b"}) {
+		t.Fatalf("target dependencies alias input: %v", targets[1].Dependencies)
+	}
+}
+
+func TestDiscoverTargetsTreatsEmptyRelativeDirectoryAsRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "root_test.go", "package root\nimport \"testing\"\nfunc TestRoot(t *testing.T) {}\n")
+	targets, err := gotest.DiscoverTargets(root, []gotest.Package{{ImportPath: "example.com/sample", RelativeDir: ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Path != "root_test.go" {
+		t.Fatalf("targets = %+v", targets)
+	}
+}
+
+func TestDiscoverTargetsReportsDirectoryAndParseFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("directory", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := gotest.DiscoverTargets(root, []gotest.Package{{ImportPath: "example.com/missing", RelativeDir: "missing"}})
+		if err == nil || !strings.HasPrefix(err.Error(), "goatest: read package example.com/missing: ") {
+			t.Fatalf("DiscoverTargets error = %v", err)
+		}
+	})
+	t.Run("parse", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "broken_test.go")
+		writeGo(t, root, "broken_test.go", "package broken\nfunc TestBroken(")
+		_, err := gotest.DiscoverTargets(root, []gotest.Package{{ImportPath: "example.com/broken", RelativeDir: "."}})
+		if err == nil || !strings.HasPrefix(err.Error(), "goatest: parse "+path+": ") {
+			t.Fatalf("DiscoverTargets error = %v", err)
+		}
+	})
 }

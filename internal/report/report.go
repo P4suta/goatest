@@ -100,12 +100,10 @@ func canonical(input Report) Report {
 }
 
 // JSON returns canonical indented assurance-report-v1 bytes with one newline.
-func JSON(input Report) ([]byte, error) {
-	data, err := json.MarshalIndent(canonical(input), "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
+// Report contains only JSON-native fields, so encoding cannot fail.
+func JSON(input Report) []byte {
+	data, _ := json.MarshalIndent(canonical(input), "", "  ")
+	return append(data, '\n')
 }
 
 // Lines is the deterministic renderer used by terminals, pipes, and CI.
@@ -178,13 +176,12 @@ h1{letter-spacing:.04em}.meta{color:#52606d}table{border-collapse:collapse;width
 {{range .Repairs}}<tr><td><code>{{.ID}}</code></td><td><code>{{.Finding}}</code></td><td>{{.Path}}</td><td>{{.Status}}</td></tr>{{end}}
 </tbody></table><h2>Residual risks</h2><ul>{{range .ResidualRisks}}<li>{{.}}</li>{{end}}</ul></body></html>`))
 
-// HTML renders one self-contained offline document.
-func HTML(input Report) ([]byte, error) {
+// HTML renders one self-contained offline document. The template is parsed at
+// initialization and bytes.Buffer writes cannot fail.
+func HTML(input Report) []byte {
 	var output bytes.Buffer
-	if err := page.Execute(&output, canonical(input)); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
+	_ = page.Execute(&output, canonical(input))
+	return output.Bytes()
 }
 
 // FindingID returns a stable 16-hex display identity over length-prefixed

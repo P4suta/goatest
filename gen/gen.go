@@ -4,7 +4,7 @@
 // Package gen provides typed deterministic generators and shrinkers.
 package gen
 
-import "strconv"
+import "cmp"
 
 // Source supplies deterministic choices. goatest.T implements Source, keeping
 // this package independent from testing and from the goatest root package.
@@ -28,9 +28,7 @@ func (g generator[T]) Shrink(value T) []T       { return g.shrink(value) }
 
 // IntRange generates an integer in the inclusive [minimum, maximum] range.
 func IntRange(minimum, maximum int) Generator[int] {
-	if maximum < minimum {
-		minimum, maximum = maximum, minimum
-	}
+	minimum, maximum = min(minimum, maximum), max(minimum, maximum)
 	width := intRangeWidth(minimum, maximum)
 	return generator[int]{
 		generate: func(source Source) int {
@@ -38,53 +36,27 @@ func IntRange(minimum, maximum int) Generator[int] {
 			if width != 0 {
 				choice %= width
 			}
-			if strconv.IntSize == 32 {
-				return int(uint32(uint64(uint32(minimum)) + choice))
-			}
-			return int(uint64(minimum) + choice)
+			return int(uint(minimum) + uint(choice))
 		},
 		shrink: func(value int) []int { return shrinkIntRange(value, minimum, maximum) },
 	}
 }
 
 func intRangeWidth(minimum, maximum int) uint64 {
-	if strconv.IntSize == 32 {
-		return uint64(uint32(maximum)-uint32(minimum)) + 1
-	}
-	difference := uint64(maximum) - uint64(minimum)
-	if difference == ^uint64(0) {
-		return 0
-	}
-	return difference + 1
+	return uint64(uint(maximum)-uint(minimum)) + 1
 }
 
 func shrinkIntRange(value, minimum, maximum int) []int {
-	if value < minimum {
-		value = minimum
-	}
-	if value > maximum {
-		value = maximum
-	}
-	goal := 0
-	if goal < minimum {
-		goal = minimum
-	}
-	if goal > maximum {
-		goal = maximum
-	}
+	value = min(max(value, minimum), maximum)
+	goal := min(max(0, minimum), maximum)
 	if value == goal {
 		return nil
 	}
 	half := value/2 + goal/2
-	toward := value
-	if value > goal {
-		toward--
-	} else {
-		toward++
-	}
+	toward := value + cmp.Compare(goal, value)
 	values := make([]int, 0, 3)
 	for _, candidate := range []int{goal, half, toward} {
-		if candidate < minimum || candidate > maximum || candidate == value {
+		if candidate == value {
 			continue
 		}
 		duplicate := false
@@ -108,12 +80,8 @@ func String() Generator[string] { return StringRange(0, 64) }
 // inclusive range. Lower-case values keep the base generator predictable;
 // callers can use Map when a richer alphabet is useful.
 func StringRange(minimum, maximum int) Generator[string] {
-	if minimum < 0 {
-		minimum = 0
-	}
-	if maximum < minimum {
-		maximum = minimum
-	}
+	minimum = max(minimum, 0)
+	maximum = max(maximum, minimum)
 	lengths := IntRange(minimum, maximum)
 	return generator[string]{
 		generate: func(source Source) string {
@@ -132,7 +100,7 @@ func StringRange(minimum, maximum int) Generator[string] {
 			seen := make(map[int]bool, len(lengths))
 			values := make([]string, 0, len(lengths))
 			for _, length := range lengths {
-				if length < minimum || length >= len(value) || seen[length] {
+				if seen[length] {
 					continue
 				}
 				seen[length] = true

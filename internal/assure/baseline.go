@@ -42,6 +42,11 @@ type BaselineResult struct {
 	Targets  []TargetEvidence
 }
 
+const (
+	defaultBaselineTimeout = 10 * time.Minute
+	maximumSummaryRunes    = 512
+)
+
 // CollectBaseline validates build/vet, compiles exactly one baseline test
 // binary for each package that owns a target, and executes every top-level
 // TestX/FuzzX independently to produce an exact coverage graph.
@@ -57,11 +62,11 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 	}
 	commandTimeout := options.CommandTimeout
 	if commandTimeout <= 0 {
-		commandTimeout = 10 * time.Minute
+		commandTimeout = defaultBaselineTimeout
 	}
 	targetTimeout := options.TargetTimeout
 	if targetTimeout <= 0 {
-		targetTimeout = 10 * time.Minute
+		targetTimeout = defaultBaselineTimeout
 	}
 	var result BaselineResult
 	for _, check := range []struct {
@@ -140,7 +145,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				return BaselineResult{}, fmt.Errorf("goatest: coverage for %s: %w", target.Target.Name, err)
 			}
 			result.Targets = append(result.Targets, TargetEvidence{
-				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment),
+				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment), Duration: first.Duration,
 			})
 			result.Evidence = append(result.Evidence, report.Evidence{
 				Kind: "target", ID: target.Target.ID, Status: "passed", Detail: target.Target.Name,
@@ -172,10 +177,9 @@ func targetCommand(binary, profile, relativeDir string, target BaselineTarget, t
 }
 
 func classifyTargetFailure(attempts []gomutants.CommandResult) (string, string) {
-	firstFailure := attempts[0].TimedOut || attempts[0].ExitCode != 0
 	consistent := true
 	for _, attempt := range attempts[1:] {
-		if (attempt.TimedOut || attempt.ExitCode != 0) != firstFailure || attempt.TimedOut != attempts[0].TimedOut || attempt.ExitCode != attempts[0].ExitCode {
+		if attempt.TimedOut != attempts[0].TimedOut || attempt.ExitCode != attempts[0].ExitCode {
 			consistent = false
 		}
 	}
@@ -201,8 +205,9 @@ func summarize(output []byte) string {
 	if trimmed == "" {
 		return "no output"
 	}
-	if len(trimmed) > 512 {
-		trimmed = trimmed[:512] + "…"
+	runes := []rune(trimmed)
+	if len(runes) > maximumSummaryRunes {
+		return string(runes[:maximumSummaryRunes]) + "…"
 	}
 	return trimmed
 }

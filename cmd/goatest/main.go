@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -21,19 +22,31 @@ func main() {
 }
 
 func realMain(arguments []string) int {
+	return realMainWith(arguments, os.Stdout, os.Stderr, app.Service{Root: ".", Progress: os.Stderr})
+}
+
+func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Service) int {
 	if len(arguments) == 1 && arguments[0] == "--version" {
-		_, _ = fmt.Fprintf(os.Stdout, "goatest %s\n", assure.GoatestVersion)
-		return cli.ExitAssured
+		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.GoatestVersion)
+		return 0
 	}
-	return runWithService(arguments, app.Service{Root: ".", Progress: os.Stderr})
+	return runWithServiceWriters(arguments, service, stdout, stderr)
 }
 
 func runWithService(arguments []string, service cli.Service) int {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	return runWithServiceWriters(arguments, service, os.Stdout, os.Stderr)
+}
+
+func runWithServiceWriters(arguments []string, service cli.Service, stdout, stderr io.Writer) int {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
+	return runWithSignals(arguments, service, signals, stdout, stderr)
+}
+
+func runWithSignals(arguments []string, service cli.Service, signals <-chan os.Signal, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var received atomic.Int32
 	done := make(chan struct{})
 	defer close(done)
@@ -47,7 +60,7 @@ func runWithService(arguments []string, service cli.Service) int {
 		case <-done:
 		}
 	}()
-	code := cli.Run(ctx, arguments, os.Stdout, os.Stderr, service)
+	code := cli.Run(ctx, arguments, stdout, stderr, service)
 	var receivedSignal os.Signal
 	if value := received.Load(); value != 0 {
 		receivedSignal = syscall.Signal(value)

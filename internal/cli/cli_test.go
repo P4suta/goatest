@@ -6,6 +6,7 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -55,8 +56,26 @@ func TestDefaultCommandAndGlobalFlags(t *testing.T) {
 	if !fake.request.Changed || fake.request.ChangedRef != "origin/main" || fake.request.Contract != "deep-v1" || !fake.request.NoApply || !fake.request.JSON || !fake.request.NoTUI {
 		t.Errorf("request = %+v", fake.request)
 	}
-	if stdout.Len() == 0 || stderr.Len() != 0 {
+	var rendered report.Report
+	if err := json.Unmarshal(stdout.Bytes(), &rendered); err != nil || rendered.Verdict != report.VerdictAssured || rendered.Contract != "deep-v1" {
+		t.Fatalf("JSON output = %+v, %v\n%s", rendered, err, stdout.Bytes())
+	}
+	if stderr.Len() != 0 {
 		t.Errorf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
+	changed := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"--changed"}, &bytes.Buffer{}, &bytes.Buffer{}, changed); exit != cli.ExitAssured || !changed.request.Changed || changed.request.ChangedRef != "" {
+		t.Fatalf("bare changed = exit %d request %+v", exit, changed.request)
+	}
+
+	cancelled := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictError}, err: context.Canceled}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if exit := cli.Run(t.Context(), nil, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" || stdout.Len() != 0 {
+		t.Fatalf("cancellation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 
@@ -78,7 +97,10 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 			t.Errorf("%v => %d/%s/%q", test.args, exit, fake.command, fake.id)
 		}
 	}
-	for _, args := range [][]string{{"explain"}, {"accept"}, {"unknown"}, {"--contract=bad"}} {
+	for _, args := range [][]string{
+		{"explain"}, {"accept"}, {"unknown"}, {"--contract=bad"}, {"--unknown"},
+		{"init", "extra"}, {"report", "extra"}, {"replay", ""},
+	} {
 		var stderr bytes.Buffer
 		if exit := cli.Run(t.Context(), args, &bytes.Buffer{}, &stderr, &service{}); exit != cli.ExitError || stderr.Len() == 0 {
 			t.Errorf("%v => exit %d stderr %q", args, exit, stderr.String())
@@ -108,5 +130,36 @@ func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 	}
 	if got, want := stderr.String(), "goatest: failed\\nFINDING forged\\u001b[31m\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestInfrastructureErrorsRenderTheirErrorReportBeforeTheDiagnostic(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lines", true: "json"}[jsonOutput], func(t *testing.T) {
+			result := report.Report{
+				Schema: report.SchemaV1, Verdict: report.VerdictError, Contract: "standard-v1",
+				Findings: []report.Finding{{ID: "infrastructure-error", Kind: "infrastructure", Summary: "workspace failed"}},
+			}
+			fake := &service{report: result, err: errors.New("workspace failed")}
+			var stdout, stderr bytes.Buffer
+			var arguments []string
+			if jsonOutput {
+				arguments = []string{"--json"}
+			}
+			if exit := cli.Run(t.Context(), arguments, &stdout, &stderr, fake); exit != cli.ExitError {
+				t.Fatalf("exit = %d", exit)
+			}
+			if jsonOutput {
+				var rendered report.Report
+				if err := json.Unmarshal(stdout.Bytes(), &rendered); err != nil || rendered.Verdict != report.VerdictError {
+					t.Fatalf("JSON ERROR report = %+v, %v\n%s", rendered, err, stdout.Bytes())
+				}
+			} else if !strings.HasPrefix(stdout.String(), "ERROR standard-v1") {
+				t.Fatalf("line ERROR report = %q", stdout.String())
+			}
+			if got, want := stderr.String(), "goatest: workspace failed\n"; got != want {
+				t.Fatalf("stderr = %q, want %q", got, want)
+			}
+		})
 	}
 }

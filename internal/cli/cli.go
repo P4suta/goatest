@@ -35,12 +35,13 @@ const (
 )
 
 type Request struct {
-	Changed    bool
-	ChangedRef string
-	Contract   string
-	NoApply    bool
-	JSON       bool
-	NoTUI      bool
+	Changed        bool
+	ChangedRef     string
+	Contract       string
+	NoApply        bool
+	JSON           bool
+	NoTUI          bool
+	ReplayMutantID string
 }
 
 type Service interface {
@@ -61,7 +62,7 @@ Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 t
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, _ = io.WriteString(stdout, help)
-		return ExitAssured
+		return 0
 	}
 	command, request, id, err := parse(args)
 	if err != nil {
@@ -74,20 +75,22 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
 			return ExitInterrupted
 		}
+		if result.Verdict == report.VerdictError {
+			render(stdout, result, request.JSON)
+		}
 		_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(err.Error()))
 		return ExitError
 	}
-	if request.JSON {
-		data, encodeErr := report.JSON(result)
-		if encodeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "goatest: encode report: %s\n", report.LineText(encodeErr.Error()))
-			return ExitError
-		}
-		_, _ = stdout.Write(data)
-	} else {
-		_, _ = io.WriteString(stdout, report.Lines(result))
-	}
+	render(stdout, result, request.JSON)
 	return exitCode(result.Verdict)
+}
+
+func render(output io.Writer, result report.Report, jsonOutput bool) {
+	if jsonOutput {
+		_, _ = output.Write(report.JSON(result))
+	} else {
+		_, _ = io.WriteString(output, report.Lines(result))
+	}
 }
 
 func parse(args []string) (Command, Request, string, error) {
@@ -141,7 +144,7 @@ func parse(args []string) (Command, Request, string, error) {
 func exitCode(verdict report.Verdict) int {
 	switch verdict {
 	case report.VerdictAssured:
-		return ExitAssured
+		return 0
 	case report.VerdictDefect:
 		return ExitDefect
 	case report.VerdictInsufficient:
