@@ -160,6 +160,9 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		if !ok {
 			return report.Report{}, fmt.Errorf("goatest: finding %q is absent from the latest report", id)
 		}
+		if finding.MutantID == "" {
+			return report.Report{}, fmt.Errorf("goatest: finding %q is not replayable because it has no mutant identity", id)
+		}
 		request.ReplayFindingID = finding.ID
 		request.ReplayMutantID = finding.MutantID
 		return service.runAndWrite(ctx, absolute, request)

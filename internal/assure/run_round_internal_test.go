@@ -157,18 +157,25 @@ func TestRunCoordinatorReturnsAndCachesEachBaselineFindingVerdict(t *testing.T) 
 
 func TestRunCoordinatorUsesRelevantRaceScopeAndHandlesConcurrencyFailures(t *testing.T) {
 	for _, test := range []struct {
+		name         string
 		contract     string
+		excludes     []string
 		wantPackages []string
 		wantDetail   string
+		wantExcluded int
 	}{
-		{contract: "standard-v1", wantPackages: []string{"fixture.example/module"}, wantDetail: "1 packages"},
-		{contract: "deep-v1", wantPackages: []string{"fixture.example/module", "fixture.example/other"}, wantDetail: "2 packages"},
+		{name: "standard", contract: "standard-v1", wantPackages: []string{"fixture.example/module"}, wantDetail: "1 packages", wantExcluded: 1},
+		{name: "deep", contract: "deep-v1", wantPackages: []string{"fixture.example/module", "fixture.example/other"}, wantDetail: "2 packages"},
+		{name: "deep project exclude", contract: "deep-v1", excludes: []string{"other/**"}, wantPackages: []string{"fixture.example/module"}, wantDetail: "1 packages", wantExcluded: 1},
 	} {
-		t.Run(test.contract, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			harness := newRunCoordinatorHarness(t)
-			_, err := harness.run(Options{Contract: test.contract})
-			if err != nil || !slices.Equal(harness.racePackages, test.wantPackages) {
-				t.Fatalf("race packages = %v, err=%v", harness.racePackages, err)
+			harness.loaded.Project.Exclude = test.excludes
+			result, err := harness.run(Options{Contract: test.contract})
+			if err != nil || !slices.Equal(harness.racePackages, test.wantPackages) ||
+				result.Accounting.Race.Selected != len(test.wantPackages) || result.Accounting.Race.Excluded != test.wantExcluded ||
+				test.contract == "deep-v1" && !slices.Equal(modelPackagePaths(harness.raceModel), test.wantPackages) {
+				t.Fatalf("race packages = %v, model=%v, accounting=%+v, err=%v", harness.racePackages, modelPackagePaths(harness.raceModel), result.Accounting.Race, err)
 			}
 			found := false
 			for _, event := range harness.events {

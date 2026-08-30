@@ -335,37 +335,17 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 	}
 }
 
-func TestReplayWithoutMutantIdentityHasReplayScopeAndSelectedOutcome(t *testing.T) {
+func TestReplayRejectsFindingWithoutMutantIdentityBeforeRunner(t *testing.T) {
 	root := t.TempDir()
-	writeLatestFixture(t, root)
-	reproduced := true
-	var received assure.Options
-	service := app.Service{Root: root, Run: func(_ context.Context, options assure.Options) (report.Report, error) {
-		received = options
-		result := report.Report{
-			Schema: report.SchemaV1, Verdict: report.VerdictAssured,
-			Contract: "standard-v1", Snapshot: "replay-snapshot",
-		}
-		if reproduced {
-			result.Verdict = report.VerdictDefect
-			result.Findings = []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "still present"}}
-		}
-		return result, nil
+	writeLatestFixtureWithMutant(t, root, "")
+	runnerCalled := false
+	service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
+		runnerCalled = true
+		return report.Report{}, nil
 	}}
-
 	result, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-a")
-	if err != nil || result.RunKind != report.RunReplay || result.Verdict != report.VerdictReproduced ||
-		result.Scope.Requested.Kind != string(report.RunReplay) || received.ReplayFindingID != "finding-a" || received.ReplayMutantID != "" {
-		t.Fatalf("reproduced replay = %+v, %v options=%+v", result, err, received)
-	}
-	reproduced = false
-	result, err = service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-a")
-	if err != nil || result.RunKind != report.RunReplay || result.Verdict != report.VerdictResolved || len(result.Findings) != 0 {
-		t.Fatalf("resolved replay = %+v, %v", result, err)
-	}
-	latestFull, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportLatestFull: true}, "")
-	if err != nil || latestFull.RunID != "fixture-run" {
-		t.Fatalf("replay replaced latest full report: %+v, %v", latestFull, err)
+	if err == nil || !strings.Contains(err.Error(), "no mutant identity") || runnerCalled || result.Verdict != "" {
+		t.Fatalf("non-mutation replay = %+v, %v runnerCalled=%t", result, err, runnerCalled)
 	}
 }
 
@@ -531,6 +511,10 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 }
 
 func writeLatestFixture(t *testing.T, root string) {
+	writeLatestFixtureWithMutant(t, root, "mutant-a")
+}
+
+func writeLatestFixtureWithMutant(t *testing.T, root, mutantID string) {
 	t.Helper()
 	input := report.Report{
 		Schema: report.SchemaV1, RunID: "fixture-run", RunKind: report.RunFull,
@@ -543,7 +527,7 @@ func writeLatestFixture(t *testing.T, root string) {
 		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
 		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
 		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
-		Findings:      []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "survived"}},
+		Findings:      []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "survived", MutantID: mutantID}},
 	}
 	if err := app.WriteReports(root, input); err != nil {
 		t.Fatal(err)

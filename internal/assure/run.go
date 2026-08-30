@@ -178,7 +178,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			return report.Report{}, err
 		}
 		if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
-			selectedModel, selectErr := inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags)
+			selectedModel, selectErr := inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags, options.CommandTimeout)
 			if selectErr != nil {
 				_ = dependencies.closeWorkspace(workspace)
 				return report.Report{}, selectErr
@@ -349,9 +349,11 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
+		raceModel := metadata.model
 		racePackages := dependencies.relevantRacePackages(metadata.model, concurrentPackages, baseline.Targets)
 		if contract == "deep-v1" {
-			racePackages = modelPackagePaths(metadata.model)
+			raceModel.Packages = includedProjectPackages(metadata.model.Packages, loaded.Project.Exclude)
+			racePackages = modelPackagePaths(raceModel)
 		} else {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
 				Code:      "race-scope-static-estimate",
@@ -365,7 +367,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Executed: raceCount, Excluded: len(metadata.model.Packages) - raceCount,
 		}
 		emit(options, "race", fmt.Sprintf("%d packages", raceCount))
-		raceResult, err := dependencies.collectRaceWithOptions(ctx, workspace, metadata.model, racePackages, contract, RaceOptions{
+		raceResult, err := dependencies.collectRaceWithOptions(ctx, workspace, raceModel, racePackages, contract, RaceOptions{
 			Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
 		})
 		if err != nil {
@@ -615,13 +617,13 @@ func inspectWorkspace(ctx context.Context, workspace CommandWorkspace) (roundMet
 	return roundMetadata{model: model, toolchain: strings.TrimSpace(string(version.Output)), dependencies: dependencies}, nil
 }
 
-func inspectSelectedPackages(ctx context.Context, workspace CommandWorkspace, patterns, tags []string) (goanalysis.Model, error) {
+func inspectSelectedPackages(ctx context.Context, workspace CommandWorkspace, patterns, tags []string, timeout time.Duration) (goanalysis.Model, error) {
 	argv := []string{"go", "list", "-json"}
 	if len(tags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(tags, ","))
 	}
 	argv = append(argv, patterns...)
-	listed, err := workspace.Exec(ctx, command(argv, 5*time.Minute))
+	listed, err := workspace.Exec(ctx, command(argv, timeout))
 	if err != nil || listed.ExitCode != 0 || listed.TimedOut {
 		return goanalysis.Model{}, commandError("go list selected packages", listed, err)
 	}
@@ -823,6 +825,16 @@ func includedProjectTargets(targets []goanalysis.Target, excludes []string) []go
 	for _, target := range targets {
 		if !projectPathExcluded(target.Path, excludes) {
 			result = append(result, target)
+		}
+	}
+	return result
+}
+
+func includedProjectPackages(packages []goanalysis.Package, excludes []string) []goanalysis.Package {
+	result := make([]goanalysis.Package, 0, len(packages))
+	for _, pkg := range packages {
+		if !projectPathExcluded(pkg.RelativeDir, excludes) {
+			result = append(result, pkg)
 		}
 	}
 	return result

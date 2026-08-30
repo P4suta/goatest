@@ -94,6 +94,23 @@ func TestInspectWorkspaceReturnsCompleteMetadataAndExactCommands(t *testing.T) {
 	}
 }
 
+func TestInspectSelectedPackagesUsesConfiguredCommandTimeout(t *testing.T) {
+	t.Parallel()
+	timeout := 17 * time.Second
+	workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{{
+		Output: listedPackageJSON(t, t.TempDir()),
+	}}}
+	model, err := inspectSelectedPackages(t.Context(), workspace, []string{"./pkg/..."}, []string{"integration", "sqlite"}, timeout)
+	if err != nil || model.ModulePath != "fixture.example/module" || len(workspace.commands) != 1 {
+		t.Fatalf("inspectSelectedPackages = (%+v, %v), commands=%+v", model, err, workspace.commands)
+	}
+	wantArgv := []string{"go", "list", "-json", "-tags=integration,sqlite", "./pkg/..."}
+	command := workspace.commands[0]
+	if !slices.Equal(command.Argv, wantArgv) || command.Timeout != timeout || command.OutputLimit != 32<<20 {
+		t.Fatalf("selected package command = %+v, want argv=%v timeout=%s", command, wantArgv, timeout)
+	}
+}
+
 func TestInspectWorkspaceRejectsEveryCommandFailureAndMalformedOutput(t *testing.T) {
 	moduleRoot := t.TempDir()
 	validList := listedPackageJSON(t, moduleRoot)
@@ -329,6 +346,13 @@ func TestProjectExcludeMatchingAndLimitationsAreExplicit(t *testing.T) {
 	targets := []goanalysis.Target{{Path: "generated/a_test.go"}, {Path: "pkg/a_test.go"}}
 	if got := includedProjectTargets(targets, patterns); len(got) != 1 || got[0].Path != "pkg/a_test.go" {
 		t.Fatalf("included targets = %+v", got)
+	}
+	packages := []goanalysis.Package{
+		{ImportPath: "example/generated", RelativeDir: "generated"},
+		{ImportPath: "example/pkg", RelativeDir: "pkg"},
+	}
+	if got := includedProjectPackages(packages, patterns); len(got) != 1 || got[0].ImportPath != "example/pkg" {
+		t.Fatalf("included packages = %+v", got)
 	}
 	limitations := projectExcludeLimitations(patterns)
 	if len(limitations) != len(patterns) || limitations[0].Code != "project-exclude" || !strings.Contains(limitations[0].Summary, patterns[0]) {

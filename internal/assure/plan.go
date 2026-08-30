@@ -56,7 +56,7 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		return report.Report{}, err
 	}
 	if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
-		metadata.model, err = inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags)
+		metadata.model, err = inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags, options.CommandTimeout)
 		if err != nil {
 			return report.Report{}, err
 		}

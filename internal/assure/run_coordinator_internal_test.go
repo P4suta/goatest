@@ -83,6 +83,7 @@ type runCoordinatorHarness struct {
 	mutationOptions   MutationOptions
 	generationOptions GenerationOptions
 	racePackages      []string
+	raceModel         goanalysis.Model
 	raceOptions       RaceOptions
 	baselineOptions   BaselineOptions
 }
@@ -202,8 +203,9 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		relevantRacePackages: func(goanalysis.Model, []string, []TargetEvidence) []string {
 			return []string{"fixture.example/module"}
 		},
-		collectRaceWithOptions: func(_ context.Context, _ CommandWorkspace, _ goanalysis.Model, packages []string, _ string, options RaceOptions) (RaceResult, error) {
+		collectRaceWithOptions: func(_ context.Context, _ CommandWorkspace, model goanalysis.Model, packages []string, _ string, options RaceOptions) (RaceResult, error) {
 			harness.raceCalls++
+			harness.raceModel = model
 			harness.racePackages = slices.Clone(packages)
 			harness.raceOptions = options
 			if !slices.Equal(options.Environment, []string{"DB=ready"}) {

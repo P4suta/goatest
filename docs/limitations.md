@@ -17,6 +17,9 @@ self-dogfood is not external compatibility evidence.
   changed non-test Go file. The pinned go-mutants API does not expose line-range
   selection, so this can over-select work but cannot omit a mutant in a selected
   changed file.
+- `replay` currently accepts only mutation-backed findings with a recorded
+  mutant identity. Other finding kinds are rejected instead of executing an
+  unrelated mutation set.
 - Cache locking is process-local. Concurrent goatest processes, target-level
   checkpoints, and interrupted-run resume are not implemented.
 - Resource providers support start/ready/stop and shared/exclusive instances,
