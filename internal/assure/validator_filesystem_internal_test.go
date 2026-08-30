@@ -311,7 +311,8 @@ func TestCopyRepositoryClosesFilesAndJoinsOutputFailures(t *testing.T) {
 			if want == nil {
 				want = errors.Join(test.copyErr, test.closeOut, test.closeIn)
 			}
-			if !errors.Is(err, want) && !(test.copyErr != nil && errors.Is(err, test.copyErr)) && !(test.closeOut != nil && errors.Is(err, test.closeOut)) && !(test.closeIn != nil && errors.Is(err, test.closeIn)) {
+			if !errors.Is(err, want) && (test.copyErr == nil || !errors.Is(err, test.copyErr)) &&
+				(test.closeOut == nil || !errors.Is(err, test.closeOut)) && (test.closeIn == nil || !errors.Is(err, test.closeIn)) {
 				t.Fatalf("copyRepository error = %v, want %v", err, want)
 			}
 			if test.outputErr != nil {
