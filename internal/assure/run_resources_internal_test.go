@@ -69,6 +69,7 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 		{ID: "ordinary"},
 		{ID: "alpha-a", Capability: "alpha"},
 		{ID: "alpha-b", Capability: "alpha"},
+		{ID: "alpha-beta", Capability: "alpha", Capabilities: []string{"alpha", "beta"}},
 	}
 	gotManager, baseline, evidenceItems, environment, err := acquireResources(
 		t.Context(), loaded, targets, []string{"Path=C:/tools", "TOKEN=allowed", "SECRET=hidden"},
@@ -80,6 +81,7 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 	}
 	wantTargetEnvironment := [][]string{
 		{"CACHE=ready", "common=same"}, nil, {"DB=ready", "COMMON=same"}, {"DB=ready", "COMMON=same"},
+		{"CACHE=ready", "COMMON=same", "DB=ready"},
 	}
 	for index := range baseline {
 		if baseline[index].Target.ID != targets[index].ID || !slices.Equal(baseline[index].Environment, wantTargetEnvironment[index]) {

@@ -165,3 +165,21 @@ func TestCollectRaceClassifiesPanicAndUnexpectedExitPrecisely(t *testing.T) {
 		})
 	}
 }
+
+func TestCollectRaceReplayMatchesTheExecutedTaggedCommand(t *testing.T) {
+	for _, output := range []string{"WARNING: DATA RACE", "--- FAIL: TestConcurrent"} {
+		t.Run(strings.Fields(output)[0], func(t *testing.T) {
+			var executed []string
+			workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+				executed = slices.Clone(command.Argv)
+				return gomutants.CommandResult{ExitCode: 1, Output: []byte(output)}, nil
+			}}
+			result, err := CollectRaceWithOptions(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/worker"}, "standard-v1", RaceOptions{
+				BuildTags: []string{"integration"}, TestArgs: []string{"-test.short=true"},
+			})
+			if err != nil || len(result.Findings) != 1 || result.Findings[0].Replay != strings.Join(executed, " ") {
+				t.Fatalf("race replay = (%+v, %v), command=%v", result, err, executed)
+			}
+		})
+	}
+}

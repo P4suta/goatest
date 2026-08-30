@@ -25,8 +25,6 @@ type PrepareOptions struct {
 	Operators     []string
 	Include       []string
 	Exclude       []string
-	Changed       bool
-	ChangedRef    string
 	Packages      []string
 	Jobs          int
 	BuildTimeout  time.Duration

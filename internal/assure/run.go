@@ -117,7 +117,6 @@ type runDependencies struct {
 	collectBaseline        func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error)
 	concurrencyPackages    func(string, []goanalysis.Package) ([]string, error)
 	relevantRacePackages   func(goanalysis.Model, []string, []TargetEvidence) []string
-	collectRace            func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, []string) (RaceResult, error)
 	collectRaceWithOptions func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, RaceOptions) (RaceResult, error)
 	prepareSession         func(context.Context, *mutationbridge.Workspace, mutationbridge.PrepareOptions) (MutationSession, error)
 	evaluateMutations      func(context.Context, MutationSession, []TargetEvidence, MutationOptions) (MutationEvaluation, error)
@@ -142,24 +141,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	if err != nil {
 		return report.Report{}, err
 	}
-	if len(options.Packages) == 0 {
-		options.Packages = slices.Clone(loaded.Project.Packages)
-	}
-	if len(options.TestArgs) == 0 {
-		options.TestArgs = slices.Clone(loaded.Execution.TestBinaryArgs)
-	}
-	if len(options.BuildTags) == 0 {
-		options.BuildTags = slices.Clone(loaded.Execution.BuildTags)
-	}
-	if options.CommandTimeout <= 0 {
-		options.CommandTimeout = loaded.Execution.Timeout
-	}
-	if options.TargetTimeout <= 0 {
-		options.TargetTimeout = loaded.Execution.Timeout
-	}
-	if options.MutationJobs <= 0 {
-		options.MutationJobs = loaded.Execution.Jobs
-	}
+	applyExecutionDefaults(&options, loaded)
 	contract := options.Contract
 	if contract == "" {
 		contract = loaded.Contract
@@ -383,14 +365,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Executed: raceCount, Excluded: len(metadata.model.Packages) - raceCount,
 		}
 		emit(options, "race", fmt.Sprintf("%d packages", raceCount))
-		var raceResult RaceResult
-		if dependencies.collectRaceWithOptions != nil {
-			raceResult, err = dependencies.collectRaceWithOptions(ctx, workspace, metadata.model, racePackages, contract, RaceOptions{
-				Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
-			})
-		} else {
-			raceResult, err = dependencies.collectRace(ctx, workspace, metadata.model, racePackages, contract, resourceEnv)
-		}
+		raceResult, err := dependencies.collectRaceWithOptions(ctx, workspace, metadata.model, racePackages, contract, RaceOptions{
+			Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
+		})
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
@@ -413,29 +390,14 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		if !defaultPackagePatterns(options.Packages) && !options.Changed {
 			packages = slices.Clone(options.Packages)
 		}
-		verifyArgv := []string{"go", "test"}
-		if len(options.BuildTags) != 0 {
-			verifyArgv = append(verifyArgv, "-tags="+strings.Join(options.BuildTags, ","))
-		}
-		verifyArgv = append(verifyArgv, "-run=^$")
-		verifyPackages := slices.Clone(options.Packages)
-		if len(verifyPackages) == 0 {
-			verifyPackages = []string{"./..."}
-		}
-		verifyArgv = append(verifyArgv, verifyPackages...)
-		if len(options.TestArgs) != 0 {
-			verifyArgv = append(verifyArgv, "-args")
-			verifyArgv = append(verifyArgv, options.TestArgs...)
-		}
+		verifyArgv := plannedVerifyArgv(options)
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
-			Contract:   contract,
-			Operators:  slices.Clone(options.MutationOperators),
-			Include:    include,
-			Exclude:    slices.Clone(loaded.Project.Exclude),
-			Changed:    options.Changed && !selection.broad,
-			ChangedRef: mutationChangedRefForSelection(options, selection),
-			Packages:   packages,
-			Jobs:       mutationJobLimit(options, loaded), BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
+			Contract:  contract,
+			Operators: slices.Clone(options.MutationOperators),
+			Include:   include,
+			Exclude:   slices.Clone(loaded.Project.Exclude),
+			Packages:  packages,
+			Jobs:      mutationJobLimit(options, loaded), BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
 			VerifyArgv: verifyArgv, VerifyEnv: resourceEnv, VerifyTimeout: options.CommandTimeout,
 		})
 		if err != nil {
@@ -452,7 +414,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Root: root, Snapshot: digest, Contract: contract, NoApply: options.NoApply,
 			ReplayMutantID: options.ReplayMutantID,
 			TestArgs:       slices.Clone(options.TestArgs),
-			FuzzExecutions: options.FuzzExecutions, Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
+			FuzzExecutions: options.FuzzExecutions, Timeout: options.CommandTimeout,
+			Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
 			Progress:        mutationProgress(options),
 			OriginalControl: originalControl,
 		})
@@ -501,7 +464,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			continue
 		}
 
-		finalInputs, finalDigest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
+		_, finalDigest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
 		if err != nil {
 			return report.Report{}, err
 		}
@@ -517,16 +480,12 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Acceptances: slices.Clone(baseReport.Acceptances), Limitations: slices.Clone(baseReport.Limitations),
 		}
 		result.Accounting.Mutants = mutation.Accounting
-		_ = finalInputs
 		if len(result.Findings) == 0 {
 			result.Verdict = report.VerdictAssured
 		} else {
 			result.Verdict = report.VerdictInsufficient
 			result.Limitations = append(result.Limitations, report.Limitation{
 				Code: "unresolved-mutation-gaps", Summary: "Unresolved mutation evidence gaps remain",
-			})
-			result.Limitations = append(result.Limitations, report.Limitation{
-				Code: "unresolved-mutation-evidence", Summary: "one or more selected mutants lack sufficient killing evidence",
 			})
 		}
 		if result.Accounting.Mutants.Unknown != 0 {
@@ -627,23 +586,6 @@ func mutationTargetCount(catalog gomutants.Catalog, replayMutantID string) int {
 		}
 	}
 	return count
-}
-
-func mutationChangedRefForSelection(options Options, selection impactSelection) string {
-	if selection.broad {
-		return ""
-	}
-	return mutationChangedRef(options)
-}
-
-func mutationChangedRef(options Options) string {
-	if !options.Changed {
-		return ""
-	}
-	if options.ChangedRef == "" {
-		return "HEAD"
-	}
-	return options.ChangedRef
 }
 
 func inspectWorkspace(ctx context.Context, workspace CommandWorkspace) (roundMetadata, error) {

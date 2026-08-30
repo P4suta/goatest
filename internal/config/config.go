@@ -395,10 +395,23 @@ func save(root string, input Config) error {
 		return err
 	}
 	if err := renameConfigFile(temporaryPath, path); err != nil {
-		if removeErr := removeConfigFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return errors.Join(err, removeErr)
+		backupPath := temporaryPath + ".backup"
+		backupErr := renameConfigFile(path, backupPath)
+		if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
+			return errors.Join(err, backupErr)
 		}
-		return renameConfigFile(temporaryPath, path)
+		retryErr := renameConfigFile(temporaryPath, path)
+		if retryErr != nil {
+			if backupErr == nil {
+				if restoreErr := renameConfigFile(backupPath, path); restoreErr != nil {
+					return errors.Join(err, retryErr, fmt.Errorf("goatest: restore previous config from %s: %w", backupPath, restoreErr))
+				}
+			}
+			return errors.Join(err, retryErr)
+		}
+		if backupErr == nil {
+			_ = removeConfigFile(backupPath)
+		}
 	}
 	return nil
 }

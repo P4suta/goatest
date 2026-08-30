@@ -228,6 +228,26 @@ func TestPlainUIWritesDeterministicProgressImmediately(t *testing.T) {
 	}
 }
 
+func TestCacheHitProvenanceDoesNotDependOnAProgressWriter(t *testing.T) {
+	service := app.Service{
+		Root: t.TempDir(),
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			if options.Progress == nil {
+				t.Fatal("cache provenance callback is nil")
+			}
+			options.Progress(assure.Event{Kind: "cache-hit", Detail: "snapshot-cache"})
+			return report.Report{
+				Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1",
+				Snapshot: "snapshot-cache", RunID: "source-run",
+			}, nil
+		},
+	}
+	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+	if err != nil || !result.Cache.Derived || result.Cache.SourceRunID != "source-run" {
+		t.Fatalf("cache provenance = (%+v, %v)", result.Cache, err)
+	}
+}
+
 func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
 	var progress bytes.Buffer
 	service := app.Service{
@@ -280,7 +300,8 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		Root: root,
 		Now:  func() time.Time { return time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC) },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
-			if !options.NoApply || options.ReplayFindingID != "finding-b" || options.ReplayMutantID != "mutant-b" {
+			if !options.NoApply || options.ReplayFindingID != "finding-b" || options.ReplayMutantID != "mutant-b" ||
+				options.Now == nil || !options.Now().Equal(time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)) {
 				t.Fatalf("replay options = %+v", options)
 			}
 			return original, nil
@@ -294,14 +315,15 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		t.Fatalf("explain = %+v, %v", explained, err)
 	}
 	accepted, err := service.Execute(t.Context(), cli.CommandAccept, cli.Request{
-		Reason: "reviewed boundary", Expires: "2026-09-30T00:00:00Z",
+		Reason: " reviewed boundary ", Expires: "2026-09-30T00:00:00Z", Owner: " alice ", Ticket: " GAP-42 ",
 	}, "finding-a")
 	if err != nil || accepted.Verdict != report.VerdictCompleted {
 		t.Fatalf("accept = %+v, %v", accepted, err)
 	}
 	loaded, err := config.Load(root)
 	if err != nil || len(loaded.Acceptance) != 1 || loaded.Acceptance[0].ID != "finding-a" ||
-		loaded.Acceptance[0].Reason != "reviewed boundary" || !loaded.Acceptance[0].Expires.Equal(time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)) {
+		loaded.Acceptance[0].Reason != "reviewed boundary" || loaded.Acceptance[0].Owner != "alice" || loaded.Acceptance[0].Ticket != "GAP-42" ||
+		!loaded.Acceptance[0].Expires.Equal(time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("config = %+v, %v", loaded, err)
 	}
 	replayed, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-b")
@@ -377,6 +399,13 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 				t.Fatalf("report error = %v, want %q", err, testCase.want)
 			}
 		})
+	}
+}
+
+func TestHistoricalReportLoadErrorsIdentifyTheRequestedRun(t *testing.T) {
+	_, err := (app.Service{Root: t.TempDir()}).Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: "missing-run"}, "")
+	if err == nil || !strings.Contains(err.Error(), `read report run "missing-run"`) || strings.Contains(err.Error(), "latest report") {
+		t.Fatalf("historical report error = %v", err)
 	}
 }
 

@@ -193,9 +193,6 @@ func parse(args []string) (Command, Request, string, error) {
 	switch command {
 	case CommandVerify, CommandPlan:
 		request.Packages = append([]string(nil), rest...)
-		if command == CommandPlan && len(testArgs) != 0 {
-			return "", Request{}, "", errors.New("plan does not accept test-binary arguments")
-		}
 		return parsedCommand(command, request, "")
 	case CommandInit, CommandDoctor:
 		if len(rest) != 0 {
@@ -229,6 +226,9 @@ func parse(args []string) (Command, Request, string, error) {
 }
 
 func parsedCommand(command Command, request Request, id string) (Command, Request, string, error) {
+	if len(request.TestArgs) != 0 && command != CommandVerify {
+		return "", Request{}, "", fmt.Errorf("%s does not accept test-binary arguments", command)
+	}
 	if request.Apply && command != CommandFix {
 		return "", Request{}, "", errors.New("--apply is only valid with fix")
 	}

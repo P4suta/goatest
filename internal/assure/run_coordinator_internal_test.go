@@ -83,6 +83,7 @@ type runCoordinatorHarness struct {
 	mutationOptions   MutationOptions
 	generationOptions GenerationOptions
 	racePackages      []string
+	raceOptions       RaceOptions
 	baselineOptions   BaselineOptions
 }
 
@@ -201,11 +202,12 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		relevantRacePackages: func(goanalysis.Model, []string, []TargetEvidence) []string {
 			return []string{"fixture.example/module"}
 		},
-		collectRace: func(_ context.Context, _ CommandWorkspace, _ goanalysis.Model, packages []string, _ string, environment []string) (RaceResult, error) {
+		collectRaceWithOptions: func(_ context.Context, _ CommandWorkspace, _ goanalysis.Model, packages []string, _ string, options RaceOptions) (RaceResult, error) {
 			harness.raceCalls++
 			harness.racePackages = slices.Clone(packages)
-			if !slices.Equal(environment, []string{"DB=ready"}) {
-				t.Fatalf("race environment = %v", environment)
+			harness.raceOptions = options
+			if !slices.Equal(options.Environment, []string{"DB=ready"}) {
+				t.Fatalf("race options = %+v", options)
 			}
 			return harness.race, nil
 		},
@@ -269,14 +271,13 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	}
 	if harness.preparedOptions.Contract != "standard-v1" || !slices.Equal(harness.preparedOptions.Operators, []string{"comparison"}) ||
 		!slices.Equal(harness.preparedOptions.Exclude, []string{"generated/**"}) ||
-		harness.preparedOptions.Changed || harness.preparedOptions.ChangedRef != "" ||
 		harness.preparedOptions.Jobs != 3 || harness.preparedOptions.BuildTimeout != 7*time.Minute ||
 		harness.preparedOptions.MutantTimeout != 7*time.Minute || harness.preparedOptions.VerifyTimeout != 7*time.Minute ||
 		!slices.Equal(harness.preparedOptions.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || !slices.Equal(harness.preparedOptions.VerifyEnv, []string{"DB=ready"}) {
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
 	if harness.mutationOptions.Root != harness.root || harness.mutationOptions.Contract != "standard-v1" || !harness.mutationOptions.NoApply ||
-		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
+		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Timeout != 7*time.Minute || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
 		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
 		t.Fatalf("mutation options = %+v", harness.mutationOptions)
 	}
@@ -307,22 +308,6 @@ func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
 	}
 	if got := mutationTargetCount(catalog, "selected-a"); got != 1 {
 		t.Fatalf("replay mutationTargetCount = %d, want 1", got)
-	}
-}
-
-func TestMutationChangedRefDefaultsBareChangedToHEAD(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		options Options
-		want    string
-	}{
-		{options: Options{}, want: ""},
-		{options: Options{Changed: true}, want: "HEAD"},
-		{options: Options{Changed: true, ChangedRef: "origin/main"}, want: "origin/main"},
-	} {
-		if got := mutationChangedRef(test.options); got != test.want {
-			t.Errorf("mutationChangedRef(%+v) = %q, want %q", test.options, got, test.want)
-		}
 	}
 }
 

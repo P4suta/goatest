@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 // Package testargs validates and canonicalizes arguments passed directly to a

@@ -55,14 +55,19 @@ type validationWriteCloser interface {
 	Close() error
 }
 
+func defaultPrepareValidationSession(ctx context.Context, workspace validationWorkspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
+	mutationWorkspace, ok := workspace.(*mutationbridge.Workspace)
+	if !ok {
+		return nil, fmt.Errorf("goatest: unsupported validation workspace %T", workspace)
+	}
+	return mutationWorkspace.Prepare(ctx, options)
+}
+
 var (
 	openValidationWorkspace = func(ctx context.Context, root string, options mutationbridge.Options) (validationWorkspace, error) {
 		return mutationbridge.Open(ctx, root, options)
 	}
-	prepareValidationSession = func(ctx context.Context, workspace validationWorkspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
-		session, err := workspace.(*mutationbridge.Workspace).Prepare(ctx, options)
-		return session, err
-	}
+	prepareValidationSession      = defaultPrepareValidationSession
 	decodeValidationPackages      = goanalysis.DecodePackages
 	concurrencyValidationPackages = goanalysis.ConcurrencyPackages
 	collectValidationRace         = CollectRaceWithOptions

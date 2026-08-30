@@ -114,7 +114,8 @@ type CountAccounting struct {
 
 // MutantAccounting is deliberately redundant so a reader can audit both the
 // disposition of every discovered mutant and the outcome of every execution.
-// Discovered must equal Executed + CompileRejected + Accepted + OutOfScope;
+// Discovered must equal Executed + CompileRejected + Accepted + OutOfScope +
+// Unknown;
 // Executed must equal Killed + Survived + Inconclusive.
 type MutantAccounting struct {
 	Discovered      int `json:"discovered"`

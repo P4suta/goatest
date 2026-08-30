@@ -325,7 +325,12 @@ func TestApplyCandidatesRollsBackEarlierWritesAfterLaterFailure(t *testing.T) {
 func TestValidateAndApplyRechecksConfinementAfterValidation(t *testing.T) {
 	root := t.TempDir()
 	moved := root + "-moved"
-	validator := callbackValidator{suite: func() error { return os.Rename(root, moved) }}
+	validator := callbackValidator{suite: func() error {
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatalf("move repair root: %v", err)
+		}
+		return nil
+	}}
 	t.Cleanup(func() { _ = os.Rename(moved, root) })
 	_, err := ValidateAndApply(context.Background(), root, report.Finding{ID: "finding-a"}, provider.Candidate{
 		Kind: "patch", Path: "value_test.go", Content: []byte("package fixture\n"),

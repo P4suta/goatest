@@ -390,7 +390,10 @@ func TestMergeAndValidationEnvironmentHandleCaseConflictsAndOverlay(t *testing.T
 func TestBaselineVerdictRepositoryRootExecutionEnvironmentAndEmit(t *testing.T) {
 	if baselineVerdict(nil) != report.VerdictInsufficient || baselineVerdict([]report.Finding{{Kind: "other"}}) != report.VerdictInsufficient ||
 		baselineVerdict([]report.Finding{{Kind: "other"}, {Kind: "baseline-failure"}}) != report.VerdictDefect ||
-		baselineVerdict([]report.Finding{{Kind: "baseline-timeout"}}) != report.VerdictDefect {
+		baselineVerdict([]report.Finding{{Kind: "baseline-timeout"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "vet-failure"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "build-failure"}}) != report.VerdictDefect ||
+		baselineVerdict([]report.Finding{{Kind: "test-binary-build-failure"}}) != report.VerdictDefect {
 		t.Fatal("baselineVerdict matrix failed")
 	}
 

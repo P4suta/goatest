@@ -47,6 +47,13 @@ func (workspace *scriptedValidationWorkspace) Close() error {
 	return nil
 }
 
+func TestDefaultPrepareValidationSessionRejectsUnsupportedWorkspace(t *testing.T) {
+	session, err := defaultPrepareValidationSession(t.Context(), &scriptedValidationWorkspace{}, mutationbridge.PrepareOptions{})
+	if session != nil || err == nil || !strings.Contains(err.Error(), "unsupported validation workspace") {
+		t.Fatalf("defaultPrepareValidationSession = (%T, %v)", session, err)
+	}
+}
+
 func TestNewRepositoryValidatorCopiesOptions(t *testing.T) {
 	options := RepositoryValidatorOptions{
 		Root: "root", Contract: "deep-v1", GoBinary: "go-custom", TempDirectory: "temp",

@@ -97,6 +97,7 @@ func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report
 				}
 				evaluation.Repairs = append(evaluation.Repairs, report.Repair{
 					ID: repairID, Finding: finding.ID, Path: validated.Path, Status: string(repair.StatusCandidate),
+					Validation: "passed", Provenance: "snapshot=" + options.Snapshot,
 				})
 				continue
 			}

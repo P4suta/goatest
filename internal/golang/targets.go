@@ -201,6 +201,7 @@ func targetCapabilities(function *ast.FuncDecl, goatestAliases map[string]bool) 
 	result := make([]string, 0, len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
+		value = strings.TrimSpace(value)
 		if value != "" && !seen[value] {
 			seen[value] = true
 			result = append(result, value)
@@ -217,19 +218,10 @@ func capability(body *ast.BlockStmt, goatestAliases map[string]bool) string {
 		if result != "" {
 			return false
 		}
-		call, ok := node.(*ast.CallExpr)
-		if !ok || len(call.Args) != 3 || !selectorIs(call.Fun, goatestAliases, "Run") {
-			return true
+		values, ok := integrationCapabilities(node, goatestAliases)
+		if ok && len(values) != 0 {
+			result = strings.TrimSpace(values[0])
 		}
-		scope, ok := call.Args[1].(*ast.CallExpr)
-		if !ok || len(scope.Args) != 1 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
-			return true
-		}
-		literal, ok := scope.Args[0].(*ast.BasicLit)
-		if !ok || literal.Kind != token.STRING {
-			return true
-		}
-		result, _ = strconv.Unquote(literal.Value)
 		return true
 	})
 	return result

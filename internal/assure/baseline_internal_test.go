@@ -210,6 +210,20 @@ func TestClassifyTargetFailureDistinguishesFlakeTimeoutAndStableFailure(t *testi
 	}
 }
 
+func TestClassifyTest2JSONIgnoresMixedStderrButRetainsScannerFailures(t *testing.T) {
+	output := []byte("plain stderr before JSON\n" +
+		`{"Action":"output","Test":"TestValue","Output":"running"}` + "\n" +
+		"another malformed line\n" +
+		`{"Action":"skip","Test":"TestValue/subtest","Output":"skipped"}` + "\n")
+	skipped, kind, summary, err := classifyTest2JSON("TestValue", output)
+	if err != nil || !skipped || kind != "skipped-subtest" || summary != "a selected subtest was skipped: TestValue/subtest" {
+		t.Fatalf("mixed test2json = (%t, %q, %q, %v)", skipped, kind, summary, err)
+	}
+	if skipped, kind, summary, err = classifyTest2JSON("TestValue", []byte(strings.Repeat("x", (4<<20)+1))); err == nil || skipped || kind != "" || summary != "" {
+		t.Fatalf("oversized test2json = (%t, %q, %q, %v)", skipped, kind, summary, err)
+	}
+}
+
 func TestSummarizeIsBoundedTrimmedAndValidUTF8(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

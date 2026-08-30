@@ -93,7 +93,6 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		verifyArgv := plannedVerifyArgv(options)
 		session, prepareErr := workspace.Prepare(ctx, mutationbridge.PrepareOptions{
 			Contract: contract, Operators: slices.Clone(options.MutationOperators), Include: include, Exclude: slices.Clone(loaded.Project.Exclude),
-			Changed: options.Changed && !selection.broad, ChangedRef: mutationChangedRefForSelection(options, selection),
 			Packages: packages, Jobs: mutationJobLimit(options, loaded),
 			BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout, VerifyArgv: verifyArgv,
 			VerifyTimeout: options.CommandTimeout,
@@ -112,14 +111,17 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		for _, mutant := range catalog.Mutants {
 			status := "excluded"
 			detail := fmt.Sprintf("%s:%d %s: %s -> %s", mutant.Path, mutant.Line, mutant.Rule, mutant.Original, mutant.Replacement)
+			diagnostic, wasRejected := rejected[mutant.ID]
 			switch {
 			case mutant.Accepted:
 				status = "selected"
 				selectedMutants++
-			case rejected[mutant.ID] != "":
+			case wasRejected:
 				status = "compile-rejected"
 				compileRejected++
-				detail = rejected[mutant.ID]
+				if diagnostic != "" {
+					detail = diagnostic
+				}
 			}
 			evidenceItems = append(evidenceItems, report.Evidence{Kind: "plan-mutant", ID: mutant.ID, Status: status, Detail: detail})
 		}

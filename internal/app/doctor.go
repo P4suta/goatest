@@ -40,7 +40,11 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "config", config.FileName, err), nil
 	}
 	result.Contract = loaded.Contract
-	result.Configuration.Digest = configurationDigest(root, cli.Request{})
+	digest, digestErr := configurationDigest(root, cli.Request{})
+	result.Configuration.Digest = digest
+	if digestErr != nil {
+		return doctorFailure(result, "config", "configuration-metadata", digestErr), nil
+	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "config", Status: "ready", Detail: "strict config v1"})
 	goBinary := service.GoBinary
 	if goBinary == "" {

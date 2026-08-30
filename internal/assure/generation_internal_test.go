@@ -98,7 +98,10 @@ func TestAttemptGeneratedRepairsNoApplyStoresValidatedCandidateWithoutChangingSo
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRepairs := []report.Repair{{ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "candidate"}}
+	wantRepairs := []report.Repair{{
+		ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "candidate",
+		Validation: "passed", Provenance: "snapshot=snapshot-read-only",
+	}}
 	if evaluation.Applied || !reflect.DeepEqual(evaluation.Repairs, wantRepairs) {
 		t.Fatalf("evaluation = %+v, want repairs %+v", evaluation, wantRepairs)
 	}

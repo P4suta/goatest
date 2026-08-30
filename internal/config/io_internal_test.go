@@ -125,59 +125,105 @@ func TestSavePropagatesEveryAtomicWriteStage(t *testing.T) {
 	}
 }
 
-func TestSaveRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
+func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
 	firstRename := errors.New("first rename")
-	secondRename := errors.New("second rename")
-	removeFailure := errors.New("remove destination")
+	retryFailure := errors.New("retry rename")
+	backupFailure := errors.New("backup rename")
+	restoreFailure := errors.New("restore rename")
 	for _, testCase := range []struct {
 		name       string
-		removeErr  error
-		secondErr  error
-		want       error
-		wantJoined error
+		backupErr  error
+		retryErr   error
+		restoreErr error
+		want       []error
 		wantCalls  int
 	}{
-		{name: "replace", secondErr: nil, wantCalls: 2},
-		{name: "missing-destination", removeErr: os.ErrNotExist, secondErr: secondRename, want: secondRename, wantCalls: 2},
-		{name: "remove-failure", removeErr: removeFailure, want: firstRename, wantJoined: removeFailure, wantCalls: 1},
+		{name: "replace", wantCalls: 3},
+		{name: "missing destination", backupErr: os.ErrNotExist, wantCalls: 3},
+		{name: "missing destination retry failure", backupErr: os.ErrNotExist, retryErr: retryFailure, want: []error{firstRename, retryFailure}, wantCalls: 3},
+		{name: "backup failure", backupErr: backupFailure, want: []error{firstRename, backupFailure}, wantCalls: 2},
+		{name: "retry failure restores backup", retryErr: retryFailure, want: []error{firstRename, retryFailure}, wantCalls: 4},
+		{name: "restore failure preserves backup", retryErr: retryFailure, restoreErr: restoreFailure, want: []error{firstRename, retryFailure, restoreFailure}, wantCalls: 4},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
 			temporary := filepath.Join(root, "temporary")
 			destination := filepath.Join(root, FileName)
+			backup := temporary + ".backup"
 			file := &stubConfigFile{name: temporary}
 			renames := 0
 			installConfigIO(t, configIOHooks{
 				create: func(string, string) (configWritableFile, error) { return file, nil },
 				rename: func(oldPath, newPath string) error {
-					if oldPath != temporary || newPath != destination {
-						t.Fatalf("rename(%q, %q)", oldPath, newPath)
-					}
 					renames++
-					if renames == 1 {
+					switch renames {
+					case 1:
+						if oldPath != temporary || newPath != destination {
+							t.Fatalf("initial rename(%q, %q)", oldPath, newPath)
+						}
 						return firstRename
+					case 2:
+						if oldPath != destination || newPath != backup {
+							t.Fatalf("backup rename(%q, %q)", oldPath, newPath)
+						}
+						return testCase.backupErr
+					case 3:
+						if oldPath != temporary || newPath != destination {
+							t.Fatalf("retry rename(%q, %q)", oldPath, newPath)
+						}
+						return testCase.retryErr
+					case 4:
+						if oldPath != backup || newPath != destination {
+							t.Fatalf("restore rename(%q, %q)", oldPath, newPath)
+						}
+						return testCase.restoreErr
+					default:
+						t.Fatalf("unexpected rename(%q, %q)", oldPath, newPath)
+						return nil
 					}
-					return testCase.secondErr
-				},
-				remove: func(path string) error {
-					if path == destination {
-						return testCase.removeErr
-					}
-					return nil
 				},
 			})
 			err := save(root, minimalConfig())
-			if testCase.want == nil {
-				if err != nil {
-					t.Fatalf("save error = %v", err)
+			if len(testCase.want) == 0 && err != nil {
+				t.Fatalf("save error = %v", err)
+			}
+			for _, want := range testCase.want {
+				if !errors.Is(err, want) {
+					t.Fatalf("save error = %v, want joined error %v", err, want)
 				}
-			} else if !errors.Is(err, testCase.want) || testCase.wantJoined != nil && !errors.Is(err, testCase.wantJoined) {
-				t.Fatalf("save error = %v, want %v joined with %v", err, testCase.want, testCase.wantJoined)
 			}
 			if renames != testCase.wantCalls {
 				t.Fatalf("rename calls = %d, want %d", renames, testCase.wantCalls)
 			}
 		})
+	}
+}
+
+func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, FileName)
+	original := []byte("original configuration\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firstFailure := errors.New("platform refused replacement")
+	retryFailure := errors.New("replacement retry failed")
+	renames := 0
+	installConfigIO(t, configIOHooks{rename: func(oldPath, newPath string) error {
+		renames++
+		switch renames {
+		case 1:
+			return firstFailure
+		case 3:
+			return retryFailure
+		default:
+			return os.Rename(oldPath, newPath)
+		}
+	}})
+	err := save(root, minimalConfig())
+	contents, readErr := os.ReadFile(path)
+	if !errors.Is(err, firstFailure) || !errors.Is(err, retryFailure) || readErr != nil || string(contents) != string(original) || renames != 4 {
+		t.Fatalf("save = %v, config=%q read=%v renames=%d", err, contents, readErr, renames)
 	}
 }
 

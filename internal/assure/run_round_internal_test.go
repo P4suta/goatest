@@ -172,8 +172,9 @@ func TestRunCoordinatorUsesRelevantRaceScopeAndHandlesConcurrencyFailures(t *tes
 			}
 			found := false
 			for _, event := range harness.events {
-				if event.Kind == "race" {
-					found = event.Detail == test.wantDetail
+				if event.Kind == "race" && event.Detail == test.wantDetail {
+					found = true
+					break
 				}
 			}
 			if !found {
@@ -194,7 +195,7 @@ func TestRunCoordinatorHandlesRaceExecutionAndFindingTerminals(t *testing.T) {
 	t.Run("execution error", func(t *testing.T) {
 		harness := newRunCoordinatorHarness(t)
 		cause := errors.New("race failed")
-		harness.dependencies.collectRace = func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, []string) (RaceResult, error) {
+		harness.dependencies.collectRaceWithOptions = func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, RaceOptions) (RaceResult, error) {
 			return RaceResult{}, cause
 		}
 		result, err := harness.run(Options{})

@@ -114,6 +114,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{"--no-tui"}, {"--no-apply"},
 		{"verify", "--apply"}, {"doctor", "--changed"}, {"init", "--contract=deep-v1"},
 		{"verify", "--latest-full"}, {"fix", "--reason=reviewed"}, {"report", "--apply"},
+		{"plan", "--", "-short"}, {"doctor", "--", "-short"}, {"report", "--", "-short"},
 		{"init", "extra"}, {"report", "extra"}, {"replay", ""}, {"accept", "finding-c"},
 	} {
 		var stderr bytes.Buffer

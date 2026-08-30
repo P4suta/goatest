@@ -261,7 +261,7 @@ func classifyTest2JSON(target string, output []byte) (bool, string, string, erro
 		}
 		var event test2JSONEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			return false, "", "", err
+			continue
 		}
 		if event.Action != "skip" || event.Test != target && !strings.HasPrefix(event.Test, target+"/") {
 			continue

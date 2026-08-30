@@ -13,6 +13,10 @@ self-dogfood is not external compatibility evidence.
 - Project excludes are explicit limitations. Excluded mutants are represented
   by the configured boundary, not enumerated from source that was never sent to
   the mutation catalog.
+- Changeset mutation discovery conservatively includes every mutant in each
+  changed non-test Go file. The pinned go-mutants API does not expose line-range
+  selection, so this can over-select work but cannot omit a mutant in a selected
+  changed file.
 - Cache locking is process-local. Concurrent goatest processes, target-level
   checkpoints, and interrupted-run resume are not implemented.
 - Resource providers support start/ready/stop and shared/exclusive instances,

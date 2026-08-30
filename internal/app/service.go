@@ -46,7 +46,10 @@ type Service struct {
 	absolute      func(string) (string, error)
 }
 
-var reportRunSequence atomic.Uint64
+var (
+	reportRunSequence     atomic.Uint64
+	readConfigurationFile = os.ReadFile
+)
 
 func (service Service) Execute(ctx context.Context, command cli.Command, request cli.Request, id string) (report.Report, error) {
 	root := service.Root
@@ -75,7 +78,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 				result.Contract = loaded.Contract
 			}
 		}
-		result = finalizeReportKind(absolute, request, result, report.RunOperation, started, clock().UTC())
+		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC())
 		if validationErr := report.ValidateForPersistence(result); validationErr != nil {
 			return result, fmt.Errorf("goatest: finalize %s report: %w", command, validationErr)
 		}
@@ -126,11 +129,9 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		if !ok {
 			return report.Report{}, fmt.Errorf("goatest: finding %q is absent from the latest report", id)
 		}
-		now := time.Now
-		if service.Now != nil {
-			now = service.Now
-		}
 		reason := strings.TrimSpace(request.Reason)
+		owner := strings.TrimSpace(request.Owner)
+		ticket := strings.TrimSpace(request.Ticket)
 		if reason == "" || strings.TrimSpace(request.Expires) == "" {
 			return report.Report{}, errors.New("goatest: acceptance requires a reason and expiry")
 		}
@@ -138,11 +139,11 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		if parseErr != nil {
 			return report.Report{}, fmt.Errorf("goatest: acceptance expiry: %w", parseErr)
 		}
-		if !expires.After(now().UTC()) {
+		if !expires.After(clock().UTC()) {
 			return report.Report{}, errors.New("goatest: acceptance expiry must be in the future")
 		}
 		if err := config.AddAcceptance(absolute, config.Acceptance{
-			ID: id, Reason: reason, Expires: expires, Owner: request.Owner, Ticket: request.Ticket,
+			ID: id, Reason: reason, Expires: expires, Owner: owner, Ticket: ticket,
 		}); err != nil {
 			return report.Report{}, err
 		}
@@ -181,14 +182,14 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 			return report.Report{}, err
 		}
 		result = infrastructureErrorReport(result, request, err)
-		result = finalizeReport(root, request, result, started, clock().UTC())
+		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
-	result = finalizeReport(root, request, result, started, clock().UTC())
+	result = finalizeReport(ctx, root, request, result, started, clock().UTC())
 	if err := WriteReports(root, result); err != nil {
 		return report.Report{}, err
 	}
@@ -220,19 +221,22 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 	}
 	options := service.assureOptions(root, request)
 	cacheHit := false
-	if service.Progress != nil {
-		var mutex sync.Mutex
-		options.Progress = func(event assure.Event) {
-			mutex.Lock()
-			defer mutex.Unlock()
-			if event.Kind == "cache-hit" {
-				cacheHit = true
-			}
+	var mutex sync.Mutex
+	options.Progress = func(event assure.Event) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if event.Kind == "cache-hit" {
+			cacheHit = true
+		}
+		if service.Progress != nil {
 			_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", report.LineText(event.Kind), report.LineText(event.Detail))
 		}
 	}
 	result, err := runner(ctx, options)
-	if cacheHit {
+	mutex.Lock()
+	derived := cacheHit
+	mutex.Unlock()
+	if derived {
 		source := result.RunID
 		if source == "" {
 			source = "evidence-" + result.Snapshot
@@ -249,15 +253,15 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		ReplayFindingID: request.ReplayFindingID, ReplayMutantID: request.ReplayMutantID,
 		Packages: slices.Clone(request.Packages), PackageScope: explicitPackageScope(request.Packages),
 		TestArgs: slices.Clone(request.TestArgs),
-		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment,
+		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
 	}
 }
 
-func finalizeReport(root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {
-	return finalizeReportKind(root, request, input, requestedRunKind(request), started, finished)
+func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {
+	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished)
 }
 
-func finalizeReportKind(root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time) report.Report {
+func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time) report.Report {
 	result := input
 	result.Schema = report.SchemaV1
 	result.RunKind = kind
@@ -294,7 +298,13 @@ func finalizeReportKind(root string, request cli.Request, input report.Report, k
 		DurationMS: max(0, finished.Sub(started).Milliseconds()),
 	}
 	if result.Configuration.Digest == "" {
-		result.Configuration.Digest = configurationDigest(root, request)
+		digest, digestErr := configurationDigest(root, request)
+		result.Configuration.Digest = digest
+		if digestErr != nil {
+			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
+				Code: "configuration-metadata-unavailable", Summary: "The effective configuration could not be read while finalizing the report",
+			})
+		}
 	}
 	if result.Toolchain.Goatest == "" {
 		result.Toolchain.Goatest = assure.GoatestVersion
@@ -331,7 +341,7 @@ func finalizeReportKind(root string, request cli.Request, input report.Report, k
 			result.Scope.Resolved.Modules = []string{result.Repository.Module}
 		}
 	}
-	git, gitErr := inspectGit(root, request)
+	git, gitErr := inspectGit(ctx, root, request)
 	if gitErr != nil {
 		result.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
@@ -410,12 +420,14 @@ func newRunID(root, snapshot string, kind report.RunKind, finished time.Time) st
 	return finished.UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(digest[:6])
 }
 
-func configurationDigest(root string, request cli.Request) string {
-	data, err := os.ReadFile(filepath.Join(root, config.FileName))
+func configurationDigest(root string, request cli.Request) (string, error) {
+	data, err := readConfigurationFile(filepath.Join(root, config.FileName))
+	var readErr error
 	if errors.Is(err, os.ErrNotExist) {
 		data = []byte("goatest-config-v1-defaults")
 	} else if err != nil {
 		data = []byte("goatest-config-v1-unreadable")
+		readErr = fmt.Errorf("goatest: read effective configuration: %w", err)
 	}
 	invocation, _ := json.Marshal(struct {
 		Contract        string   `json:"contract"`
@@ -436,15 +448,15 @@ func configurationDigest(root string, request cli.Request) string {
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(invocation)
 	digest := hash.Sum(nil)
-	return hex.EncodeToString(digest)
+	return hex.EncodeToString(digest), readErr
 }
 
-func inspectGit(root string, request cli.Request) (report.Git, error) {
-	commit, err := gitOutput(root, "rev-parse", "--verify", "HEAD")
+func inspectGit(ctx context.Context, root string, request cli.Request) (report.Git, error) {
+	commit, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return report.Git{}, err
 	}
-	status, err := gitOutputBytes(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	status, err := gitOutputBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -453,7 +465,7 @@ func inspectGit(root string, request cli.Request) (report.Git, error) {
 	if request.ChangedRef != "" {
 		base = request.ChangedRef
 	}
-	mergeBase, mergeErr := gitOutput(root, "merge-base", "HEAD", base)
+	mergeBase, mergeErr := gitOutput(ctx, root, "merge-base", "HEAD", base)
 	if mergeErr == nil {
 		metadata.MergeBase = strings.TrimSpace(string(mergeBase))
 	} else if base == "HEAD" {
@@ -465,11 +477,11 @@ func inspectGit(root string, request cli.Request) (report.Git, error) {
 	if diffBase == "" {
 		diffBase = base
 	}
-	changed, err := gitOutputBytes(root, "diff", "--name-only", "-z", "--find-renames", diffBase)
+	changed, err := gitOutputBytes(ctx, root, "diff", "--name-only", "-z", "--find-renames", diffBase)
 	if err != nil {
 		return report.Git{}, err
 	}
-	untracked, err := gitOutputBytes(root, "ls-files", "--others", "--exclude-standard", "-z")
+	untracked, err := gitOutputBytes(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -477,12 +489,16 @@ func inspectGit(root string, request cli.Request) (report.Git, error) {
 	return metadata, nil
 }
 
-func gitOutput(root string, arguments ...string) ([]byte, error) {
-	return gitOutputBytes(root, arguments...)
+const gitMetadataTimeout = 30 * time.Second
+
+func gitOutput(ctx context.Context, root string, arguments ...string) ([]byte, error) {
+	return gitOutputBytes(ctx, root, arguments...)
 }
 
-func gitOutputBytes(root string, arguments ...string) ([]byte, error) {
-	command := exec.Command("git", arguments...)
+func gitOutputBytes(ctx context.Context, root string, arguments ...string) ([]byte, error) {
+	bounded, cancel := context.WithTimeout(ctx, gitMetadataTimeout)
+	defer cancel()
+	command := exec.CommandContext(bounded, "git", arguments...)
 	command.Dir = root
 	output, err := command.Output()
 	if err != nil {
@@ -517,37 +533,37 @@ func loadSelected(root string, request cli.Request) (report.Report, error) {
 		if !safeRunID(request.ReportRunID) {
 			return report.Report{}, fmt.Errorf("goatest: unsafe report run ID %q", request.ReportRunID)
 		}
-		return loadReport(filepath.Join(root, "reports", "runs", request.ReportRunID, "assurance-report-v1.json"))
+		return loadReport(filepath.Join(root, "reports", "runs", request.ReportRunID, "assurance-report-v1.json"), fmt.Sprintf("report run %q", request.ReportRunID))
 	}
 	if request.ReportLatestFull {
-		return loadReport(filepath.Join(root, ".goatest", "latest-full.json"))
+		return loadReport(filepath.Join(root, ".goatest", "latest-full.json"), "latest report")
 	}
 	return loadLatestAny(root)
 }
 
 func loadLatestAny(root string) (report.Report, error) {
-	return loadReport(filepath.Join(root, ".goatest", "latest-any.json"))
+	return loadReport(filepath.Join(root, ".goatest", "latest-any.json"), "latest report")
 }
 
-func loadReport(path string) (report.Report, error) {
+func loadReport(path, label string) (report.Report, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return report.Report{}, fmt.Errorf("goatest: read latest report: %w", err)
+		return report.Report{}, fmt.Errorf("goatest: read %s: %w", label, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var result report.Report
 	if err := decoder.Decode(&result); err != nil {
-		return report.Report{}, fmt.Errorf("goatest: decode latest report: %w", err)
+		return report.Report{}, fmt.Errorf("goatest: decode %s: %w", label, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return report.Report{}, errors.New("goatest: latest report has trailing data")
+		return report.Report{}, fmt.Errorf("goatest: %s has trailing data", label)
 	}
 	if result.Schema != report.SchemaV1 {
-		return report.Report{}, fmt.Errorf("goatest: latest report schema %q is unsupported", result.Schema)
+		return report.Report{}, fmt.Errorf("goatest: %s schema %q is unsupported", label, result.Schema)
 	}
 	if err := report.ValidateForPersistence(result); err != nil {
-		return report.Report{}, fmt.Errorf("goatest: invalid latest report: %w", err)
+		return report.Report{}, fmt.Errorf("goatest: invalid %s: %w", label, err)
 	}
 	return result, nil
 }

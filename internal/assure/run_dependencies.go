@@ -66,7 +66,6 @@ func productionRunDependencies() runDependencies {
 		collectBaseline:        CollectBaseline,
 		concurrencyPackages:    goanalysis.ConcurrencyPackages,
 		relevantRacePackages:   RelevantRacePackages,
-		collectRace:            CollectRace,
 		collectRaceWithOptions: CollectRaceWithOptions,
 		prepareSession: func(ctx context.Context, workspace *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
 			return workspace.Prepare(ctx, options)

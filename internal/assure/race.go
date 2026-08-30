@@ -115,6 +115,7 @@ func CollectRaceWithOptions(ctx context.Context, workspace CommandWorkspace, mod
 		argv = append(argv, "-args")
 		argv = append(argv, options.TestArgs...)
 	}
+	replay := strings.Join(argv, " ")
 	run, err := workspace.Exec(ctx, gomutants.Command{
 		Argv: argv, Env: slices.Clone(options.Environment), Timeout: raceVerificationTimeout,
 	})
@@ -130,14 +131,14 @@ func CollectRaceWithOptions(ctx context.Context, workspace CommandWorkspace, mod
 			id := report.FindingID("data-race", strings.Join(packages, "\x00"))
 			return RaceResult{Findings: []report.Finding{{
 				ID: id, Kind: "data-race", Summary: "Go race detector reproduced a data race: " + summarize(run.Output),
-				Replay: "go test -race -count=1 " + strings.Join(packages, " "),
+				Replay: replay,
 			}}}, nil
 		}
 		if strings.Contains(output, "--- FAIL:") || strings.Contains(output, "\npanic:") {
 			id := report.FindingID("race-test-failure", strings.Join(packages, "\x00"))
 			return RaceResult{Findings: []report.Finding{{
 				ID: id, Kind: "race-test-failure", Summary: "a test failed under the Go race detector: " + summarize(run.Output),
-				Replay: "go test -race -count=1 " + strings.Join(packages, " "),
+				Replay: replay,
 			}}}, nil
 		}
 		return RaceResult{}, fmt.Errorf("goatest: race verification failed (exit=%d): %s", run.ExitCode, summarize(run.Output))

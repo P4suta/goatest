@@ -523,16 +523,6 @@ func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
 	evaluation.Evidence = append(evaluation.Evidence, other.Evidence...)
 	evaluation.Findings = append(evaluation.Findings, other.Findings...)
 	evaluation.Repairs = append(evaluation.Repairs, other.Repairs...)
-	evaluation.Accounting.Discovered += other.Accounting.Discovered
-	evaluation.Accounting.Selected += other.Accounting.Selected
-	evaluation.Accounting.Executed += other.Accounting.Executed
-	evaluation.Accounting.Killed += other.Accounting.Killed
-	evaluation.Accounting.Survived += other.Accounting.Survived
-	evaluation.Accounting.Inconclusive += other.Accounting.Inconclusive
-	evaluation.Accounting.CompileRejected += other.Accounting.CompileRejected
-	evaluation.Accounting.Accepted += other.Accounting.Accepted
-	evaluation.Accounting.OutOfScope += other.Accounting.OutOfScope
-	evaluation.Accounting.Unknown += other.Accounting.Unknown
 	evaluation.Applied = evaluation.Applied || other.Applied
 }
 

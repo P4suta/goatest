@@ -43,6 +43,7 @@ var (
 	}
 	removeCacheFile = os.Remove
 	renameCacheFile = os.Rename
+	collectCache    = collectUnlocked
 )
 
 func New(root string) *Store { return &Store{root: root} }
@@ -131,9 +132,7 @@ func (store *Store) Put(digest string, result report.Report) error {
 		if store.now != nil {
 			now = store.now
 		}
-		if _, err := collectUnlocked(store.root, store.maxBytes, store.ttl, now()); err != nil {
-			return fmt.Errorf("goatest: cache collection: %w", err)
-		}
+		_, _ = collectCache(store.root, store.maxBytes, store.ttl, now())
 	}
 	return nil
 }

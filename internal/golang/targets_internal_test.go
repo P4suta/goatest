@@ -138,7 +138,7 @@ func TestCapabilityRecognizesOnlyWellFormedIntegrationScopes(t *testing.T) {
 		{name: "scope is not call", body: `gt.Run(t, scope, callback)`},
 		{name: "wrong scope", body: `gt.Run(t, gt.Unit(), callback)`},
 		{name: "scope has no argument", body: `gt.Run(t, gt.Integration(), callback)`},
-		{name: "scope has two arguments", body: `gt.Run(t, gt.Integration("a", "b"), callback)`},
+		{name: "scope has two arguments", body: `gt.Run(t, gt.Integration("a", "b"), callback)`, want: "a"},
 		{name: "scope argument is identifier", body: `gt.Run(t, gt.Integration(name), callback)`},
 		{name: "scope argument is rune", body: `gt.Run(t, gt.Integration('x'), callback)`},
 	} {

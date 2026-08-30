@@ -88,7 +88,7 @@ func TestWorkspacePrepareMapsAndClonesEveryOption(t *testing.T) {
 	workspace := &Workspace{inner: engine}
 	options := PrepareOptions{
 		Contract: "deep-v1", Operators: []string{"comparison"}, Include: []string{"internal/**"},
-		Exclude: []string{"generated/**"}, Changed: true, ChangedRef: "origin/main",
+		Exclude:  []string{"generated/**"},
 		Packages: []string{"./internal/..."}, Jobs: 3,
 		BuildTimeout: time.Minute, MutantTimeout: 2 * time.Second,
 		VerifyArgv: []string{"go", "test", "./..."}, VerifyEnv: []string{"A=1"}, VerifyTimeout: 3 * time.Minute,
