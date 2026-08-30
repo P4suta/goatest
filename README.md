@@ -131,6 +131,9 @@ go test -race ./...
 go vet ./...
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the `mise`-based workflow, pull
+request rules, and source conventions.
+
 Development is test-driven. The suite includes the full weak-test → survivor →
 targeted fuzz → corpus promotion → fresh-session kill flow, exact-cache and
 impact-graph cases, provider/resource failures and cleanup, deterministic
