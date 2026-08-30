@@ -20,35 +20,20 @@ type RaceResult struct {
 	Findings []report.Finding
 }
 
+const raceVerificationTimeout = 30 * time.Minute
+
 // RelevantRacePackages returns the packages whose top-level tests exercise a
 // package containing concurrency. Running the concurrent dependency's own
 // tests alone can miss a race that is only driven through a caller.
 func RelevantRacePackages(model goanalysis.Model, concurrentPackages []string, targets []TargetEvidence) []string {
-	concurrent := make(map[string]bool, len(concurrentPackages))
+	concurrent := make(map[string]struct{}, len(concurrentPackages))
 	for _, importPath := range concurrentPackages {
-		concurrent[importPath] = true
+		concurrent[importPath] = struct{}{}
 	}
-	selected := make(map[string]bool)
+	selected := make(map[string]struct{})
 	for _, target := range targets {
-		reaches := concurrent[target.Target.Package]
-		if !reaches {
-			for _, dependency := range target.Target.Dependencies {
-				if concurrent[dependency] {
-					reaches = true
-					break
-				}
-			}
-		}
-		if !reaches {
-			for _, covered := range target.CoveredFiles {
-				if concurrent[packageForFile(model.Packages, covered)] {
-					reaches = true
-					break
-				}
-			}
-		}
-		if reaches {
-			selected[target.Target.Package] = true
+		if reachesConcurrency(model, concurrent, target) {
+			selected[target.Target.Package] = struct{}{}
 		}
 	}
 	result := make([]string, 0, len(selected))
@@ -59,6 +44,23 @@ func RelevantRacePackages(model goanalysis.Model, concurrentPackages []string, t
 	return result
 }
 
+func reachesConcurrency(model goanalysis.Model, concurrent map[string]struct{}, target TargetEvidence) bool {
+	if _, ok := concurrent[target.Target.Package]; ok {
+		return true
+	}
+	for _, dependency := range target.Target.Dependencies {
+		if _, ok := concurrent[dependency]; ok {
+			return true
+		}
+	}
+	for _, covered := range target.CoveredFiles {
+		if _, ok := concurrent[packageForFile(model.Packages, covered)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func packageForFile(packages []goanalysis.Package, path string) string {
 	path = strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "./")
 	bestPath, bestPackage := "", ""
@@ -67,8 +69,11 @@ func packageForFile(packages []goanalysis.Package, path string) string {
 		if directory == "." {
 			directory = ""
 		}
-		inside := directory == "" && !strings.Contains(path, "/") || directory != "" && strings.HasPrefix(path, directory+"/")
-		if inside && len(directory) >= len(bestPath) {
+		inside := !strings.Contains(path, "/")
+		if directory != "" {
+			inside = strings.HasPrefix(path, directory+"/")
+		}
+		if inside && (bestPackage == "" || len(directory) > len(bestPath)) {
 			bestPath, bestPackage = directory, pkg.ImportPath
 		}
 	}
@@ -88,10 +93,13 @@ func CollectRace(ctx context.Context, workspace CommandWorkspace, model goanalys
 	if len(packages) == 0 {
 		return RaceResult{Evidence: []report.Evidence{{Kind: "race", ID: "packages", Status: "not-applicable"}}}, nil
 	}
+	if workspace == nil {
+		return RaceResult{}, fmt.Errorf("goatest: nil race workspace")
+	}
 	argv := []string{"go", "test", "-race", "-count=1"}
 	argv = append(argv, packages...)
 	run, err := workspace.Exec(ctx, gomutants.Command{
-		Argv: argv, Env: slices.Clone(environment), Timeout: 30 * time.Minute,
+		Argv: argv, Env: slices.Clone(environment), Timeout: raceVerificationTimeout,
 	})
 	if err != nil {
 		return RaceResult{}, fmt.Errorf("goatest: race verification: %w", err)
