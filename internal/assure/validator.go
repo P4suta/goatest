@@ -36,7 +36,52 @@ type RepositoryValidatorOptions struct {
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
 
+type validationWorkspace interface {
+	CommandWorkspace
+	Close() error
+}
+
+type validationReadCloser interface {
+	io.Reader
+	Close() error
+}
+
+type validationWriteCloser interface {
+	io.Writer
+	Close() error
+}
+
+var (
+	openValidationWorkspace = func(ctx context.Context, root string, options mutationbridge.Options) (validationWorkspace, error) {
+		return mutationbridge.Open(ctx, root, options)
+	}
+	prepareValidationSession = func(ctx context.Context, workspace validationWorkspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
+		session, err := workspace.(*mutationbridge.Workspace).Prepare(ctx, options)
+		return session, err
+	}
+	decodeValidationPackages      = goanalysis.DecodePackages
+	concurrencyValidationPackages = goanalysis.ConcurrencyPackages
+	collectValidationRace         = CollectRace
+	makeCandidateTemp             = os.MkdirTemp
+	removeCandidateTemp           = os.RemoveAll
+	copyCandidateRepository       = copyRepository
+	writeCandidateRepositoryFile  = writeCandidate
+	resolveCandidatePath          = filepath.EvalSymlinks
+	walkCandidateFiles            = filepath.WalkDir
+	relativeCandidatePath         = filepath.Rel
+	makeCandidateDirectory        = os.MkdirAll
+	openCandidateInput            = func(name string) (validationReadCloser, error) { return os.Open(name) }
+	openCandidateOutput           = func(name string, flag int, mode os.FileMode) (validationWriteCloser, error) {
+		return os.OpenFile(name, flag, mode)
+	}
+	copyCandidateContent = io.Copy
+	readCandidateFile    = os.ReadFile
+	writeCandidateFile   = os.WriteFile
+)
+
 func NewRepositoryValidator(options RepositoryValidatorOptions) *repositoryValidator {
+	options.Environment = slices.Clone(options.Environment)
+	options.MutationOperators = slices.Clone(options.MutationOperators)
 	return &repositoryValidator{options: options}
 }
 
@@ -61,7 +106,7 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 			return err
 		}
 		defer func() { _ = workspace.Close() }()
-		session, err := workspace.Prepare(ctx, mutationbridge.PrepareOptions{
+		session, err := prepareValidationSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract: validator.options.Contract, Operators: slices.Clone(validator.options.MutationOperators),
 			VerifyArgv: []string{"go", "test", "-run=^$", "./..."},
 		})
@@ -106,15 +151,15 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 		if err != nil || listed.ExitCode != 0 || listed.TimedOut {
 			return commandError("candidate go list", listed, err)
 		}
-		model, err := goanalysis.DecodePackages(bytes.NewReader(listed.Output))
+		model, err := decodeValidationPackages(bytes.NewReader(listed.Output))
 		if err != nil {
 			return err
 		}
-		concurrent, err := goanalysis.ConcurrencyPackages(root, model.Packages)
+		concurrent, err := concurrencyValidationPackages(root, model.Packages)
 		if err != nil {
 			return err
 		}
-		raceResult, err := CollectRace(ctx, workspace, model, concurrent, validator.options.Contract, nil)
+		raceResult, err := collectValidationRace(ctx, workspace, model, concurrent, validator.options.Contract, nil)
 		if err != nil {
 			return err
 		}
@@ -125,14 +170,14 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 	})
 }
 
-func (validator *repositoryValidator) open(ctx context.Context, root string) (*mutationbridge.Workspace, error) {
-	return mutationbridge.Open(ctx, root, mutationbridge.Options{
+func (validator *repositoryValidator) open(ctx context.Context, root string) (validationWorkspace, error) {
+	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
 		ReportDirectory: ".goatest", Environment: slices.Clone(validator.options.Environment),
 	})
 }
 
-func runPassing(ctx context.Context, workspace *mutationbridge.Workspace, argv []string, purpose string) error {
+func runPassing(ctx context.Context, workspace CommandWorkspace, argv []string, purpose string) error {
 	result, err := workspace.Exec(ctx, gomutants.Command{Argv: argv, Timeout: 10 * time.Minute})
 	if err != nil {
 		return err
@@ -144,15 +189,15 @@ func runPassing(ctx context.Context, workspace *mutationbridge.Workspace, argv [
 }
 
 func (validator *repositoryValidator) withCandidate(ctx context.Context, candidate provider.Candidate, action func(context.Context, string) error) error {
-	root, err := os.MkdirTemp(validator.options.TempDirectory, "goatest-candidate-")
+	root, err := makeCandidateTemp(validator.options.TempDirectory, "goatest-candidate-")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(root) }()
-	if err := copyRepository(validator.options.Root, root); err != nil {
+	defer func() { _ = removeCandidateTemp(root) }()
+	if err := copyCandidateRepository(validator.options.Root, root); err != nil {
 		return err
 	}
-	if err := writeCandidate(root, candidate); err != nil {
+	if err := writeCandidateRepositoryFile(root, candidate); err != nil {
 		return err
 	}
 	return action(ctx, root)
@@ -162,11 +207,11 @@ func copyRepository(source, destination string) error {
 	if err := validateCopyRoots(source, destination); err != nil {
 		return err
 	}
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+	return walkCandidateFiles(source, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		relative, err := filepath.Rel(source, path)
+		relative, err := relativeCandidatePath(source, path)
 		if err != nil {
 			return err
 		}
@@ -175,57 +220,70 @@ func copyRepository(source, destination string) error {
 		}
 		relativeSlash := filepath.ToSlash(relative)
 		first, _, _ := strings.Cut(relativeSlash, "/")
-		if entry.IsDir() && (first == ".git" || first == ".goatest" || first == "reports" || first == "dist") {
+		if entry.IsDir() && excludedCandidateDirectory(first) {
 			return filepath.SkipDir
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("goatest: candidate validation refuses symbolic link %s", relativeSlash)
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		if entry.Type()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("goatest: candidate validation refuses symbolic link %s", relativeSlash)
-		}
 		target := filepath.Join(destination, relative)
 		if entry.IsDir() {
-			return os.MkdirAll(target, info.Mode().Perm())
+			return makeCandidateDirectory(target, info.Mode().Perm())
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("goatest: candidate validation refuses irregular file %s", relativeSlash)
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := makeCandidateDirectory(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		input, err := os.Open(path)
+		input, err := openCandidateInput(path)
 		if err != nil {
 			return err
 		}
-		output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		output, err := openCandidateOutput(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
 		if err != nil {
 			_ = input.Close()
 			return err
 		}
-		_, copyErr := io.Copy(output, input)
+		_, copyErr := copyCandidateContent(output, input)
 		return errors.Join(copyErr, output.Close(), input.Close())
 	})
 }
 
+func excludedCandidateDirectory(name string) bool {
+	switch name {
+	case ".git", ".goatest", "reports", "dist":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateCopyRoots(source, destination string) error {
-	canonicalSource, err := filepath.EvalSymlinks(source)
+	canonicalSource, err := resolveCandidatePath(source)
 	if err != nil {
 		return fmt.Errorf("goatest: resolve candidate source: %w", err)
 	}
-	canonicalDestination, err := filepath.EvalSymlinks(destination)
+	canonicalDestination, err := resolveCandidatePath(destination)
 	if err != nil {
 		return fmt.Errorf("goatest: resolve candidate destination: %w", err)
 	}
-	inside := func(root, path string) bool {
-		relative, relErr := filepath.Rel(root, path)
-		return relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-	}
-	if inside(canonicalSource, canonicalDestination) || inside(canonicalDestination, canonicalSource) {
+	if candidatePathInside(canonicalSource, canonicalDestination) || candidatePathInside(canonicalDestination, canonicalSource) {
 		return errors.New("goatest: candidate source and destination must be separate trees")
 	}
 	return nil
+}
+
+func candidatePathInside(root, candidate string) bool {
+	relative, err := relativeCandidatePath(root, candidate)
+	if err != nil {
+		return false
+	}
+	return filepath.IsLocal(relative)
 }
 
 func writeCandidate(root string, candidate provider.Candidate) error {
@@ -233,7 +291,7 @@ func writeCandidate(root string, candidate provider.Candidate) error {
 		return fmt.Errorf("goatest: candidate path %q is unsafe", candidate.Path)
 	}
 	target := filepath.Join(root, filepath.FromSlash(candidate.Path))
-	existing, err := os.ReadFile(target)
+	existing, err := readCandidateFile(target)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -247,8 +305,8 @@ func writeCandidate(root string, candidate provider.Candidate) error {
 			return errors.New("goatest: candidate preimage does not match validation copy")
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := makeCandidateDirectory(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(target, candidate.Content, 0o644)
+	return writeCandidateFile(target, candidate.Content, 0o644)
 }
