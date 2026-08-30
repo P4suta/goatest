@@ -23,8 +23,9 @@ import (
 type TargetKind string
 
 const (
-	KindTest TargetKind = "test"
-	KindFuzz TargetKind = "fuzz"
+	KindTest    TargetKind = "test"
+	KindFuzz    TargetKind = "fuzz"
+	KindExample TargetKind = "example"
 )
 
 type Target struct {
@@ -36,6 +37,7 @@ type Target struct {
 	Path         string
 	Line         int
 	Capability   string
+	Capabilities []string
 	Dependencies []string
 }
 
@@ -53,7 +55,7 @@ func DiscoverTargets(root string, packages []Package) ([]Target, error) {
 			}
 			path := filepath.Join(directory, entry.Name())
 			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, path, nil, 0)
+			file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 			if err != nil {
 				return nil, fmt.Errorf("goatest: parse %s: %w", path, err)
 			}
@@ -64,16 +66,22 @@ func DiscoverTargets(root string, packages []Package) ([]Target, error) {
 					continue
 				}
 				kind, ok := targetKind(function.Name.Name)
-				if !ok || !testingSignature(function, testingAliases, kind) {
+				if !ok || !testingSignature(function, testingAliases, kind) ||
+					kind == KindExample && !hasExampleOutput(function, file.Comments) {
 					continue
 				}
 				relativePath := filepath.ToSlash(filepath.Join(filepath.FromSlash(pkg.RelativeDir), entry.Name()))
 				line := fset.Position(function.Pos()).Line
+				capabilities := targetCapabilities(function, goatestAliases)
+				firstCapability := ""
+				if len(capabilities) != 0 {
+					firstCapability = capabilities[0]
+				}
 				targets = append(targets, Target{
 					ID:   TargetID(pkg.ImportPath, function.Name.Name, kind, relativePath, line),
 					Name: function.Name.Name, Kind: kind, Package: pkg.ImportPath,
 					RelativeDir: pkg.RelativeDir, Path: relativePath, Line: line,
-					Capability:   capability(function.Body, goatestAliases),
+					Capability: firstCapability, Capabilities: capabilities,
 					Dependencies: slices.Clone(pkg.Dependencies),
 				})
 			}
@@ -111,7 +119,11 @@ func aliases(file *ast.File) (map[string]bool, map[string]bool) {
 }
 
 func targetKind(name string) (TargetKind, bool) {
-	for prefix, kind := range map[string]TargetKind{"Test": KindTest, "Fuzz": KindFuzz} {
+	for _, candidate := range []struct {
+		prefix string
+		kind   TargetKind
+	}{{"Test", KindTest}, {"Fuzz", KindFuzz}, {"Example", KindExample}} {
+		prefix, kind := candidate.prefix, candidate.kind
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
@@ -128,6 +140,10 @@ func targetKind(name string) (TargetKind, bool) {
 }
 
 func testingSignature(function *ast.FuncDecl, testingAliases map[string]bool, kind TargetKind) bool {
+	if kind == KindExample {
+		return (function.Type.Params == nil || len(function.Type.Params.List) == 0) &&
+			(function.Type.Results == nil || len(function.Type.Results.List) == 0)
+	}
 	if function.Type.Params == nil || len(function.Type.Params.List) != 1 || function.Type.Results != nil && len(function.Type.Results.List) != 0 {
 		return false
 	}
@@ -154,13 +170,69 @@ func testingSignature(function *ast.FuncDecl, testingAliases map[string]bool, ki
 	return selector.Sel.Name == want
 }
 
-func capability(body *ast.BlockStmt, goatestAliases map[string]bool) string {
-	visitor := &capabilityVisitor{aliases: goatestAliases}
-	ast.Walk(visitor, body)
-	if len(visitor.values) == 0 {
-		return ""
+func hasExampleOutput(function *ast.FuncDecl, comments []*ast.CommentGroup) bool {
+	for _, group := range comments {
+		if group.Pos() < function.Body.Lbrace || group.End() > function.Body.Rbrace {
+			continue
+		}
+		for _, comment := range group.List {
+			text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+			lower := strings.ToLower(text)
+			if strings.HasPrefix(lower, "output:") || strings.HasPrefix(lower, "unordered output:") {
+				return true
+			}
+		}
 	}
-	return visitor.values[0]
+	return false
+}
+
+func targetCapabilities(function *ast.FuncDecl, goatestAliases map[string]bool) []string {
+	visitor := &capabilityVisitor{aliases: goatestAliases}
+	ast.Walk(visitor, function.Body)
+	values := slices.Clone(visitor.values)
+	if function.Doc != nil {
+		for _, comment := range function.Doc.List {
+			text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+			if resources, ok := strings.CutPrefix(text, "goatest:resources"); ok {
+				values = append(values, strings.Fields(resources)...)
+			}
+		}
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+// capability is kept as the single-resource parser seam used by focused
+// tests; production target discovery records the complete capability set.
+func capability(body *ast.BlockStmt, goatestAliases map[string]bool) string {
+	result := ""
+	ast.Inspect(body, func(node ast.Node) bool {
+		if result != "" {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) != 3 || !selectorIs(call.Fun, goatestAliases, "Run") {
+			return true
+		}
+		scope, ok := call.Args[1].(*ast.CallExpr)
+		if !ok || len(scope.Args) != 1 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
+			return true
+		}
+		literal, ok := scope.Args[0].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		result, _ = strconv.Unquote(literal.Value)
+		return true
+	})
+	return result
 }
 
 type capabilityVisitor struct {
@@ -169,27 +241,34 @@ type capabilityVisitor struct {
 }
 
 func (visitor *capabilityVisitor) Visit(node ast.Node) ast.Visitor {
-	if value, ok := integrationCapability(node, visitor.aliases); ok {
-		visitor.values = append(visitor.values, value)
+	if values, ok := integrationCapabilities(node, visitor.aliases); ok {
+		visitor.values = append(visitor.values, values...)
 	}
 	return visitor
 }
 
-func integrationCapability(node ast.Node, goatestAliases map[string]bool) (string, bool) {
+func integrationCapabilities(node ast.Node, goatestAliases map[string]bool) ([]string, bool) {
 	call, ok := node.(*ast.CallExpr)
-	if !ok || len(call.Args) != 3 || !selectorIs(call.Fun, goatestAliases, "Run", "Check") {
-		return "", false
+	if !ok || len(call.Args) != 3 || !selectorIs(call.Fun, goatestAliases, "Run") {
+		return nil, false
 	}
 	scope, ok := call.Args[1].(*ast.CallExpr)
-	if !ok || len(scope.Args) != 1 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
-		return "", false
+	if !ok || len(scope.Args) == 0 || !selectorIs(scope.Fun, goatestAliases, "Integration") {
+		return nil, false
 	}
-	literal, ok := scope.Args[0].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		return "", false
+	values := make([]string, 0, len(scope.Args))
+	for _, argument := range scope.Args {
+		literal, ok := argument.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return nil, false
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err != nil || strings.TrimSpace(value) == "" {
+			return nil, false
+		}
+		values = append(values, value)
 	}
-	value, _ := strconv.Unquote(literal.Value)
-	return value, true
+	return values, true
 }
 
 func selectorIs(expression ast.Expr, aliases map[string]bool, names ...string) bool {

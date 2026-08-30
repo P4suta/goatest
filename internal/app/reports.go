@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -36,31 +37,85 @@ var operatingSystemAtomicWrites = atomicWriteOperations{
 	rename: os.Rename,
 }
 
-// WriteReports atomically projects one verdict to every supported report
-// format and to the latest-report index used by explain/replay/accept.
+// WriteReports atomically projects one completed run to its immutable history
+// directory and then advances the scope-aware indexes. A changeset, package,
+// or replay run can never replace latest-full.
 func WriteReports(root string, input report.Report) error {
+	if err := report.ValidateForPersistence(input); err != nil {
+		return err
+	}
+	if !safeRunID(input.RunID) {
+		return fmt.Errorf("goatest: unsafe report run ID %q", input.RunID)
+	}
 	jsonReport := report.JSON(input)
 	htmlReport := report.HTML(input)
 	sarifReport := report.SARIF(input)
 	junitReport := report.JUnit(input)
 	schema := report.JSONSchema()
+	runsDirectory := filepath.Join(root, "reports", "runs")
+	runDirectory := filepath.Join(runsDirectory, input.RunID)
+	if _, err := os.Stat(runDirectory); err == nil {
+		return fmt.Errorf("goatest: report run %s already exists", input.RunID)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("goatest: inspect report run %s: %w", input.RunID, err)
+	}
+	if err := os.MkdirAll(runsDirectory, 0o755); err != nil {
+		return fmt.Errorf("goatest: create report history: %w", err)
+	}
+	stagingDirectory, err := os.MkdirTemp(runsDirectory, ".goatest-run-*")
+	if err != nil {
+		return fmt.Errorf("goatest: stage report run %s: %w", input.RunID, err)
+	}
+	defer func() { _ = os.RemoveAll(stagingDirectory) }()
 	artifacts := []struct {
-		path string
+		name string
 		data []byte
 	}{
-		{filepath.Join(root, ".goatest", "report.json"), jsonReport},
-		{filepath.Join(root, "reports", "assurance-report-v1.json"), jsonReport},
-		{filepath.Join(root, "reports", "assurance-report-v1.html"), htmlReport},
-		{filepath.Join(root, "reports", "assurance-report-v1.sarif"), sarifReport},
-		{filepath.Join(root, "reports", "assurance-report-v1.junit.xml"), junitReport},
-		{filepath.Join(root, "reports", "assurance-report-v1.schema.json"), schema},
+		{"assurance-report-v1.json", jsonReport},
+		{"assurance-report-v1.html", htmlReport},
+		{"assurance-report-v1.sarif", sarifReport},
+		{"assurance-report-v1.junit.xml", junitReport},
+		{"assurance-report-v1.schema.json", schema},
 	}
 	for _, artifact := range artifacts {
-		if err := atomicWrite(artifact.path, artifact.data); err != nil {
-			return fmt.Errorf("goatest: write report %s: %w", artifact.path, err)
+		path := filepath.Join(stagingDirectory, artifact.name)
+		if err := atomicWrite(path, artifact.data); err != nil {
+			return fmt.Errorf("goatest: write report %s: %w", path, err)
+		}
+	}
+	if err := os.Rename(stagingDirectory, runDirectory); err != nil {
+		return fmt.Errorf("goatest: publish report run %s: %w", input.RunID, err)
+	}
+	indexes := []string{
+		filepath.Join(root, ".goatest", "latest-any.json"),
+		filepath.Join(root, "reports", "latest-any.json"),
+	}
+	if input.RunKind == report.RunFull {
+		indexes = append(indexes,
+			filepath.Join(root, ".goatest", "latest-full.json"),
+			filepath.Join(root, "reports", "latest-full.json"),
+		)
+	}
+	for _, path := range indexes {
+		if err := atomicWrite(path, jsonReport); err != nil {
+			return fmt.Errorf("goatest: write report index %s: %w", path, err)
 		}
 	}
 	return nil
+}
+
+func safeRunID(id string) bool {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\\`) {
+		return false
+	}
+	for _, character := range id {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func atomicWrite(path string, data []byte) error {

@@ -43,24 +43,16 @@ var (
 )
 
 func PromoteCorpus(root string, artifact gomutants.Artifact) (string, bool, error) {
-	normalized, ok := corpusPath(artifact.Path)
-	if !ok {
-		return "", false, fmt.Errorf("goatest: artifact path %q is not standard fuzz corpus", artifact.Path)
-	}
-	if len(artifact.Data) == 0 || len(artifact.Data) > maximumCorpusBytes || !bytes.HasPrefix(artifact.Data, []byte("go test fuzz v1\n")) {
-		return "", false, errors.New("goatest: artifact is not bounded standard Go fuzz v1 data")
-	}
-	sum := sha256.Sum256(artifact.Data)
-	digest := hex.EncodeToString(sum[:])
-	if artifact.SHA256 != "" && artifact.SHA256 != digest {
-		return "", false, errors.New("goatest: artifact digest does not match its bytes")
+	normalized, data, err := CorpusCandidate(artifact)
+	if err != nil {
+		return "", false, err
 	}
 	target, err := safeTarget(root, normalized)
 	if err != nil {
 		return "", false, err
 	}
 	if existing, err := readCorpusFile(target); err == nil {
-		if slices.Equal(existing, artifact.Data) {
+		if slices.Equal(existing, data) {
 			return normalized, false, nil
 		}
 		return "", false, fmt.Errorf("goatest: corpus path %s already exists with different bytes", normalized)
@@ -80,12 +72,12 @@ func PromoteCorpus(root string, artifact gomutants.Artifact) (string, bool, erro
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = removeCorpusFile(temporaryPath) }()
-	written, err := temporary.Write(artifact.Data)
+	written, err := temporary.Write(data)
 	if err != nil {
 		_ = temporary.Close()
 		return "", false, err
 	}
-	if written != len(artifact.Data) {
+	if written != len(data) {
 		_ = temporary.Close()
 		return "", false, io.ErrShortWrite
 	}
@@ -101,12 +93,30 @@ func PromoteCorpus(root string, artifact gomutants.Artifact) (string, bool, erro
 		return "", false, err
 	}
 	if err := linkCorpusFile(temporaryPath, target); err != nil {
-		if existing, readErr := readCorpusFile(target); readErr == nil && slices.Equal(existing, artifact.Data) {
+		if existing, readErr := readCorpusFile(target); readErr == nil && slices.Equal(existing, data) {
 			return normalized, false, nil
 		}
 		return "", false, fmt.Errorf("goatest: atomically promote corpus %s: %w", normalized, err)
 	}
 	return normalized, true, nil
+}
+
+// CorpusCandidate validates a go-mutants fuzz artifact without writing it and
+// returns the canonical standard Go corpus path and independent bytes.
+func CorpusCandidate(artifact gomutants.Artifact) (string, []byte, error) {
+	normalized, ok := corpusPath(artifact.Path)
+	if !ok {
+		return "", nil, fmt.Errorf("goatest: artifact path %q is not standard fuzz corpus", artifact.Path)
+	}
+	if len(artifact.Data) == 0 || len(artifact.Data) > maximumCorpusBytes || !bytes.HasPrefix(artifact.Data, []byte("go test fuzz v1\n")) {
+		return "", nil, errors.New("goatest: artifact is not bounded standard Go fuzz v1 data")
+	}
+	sum := sha256.Sum256(artifact.Data)
+	digest := hex.EncodeToString(sum[:])
+	if artifact.SHA256 != "" && artifact.SHA256 != digest {
+		return "", nil, errors.New("goatest: artifact digest does not match its bytes")
+	}
+	return normalized, slices.Clone(artifact.Data), nil
 }
 
 func corpusPath(path string) (string, bool) {

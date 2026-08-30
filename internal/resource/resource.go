@@ -43,10 +43,11 @@ type Response struct {
 }
 
 type Spec struct {
-	Command   []string
-	Timeout   time.Duration
-	Shared    bool
-	Exclusive bool
+	Command     []string
+	Timeout     time.Duration
+	Shared      bool
+	Exclusive   bool
+	Environment []string
 }
 
 type Manager struct {
@@ -105,6 +106,7 @@ func New(specs map[string]Spec) *Manager {
 	cloned := make(map[string]Spec, len(specs))
 	for name, spec := range specs {
 		spec.Command = slices.Clone(spec.Command)
+		spec.Environment = slices.Clone(spec.Environment)
 		cloned[name] = spec
 	}
 	return &Manager{specs: cloned, shared: make(map[string]*instance), active: make(map[*instance]bool), changed: make(chan struct{})}
@@ -259,7 +261,11 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		timeout = 30 * time.Second
 	}
 	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
-	cmd.Env = os.Environ()
+	if spec.Environment == nil {
+		cmd.Env = os.Environ()
+	} else {
+		cmd.Env = slices.Clone(spec.Environment)
+	}
 	stdin, err := resourceStdinPipe(cmd)
 	if err != nil {
 		return nil, err

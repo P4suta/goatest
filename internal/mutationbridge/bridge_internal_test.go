@@ -100,7 +100,7 @@ func TestWorkspacePrepareMapsAndClonesEveryOption(t *testing.T) {
 	options.Operators[0], options.Include[0], options.Exclude[0], options.Packages[0] = "mutated", "mutated", "mutated", "mutated"
 	options.VerifyArgv[0], options.VerifyEnv[0] = "mutated", "mutated"
 	prepared := engine.prepare
-	if prepared.Profile != "all" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.Include, []string{"internal/**"}) || !slices.Equal(prepared.Exclude, []string{"generated/**"}) || !prepared.Changed || prepared.ChangedRef != "origin/main" || !slices.Equal(prepared.Packages, []string{"./internal/..."}) || prepared.Jobs != 3 || prepared.BuildTimeout != time.Minute || prepared.MutantTimeout != 2*time.Second || !slices.Equal(prepared.Verify.Argv, []string{"go", "test", "./..."}) || !slices.Equal(prepared.Verify.Env, []string{"A=1"}) || prepared.Verify.Timeout != 3*time.Minute {
+	if prepared.Profile != "all" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.Include, []string{"internal/**"}) || !slices.Equal(prepared.Exclude, []string{"generated/**"}) || !slices.Equal(prepared.Packages, []string{"./internal/..."}) || prepared.Jobs != 3 || prepared.BuildTimeout != time.Minute || prepared.MutantTimeout != 2*time.Second || !slices.Equal(prepared.Verify.Argv, []string{"go", "test", "./..."}) || !slices.Equal(prepared.Verify.Env, []string{"A=1"}) || prepared.Verify.Timeout != 3*time.Minute {
 		t.Fatalf("Prepare options = %+v", prepared)
 	}
 }

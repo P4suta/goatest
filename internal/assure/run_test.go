@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -127,6 +128,50 @@ func TestBoundary(t *testing.T) {
 		if event.Kind == "baseline-target" || event.Kind == "mutation-target" || event.Kind == "mutation-prepare" {
 			t.Fatalf("warm cache started child work: %+v", events)
 		}
+	}
+}
+
+func TestPlanEnumeratesTargetsAndMutantsWithoutRunningTestTargets(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "go.mod", "module fixture.example/plan\n\ngo 1.26.0\n")
+	writeFixture(t, root, "value.go", "package plan\n\nfunc Value(v int) bool { return v < 10 }\n")
+	writeFixture(t, root, "value_test.go", `package plan
+
+import (
+	"os"
+	"testing"
+)
+
+func TestValue(t *testing.T) {
+	if err := os.WriteFile("test-target-ran", []byte("ran"), 0o600); err != nil { t.Fatal(err) }
+}
+`)
+	planned, err := assure.Plan(t.Context(), assure.Options{
+		Root: root, Contract: "standard-v1", GoBinary: goBinary(t), TempDirectory: t.TempDir(),
+		MutationOperators: []string{"comparison"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Verdict != report.VerdictCompleted || planned.RunKind != report.RunOperation || planned.Scope.Resolved.Kind != "full" {
+		t.Fatalf("plan = %+v", planned)
+	}
+	var targetCount, mutantCount, summaryCount int
+	for _, item := range planned.Evidence {
+		switch item.Kind {
+		case "plan-target":
+			targetCount++
+		case "plan-mutant":
+			mutantCount++
+		case "plan":
+			summaryCount++
+		}
+	}
+	if targetCount != 1 || mutantCount == 0 || summaryCount != 1 {
+		t.Fatalf("plan evidence = %+v", planned.Evidence)
+	}
+	if _, err := os.Stat(filepath.Join(root, "test-target-ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plan ran a test target: %v", err)
 	}
 }
 
@@ -368,6 +413,7 @@ contract = "standard-v1"
 command = [%s, "-test.run=^TestRunResourceProviderHelper$"]
 timeout = "10s"
 shared = true
+environment = ["GOATEST_ASSURE_RESOURCE_HELPER", "GOATEST_ASSURE_RESOURCE_LOG"]
 `, strconv.Quote(os.Args[0]))
 	writeFixture(t, root, ".goatest.toml", configuration)
 	writeFixture(t, root, "go.mod", "module github.com/P4suta/goatest\n\ngo 1.26.0\n")
@@ -488,6 +534,7 @@ contract = "standard-v1"
 [generation]
 command = [%s, "-test.run=^TestRunGenerationProviderHelper$"]
 allowed_paths = ["boundary_test.go"]
+environment = ["GOATEST_ASSURE_GENERATION_HELPER", "GOATEST_ASSURE_GENERATION_CONTENT", "GOATEST_ASSURE_GENERATION_PREIMAGE"]
 `, strconv.Quote(os.Args[0]))
 	writeFixture(t, root, ".goatest.toml", configuration)
 	result, err := assure.Run(t.Context(), assure.Options{

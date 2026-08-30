@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,11 +50,11 @@ func (s *service) Execute(_ context.Context, command cli.Command, request cli.Re
 func TestDefaultCommandAndGlobalFlags(t *testing.T) {
 	fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "deep-v1"}}
 	var stdout, stderr bytes.Buffer
-	exit := cli.Run(t.Context(), []string{"--changed=origin/main", "--contract=deep-v1", "--no-apply", "--json", "--no-tui"}, &stdout, &stderr, fake)
+	exit := cli.Run(t.Context(), []string{"--changed=origin/main", "--contract=deep-v1", "--json", "--ui=plain"}, &stdout, &stderr, fake)
 	if exit != cli.ExitAssured || fake.command != cli.CommandVerify {
 		t.Fatalf("exit/command = %d/%s", exit, fake.command)
 	}
-	if !fake.request.Changed || fake.request.ChangedRef != "origin/main" || fake.request.Contract != "deep-v1" || !fake.request.NoApply || !fake.request.JSON || !fake.request.NoTUI {
+	if !fake.request.Changed || fake.request.ChangedRef != "origin/main" || fake.request.Contract != "deep-v1" || !fake.request.JSON || fake.request.UI != cli.UIPlain {
 		t.Errorf("request = %+v", fake.request)
 	}
 	var rendered report.Report
@@ -62,6 +63,17 @@ func TestDefaultCommandAndGlobalFlags(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestTestBinaryArgumentsAreCanonicalizedAfterSeparator(t *testing.T) {
+	fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	exit := cli.Run(t.Context(), []string{"verify", "./...", "--", "-short", "-custom=value"}, &bytes.Buffer{}, &bytes.Buffer{}, fake)
+	if exit != cli.ExitAssured {
+		t.Fatalf("exit = %d", exit)
+	}
+	if got, want := fake.request.TestArgs, []string{"-test.short=true", "-custom=value"}; !slices.Equal(got, want) {
+		t.Fatalf("test args = %v, want %v", got, want)
 	}
 }
 
@@ -88,7 +100,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{[]string{"init"}, cli.CommandInit, ""},
 		{[]string{"explain", "finding-a"}, cli.CommandExplain, "finding-a"},
 		{[]string{"replay", "finding-b"}, cli.CommandReplay, "finding-b"},
-		{[]string{"accept", "finding-c"}, cli.CommandAccept, "finding-c"},
+		{[]string{"accept", "finding-c", "--reason=reviewed", "--expires=2026-12-01T00:00:00Z"}, cli.CommandAccept, "finding-c"},
 		{[]string{"report"}, cli.CommandReport, ""},
 	} {
 		fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
@@ -99,7 +111,10 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"explain"}, {"accept"}, {"unknown"}, {"--contract=bad"}, {"--unknown"},
-		{"init", "extra"}, {"report", "extra"}, {"replay", ""},
+		{"--no-tui"}, {"--no-apply"},
+		{"verify", "--apply"}, {"doctor", "--changed"}, {"init", "--contract=deep-v1"},
+		{"verify", "--latest-full"}, {"fix", "--reason=reviewed"}, {"report", "--apply"},
+		{"init", "extra"}, {"report", "extra"}, {"replay", ""}, {"accept", "finding-c"},
 	} {
 		var stderr bytes.Buffer
 		if exit := cli.Run(t.Context(), args, &bytes.Buffer{}, &stderr, &service{}); exit != cli.ExitError || stderr.Len() == 0 {
@@ -110,10 +125,15 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 
 func TestVerdictsMapToStableExitCodes(t *testing.T) {
 	for verdict, want := range map[report.Verdict]int{
-		report.VerdictAssured:      cli.ExitAssured,
-		report.VerdictDefect:       cli.ExitDefect,
-		report.VerdictInsufficient: cli.ExitInsufficient,
-		report.VerdictError:        cli.ExitError,
+		report.VerdictAssured:       cli.ExitAssured,
+		report.VerdictChangeAssured: cli.ExitAssured,
+		report.VerdictScopeAssured:  cli.ExitAssured,
+		report.VerdictResolved:      cli.ExitAssured,
+		report.VerdictCompleted:     cli.ExitAssured,
+		report.VerdictDefect:        cli.ExitDefect,
+		report.VerdictReproduced:    cli.ExitDefect,
+		report.VerdictInsufficient:  cli.ExitInsufficient,
+		report.VerdictError:         cli.ExitError,
 	} {
 		fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: verdict}}
 		if got := cli.Run(t.Context(), nil, &bytes.Buffer{}, &bytes.Buffer{}, fake); got != want {

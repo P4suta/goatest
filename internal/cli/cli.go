@@ -6,12 +6,14 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/testargs"
 )
 
 const (
@@ -32,16 +34,38 @@ const (
 	CommandReplay  Command = "replay"
 	CommandAccept  Command = "accept"
 	CommandReport  Command = "report"
+	CommandPlan    Command = "plan"
+	CommandDoctor  Command = "doctor"
+	CommandFix     Command = "fix"
+	CommandCache   Command = "cache"
+)
+
+type UI string
+
+const (
+	UIAuto  UI = "auto"
+	UIPlain UI = "plain"
+	UIJSONL UI = "jsonl"
 )
 
 type Request struct {
-	Changed        bool
-	ChangedRef     string
-	Contract       string
-	NoApply        bool
-	JSON           bool
-	NoTUI          bool
-	ReplayMutantID string
+	Changed          bool
+	ChangedRef       string
+	Contract         string
+	JSON             bool
+	UI               UI
+	Packages         []string
+	TestArgs         []string
+	ReportLatestFull bool
+	ReportRunID      string
+	IDs              []string
+	Apply            bool
+	Reason           string
+	Expires          string
+	Owner            string
+	Ticket           string
+	ReplayFindingID  string
+	ReplayMutantID   string
 }
 
 type Service interface {
@@ -49,13 +73,16 @@ type Service interface {
 }
 
 const help = `Usage:
-  goatest [--changed[=REF]] [--contract=standard-v1|deep-v1] [--no-apply] [--json] [--no-tui]
-  goatest init
-  goatest explain ID
-  goatest replay ID
-  goatest accept ID
-  goatest report
-
+	goatest verify [packages...] [--changed[=REF]] [--contract=standard-v1|deep-v1] [--ui=auto|plain|jsonl] [-- test-binary-args...]
+	goatest plan [packages...]
+	goatest doctor
+	goatest init
+	goatest explain ID
+	goatest replay ID
+	goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
+	goatest fix [ID...] [--apply]
+	goatest report [--latest-full|--run=ID]
+	goatest cache status|gc
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
 `
 
@@ -76,17 +103,24 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 			return ExitInterrupted
 		}
 		if result.Verdict == report.VerdictError {
-			render(stdout, result, request.JSON)
+			render(stdout, result, request)
 		}
 		_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(err.Error()))
 		return ExitError
 	}
-	render(stdout, result, request.JSON)
+	render(stdout, result, request)
 	return exitCode(result.Verdict)
 }
 
-func render(output io.Writer, result report.Report, jsonOutput bool) {
-	if jsonOutput {
+func render(output io.Writer, result report.Report, request Request) {
+	if request.UI == UIJSONL {
+		event := struct {
+			Type   string        `json:"type"`
+			Report report.Report `json:"report"`
+		}{Type: "report", Report: result}
+		data, _ := json.Marshal(event)
+		_, _ = output.Write(append(data, '\n'))
+	} else if request.JSON {
 		_, _ = output.Write(report.JSON(result))
 	} else {
 		_, _ = io.WriteString(output, report.Lines(result))
@@ -94,7 +128,15 @@ func render(output io.Writer, result report.Report, jsonOutput bool) {
 }
 
 func parse(args []string) (Command, Request, string, error) {
-	request := Request{}
+	request := Request{UI: UIAuto}
+	var testArgs []string
+	for index, argument := range args {
+		if argument == "--" {
+			testArgs = append(testArgs, args[index+1:]...)
+			args = args[:index]
+			break
+		}
+	}
 	positionals := make([]string, 0, 2)
 	for _, argument := range args {
 		switch {
@@ -105,47 +147,114 @@ func parse(args []string) (Command, Request, string, error) {
 			request.ChangedRef = strings.TrimPrefix(argument, "--changed=")
 		case strings.HasPrefix(argument, "--contract="):
 			request.Contract = strings.TrimPrefix(argument, "--contract=")
-		case argument == "--no-apply":
-			request.NoApply = true
+		case argument == "--apply":
+			request.Apply = true
 		case argument == "--json":
 			request.JSON = true
-		case argument == "--no-tui":
-			request.NoTUI = true
+		case strings.HasPrefix(argument, "--ui="):
+			request.UI = UI(strings.TrimPrefix(argument, "--ui="))
+		case argument == "--latest-full":
+			request.ReportLatestFull = true
+		case strings.HasPrefix(argument, "--run="):
+			request.ReportRunID = strings.TrimPrefix(argument, "--run=")
+		case strings.HasPrefix(argument, "--reason="):
+			request.Reason = strings.TrimPrefix(argument, "--reason=")
+		case strings.HasPrefix(argument, "--expires="):
+			request.Expires = strings.TrimPrefix(argument, "--expires=")
+		case strings.HasPrefix(argument, "--owner="):
+			request.Owner = strings.TrimPrefix(argument, "--owner=")
+		case strings.HasPrefix(argument, "--ticket="):
+			request.Ticket = strings.TrimPrefix(argument, "--ticket=")
 		case strings.HasPrefix(argument, "-"):
 			return "", Request{}, "", fmt.Errorf("unknown flag %q", argument)
 		default:
 			positionals = append(positionals, argument)
 		}
 	}
+	normalizedTestArgs, err := testargs.Normalize(testArgs)
+	if err != nil {
+		return "", Request{}, "", err
+	}
+	request.TestArgs = normalizedTestArgs
 	if request.Contract != "" && request.Contract != "standard-v1" && request.Contract != "deep-v1" {
 		return "", Request{}, "", fmt.Errorf("contract %q: expected standard-v1 or deep-v1", request.Contract)
 	}
+	if request.UI != UIAuto && request.UI != UIPlain && request.UI != UIJSONL {
+		return "", Request{}, "", fmt.Errorf("ui %q: expected auto, plain, or jsonl", request.UI)
+	}
+	if request.JSON && request.UI == UIJSONL {
+		return "", Request{}, "", errors.New("--json and --ui=jsonl are mutually exclusive")
+	}
 	if len(positionals) == 0 {
-		return CommandVerify, request, "", nil
+		return parsedCommand(CommandVerify, request, "")
 	}
 	command := Command(positionals[0])
 	rest := positionals[1:]
 	switch command {
-	case CommandInit, CommandReport:
+	case CommandVerify, CommandPlan:
+		request.Packages = append([]string(nil), rest...)
+		if command == CommandPlan && len(testArgs) != 0 {
+			return "", Request{}, "", errors.New("plan does not accept test-binary arguments")
+		}
+		return parsedCommand(command, request, "")
+	case CommandInit, CommandDoctor:
 		if len(rest) != 0 {
 			return "", Request{}, "", fmt.Errorf("%s takes no ID", command)
 		}
-		return command, request, "", nil
+		return parsedCommand(command, request, "")
+	case CommandReport:
+		if len(rest) != 0 || request.ReportLatestFull && request.ReportRunID != "" {
+			return "", Request{}, "", errors.New("report accepts exactly one of --latest-full or --run=ID")
+		}
+		return parsedCommand(command, request, "")
 	case CommandExplain, CommandReplay, CommandAccept:
 		if len(rest) != 1 || rest[0] == "" {
 			return "", Request{}, "", fmt.Errorf("%s requires exactly one ID", command)
 		}
-		return command, request, rest[0], nil
+		if command == CommandAccept && (strings.TrimSpace(request.Reason) == "" || strings.TrimSpace(request.Expires) == "") {
+			return "", Request{}, "", errors.New("accept requires --reason and --expires")
+		}
+		return parsedCommand(command, request, rest[0])
+	case CommandFix:
+		request.IDs = append([]string(nil), rest...)
+		return parsedCommand(command, request, "")
+	case CommandCache:
+		if len(rest) != 1 || rest[0] != "status" && rest[0] != "gc" {
+			return "", Request{}, "", errors.New("cache requires status or gc")
+		}
+		return parsedCommand(command, request, rest[0])
 	default:
 		return "", Request{}, "", fmt.Errorf("unknown command %q", command)
 	}
 }
 
+func parsedCommand(command Command, request Request, id string) (Command, Request, string, error) {
+	if request.Apply && command != CommandFix {
+		return "", Request{}, "", errors.New("--apply is only valid with fix")
+	}
+	if request.Changed && command != CommandVerify && command != CommandPlan {
+		return "", Request{}, "", errors.New("--changed is only valid with verify or plan")
+	}
+	if request.Contract != "" && command != CommandVerify && command != CommandPlan {
+		return "", Request{}, "", errors.New("--contract is only valid with verify or plan")
+	}
+	if (request.ReportLatestFull || request.ReportRunID != "") && command != CommandReport {
+		return "", Request{}, "", errors.New("--latest-full and --run are only valid with report")
+	}
+	if request.Reason != "" || request.Expires != "" || request.Owner != "" || request.Ticket != "" {
+		if command != CommandAccept {
+			return "", Request{}, "", errors.New("acceptance metadata flags are only valid with accept")
+		}
+	}
+	return command, request, id, nil
+}
+
 func exitCode(verdict report.Verdict) int {
 	switch verdict {
-	case report.VerdictAssured:
+	case report.VerdictAssured, report.VerdictChangeAssured, report.VerdictScopeAssured,
+		report.VerdictResolved, report.VerdictCompleted:
 		return 0
-	case report.VerdictDefect:
+	case report.VerdictDefect, report.VerdictReproduced:
 		return ExitDefect
 	case report.VerdictInsufficient:
 		return ExitInsufficient

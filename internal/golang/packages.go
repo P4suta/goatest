@@ -64,7 +64,7 @@ decode:
 	model := Model{ModulePath: modulePath}
 	for _, item := range listed {
 		if item.Module.Path != modulePath || item.Module.Dir != moduleDir {
-			continue
+			return Model{}, fmt.Errorf("goatest: go list returned packages from multiple module roots; refusing partial package discovery")
 		}
 		relative, err := relativePackagePath(moduleDir, item.Dir)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {

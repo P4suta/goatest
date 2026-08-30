@@ -55,8 +55,11 @@ func selectImpact(ctx context.Context, root string, model goanalysis.Model, targ
 		return impactSelection{targets: slices.Clone(targets), broad: true}
 	}
 	changed, known := changedImpactFiles(ctx, root, options.ChangedRef)
-	if !known || len(changed) == 0 {
+	if !known {
 		return impactSelection{targets: slices.Clone(targets), changed: changed, broad: true, prior: &record}
+	}
+	if len(changed) == 0 {
+		return impactSelection{changed: []string{}, prior: &record}
 	}
 	impact := record.Graph.Affected(changed)
 	if impact.Broad {

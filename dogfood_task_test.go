@@ -28,9 +28,9 @@ func TestDogfoodTaskRunsBuiltCLIWithoutGoRunWrapper(t *testing.T) {
 	}
 	for _, required := range []string{
 		"go build -o ./dist/dogfood/goatest ./cmd/goatest",
-		"./dist/dogfood/goatest --no-tui",
+		"./dist/dogfood/goatest --ui=plain",
 		"go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
-		`.\dist\dogfood\goatest.exe --no-tui`,
+		`.\dist\dogfood\goatest.exe --ui=plain`,
 	} {
 		if !strings.Contains(task, required) {
 			t.Errorf("dogfood task omitted %q", required)

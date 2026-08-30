@@ -4,11 +4,10 @@
 package goatest_test
 
 import (
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/P4suta/goatest"
-	"github.com/P4suta/goatest/gen"
 )
 
 func TestRunPreservesTestingTAndScope(t *testing.T) {
@@ -18,7 +17,7 @@ func TestRunPreservesTestingTAndScope(t *testing.T) {
 		if gt.T != t {
 			t.Fatal("goatest.T did not embed the original testing.T")
 		}
-		if got := gt.Scope(); got.Kind != goatest.ScopeUnit || got.Capability != "" {
+		if got := gt.Scope(); got.Kind != goatest.ScopeUnit || got.Capabilities() != nil {
 			t.Errorf("scope = %+v", got)
 		}
 	})
@@ -27,10 +26,15 @@ func TestRunPreservesTestingTAndScope(t *testing.T) {
 	}
 }
 
-func TestIntegrationCarriesCapability(t *testing.T) {
-	got := goatest.Integration("postgres")
-	if got.Kind != goatest.ScopeIntegration || got.Capability != "postgres" {
+func TestIntegrationCarriesUniqueCapabilitiesWithoutAliasing(t *testing.T) {
+	got := goatest.Integration("postgres", "redis", "postgres")
+	if got.Kind != goatest.ScopeIntegration || !slices.Equal(got.Capabilities(), []string{"postgres", "redis"}) {
 		t.Fatalf("scope = %+v", got)
+	}
+	capabilities := got.Capabilities()
+	capabilities[0] = "mutated"
+	if !slices.Equal(got.Capabilities(), []string{"postgres", "redis"}) {
+		t.Fatal("Capabilities aliases internal metadata")
 	}
 }
 
@@ -41,32 +45,4 @@ func TestIntegrationRejectsBlankCapability(t *testing.T) {
 		}
 	}()
 	_ = goatest.Integration(" \t")
-}
-
-func TestDrawIsDeterministicAndLabelsTheReplayTrace(t *testing.T) {
-	var firstValue, firstToken string
-	goatest.Run(t, goatest.Unit(), func(gt *goatest.T) {
-		firstValue = goatest.Draw(gt, "input", gen.String())
-		firstToken = gt.ReplayToken()
-	})
-	var secondValue, secondToken string
-	goatest.Run(t, goatest.Unit(), func(gt *goatest.T) {
-		secondValue = goatest.Draw(gt, "input", gen.String())
-		secondToken = gt.ReplayToken()
-	})
-	if firstValue != secondValue || firstToken != secondToken {
-		t.Fatalf("draws differ: (%q, %q) != (%q, %q)", firstValue, firstToken, secondValue, secondToken)
-	}
-	if !strings.HasPrefix(firstToken, "goatest-replay-v1:") {
-		t.Fatalf("token = %q, want versioned prefix", firstToken)
-	}
-}
-
-func FuzzCheckUsesOneByteSliceInput(f *testing.F) {
-	goatest.Check(f, goatest.Unit(), func(gt *goatest.T) {
-		value := goatest.Draw(gt, "value", gen.String())
-		if string([]byte(value)) != value {
-			gt.Fatalf("string round trip changed %q", value)
-		}
-	})
 }

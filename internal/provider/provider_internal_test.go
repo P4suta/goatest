@@ -8,11 +8,33 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 )
+
+func TestGenerateUsesOnlyExplicitEnvironmentWhenProvided(t *testing.T) {
+	sentinel := errors.New("captured environment")
+	original := startGenerationProcess
+	t.Cleanup(func() { startGenerationProcess = original })
+	var captured []string
+	startGenerationProcess = func(command *exec.Cmd) (generationProcessTree, error) {
+		captured = slices.Clone(command.Env)
+		return nil, sentinel
+	}
+	environment := []string{"PATH=provider-path", "EXPLICIT=value"}
+	client := Client{Command: []string{os.Args[0]}, Environment: environment}
+	_, err := client.Generate(t.Context(), Request{Version: 1, Finding: report.Finding{ID: "finding-a"}})
+	if !errors.Is(err, sentinel) || !slices.Equal(captured, environment) {
+		t.Fatalf("Generate = (%v), environment=%v", err, captured)
+	}
+	captured[0] = "MUTATED=yes"
+	if environment[0] != "PATH=provider-path" {
+		t.Fatal("provider command environment aliases caller input")
+	}
+}
 
 func TestLimitedBufferHonoursEveryBoundary(t *testing.T) {
 	t.Run("multiple writes", func(t *testing.T) {

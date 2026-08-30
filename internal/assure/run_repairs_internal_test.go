@@ -161,14 +161,17 @@ func TestRunCoordinatorRejectsFinalInputErrorsAndRepositoryDrift(t *testing.T) {
 	})
 }
 
-func TestRunCoordinatorReportsResidualRiskAfterCheckpointingImpactGraph(t *testing.T) {
+func TestRunCoordinatorReportsStructuredLimitationAfterCheckpointingImpactGraph(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
 	finding := report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "gap"}
 	harness.mutation.Findings = []report.Finding{finding}
 	harness.generation.Findings = []report.Finding{finding}
 	result, err := harness.run(Options{})
+	hasLimitation := slices.ContainsFunc(result.Limitations, func(item report.Limitation) bool {
+		return item.Code == "unresolved-mutation-gaps" && item.Summary == "Unresolved mutation evidence gaps remain"
+	})
 	if err != nil || result.Verdict != report.VerdictInsufficient || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) ||
-		!reflect.DeepEqual(result.ResidualRisks, []string{"unresolved mutation evidence gaps remain"}) || harness.buildGraphCalls != 1 ||
+		!hasLimitation || harness.buildGraphCalls != 1 ||
 		harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 || len(harness.cache.puts) != 1 {
 		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 	}

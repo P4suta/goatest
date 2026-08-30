@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,7 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 		},
 	}
 	verified, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{
-		Changed: true, ChangedRef: "origin/main", Contract: "deep-v1", NoApply: true,
+		Changed: true, ChangedRef: "origin/main", Contract: "deep-v1",
 	}, "")
 	if err != nil || verified.Snapshot != result.Snapshot {
 		t.Fatalf("verify = %+v, %v", verified, err)
@@ -45,8 +46,12 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 		t.Fatalf("runner options = %+v", got)
 	}
 	for _, path := range []string{
-		".goatest/report.json", "reports/assurance-report-v1.json", "reports/assurance-report-v1.html",
-		"reports/assurance-report-v1.sarif", "reports/assurance-report-v1.junit.xml", "reports/assurance-report-v1.schema.json",
+		".goatest/latest-any.json", "reports/latest-any.json",
+		"reports/runs/" + verified.RunID + "/assurance-report-v1.json",
+		"reports/runs/" + verified.RunID + "/assurance-report-v1.html",
+		"reports/runs/" + verified.RunID + "/assurance-report-v1.sarif",
+		"reports/runs/" + verified.RunID + "/assurance-report-v1.junit.xml",
+		"reports/runs/" + verified.RunID + "/assurance-report-v1.schema.json",
 	} {
 		data, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if readErr != nil || len(data) == 0 {
@@ -57,6 +62,84 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 	if err != nil || loaded.Snapshot != result.Snapshot || len(loaded.Findings) != 1 {
 		t.Fatalf("report = %+v, %v", loaded, err)
 	}
+}
+
+func TestDefaultAllPatternIsFullButNarrowPatternIsPackageScope(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		packages     []string
+		packageScope bool
+		kind         report.RunKind
+		verdict      report.Verdict
+	}{
+		{name: "all", packages: []string{"./..."}, kind: report.RunFull, verdict: report.VerdictAssured},
+		{name: "narrow", packages: []string{"./internal/report"}, packageScope: true, kind: report.RunPackage, verdict: report.VerdictScopeAssured},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var received assure.Options
+			service := app.Service{Root: t.TempDir(), Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+				received = options
+				return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1", Snapshot: test.name}, nil
+			}}
+			result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Packages: test.packages}, "")
+			if err != nil || result.RunKind != test.kind || result.Verdict != test.verdict || received.PackageScope != test.packageScope {
+				t.Fatalf("verify = %+v, %v options=%+v", result, err, received)
+			}
+		})
+	}
+}
+
+func TestChangesetHistoryNeverReplacesLatestFull(t *testing.T) {
+	root := t.TempDir()
+	result := report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}
+	service := app.Service{Root: root, Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+		copy := result
+		if options.Changed {
+			copy.Snapshot = "changeset-snapshot"
+			copy.Accounting.Mutants = report.MutantAccounting{
+				Discovered: 2396, Selected: 13, Executed: 13, Killed: 13, OutOfScope: 2383,
+			}
+			copy.Scope.Resolved = report.ScopeSpec{Kind: "changeset", Project: ".", Files: []string{"changed.go"}}
+			copy.Mutants = mutantInventory(2396, 13)
+		} else {
+			copy.Snapshot = "full-snapshot"
+			copy.Accounting.Mutants = report.MutantAccounting{Discovered: 2396, Selected: 2396, Executed: 2396, Killed: 2396}
+			copy.Mutants = mutantInventory(2396, 2396)
+		}
+		return copy, nil
+	}}
+	full, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+	if err != nil || full.Verdict != report.VerdictAssured {
+		t.Fatalf("full = %+v, %v", full, err)
+	}
+	changed, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Changed: true}, "")
+	if err != nil || changed.Verdict != report.VerdictChangeAssured || changed.RunID == full.RunID {
+		t.Fatalf("changeset = %+v, %v", changed, err)
+	}
+	latestAny, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{}, "")
+	if err != nil || latestAny.RunID != changed.RunID || latestAny.Accounting.Mutants.Selected != 13 {
+		t.Fatalf("latest-any = %+v, %v", latestAny, err)
+	}
+	latestFull, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportLatestFull: true}, "")
+	if err != nil || latestFull.RunID != full.RunID || latestFull.Accounting.Mutants.Selected != 2396 {
+		t.Fatalf("latest-full = %+v, %v", latestFull, err)
+	}
+	historical, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: changed.RunID}, "")
+	if err != nil || historical.RunID != changed.RunID {
+		t.Fatalf("historical = %+v, %v", historical, err)
+	}
+}
+
+func mutantInventory(total, selected int) []report.MutantDisposition {
+	result := make([]report.MutantDisposition, total)
+	for index := range total {
+		status := report.MutantOutOfScope
+		if index < selected {
+			status = report.MutantKilled
+		}
+		result[index] = report.MutantDisposition{ID: fmt.Sprintf("mutant-%04d", index), Status: status}
+	}
+	return result
 }
 
 func TestVerifyAndReplayPersistInfrastructureErrorReports(t *testing.T) {
@@ -92,7 +175,13 @@ func TestVerifyAndReplayPersistInfrastructureErrorReports(t *testing.T) {
 			if loadErr != nil || latest.Verdict != report.VerdictError || len(latest.Findings) != 1 {
 				t.Fatalf("persisted %s report = %+v, %v", command, latest, loadErr)
 			}
-			for _, path := range []string{".goatest/report.json", "reports/assurance-report-v1.json", "reports/assurance-report-v1.html", "reports/assurance-report-v1.sarif", "reports/assurance-report-v1.junit.xml"} {
+			for _, path := range []string{
+				".goatest/latest-any.json", "reports/latest-any.json",
+				"reports/runs/" + result.RunID + "/assurance-report-v1.json",
+				"reports/runs/" + result.RunID + "/assurance-report-v1.html",
+				"reports/runs/" + result.RunID + "/assurance-report-v1.sarif",
+				"reports/runs/" + result.RunID + "/assurance-report-v1.junit.xml",
+			} {
 				if data, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(path))); readErr != nil || len(data) == 0 {
 					t.Errorf("error report artifact %s = %d bytes, %v", path, len(data), readErr)
 				}
@@ -118,14 +207,14 @@ func TestCancelledRunDoesNotReplaceTheLatestCompletedReport(t *testing.T) {
 	}
 }
 
-func TestNoTUIWritesDeterministicProgressImmediately(t *testing.T) {
+func TestPlainUIWritesDeterministicProgressImmediately(t *testing.T) {
 	root := t.TempDir()
 	var progress bytes.Buffer
 	service := app.Service{
 		Root: root, Progress: &progress,
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			if options.Progress == nil {
-				t.Fatal("--no-tui disabled progress")
+				t.Fatal("plain UI disabled progress")
 			}
 			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
 			if got, want := progress.String(), "goatest: snapshot           captured\n"; got != want {
@@ -134,7 +223,7 @@ func TestNoTUIWritesDeterministicProgressImmediately(t *testing.T) {
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
 	}
-	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{NoTUI: true}, ""); err != nil {
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIPlain}, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -148,7 +237,7 @@ func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
 	}
-	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{NoTUI: true}, ""); err != nil {
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIPlain}, ""); err != nil {
 		t.Fatal(err)
 	}
 	got := progress.String()
@@ -168,7 +257,16 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := report.Report{
-		Schema: report.SchemaV1, Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot-a",
+		Schema: report.SchemaV1, RunID: "identity-fixture", RunKind: report.RunFull,
+		Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot-a",
+		Scope: report.Scope{
+			Requested: report.ScopeSpec{Kind: "full", Project: "."},
+			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
+		},
+		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
+		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
+		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
+		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
 		Findings: []report.Finding{
 			{ID: "finding-a", Kind: "survivor", Summary: "one"},
 			{ID: "finding-b", Kind: "coverage", Summary: "two", MutantID: "mutant-b"},
@@ -182,7 +280,7 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		Root: root,
 		Now:  func() time.Time { return time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC) },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
-			if !options.NoApply || options.ReplayMutantID != "mutant-b" {
+			if !options.NoApply || options.ReplayFindingID != "finding-b" || options.ReplayMutantID != "mutant-b" {
 				t.Fatalf("replay options = %+v", options)
 			}
 			return original, nil
@@ -195,20 +293,57 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 	if err != nil || len(explained.Findings) != 1 || explained.Findings[0].ID != "finding-b" || len(explained.Evidence) != 0 || len(explained.Repairs) != 1 || explained.Repairs[0].ID != "repair-b" {
 		t.Fatalf("explain = %+v, %v", explained, err)
 	}
-	accepted, err := service.Execute(t.Context(), cli.CommandAccept, cli.Request{}, "finding-a")
-	if err != nil || accepted.Verdict != report.VerdictAssured {
+	accepted, err := service.Execute(t.Context(), cli.CommandAccept, cli.Request{
+		Reason: "reviewed boundary", Expires: "2026-09-30T00:00:00Z",
+	}, "finding-a")
+	if err != nil || accepted.Verdict != report.VerdictCompleted {
 		t.Fatalf("accept = %+v, %v", accepted, err)
 	}
 	loaded, err := config.Load(root)
-	if err != nil || len(loaded.Acceptance) != 1 || loaded.Acceptance[0].ID != "finding-a" || !loaded.Acceptance[0].Expires.Equal(time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)) {
+	if err != nil || len(loaded.Acceptance) != 1 || loaded.Acceptance[0].ID != "finding-a" ||
+		loaded.Acceptance[0].Reason != "reviewed boundary" || !loaded.Acceptance[0].Expires.Equal(time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("config = %+v, %v", loaded, err)
 	}
 	replayed, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-b")
-	if err != nil || replayed.Verdict != report.VerdictInsufficient {
+	if err != nil || replayed.Verdict != report.VerdictReproduced {
 		t.Fatalf("replay = %+v, %v", replayed, err)
 	}
 	if _, err := service.Execute(t.Context(), cli.CommandExplain, cli.Request{}, "missing"); err == nil {
 		t.Fatal("missing finding was accepted")
+	}
+}
+
+func TestReplayWithoutMutantIdentityHasReplayScopeAndSelectedOutcome(t *testing.T) {
+	root := t.TempDir()
+	writeLatestFixture(t, root)
+	reproduced := true
+	var received assure.Options
+	service := app.Service{Root: root, Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+		received = options
+		result := report.Report{
+			Schema: report.SchemaV1, Verdict: report.VerdictAssured,
+			Contract: "standard-v1", Snapshot: "replay-snapshot",
+		}
+		if reproduced {
+			result.Verdict = report.VerdictDefect
+			result.Findings = []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "still present"}}
+		}
+		return result, nil
+	}}
+
+	result, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-a")
+	if err != nil || result.RunKind != report.RunReplay || result.Verdict != report.VerdictReproduced ||
+		result.Scope.Requested.Kind != string(report.RunReplay) || received.ReplayFindingID != "finding-a" || received.ReplayMutantID != "" {
+		t.Fatalf("reproduced replay = %+v, %v options=%+v", result, err, received)
+	}
+	reproduced = false
+	result, err = service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-a")
+	if err != nil || result.RunKind != report.RunReplay || result.Verdict != report.VerdictResolved || len(result.Findings) != 0 {
+		t.Fatalf("resolved replay = %+v, %v", result, err)
+	}
+	latestFull, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportLatestFull: true}, "")
+	if err != nil || latestFull.RunID != "fixture-run" {
+		t.Fatalf("replay replaced latest full report: %+v, %v", latestFull, err)
 	}
 }
 
@@ -223,12 +358,13 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 		{name: "missing", want: "read latest report"},
 		{name: "malformed", content: []byte(`{`), write: true, want: "decode latest report"},
 		{name: "trailing", content: append(append([]byte(nil), valid...), []byte(`{}`)...), write: true, want: "trailing data"},
-		{name: "schema", content: report.JSON(report.Report{Schema: "future-report-v2", Verdict: report.VerdictAssured}), write: true, want: "unsupported"},
+		{name: "schema", content: report.JSON(report.Report{Schema: "future-report", Verdict: report.VerdictAssured}), write: true, want: "unsupported"},
+		{name: "incomplete-audit", content: valid, write: true, want: "invalid latest report"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
 			if testCase.write {
-				path := filepath.Join(root, ".goatest", "report.json")
+				path := filepath.Join(root, ".goatest", "latest-any.json")
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -324,7 +460,9 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("unknown = true\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (app.Service{Root: root}).Execute(t.Context(), cli.CommandAccept, cli.Request{}, "finding-a"); err == nil {
+		if _, err := (app.Service{Root: root}).Execute(t.Context(), cli.CommandAccept, cli.Request{
+			Reason: "reviewed", Expires: "2026-12-01T00:00:00Z",
+		}, "finding-a"); err == nil {
 			t.Fatal("accept ignored invalid configuration")
 		}
 	})
@@ -348,7 +486,7 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 	for _, command := range []cli.Command{cli.CommandExplain, cli.CommandAccept, cli.CommandReplay} {
 		t.Run(string(command), func(t *testing.T) {
 			root := t.TempDir()
-			path := filepath.Join(root, ".goatest", "report.json")
+			path := filepath.Join(root, ".goatest", "latest-any.json")
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -366,8 +504,17 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 func writeLatestFixture(t *testing.T, root string) {
 	t.Helper()
 	input := report.Report{
-		Schema: report.SchemaV1, Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot",
-		Findings: []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "survived"}},
+		Schema: report.SchemaV1, RunID: "fixture-run", RunKind: report.RunFull,
+		Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot",
+		Scope: report.Scope{
+			Requested: report.ScopeSpec{Kind: "full", Project: "."},
+			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
+		},
+		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
+		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
+		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
+		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
+		Findings:      []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "survived"}},
 	}
 	if err := app.WriteReports(root, input); err != nil {
 		t.Fatal(err)
@@ -381,7 +528,7 @@ func TestInitCreatesStrictConfigWithoutRunningAssurance(t *testing.T) {
 		return report.Report{}, nil
 	}}
 	result, err := service.Execute(t.Context(), cli.CommandInit, cli.Request{}, "")
-	if err != nil || result.Verdict != report.VerdictAssured {
+	if err != nil || result.Verdict != report.VerdictCompleted {
 		t.Fatalf("init = %+v, %v", result, err)
 	}
 	if _, err := config.Load(root); err != nil {

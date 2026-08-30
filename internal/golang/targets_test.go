@@ -23,9 +23,9 @@ import (
 )
 
 func TestExisting(t *testing.T) {}
+//goatest:resources redis
 func FuzzExisting(f *testing.F) { f.Add([]byte{}); f.Fuzz(func(t *testing.T, b []byte) {}) }
 func TestWrapped(t *testing.T) { gt.Run(t, gt.Integration("postgres"), func(t *gt.T) {}) }
-func FuzzWrapped(f *testing.F) { gt.Check(f, gt.Unit(), func(t *gt.T) {}) }
 func helper(t *testing.T) {}
 `
 	if err := os.WriteFile(filepath.Join(root, "sample_test.go"), []byte(source), 0o644); err != nil {
@@ -43,15 +43,15 @@ func helper(t *testing.T) {}
 			t.Errorf("target = %+v", target)
 		}
 	}
-	if !slices.Equal(names, []string{"FuzzExisting", "FuzzWrapped", "TestExisting", "TestWrapped"}) {
+	if !slices.Equal(names, []string{"FuzzExisting", "TestExisting", "TestWrapped"}) {
 		t.Fatalf("targets = %v", names)
 	}
 	for _, target := range targets {
 		if target.Name == "TestWrapped" && (target.Kind != gotest.KindTest || target.Capability != "postgres") {
 			t.Errorf("wrapped integration = %+v", target)
 		}
-		if target.Name == "FuzzWrapped" && target.Kind != gotest.KindFuzz {
-			t.Errorf("wrapped fuzz = %+v", target)
+		if target.Name == "FuzzExisting" && (target.Kind != gotest.KindFuzz || !slices.Equal(target.Capabilities, []string{"redis"})) {
+			t.Errorf("native fuzz = %+v", target)
 		}
 	}
 }

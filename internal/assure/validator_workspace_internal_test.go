@@ -99,7 +99,7 @@ func TestRunPassingCoversSuccessInfrastructureExitAndTimeout(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{test.result}, errors: []error{test.err}}
-			err := runPassing(t.Context(), workspace, []string{"go", "test", "./..."}, "candidate suite")
+			err := runPassing(t.Context(), workspace, []string{"go", "test", "./..."}, "candidate suite", 10*time.Minute)
 			if (err != nil) != test.wantErr || len(workspace.commands) != 1 {
 				t.Fatalf("runPassing = %v, commands=%+v", err, workspace.commands)
 			}
@@ -246,7 +246,10 @@ func TestRepositoryValidatorKillsRequiresIdentityAndCoversSessionOutcomes(t *tes
 
 func TestRepositoryValidatorSuiteCoversEveryFailureAndRaceOutcome(t *testing.T) {
 	root, candidate := validationFixture(t)
-	validator := NewRepositoryValidator(RepositoryValidatorOptions{Root: root, TempDirectory: t.TempDir(), Contract: "deep-v1"})
+	validator := NewRepositoryValidator(RepositoryValidatorOptions{
+		Root: root, TempDirectory: t.TempDir(), Contract: "deep-v1",
+		Environment: []string{"FEATURE=enabled"}, BuildTags: []string{"integration"}, TestArgs: []string{"-test.short=true"},
+	})
 	openCause := errors.New("open failed")
 	installValidationOpener(t, func(context.Context, string, mutationbridge.Options) (validationWorkspace, error) {
 		return nil, openCause
@@ -295,10 +298,12 @@ func TestRepositoryValidatorSuiteCoversEveryFailureAndRaceOutcome(t *testing.T) 
 				return []string{"fixture.example/module"}, test.concurrencyErr
 			}
 			collectCalls := 0
-			collectValidationRace = func(_ context.Context, got CommandWorkspace, gotModel goanalysis.Model, concurrent []string, contract string, environment []string) (RaceResult, error) {
+			collectValidationRace = func(_ context.Context, got CommandWorkspace, gotModel goanalysis.Model, concurrent []string, contract string, options RaceOptions) (RaceResult, error) {
 				collectCalls++
-				if got != workspace || !reflect.DeepEqual(gotModel, model) || !slices.Equal(concurrent, []string{"fixture.example/module"}) || contract != "deep-v1" || environment != nil {
-					t.Fatalf("race input = (%T, %+v, %v, %q, %v)", got, gotModel, concurrent, contract, environment)
+				if got != workspace || !reflect.DeepEqual(gotModel, model) || !slices.Equal(concurrent, []string{"fixture.example/module"}) || contract != "deep-v1" ||
+					!slices.Equal(options.Environment, []string{"FEATURE=enabled"}) || !slices.Equal(options.BuildTags, []string{"integration"}) ||
+					!slices.Equal(options.TestArgs, []string{"-test.short=true"}) {
+					t.Fatalf("race input = (%T, %+v, %v, %q, %+v)", got, gotModel, concurrent, contract, options)
 				}
 				return test.raceResult, test.raceErr
 			}
@@ -306,7 +311,7 @@ func TestRepositoryValidatorSuiteCoversEveryFailureAndRaceOutcome(t *testing.T) 
 			if (err != nil) != test.wantErr || len(workspace.commands) != test.wantCommands || workspace.closed != 1 || collectCalls != test.wantCollectCalls {
 				t.Fatalf("Suite = %v, commands=%+v closed=%d collect=%d", err, workspace.commands, workspace.closed, collectCalls)
 			}
-			if len(workspace.commands) == 2 && !slices.Equal(workspace.commands[1].Argv, []string{"go", "list", "-json", "./..."}) {
+			if len(workspace.commands) == 2 && !slices.Equal(workspace.commands[1].Argv, []string{"go", "list", "-json", "-tags=integration", "./..."}) {
 				t.Fatalf("list command = %+v", workspace.commands[1])
 			}
 		})

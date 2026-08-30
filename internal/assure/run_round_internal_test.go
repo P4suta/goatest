@@ -42,7 +42,7 @@ func TestRunCoordinatorClosesSnapshotOnEveryPreBaselineFailure(t *testing.T) {
 			h.dependencies.discoverTargets = func(string, []goanalysis.Package) ([]goanalysis.Target, error) { return nil, cause }
 		}},
 		{name: "resources", wantCloses: 1, change: func(h *runCoordinatorHarness) {
-			h.dependencies.acquireResources = func(context.Context, config.Config, []goanalysis.Target) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
+			h.dependencies.acquireResources = func(context.Context, config.Config, []goanalysis.Target, []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
 				return nil, nil, nil, nil, cause
 			}
 		}},

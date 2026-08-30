@@ -13,11 +13,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 )
 
-type Store struct{ root string }
+type Store struct {
+	root     string
+	maxBytes int64
+	ttl      time.Duration
+	now      func() time.Time
+}
+
+var cacheOperationMutex sync.RWMutex
 
 type cacheWritableFile interface {
 	Name() string
@@ -38,7 +47,14 @@ var (
 
 func New(root string) *Store { return &Store{root: root} }
 
+// NewWithPolicy enables bounded automatic collection after successful writes.
+func NewWithPolicy(root string, maxBytes int64, ttl time.Duration) *Store {
+	return &Store{root: root, maxBytes: maxBytes, ttl: ttl, now: time.Now}
+}
+
 func (store *Store) Get(digest string) (report.Report, bool, error) {
+	cacheOperationMutex.RLock()
+	defer cacheOperationMutex.RUnlock()
 	path, err := store.path(digest)
 	if err != nil {
 		return report.Report{}, false, err
@@ -62,12 +78,20 @@ func (store *Store) Get(digest string) (report.Report, bool, error) {
 	if result.Schema != report.SchemaV1 || result.Snapshot != digest {
 		return report.Report{}, false, errors.New("goatest: cache report identity mismatch")
 	}
+	if err := report.Validate(result); err != nil {
+		return report.Report{}, false, fmt.Errorf("goatest: invalid cache report: %w", err)
+	}
 	return result, true, nil
 }
 
 func (store *Store) Put(digest string, result report.Report) error {
+	cacheOperationMutex.Lock()
+	defer cacheOperationMutex.Unlock()
 	if result.Snapshot != digest {
 		return errors.New("goatest: cache snapshot does not match its digest")
+	}
+	if err := report.Validate(result); err != nil {
+		return fmt.Errorf("goatest: invalid cache report: %w", err)
 	}
 	path, err := store.path(digest)
 	if err != nil {
@@ -100,6 +124,15 @@ func (store *Store) Put(digest string, result report.Report) error {
 		}
 		if retryErr := renameCacheFile(temporaryPath, path); retryErr != nil {
 			return retryErr
+		}
+	}
+	if store.maxBytes > 0 || store.ttl > 0 {
+		now := time.Now
+		if store.now != nil {
+			now = store.now
+		}
+		if _, err := collectUnlocked(store.root, store.maxBytes, store.ttl, now()); err != nil {
+			return fmt.Errorf("goatest: cache collection: %w", err)
 		}
 	}
 	return nil

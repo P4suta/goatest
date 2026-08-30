@@ -38,8 +38,10 @@ func TestManagerSharedLifecycleIsReferenceCountedAndDeterministic(t *testing.T) 
 		return stopFailure
 	}
 
-	specs := map[string]Spec{"db": {Command: []string{"provider", "arg"}, Shared: true}}
+	providerEnvironment := []string{"PATH=provider", "TOKEN=allowed"}
+	specs := map[string]Spec{"db": {Command: []string{"provider", "arg"}, Shared: true, Environment: providerEnvironment}}
 	manager := New(specs)
+	providerEnvironment[0] = "MUTATED=yes"
 	specs["db"] = Spec{}
 	first, err := acquireInternal(manager, "db")
 	if err != nil {
@@ -49,7 +51,8 @@ func TestManagerSharedLifecycleIsReferenceCountedAndDeterministic(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(requests, []string{"resource-000001"}) || len(captured) != 1 || !slices.Equal(captured[0].Command, []string{"provider", "arg"}) {
+	if !slices.Equal(requests, []string{"resource-000001"}) || len(captured) != 1 || !slices.Equal(captured[0].Command, []string{"provider", "arg"}) ||
+		!slices.Equal(captured[0].Environment, []string{"PATH=provider", "TOKEN=allowed"}) {
 		t.Fatalf("requests = %v, specs = %+v", requests, captured)
 	}
 	wantEnvironment := []string{"A_FIRST=a", "Z_LAST=z"}

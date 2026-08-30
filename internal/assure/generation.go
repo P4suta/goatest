@@ -5,6 +5,8 @@ package assure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path"
 	"slices"
@@ -27,14 +29,15 @@ type GenerationOptions struct {
 	NoApply             bool
 	Generate            func(context.Context, provider.Request) (provider.Response, error)
 	Command             []string
+	ProviderEnvironment []string
 	AllowedPaths        []string
 	Validator           repair.Validator
 	RepositoryValidator RepositoryValidatorOptions
 }
 
 var (
-	generationFromCommand = func(command []string) func(context.Context, provider.Request) (provider.Response, error) {
-		client := provider.Client{Command: command}
+	generationFromCommand = func(command, environment []string) func(context.Context, provider.Request) (provider.Response, error) {
+		client := provider.Client{Command: command, Environment: environment}
 		return client.Generate
 	}
 	newGenerationValidator = func(options RepositoryValidatorOptions) repair.Validator {
@@ -44,12 +47,12 @@ var (
 
 func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report.Finding, options GenerationOptions) (GenerationEvaluation, error) {
 	evaluation := GenerationEvaluation{Findings: slices.Clone(findings)}
-	if options.NoApply || len(findings) == 0 {
+	if len(findings) == 0 {
 		return evaluation, nil
 	}
 	generate := options.Generate
 	if generate == nil && len(options.Command) != 0 {
-		generate = generationFromCommand(slices.Clone(options.Command))
+		generate = generationFromCommand(slices.Clone(options.Command), slices.Clone(options.ProviderEnvironment))
 	}
 	if generate == nil {
 		return evaluation, nil
@@ -70,14 +73,34 @@ func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report
 			return GenerationEvaluation{}, fmt.Errorf("goatest: generation response identity mismatch for %s", finding.ID)
 		}
 		for _, candidate := range response.Candidates {
-			repairID := report.FindingID("generated", finding.ID, candidate.Kind, candidate.Path, candidate.PreimageSHA256)
+			repairID := generatedRepairID(options.Snapshot, finding, candidate)
 			if !generationPathAllowed(candidate.Path, options.AllowedPaths) {
 				evaluation.Repairs = append(evaluation.Repairs, report.Repair{
 					ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "rejected",
 				})
 				continue
 			}
-			applied, err := repair.ValidateAndApply(ctx, root, finding, candidate, validator)
+			validated, err := repair.ValidateCandidate(ctx, root, finding, candidate, validator)
+			if err != nil {
+				evaluation.Repairs = append(evaluation.Repairs, report.Repair{
+					ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "rejected",
+				})
+				continue
+			}
+			if options.NoApply {
+				_, storeErr := repair.StoreCandidate(root, repair.CandidateRecord{
+					Version: repair.CandidateVersion, ID: repairID, Snapshot: options.Snapshot,
+					Finding: finding, Candidate: validated, Validation: "passed",
+				})
+				if storeErr != nil {
+					return GenerationEvaluation{}, fmt.Errorf("goatest: store repair candidate %s: %w", repairID, storeErr)
+				}
+				evaluation.Repairs = append(evaluation.Repairs, report.Repair{
+					ID: repairID, Finding: finding.ID, Path: validated.Path, Status: string(repair.StatusCandidate),
+				})
+				continue
+			}
+			applied, err := repair.ApplyCandidate(root, finding, validated)
 			if err != nil {
 				evaluation.Repairs = append(evaluation.Repairs, report.Repair{
 					ID: repairID, Finding: finding.ID, Path: candidate.Path, Status: "rejected",
@@ -94,6 +117,14 @@ func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report
 		}
 	}
 	return evaluation, nil
+}
+
+func generatedRepairID(snapshot string, finding report.Finding, candidate provider.Candidate) string {
+	content := sha256.Sum256(candidate.Content)
+	return report.FindingID(
+		"generated", snapshot, finding.ID, candidate.Kind, candidate.Path,
+		candidate.PreimageSHA256, hex.EncodeToString(content[:]),
+	)
 }
 
 func generationPaths(options Options, loaded config.Config) []string {

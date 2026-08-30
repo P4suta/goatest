@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,9 +30,31 @@ func fixture() report.Report {
 			{ID: "f2", Kind: "survivor", Path: "z.go", Summary: "survived", Mutant: "lt-to-le: < -> <=", Replay: "goatest replay f2"},
 			{ID: "f1", Kind: "coverage", Path: "a.go", Summary: "unreached"},
 		},
-		Repairs:       []report.Repair{{ID: "r1", Finding: "f2", Path: "z_test.go", Status: "applied"}},
-		ResidualRisks: []string{"z risk", "a risk"},
+		Repairs: []report.Repair{{ID: "r1", Finding: "f2", Path: "z_test.go", Status: "applied"}},
+		Limitations: []report.Limitation{
+			{Code: "z-risk", Summary: "z risk"},
+			{Code: "a-risk", Summary: "a risk"},
+		},
 	}
+}
+
+func persistedFixture() report.Report {
+	result := fixture()
+	result.RunID = "fixture-run"
+	result.RunKind = report.RunFull
+	result.Scope = report.Scope{
+		Requested: report.ScopeSpec{Kind: "full", Project: ".", Modules: []string{"example.test/fixture"}},
+		Resolved:  report.ScopeSpec{Kind: "full", Project: ".", Modules: []string{"example.test/fixture"}},
+	}
+	result.Repository = report.Repository{
+		Module: "example.test/fixture",
+		Git:    report.Git{Available: true, Commit: "commit", MergeBase: "commit"},
+	}
+	result.Configuration = report.Configuration{Digest: strings.Repeat("a", 64)}
+	result.Toolchain = report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "linux", Arch: "amd64"}
+	result.Timing = report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000}
+	result.Acceptances = []report.Acceptance{{ID: "accepted-fixture", Reason: "reviewed", Expires: "2026-12-01T00:00:00Z"}}
+	return result
 }
 
 func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
@@ -44,14 +67,14 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 		t.Errorf("findings are not canonically ordered:\n%s", first)
 	}
 	want := "INSUFFICIENT standard-v1 snapshot=abc123\n" +
-		"evidence 2  findings 2  repairs 1  risks 2\n" +
+		"evidence 2  findings 2  repairs 1  acceptances 0  limitations 2\n" +
 		"FINDING f1 coverage a.go: unreached\n" +
 		"FINDING f2 survivor z.go: survived\n" +
 		"  MUTANT lt-to-le: < -> <=\n" +
 		"  REPLAY goatest replay f2\n" +
 		"REPAIR r1 applied z_test.go finding=f2\n" +
-		"RISK a risk\n" +
-		"RISK z risk\n"
+		"LIMITATION a-risk a risk\n" +
+		"LIMITATION z-risk z risk\n"
 	if got := report.Lines(fixture()); got != want {
 		t.Errorf("lines =\n%s\nwant\n%s", got, want)
 	}
@@ -112,7 +135,7 @@ func TestLineRendererEscapesControlCharactersAndCannotForgeRecords(t *testing.T)
 			ID: "finding", Kind: "baseline", Path: "fixture.go\rRISK forged",
 			Summary: "failed\nFINDING forged\x1b[31m", Mutant: "change\tforged", Replay: "goatest\nreplay",
 		}},
-		ResidualRisks: []string{"risk\nREPAIR forged"},
+		Limitations: []report.Limitation{{Code: "risk", Summary: "risk\nREPAIR forged"}},
 	}
 	lines := report.Lines(input)
 	if strings.Count(lines, "\nFINDING ") != 1 {
@@ -129,7 +152,7 @@ func TestLineRendererEscapesControlCharactersAndCannotForgeRecords(t *testing.T)
 }
 
 func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
-	html := report.HTML(fixture())
+	html := report.HTML(persistedFixture())
 	text := strings.ToLower(string(html))
 	for _, forbidden := range []string{"http://", "https://", "<script src=", "<link rel="} {
 		if strings.Contains(text, forbidden) {
@@ -139,7 +162,10 @@ func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
 	if !strings.Contains(text, "<!doctype html>") || !strings.Contains(text, "insufficient") {
 		t.Errorf("HTML is incomplete: %s", html)
 	}
-	for _, required := range []string{"lt-to-le: &lt; -&gt; &lt;=", "goatest replay f2", "z_test.go", "a risk", "z risk"} {
+	for _, required := range []string{
+		"lt-to-le: &lt; -&gt; &lt;=", "goatest replay f2", "z_test.go", "a risk", "z risk",
+		`id="report-search"`, `data-section="findings"`, "acceptances", "accounting",
+	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("HTML omitted %q: %s", required, html)
 		}
@@ -152,6 +178,115 @@ func TestFindingIDIsStableAndInputSensitive(t *testing.T) {
 	other := report.FindingID("survivor", "a.go", "mutant-b")
 	if one != two || one == other || len(one) != 16 {
 		t.Fatalf("ids = %q %q %q", one, two, other)
+	}
+}
+
+func TestAuditValidationRejectsScopeMisrepresentationAndMissingMutants(t *testing.T) {
+	valid := report.Report{
+		Schema: report.SchemaV1, RunKind: report.RunChangeset, Verdict: report.VerdictChangeAssured,
+		Scope: report.Scope{
+			Requested: report.ScopeSpec{Kind: "changeset"},
+			Resolved:  report.ScopeSpec{Kind: "changeset"},
+		},
+		Accounting: report.Accounting{Mutants: report.MutantAccounting{
+			Discovered: 13, Selected: 13, Executed: 13, Killed: 13,
+		}},
+	}
+	for index := range 13 {
+		valid.Mutants = append(valid.Mutants, report.MutantDisposition{ID: fmt.Sprintf("mutant-%02d", index), Status: report.MutantKilled})
+	}
+	if err := report.Validate(valid); err != nil {
+		t.Fatalf("valid report rejected: %v", err)
+	}
+	misrepresented := valid
+	misrepresented.Verdict = report.VerdictAssured
+	if err := report.Validate(misrepresented); err == nil || !strings.Contains(err.Error(), "ASSURED") {
+		t.Fatalf("partial ASSURED error = %v", err)
+	}
+	missing := valid
+	missing.Verdict = report.VerdictError
+	missing.Accounting.Mutants.Unknown = 1
+	missing.Accounting.Mutants.Executed = 12
+	missing.Accounting.Mutants.Killed = 12
+	missing.Mutants[0].Status = report.MutantUnknown
+	if err := report.Validate(missing); err != nil {
+		t.Fatalf("auditable ERROR report rejected: %v", err)
+	}
+	missing.Verdict = report.VerdictChangeAssured
+	if err := report.Validate(missing); err == nil || !strings.Contains(err.Error(), "ERROR") {
+		t.Fatalf("unknown mutant passed non-error verdict: %v", err)
+	}
+}
+
+func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
+	valid := persistedFixture()
+	if err := report.ValidateForPersistence(valid); err != nil {
+		t.Fatalf("valid persisted report rejected: %v", err)
+	}
+	for _, testCase := range []struct {
+		name   string
+		change func(*report.Report)
+		want   string
+	}{
+		{name: "verdict", change: func(value *report.Report) { value.Verdict = "" }, want: "verdict"},
+		{name: "run-kind", change: func(value *report.Report) { value.RunKind = "future" }, want: "run_kind"},
+		{name: "contract", change: func(value *report.Report) { value.Contract = "" }, want: "contract"},
+		{name: "snapshot", change: func(value *report.Report) { value.Snapshot = "" }, want: "snapshot"},
+		{name: "project", change: func(value *report.Report) { value.Scope.Resolved.Project = "" }, want: "project boundary"},
+		{name: "module", change: func(value *report.Report) { value.Repository.Module = "" }, want: "module"},
+		{name: "configuration", change: func(value *report.Report) { value.Configuration.Digest = "not-a-digest" }, want: "SHA-256"},
+		{name: "toolchain", change: func(value *report.Report) { value.Toolchain.Go = "" }, want: "toolchain"},
+		{name: "git-commit", change: func(value *report.Report) { value.Repository.Git.Commit = "" }, want: "Git identity"},
+		{name: "cache-source", change: func(value *report.Report) { value.Cache.SourceRunID = "unexpected" }, want: "non-cache"},
+		{name: "expired-acceptance", change: func(value *report.Report) {
+			value.Acceptances = []report.Acceptance{value.Acceptances[0]}
+			value.Acceptances[0].Expires = "2025-12-01T00:00:00Z"
+		}, want: "was expired"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := valid
+			testCase.change(&input)
+			if err := report.ValidateForPersistence(input); err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("validation error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+
+	unavailable := valid
+	unavailable.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
+	unavailable.Limitations = append(unavailable.Limitations, report.Limitation{
+		Code: "git-metadata-unavailable", Summary: "Git metadata is unavailable",
+	})
+	if err := report.ValidateForPersistence(unavailable); err != nil {
+		t.Fatalf("explicit unavailable Git identity rejected: %v", err)
+	}
+	unavailable.Repository.Git.Dirty = true
+	if err := report.ValidateForPersistence(unavailable); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("partial unavailable Git identity error = %v", err)
+	}
+}
+
+func TestAcceptanceMetadataMustExplainEveryAcceptedMutation(t *testing.T) {
+	input := report.Report{
+		Accounting: report.Accounting{Mutants: report.MutantAccounting{Discovered: 1, Selected: 1, Accepted: 1}},
+		Mutants:    []report.MutantDisposition{{ID: "mutant-a", Status: report.MutantAccepted, Detail: "finding-a"}},
+		Evidence:   []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "accepted", Detail: "finding-a"}},
+	}
+	if err := report.Validate(input); err == nil || !strings.Contains(err.Error(), "no acceptance metadata") {
+		t.Fatalf("unexplained acceptance error = %v", err)
+	}
+	input.Acceptances = []report.Acceptance{{
+		ID: "finding-a", Reason: "reviewed equivalent boundary", Expires: "2026-12-01T00:00:00Z",
+		Owner: "quality-team", Ticket: "QA-123",
+	}}
+	if err := report.Validate(input); err != nil {
+		t.Fatalf("explained acceptance rejected: %v", err)
+	}
+	lines := report.Lines(input)
+	for _, expected := range []string{"ACCEPTANCE finding-a", "reason=reviewed equivalent boundary", "owner=quality-team", "ticket=QA-123"} {
+		if !strings.Contains(lines, expected) {
+			t.Errorf("acceptance output omitted %q: %s", expected, lines)
+		}
 	}
 }
 
@@ -288,7 +423,7 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := report.JSON(fixture())
+	valid := report.JSON(persistedFixture())
 	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(valid))
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +439,7 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	if err := compiled.Validate(invalid); err == nil {
 		t.Fatal("unknown report field passed assurance schema")
 	}
-	for _, field := range []string{"evidence", "findings", "repairs"} {
+	for _, field := range []string{"acceptances", "evidence", "findings", "repairs", "limitations"} {
 		var nested map[string]any
 		if err := json.Unmarshal(valid, &nested); err != nil {
 			t.Fatal(err)

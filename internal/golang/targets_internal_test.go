@@ -125,7 +125,7 @@ func TestCapabilityRecognizesOnlyWellFormedIntegrationScopes(t *testing.T) {
 		want string
 	}{
 		{name: "run", body: `gt.Run(t, gt.Integration("postgres"), callback)`, want: "postgres"},
-		{name: "check", body: `gt.Check(f, gt.Integration("redis"), callback)`, want: "redis"},
+		{name: "removed check API", body: `gt.Check(f, gt.Integration("redis"), callback)`},
 		{name: "first", body: `gt.Run(t, gt.Integration("first"), callback); gt.Run(t, gt.Integration("second"), callback)`, want: "first"},
 		{name: "nested", body: `wrap(gt.Run(t, gt.Integration("nested"), callback))`, want: "nested"},
 		{name: "nested in invalid scope", body: `gt.Run(t, wrap(gt.Run(t, gt.Integration("nested-scope"), callback)), callback)`, want: "nested-scope"},

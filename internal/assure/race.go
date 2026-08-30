@@ -20,6 +20,12 @@ type RaceResult struct {
 	Findings []report.Finding
 }
 
+type RaceOptions struct {
+	Environment []string
+	TestArgs    []string
+	BuildTags   []string
+}
+
 const raceVerificationTimeout = 30 * time.Minute
 
 // RelevantRacePackages returns the packages whose top-level tests exercise a
@@ -81,6 +87,10 @@ func packageForFile(packages []goanalysis.Package, path string) string {
 }
 
 func CollectRace(ctx context.Context, workspace CommandWorkspace, model goanalysis.Model, concurrentPackages []string, contract string, environment []string) (RaceResult, error) {
+	return CollectRaceWithOptions(ctx, workspace, model, concurrentPackages, contract, RaceOptions{Environment: environment})
+}
+
+func CollectRaceWithOptions(ctx context.Context, workspace CommandWorkspace, model goanalysis.Model, concurrentPackages []string, contract string, options RaceOptions) (RaceResult, error) {
 	packages := slices.Clone(concurrentPackages)
 	if contract == "deep-v1" {
 		packages = packages[:0]
@@ -97,9 +107,16 @@ func CollectRace(ctx context.Context, workspace CommandWorkspace, model goanalys
 		return RaceResult{}, fmt.Errorf("goatest: nil race workspace")
 	}
 	argv := []string{"go", "test", "-race", "-count=1"}
+	if len(options.BuildTags) != 0 {
+		argv = append(argv, "-tags="+strings.Join(options.BuildTags, ","))
+	}
 	argv = append(argv, packages...)
+	if len(options.TestArgs) != 0 {
+		argv = append(argv, "-args")
+		argv = append(argv, options.TestArgs...)
+	}
 	run, err := workspace.Exec(ctx, gomutants.Command{
-		Argv: argv, Env: slices.Clone(environment), Timeout: raceVerificationTimeout,
+		Argv: argv, Env: slices.Clone(options.Environment), Timeout: raceVerificationTimeout,
 	})
 	if err != nil {
 		return RaceResult{}, fmt.Errorf("goatest: race verification: %w", err)
