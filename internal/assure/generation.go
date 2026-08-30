@@ -32,6 +32,16 @@ type GenerationOptions struct {
 	RepositoryValidator RepositoryValidatorOptions
 }
 
+var (
+	generationFromCommand = func(command []string) func(context.Context, provider.Request) (provider.Response, error) {
+		client := provider.Client{Command: command}
+		return client.Generate
+	}
+	newGenerationValidator = func(options RepositoryValidatorOptions) repair.Validator {
+		return NewRepositoryValidator(options)
+	}
+)
+
 func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report.Finding, options GenerationOptions) (GenerationEvaluation, error) {
 	evaluation := GenerationEvaluation{Findings: slices.Clone(findings)}
 	if options.NoApply || len(findings) == 0 {
@@ -39,15 +49,14 @@ func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report
 	}
 	generate := options.Generate
 	if generate == nil && len(options.Command) != 0 {
-		client := provider.Client{Command: slices.Clone(options.Command)}
-		generate = client.Generate
+		generate = generationFromCommand(slices.Clone(options.Command))
 	}
 	if generate == nil {
 		return evaluation, nil
 	}
 	validator := options.Validator
 	if validator == nil {
-		validator = NewRepositoryValidator(options.RepositoryValidator)
+		validator = newGenerationValidator(options.RepositoryValidator)
 	}
 	for _, finding := range findings {
 		response, err := generate(ctx, provider.Request{
