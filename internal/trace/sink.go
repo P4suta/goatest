@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -240,7 +241,7 @@ func (sink *MemorySink) Emit(event Event) error {
 		sink.dropped.Add(1)
 		return errSinkClosed
 	}
-	sink.events = append(sink.events, event)
+	sink.events = append(sink.events, cloneEvent(event))
 	if sink.capacity <= 0 {
 		return nil
 	}
@@ -267,11 +268,59 @@ func (sink *MemorySink) Close() error {
 // Dropped reports how many events fell out of the ring.
 func (sink *MemorySink) Dropped() int64 { return sink.dropped.Load() }
 
-// Events returns a snapshot of the kept events, oldest first.
+// Events returns a snapshot of the kept events, oldest first. The snapshot is
+// the caller's own down to the payloads it points at, so reading a recording
+// and recording into it are independent whatever either side does next.
 func (sink *MemorySink) Events() []Event {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
-	return append([]Event(nil), sink.events...)
+	snapshot := make([]Event, 0, len(sink.events))
+	for _, event := range sink.events {
+		snapshot = append(snapshot, cloneEvent(event))
+	}
+	return snapshot
+}
+
+// cloneEvent detaches an event from the payload records and slices its holder
+// may still amend. An Event is an envelope of pointers, so copying one copies
+// nothing a caller could not reach afterwards; a sink that keeps events keeps
+// clones, both when it takes one and when it hands one back.
+func cloneEvent(event Event) Event {
+	if event.Phase != nil {
+		record := *event.Phase
+		event.Phase = &record
+	}
+	if event.Exec != nil {
+		record := *event.Exec
+		record.Argv = slices.Clone(record.Argv)
+		record.EnvNames = slices.Clone(record.EnvNames)
+		record.Output = slices.Clone(record.Output)
+		event.Exec = &record
+	}
+	if event.Mutant != nil {
+		record := *event.Mutant
+		record.Args = slices.Clone(record.Args)
+		event.Mutant = &record
+	}
+	if event.Route != nil {
+		record := *event.Route
+		record.ReachingTargets = slices.Clone(record.ReachingTargets)
+		record.Plan = slices.Clone(record.Plan)
+		event.Route = &record
+	}
+	if event.Progress != nil {
+		record := *event.Progress
+		event.Progress = &record
+	}
+	if event.Artifact != nil {
+		record := *event.Artifact
+		event.Artifact = &record
+	}
+	if event.Run != nil {
+		record := *event.Run
+		event.Run = &record
+	}
+	return event
 }
 
 // TeeSink delivers every event to several sinks, which is how one recording
