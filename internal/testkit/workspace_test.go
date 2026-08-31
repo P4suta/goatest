@@ -149,6 +149,25 @@ func TestScriptedWorkspaceRecordsCallsInOrderAsACopy(t *testing.T) {
 	}
 }
 
+func TestScriptedWorkspaceAnswersWithAnIndependentResultCopy(t *testing.T) {
+	t.Parallel()
+	output := []byte("scripted")
+	workspace := testkit.NewWorkspace()
+	workspace.On("go", "test").Return(gomutants.CommandResult{ExitCode: 1, Output: output})
+	output[0] = 'X'
+
+	first, err := workspace.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "test"}})
+	if err != nil || string(first.Output) != "scripted" {
+		t.Fatalf("first result = %+v, err = %v, want the output the rule was given", first, err)
+	}
+	first.Output[0] = 'X'
+
+	second, err := workspace.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "test"}})
+	if err != nil || string(second.Output) != "scripted" {
+		t.Fatalf("second result = %+v, err = %v, want output unaffected by the first caller", second, err)
+	}
+}
+
 func TestScriptedWorkspaceSupportsConcurrentExec(t *testing.T) {
 	t.Parallel()
 	const executions = 16

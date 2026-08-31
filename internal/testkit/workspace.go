@@ -58,10 +58,14 @@ func (workspace *ScriptedWorkspace) On(argvPrefix ...string) *Rule {
 	return rule
 }
 
-// Return answers every matching command with result.
+// Return answers every matching command with result. The result is copied when
+// the rule is registered and again for every response, so that neither the
+// caller that scripted it nor one that receives it shares the storage a later
+// response reads.
 func (rule *Rule) Return(result gomutants.CommandResult) *Rule {
+	scripted := cloneCommandResult(result)
 	return rule.Do(func(gomutants.Command) (gomutants.CommandResult, error) {
-		return result, nil
+		return cloneCommandResult(scripted), nil
 	})
 }
 
@@ -126,6 +130,11 @@ func (workspace *ScriptedWorkspace) route(command gomutants.Command) func(gomuta
 		return nil
 	}
 	return selected.handler
+}
+
+func cloneCommandResult(result gomutants.CommandResult) gomutants.CommandResult {
+	result.Output = slices.Clone(result.Output)
+	return result
 }
 
 func cloneCommand(command gomutants.Command) gomutants.Command {

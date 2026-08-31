@@ -138,6 +138,33 @@ func TestScriptedSessionFailsClosedOnUnscriptedRequests(t *testing.T) {
 	}
 }
 
+func TestScriptedSessionAnswersWithAnIndependentResultCopy(t *testing.T) {
+	t.Parallel()
+	artifacts := []gomutants.Artifact{{Path: "testdata/fuzz/seed", SHA256: "digest", Data: []byte("corpus")}}
+	session := testkit.NewSession(catalogFixture())
+	session.On("mutant-one").Return(gomutants.MutantResult{ID: "mutant-one", Artifacts: artifacts})
+	artifacts[0].Path = "mutated"
+	artifacts[0].Data[0] = 'X'
+
+	first, err := session.Exec(t.Context(), gomutants.ExecRequest{Mutant: "mutant-one"})
+	if err != nil || len(first.Artifacts) != 1 {
+		t.Fatalf("first result = %+v, err = %v", first, err)
+	}
+	if first.Artifacts[0].Path != "testdata/fuzz/seed" || string(first.Artifacts[0].Data) != "corpus" {
+		t.Fatalf("first artifact = %+v, want the artifact the rule was given", first.Artifacts[0])
+	}
+	first.Artifacts[0].Path = "mutated"
+	first.Artifacts[0].Data[0] = 'X'
+
+	second, err := session.Exec(t.Context(), gomutants.ExecRequest{Mutant: "mutant-one"})
+	if err != nil || len(second.Artifacts) != 1 {
+		t.Fatalf("second result = %+v, err = %v", second, err)
+	}
+	if second.Artifacts[0].Path != "testdata/fuzz/seed" || string(second.Artifacts[0].Data) != "corpus" {
+		t.Fatalf("second artifact = %+v, want one unaffected by the first caller", second.Artifacts[0])
+	}
+}
+
 func TestScriptedSessionSupportsConcurrentExec(t *testing.T) {
 	t.Parallel()
 	const executions = 16

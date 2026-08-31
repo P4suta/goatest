@@ -71,7 +71,10 @@ empty prefix matches everything. The longest matching prefix wins whatever the
 registration order, so a specific rule may be added after a general one. A rule
 answers with `Return(result)`, `Fail(err)`, or `Do(handler)` for responses that
 depend on the command — writing a coverage profile to the path the argv names,
-for example.
+for example. `Return` copies the result when the rule is registered and again
+for every response, so neither the test that scripted `Output` nor one that
+receives it can change what a later call sees; `Do` answers with whatever its
+handler builds.
 
 The fake fails closed: a command no rule covers is still recorded, then
 answered with an error wrapping `ErrNoRule` that names the argv, so the code
@@ -97,9 +100,10 @@ requests := session.Requests()
 `On(mutantID, args...)` restricts a rule to the requests whose arguments start
 with `args`, so one mutant can answer differently per target; the longest
 matching prefix wins. `Catalog()` returns an independent copy on every call,
-matching the go-mutants contract the scheduler is written against, and an
-unscripted request fails with `ErrNoRule` exactly as an unscripted command
-does.
+matching the go-mutants contract the scheduler is written against, `Return`
+copies its result the same way `ScriptedWorkspace.Return` does, artifact bytes
+included, and an unscripted request fails with `ErrNoRule` exactly as an
+unscripted command does.
 
 A fake that has to carry state — counting concurrent executions, or releasing
 mutants through a channel — is written by hand in the test that needs it. The

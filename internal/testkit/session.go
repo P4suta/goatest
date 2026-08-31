@@ -57,10 +57,14 @@ func (session *ScriptedSession) On(mutantID string, args ...string) *MutantRule 
 	return rule
 }
 
-// Return answers every matching request with result.
+// Return answers every matching request with result. The result is copied when
+// the rule is registered and again for every response, artifact contents
+// included, so that neither the caller that scripted it nor one that receives
+// it shares the storage a later response reads.
 func (rule *MutantRule) Return(result gomutants.MutantResult) *MutantRule {
+	scripted := cloneMutantResult(result)
 	return rule.Do(func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
-		return result, nil
+		return cloneMutantResult(scripted), nil
 	})
 }
 
@@ -140,6 +144,16 @@ func cloneCatalog(catalog gomutants.Catalog) gomutants.Catalog {
 	catalog.Rejections = slices.Clone(catalog.Rejections)
 	catalog.TestPackages = slices.Clone(catalog.TestPackages)
 	return catalog
+}
+
+// cloneMutantResult detaches the result's artifacts, whose bytes a caller may
+// legitimately read, edit, or write to disk.
+func cloneMutantResult(result gomutants.MutantResult) gomutants.MutantResult {
+	result.Artifacts = slices.Clone(result.Artifacts)
+	for index, artifact := range result.Artifacts {
+		result.Artifacts[index].Data = slices.Clone(artifact.Data)
+	}
+	return result
 }
 
 func cloneExecRequest(request gomutants.ExecRequest) gomutants.ExecRequest {
