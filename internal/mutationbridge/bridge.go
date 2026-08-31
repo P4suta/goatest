@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type Options struct {
@@ -18,6 +20,10 @@ type Options struct {
 	TempDirectory   string
 	ReportDirectory string
 	Environment     []string
+	// Trace records the commands the workspace runs. A nil recorder is a
+	// workspace that runs untraced, which is what every caller that does not
+	// ask for a trace gets.
+	Trace *trace.Recorder
 }
 
 type PrepareOptions struct {
@@ -40,7 +46,10 @@ type mutationWorkspace interface {
 	Close() error
 }
 
-type Workspace struct{ inner mutationWorkspace }
+type Workspace struct {
+	inner mutationWorkspace
+	trace *trace.Recorder
+}
 
 var openMutationWorkspace = func(ctx context.Context, root string, options gomutants.OpenOptions) (mutationWorkspace, error) {
 	return gomutants.Open(ctx, root, options)
@@ -67,14 +76,60 @@ func Open(ctx context.Context, root string, options Options) (*Workspace, error)
 	if err != nil {
 		return nil, fmt.Errorf("goatest: open mutation workspace: %w", err)
 	}
-	return &Workspace{inner: inner}, nil
+	return &Workspace{inner: inner, trace: options.Trace}, nil
 }
 
+// Trace reports the recording the workspace runs under. It is how a caller
+// that wraps what the workspace produced, such as a mutation session, records
+// into the same trace the workspace's own commands reach.
+func (workspace *Workspace) Trace() *trace.Recorder {
+	if workspace == nil {
+		return nil
+	}
+	return workspace.trace
+}
+
+// Exec runs one command and records it. Recording happens after the engine
+// answers, because what a trace reader wants is the execution and its result
+// as one line; a command that never returns leaves the phase it ran in open
+// instead, which says the same thing.
 func (workspace *Workspace) Exec(ctx context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
 	if workspace == nil || workspace.inner == nil {
 		return gomutants.CommandResult{}, errors.New("goatest: nil mutation workspace")
 	}
-	return workspace.inner.Exec(ctx, command)
+	result, err := workspace.inner.Exec(ctx, command)
+	workspace.trace.Exec(executionRecord(command, result, err))
+	return result, err
+}
+
+// executionRecord describes one executed command for the trace.
+//
+// The environment is handed over whole because the recorder is what reduces it
+// to names; the captured output is handed over for the same reason, digested
+// into the event by the recorder and preserved beside the stream by a sink
+// that can store it. The bridge writes neither.
+func executionRecord(command gomutants.Command, result gomutants.CommandResult, err error) trace.ExecRecord {
+	record := trace.ExecRecord{
+		Argv:       slices.Clone(command.Argv),
+		Dir:        command.Dir,
+		EnvNames:   command.Env,
+		TimeoutMS:  traceMilliseconds(command.Timeout),
+		ExitCode:   result.ExitCode,
+		TimedOut:   result.TimedOut,
+		DurationMS: traceMilliseconds(result.Duration),
+		Output:     result.Output,
+	}
+	if err != nil {
+		record.Error = err.Error()
+	}
+	return record
+}
+
+// traceMilliseconds is the millisecond count a trace records for a duration. A
+// negative duration, which the engine contract forbids, is recorded as none
+// rather than as a nonsense measurement.
+func traceMilliseconds(duration time.Duration) int64 {
+	return max(duration.Milliseconds(), 0)
 }
 
 func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions) (*gomutants.Session, error) {
