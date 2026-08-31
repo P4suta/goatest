@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "goatest-trace-v1",
+  "title": "goatest trace event v1",
+  "description": "One line of a goatest trace stream. A trace is diagnostic exhaust, never evidence, and it records environment names without their values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "type", "timestamp", "elapsed_ms"],
+  "properties": {
+    "seq": {
+      "description": "Position of the event in the recording, counting from one.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "description": "Which event this is, and therefore which payload it carries.",
+      "enum": [
+        "run-start",
+        "phase-start",
+        "phase-end",
+        "exec",
+        "mutant-exec",
+        "route",
+        "progress",
+        "artifact",
+        "run-end"
+      ]
+    },
+    "schema": {
+      "description": "Format identity, carried by the run-start event alone.",
+      "const": "goatest-trace-v1"
+    },
+    "timestamp": {
+      "description": "When the event was recorded, RFC 3339 in UTC.",
+      "type": "string",
+      "format": "date-time",
+      "minLength": 1
+    },
+    "elapsed_ms": {
+      "description": "Milliseconds between the start of the recording and the event.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "phase": { "$ref": "#/$defs/phase" },
+    "exec": { "$ref": "#/$defs/exec" },
+    "mutant": { "$ref": "#/$defs/mutant" },
+    "route": { "$ref": "#/$defs/route" },
+    "progress": { "$ref": "#/$defs/progress" },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "run": { "$ref": "#/$defs/run" }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "run-start" } } },
+      "then": { "required": ["schema"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "phase-start" } } },
+      "then": { "required": ["phase"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "phase-end" } } },
+      "then": { "required": ["phase"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "exec" } } },
+      "then": { "required": ["exec"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "mutant-exec" } } },
+      "then": { "required": ["mutant"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "route" } } },
+      "then": { "required": ["route"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "progress" } } },
+      "then": { "required": ["progress"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "artifact" } } },
+      "then": { "required": ["artifact"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "run-end" } } },
+      "then": { "required": ["run"] }
+    }
+  ],
+  "$defs": {
+    "phase": {
+      "description": "A phase of a run. A phase is only timed when it ends.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "exec": {
+      "description": "One executed command, recorded without its environment values and without its captured output.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "exit_code"],
+      "properties": {
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "dir": { "type": "string" },
+        "env_names": {
+          "description": "Environment variable names alone: an item holding a value is not a trace.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[^=]+$" }
+        },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "timed_out": { "type": "boolean" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "output_bytes": { "type": "integer", "minimum": 0 },
+        "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "output_truncated": { "type": "boolean" },
+        "output_path": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "mutant": {
+      "description": "One mutant execution and what became of it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "display_id": { "type": "string" },
+        "package": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "outcome": { "type": "string" },
+        "killed_by": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "error": { "type": "string" }
+      }
+    },
+    "route": {
+      "description": "How a mutant was routed to the tests that run it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "mutant_id": { "type": "string" },
+        "rule": { "type": "string" },
+        "path": { "type": "string" },
+        "line": { "type": "integer", "minimum": 0 },
+        "reaching_targets": { "type": "array", "items": { "type": "string" } },
+        "plan": { "type": "array", "items": { "type": "string" } },
+        "reason": { "enum": ["coverage-reaching", "unreached"] }
+      }
+    },
+    "progress": {
+      "description": "A progress note forwarded from the run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" }
+      }
+    },
+    "artifact": {
+      "description": "A file the run wrote.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "run": {
+      "description": "The end of a recording, with the accounting that tells a complete trace from a lossy one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events_emitted", "events_dropped"],
+      "properties": {
+        "verdict": { "type": "string" },
+        "error": { "type": "string" },
+        "events_emitted": { "type": "integer", "minimum": 0 },
+        "events_dropped": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
