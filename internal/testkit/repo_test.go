@@ -119,6 +119,46 @@ func TestRepoGitCommitsTheFixtureDeterministically(t *testing.T) {
 	}
 }
 
+func TestRepoGitIgnoresTheOperatorsGitEnvironment(t *testing.T) {
+	// t.Setenv rules this test out of t.Parallel: it rewrites the process
+	// environment the fixture's git commands inherit.
+	gitBinary(t)
+	timestamp := strconv.Itoa(testkit.GitCommitUnixTime)
+	commits := make([]string, 0, 2)
+	for _, operator := range []struct {
+		name  string
+		email string
+		date  string
+	}{
+		{name: "Operator One", email: "one@operator.invalid", date: "1500000000 +0900"},
+		{name: "Operator Two", email: "two@operator.invalid", date: "1600000000 -0500"},
+	} {
+		t.Setenv("GIT_AUTHOR_NAME", operator.name)
+		t.Setenv("GIT_COMMITTER_NAME", operator.name)
+		t.Setenv("GIT_AUTHOR_EMAIL", operator.email)
+		t.Setenv("GIT_COMMITTER_EMAIL", operator.email)
+		t.Setenv("GIT_AUTHOR_DATE", operator.date)
+		t.Setenv("GIT_COMMITTER_DATE", operator.date)
+
+		repository := testkit.NewRepo(t).BoundaryFixture().Git()
+
+		format := "--format=%an%n%ae%n%cn%n%ce%n%at%n%ct"
+		identity := strings.Split(runGit(t, repository.Root(), "log", "-1", format), "\n")
+		want := []string{
+			testkit.GitUserName, testkit.GitUserEmail,
+			testkit.GitUserName, testkit.GitUserEmail,
+			timestamp, timestamp,
+		}
+		if !slices.Equal(identity, want) {
+			t.Errorf("commit identity under %s = %q, want %q", operator.name, identity, want)
+		}
+		commits = append(commits, runGit(t, repository.Root(), "rev-parse", "HEAD"))
+	}
+	if commits[0] != commits[1] {
+		t.Errorf("commits = %q, want one hash whatever the environment sets", commits)
+	}
+}
+
 func TestHelperArgvReexecutesTheTestBinary(t *testing.T) {
 	t.Parallel()
 	argv := testkit.HelperArgv("TestTestkitReexecHelper")

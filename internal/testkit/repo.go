@@ -120,16 +120,22 @@ func (repository *Repo) BoundaryFixture() *Repo {
 }
 
 // Git turns the fixture into a repository with exactly one commit of the whole
-// worktree. The commit's branch, identity, and both dates are fixed, and the
-// operator's global and system configuration is ignored, so that neither the
-// commit nor a report derived from it varies between machines. The test is
-// skipped when git is unavailable.
+// worktree. The commit's branch, identity, and both dates are fixed, and both
+// the operator's global and system configuration and their GIT_AUTHOR_* and
+// GIT_COMMITTER_* environment are overridden, so that neither the commit nor a
+// report derived from it varies between machines. The test is skipped when git
+// is unavailable.
 func (repository *Repo) Git() *Repo {
 	repository.t.Helper()
 	git := gitBinary(repository.t)
 	date := strconv.Itoa(GitCommitUnixTime) + " +0000"
+	// The identity variables are set as well as user.name and user.email
+	// because git prefers them over configuration: a runner that exports them
+	// would otherwise author the fixture, and change its commit hash.
 	environment := append(os.Environ(),
 		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_AUTHOR_NAME="+GitUserName, "GIT_AUTHOR_EMAIL="+GitUserEmail,
+		"GIT_COMMITTER_NAME="+GitUserName, "GIT_COMMITTER_EMAIL="+GitUserEmail,
 		"GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date)
 	for _, arguments := range [][]string{
 		{"init", "--quiet", "--initial-branch=" + GitBranch},

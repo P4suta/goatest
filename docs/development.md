@@ -42,8 +42,8 @@ options := assure.Options{Root: repository.Root(), GoBinary: testkit.GoBinary(t)
   for: one guarded boundary and the test that pins it. It keeps whatever module
   `Module` already selected.
 - `Git()` makes one commit of the whole worktree on branch `main`, with a fixed
-  identity and both dates fixed, ignoring the operator's global and system
-  configuration.
+  identity and both dates fixed, overriding the operator's global and system
+  configuration and their `GIT_AUTHOR_*` and `GIT_COMMITTER_*` environment.
 - `Root()` is the absolute repository path; `Path(relative)` resolves a fixture
   path against it.
 
@@ -180,8 +180,12 @@ and keep unit tests on the scripted fakes so the suite stays bounded.
 Add `t.Parallel()` wherever the test permits it. Tests that call `t.Setenv`, or
 that depend on the working directory, cannot be parallel.
 
-The gates are `go test ./...`, `go test -race ./...`, `gofmt -l .`, and
-`go vet ./...`; `mise run check` runs all of them the way CI does.
+The gates specific to Go and the test harness are `go test ./...`,
+`go test -race ./...`, `gofmt -l .`, and `go vet ./...`. They are part of the
+gate rather than the whole of it: `mise run check` also checks TOML formatting
+with `taplo` and runs `golangci-lint`, `actionlint`, `typos`, and `gitleaks`,
+and it runs the suite without the race detector, which `mise run test-race`
+adds. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the complete set CI runs.
 
 ## Execution tracing
 
