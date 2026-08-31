@@ -31,7 +31,7 @@ func TestHelpListsPublicSurfaceWithoutRunningService(t *testing.T) {
 		if exit := cli.Run(t.Context(), []string{flag}, &stdout, &stderr, fake); exit != cli.ExitAssured {
 			t.Fatalf("%s exit = %d, stderr = %q", flag, exit, stderr.String())
 		}
-		for _, expected := range []string{"--changed[=REF]", "--contract=standard-v1|deep-v1", "init", "explain ID", "replay ID", "accept ID", "report"} {
+		for _, expected := range []string{"--changed[=REF]", "--contract=standard-v1|deep-v1", "--trace[=DIR]", "GOATEST_TRACE", "init", "explain ID", "replay ID", "accept ID", "report"} {
 			if !strings.Contains(stdout.String(), expected) {
 				t.Errorf("%s help omitted %q:\n%s", flag, expected, stdout.String())
 			}
@@ -91,6 +91,40 @@ func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
 	}
 }
 
+func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		args      []string
+		command   cli.Command
+		id        string
+		directory string
+	}{
+		{name: "default", args: []string{"--trace"}, command: cli.CommandVerify},
+		{name: "named", args: []string{"verify", "--trace=/tmp/goatest-trace"}, command: cli.CommandVerify, directory: "/tmp/goatest-trace"},
+		{name: "empty-value", args: []string{"verify", "--trace="}, command: cli.CommandVerify},
+		{name: "replay", args: []string{"replay", "finding-a", "--trace"}, command: cli.CommandReplay, id: "finding-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
+			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
+				t.Fatalf("%v => exit %d command %s id %q", test.args, exit, fake.command, fake.id)
+			}
+			if !fake.request.Trace || fake.request.TraceDirectory != test.directory {
+				t.Fatalf("%v => trace %t directory %q", test.args, fake.request.Trace, fake.request.TraceDirectory)
+			}
+		})
+	}
+	unrequested := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"verify"}, &bytes.Buffer{}, &bytes.Buffer{}, unrequested); exit != cli.ExitAssured || unrequested.request.Trace {
+		t.Fatalf("unrequested verify = exit %d request %+v", exit, unrequested.request)
+	}
+	separated := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"verify", "--", "--trace"}, &bytes.Buffer{}, &bytes.Buffer{}, separated); exit != cli.ExitAssured || separated.request.Trace {
+		t.Fatalf("test-binary --trace = exit %d request %+v", exit, separated.request)
+	}
+}
+
 func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 	for _, test := range []struct {
 		args    []string
@@ -114,6 +148,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{"--no-tui"}, {"--no-apply"},
 		{"verify", "--apply"}, {"doctor", "--changed"}, {"init", "--contract=deep-v1"},
 		{"verify", "--latest-full"}, {"fix", "--reason=reviewed"}, {"report", "--apply"},
+		{"doctor", "--trace"}, {"plan", "--trace=out"}, {"report", "--trace"}, {"fix", "--trace"},
 		{"plan", "--", "-short"}, {"doctor", "--", "-short"}, {"report", "--", "-short"},
 		{"init", "extra"}, {"report", "extra"}, {"replay", ""}, {"accept", "finding-c"},
 	} {

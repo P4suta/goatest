@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -100,6 +101,59 @@ func TestRunWithSignalsMapsTerminationAndNonSyscallInterrupt(t *testing.T) {
 				t.Fatal("signal did not stop service")
 			}
 		})
+	}
+}
+
+func TestEnvironmentTraceBecomesTheFlagTheCommandLayerParses(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		value     string
+		arguments []string
+		want      []string
+	}{
+		{name: "unset", value: "", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--trace"}},
+		{name: "true", value: "true", arguments: nil, want: []string{"--trace"}},
+		{name: "directory", value: "/tmp/goatest-trace", arguments: []string{"verify"}, want: []string{"verify", "--trace=/tmp/goatest-trace"}},
+		{name: "explicit-flag-wins", value: "/tmp/env", arguments: []string{"verify", "--trace=/tmp/flag"}, want: []string{"verify", "--trace=/tmp/flag"}},
+		{name: "explicit-default-wins", value: "/tmp/env", arguments: []string{"verify", "--trace"}, want: []string{"verify", "--trace"}},
+		{name: "before-test-arguments", value: "1", arguments: []string{"verify", "--", "-short"}, want: []string{"verify", "--trace", "--", "-short"}},
+		{name: "help", value: "1", arguments: []string{"--help"}, want: []string{"--help"}},
+		{name: "help-short", value: "1", arguments: []string{"-h"}, want: []string{"-h"}},
+		{name: "version", value: "1", arguments: []string{"--version"}, want: []string{"--version"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := withTraceEnvironment(testCase.arguments, testCase.value); !slices.Equal(got, testCase.want) {
+				t.Fatalf("arguments = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestEnvironmentTraceReachesTheServiceWithoutDisturbingVersionOrHelp(t *testing.T) {
+	t.Setenv("GOATEST_TRACE", "/tmp/goatest-environment-trace")
+	var requested cli.Request
+	service := mainServiceFunc(func(_ context.Context, _ cli.Command, request cli.Request, _ string) (report.Report, error) {
+		requested = request
+		return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := realMainWith([]string{"verify"}, &stdout, &stderr, service); exit != cli.ExitAssured {
+		t.Fatalf("verify exit = %d stderr = %q", exit, stderr.String())
+	}
+	if !requested.Trace || requested.TraceDirectory != "/tmp/goatest-environment-trace" {
+		t.Fatalf("request = %+v", requested)
+	}
+	stdout.Reset()
+	if exit := realMainWith([]string{"--version"}, &stdout, &stderr, service); exit != 0 || !bytes.Contains(stdout.Bytes(), []byte("goatest ")) {
+		t.Fatalf("version exit = %d stdout = %q", exit, stdout.String())
+	}
+	stdout.Reset()
+	if exit := realMainWith([]string{"--help"}, &stdout, &stderr, service); exit != 0 || !bytes.Contains(stdout.Bytes(), []byte("Usage:")) {
+		t.Fatalf("help exit = %d stdout = %q", exit, stdout.String())
 	}
 }
 
