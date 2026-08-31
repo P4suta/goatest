@@ -68,7 +68,10 @@ func TestTraceRequestRecordsTheRunAndClosesItWithItsVerdict(t *testing.T) {
 		Root: t.TempDir(),
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			recorded = options.Trace
+			// A run forwards its own notes to the recorder it was handed,
+			// beside the callback it answers.
 			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
+			options.Trace.Progress("snapshot", "captured")
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1", Snapshot: "snapshot-a"}, nil
 		},
 	}

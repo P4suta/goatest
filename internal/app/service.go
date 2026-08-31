@@ -43,7 +43,11 @@ type Service struct {
 	Plan          RunFunc
 	FixValidator  repair.Validator
 	Now           func() time.Time
-	absolute      func(string) (string, error)
+	// ProcessID identifies the process a default trace directory is named
+	// after, so that two goatest processes tracing one repository never write
+	// into the same recording. A nil value is the running process.
+	ProcessID func() int
+	absolute  func(string) (string, error)
 }
 
 var (
@@ -64,10 +68,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 	if err != nil {
 		return report.Report{}, err
 	}
-	clock := time.Now
-	if service.Now != nil {
-		clock = service.Now
-	}
+	clock := service.clock()
 	started := clock().UTC()
 	finishOperation := func(result report.Report, operationErr error) (report.Report, error) {
 		if operationErr != nil {
@@ -174,10 +175,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 }
 
 func (service Service) runAndWrite(ctx context.Context, root string, request cli.Request) (report.Report, error) {
-	clock := time.Now
-	if service.Now != nil {
-		clock = service.Now
-	}
+	clock := service.clock()
 	started := clock().UTC()
 	result, err := service.run(ctx, root, request)
 	if err != nil {
@@ -223,6 +221,8 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		runner = assure.Run
 	}
 	options := service.assureOptions(root, request)
+	recorder, finishTrace := service.startTrace(root, request)
+	options.Trace = recorder
 	cacheHit := false
 	var mutex sync.Mutex
 	options.Progress = func(event assure.Event) {
@@ -231,11 +231,10 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		if event.Kind == "cache-hit" {
 			cacheHit = true
 		}
-		if service.Progress != nil {
-			_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", report.LineText(event.Kind), report.LineText(event.Detail))
-		}
+		service.note(event.Kind, event.Detail)
 	}
 	result, err := runner(ctx, options)
+	finishTrace(result, err)
 	mutex.Lock()
 	derived := cacheHit
 	mutex.Unlock()
@@ -247,6 +246,25 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		result.Cache = report.Cache{Derived: true, SourceRunID: source}
 	}
 	return result, err
+}
+
+// clock is the time source the service measures with, which is the wall clock
+// unless a caller injected one.
+func (service Service) clock() func() time.Time {
+	if service.Now != nil {
+		return service.Now
+	}
+	return time.Now
+}
+
+// note writes one line to the progress stream, escaped onto a single line so
+// that nothing a run reports can forge a note of its own. A service without a
+// progress stream reports nothing.
+func (service Service) note(kind, detail string) {
+	if service.Progress == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", report.LineText(kind), report.LineText(detail))
 }
 
 func (service Service) assureOptions(root string, request cli.Request) assure.Options {
