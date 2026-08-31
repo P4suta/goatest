@@ -235,10 +235,19 @@ digest, because a run must decide the same thing traced and untraced.
   them from `Events()`, which is how a unit test asserts on a stream without
   writing a directory. A capacity of zero or less is unbounded; a full ring
   drops its oldest event and counts it, which is the loss a `run-end` reports.
+  A bounded ring fills `capacity-1` slots while a run is under way and keeps
+  the last for the `run-end`, so the event carrying the accounting never
+  displaces one the accounting had already counted. Events are cloned on the
+  way in and on the way out, so a test may amend the record it emitted or the
+  snapshot it read without touching the ring.
+- `trace.NewDirSink(root, run, hooks)` opens the recording of one run in its
+  own directory under a trace root, and reports it through `Directory()`. The
+  run directory is created exclusively: a name another recording owns is an
+  error, never an append.
 - `trace.Filesystem` is the filesystem a `DirSink` writes through, passed to
   `NewDirSink` as an ordinary argument. Fill in only the operation a test wants
-  to drive — `MkdirAll`, `OpenAppend`, or `WriteFile` — and the rest comes from
-  the `os` package.
+  to drive — `MkdirAll`, `Mkdir`, `OpenAppend`, or `WriteFile` — and the rest
+  comes from the `os` package.
 - `trace.JSONSchema()` returns the embedded schema.
   `internal/trace/schema_test.go` validates recorded events against it with the
   same compiler the report schema uses, and `internal/app/trace_e2e_test.go`

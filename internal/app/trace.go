@@ -132,9 +132,9 @@ func (service Service) traceName() string {
 //
 // A path is judged by its name and by where it lands, and either verdict is
 // enough to refuse it. Comparing names alone would let a symbolic link outside
-// the repository carry a stream into it, and comparing targets alone would
-// accept a name inside the repository that points its way out — which the rest
-// of goatest refuses outright rather than follows.
+// the repository carry a stream into it; comparing targets alone would accept
+// a name inside the repository that points its way out, which is a link the
+// rest of goatest refuses rather than follows.
 func inspectedAsSource(root, directory string) bool {
 	return underRepository(root, directory) ||
 		underRepository(existingPathOf(root), existingPathOf(directory))
