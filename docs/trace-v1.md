@@ -53,6 +53,13 @@ snapshot reads would make the repository change during verification and cost
 the run its evidence with `repository changed during verification`. Refusing
 the trace is what keeps the trace from failing the run.
 
+A directory is judged by its name and by where it lands, so a symbolic link is
+not a way past that refusal: `--trace=/tmp/alias/run` is refused when
+`/tmp/alias` resolves into the repository, and a name inside the repository is
+refused whatever it points at. Only the part of the path that already exists
+can be resolved, which is the part that decides where the directory the sink
+is about to create will land.
+
 ## Directory layout
 
 ```text

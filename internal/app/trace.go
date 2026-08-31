@@ -129,11 +129,45 @@ func (service Service) traceName() string {
 // snapshot reads would make the repository change during verification and cost
 // the run its evidence. Only the tool's own .goatest directory is exempt,
 // because the snapshot never reads it.
+//
+// A path is judged by its name and by where it lands, and either verdict is
+// enough to refuse it. Comparing names alone would let a symbolic link outside
+// the repository carry a stream into it, and comparing targets alone would
+// accept a name inside the repository that points its way out — which the rest
+// of goatest refuses outright rather than follows.
 func inspectedAsSource(root, directory string) bool {
+	return underRepository(root, directory) ||
+		underRepository(existingPathOf(root), existingPathOf(directory))
+}
+
+// underRepository reports whether a path lies within the repository and outside
+// the .goatest directory the snapshot never reads.
+func underRepository(root, directory string) bool {
 	relative, err := filepath.Rel(root, directory)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return false
 	}
 	first, _, _ := strings.Cut(filepath.ToSlash(relative), "/")
 	return first != ".goatest"
+}
+
+// existingPathOf resolves the symbolic links of the part of a path that
+// exists, keeping the part that does not as it was named. A trace directory is
+// created by the sink after this check, so the deepest existing ancestor is as
+// far as a name can be resolved, and that ancestor is what decides where the
+// directory will land.
+func existingPathOf(path string) string {
+	cleaned := filepath.Clean(path)
+	remainder := ""
+	for current := cleaned; ; {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return cleaned
+		}
+		remainder = filepath.Join(filepath.Base(current), remainder)
+		current = parent
+	}
 }
