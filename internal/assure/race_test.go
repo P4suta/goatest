@@ -11,6 +11,7 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
 func TestRelevantRacePackagesSelectsOwnersOfTestsThatReachConcurrency(t *testing.T) {
@@ -43,24 +44,25 @@ func TestCollectRaceSelectsConcurrentPackagesOrAllPackagesForDeep(t *testing.T) 
 		{contract: "standard-v1", want: "go test -race -count=1 fixture/worker"},
 		{contract: "deep-v1", want: "go test -race -count=1 fixture/plain fixture/worker"},
 	} {
-		workspace := &fakeWorkspace{run: func(gomutants.Command) gomutants.CommandResult { return gomutants.CommandResult{} }}
+		workspace := testkit.NewWorkspace()
+		workspace.On().Return(gomutants.CommandResult{})
 		result, err := assure.CollectRace(t.Context(), workspace, model, []string{"fixture/worker"}, testCase.contract, []string{"DB=ready"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Findings) != 0 || len(result.Evidence) != 1 || len(workspace.commands) != 1 {
-			t.Fatalf("result=%+v commands=%+v", result, workspace.commands)
+		commands := workspace.Calls()
+		if len(result.Findings) != 0 || len(result.Evidence) != 1 || len(commands) != 1 {
+			t.Fatalf("result=%+v commands=%+v", result, commands)
 		}
-		if got := strings.Join(workspace.commands[0].Argv, " "); got != testCase.want {
+		if got := strings.Join(commands[0].Argv, " "); got != testCase.want {
 			t.Fatalf("command = %q, want %q", got, testCase.want)
 		}
 	}
 }
 
 func TestCollectRaceReturnsDefectOnlyForDetectedRace(t *testing.T) {
-	workspace := &fakeWorkspace{run: func(gomutants.Command) gomutants.CommandResult {
-		return gomutants.CommandResult{ExitCode: 1, Output: []byte("WARNING: DATA RACE\nRead at 0x00")}
-	}}
+	workspace := testkit.NewWorkspace()
+	workspace.On().Return(gomutants.CommandResult{ExitCode: 1, Output: []byte("WARNING: DATA RACE\nRead at 0x00")})
 	result, err := assure.CollectRace(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/worker"}, "standard-v1", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -71,9 +73,8 @@ func TestCollectRaceReturnsDefectOnlyForDetectedRace(t *testing.T) {
 }
 
 func TestCollectRaceReturnsDefectForTestFailureUnderRace(t *testing.T) {
-	workspace := &fakeWorkspace{run: func(gomutants.Command) gomutants.CommandResult {
-		return gomutants.CommandResult{ExitCode: 1, Output: []byte("--- FAIL: TestWorker (0.01s)\n    worker_test.go:12: corrupted shared state\nFAIL")}
-	}}
+	workspace := testkit.NewWorkspace()
+	workspace.On().Return(gomutants.CommandResult{ExitCode: 1, Output: []byte("--- FAIL: TestWorker (0.01s)\n    worker_test.go:12: corrupted shared state\nFAIL")})
 	result, err := assure.CollectRace(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/worker"}, "standard-v1", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -84,9 +85,8 @@ func TestCollectRaceReturnsDefectForTestFailureUnderRace(t *testing.T) {
 }
 
 func TestCollectRaceTreatsUnavailableRaceToolchainAsInfrastructureError(t *testing.T) {
-	workspace := &fakeWorkspace{run: func(gomutants.Command) gomutants.CommandResult {
-		return gomutants.CommandResult{ExitCode: 2, Output: []byte("go: -race requires cgo")}
-	}}
+	workspace := testkit.NewWorkspace()
+	workspace.On().Return(gomutants.CommandResult{ExitCode: 2, Output: []byte("go: -race requires cgo")})
 	_, err := assure.CollectRace(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/worker"}, "standard-v1", nil)
 	if err == nil || !strings.Contains(err.Error(), "race verification failed") {
 		t.Fatalf("error = %v", err)

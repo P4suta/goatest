@@ -17,21 +17,12 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
-type fakeSession struct {
-	catalog  gomutants.Catalog
-	requests []gomutants.ExecRequest
-	exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
-}
-
-func (session *fakeSession) Catalog() gomutants.Catalog { return session.catalog }
-
-func (session *fakeSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-	session.requests = append(session.requests, request)
-	return session.exec(request)
-}
-
+// parallelSession counts overlapping executions and releases each mutant on
+// its own channel. A scripted session answers from a rule table and keeps no
+// state of its own, so this choreography stays hand-written.
 type parallelSession struct {
 	catalog   gomutants.Catalog
 	started   chan string
@@ -126,10 +117,8 @@ func TestEvaluateRunsSeedMutantsConcurrentlyAndKeepsCatalogOrder(t *testing.T) {
 
 func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
 	mutant := acceptedMutant()
-	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
-	}
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Return(gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled})
 	targets := []assure.TargetEvidence{
 		{Target: target("TestUnrelated", goanalysis.KindTest), CoveredFiles: []string{"other.go"}},
 		{Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Environment: []string{"DB_URL=fixture"}},
@@ -144,10 +133,11 @@ func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
 	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Applied {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(session.requests) != 1 {
-		t.Fatalf("requests = %+v", session.requests)
+	requests := session.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %+v", requests)
 	}
-	request := session.requests[0]
+	request := requests[0]
 	if request.Package != "fixture.example/module" || strings.Join(request.Args, " ") != "-test.run=^TestBoundary$" {
 		t.Fatalf("request = %+v", request)
 	}
@@ -158,10 +148,8 @@ func TestEvaluateRunsOnlyCoveringTargetsAndRecordsKill(t *testing.T) {
 
 func TestEvaluateTriesTheShortestMeasuredReachingTargetFirst(t *testing.T) {
 	mutant := acceptedMutant()
-	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
-	}
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Return(gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled})
 	targets := []assure.TargetEvidence{
 		{Target: target("TestSlowE2E", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: 90 * time.Second},
 		{Target: target("TestUnknownDuration", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}},
@@ -173,8 +161,9 @@ func TestEvaluateTriesTheShortestMeasuredReachingTargetFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(session.requests) != 1 || !hasArg(session.requests[0].Args, "-test.run=^TestFastUnit$") {
-		t.Fatalf("requests = %+v, want only the shortest measured target", session.requests)
+	requests := session.Requests()
+	if len(requests) != 1 || !hasArg(requests[0].Args, "-test.run=^TestFastUnit$") {
+		t.Fatalf("requests = %+v, want only the shortest measured target", requests)
 	}
 }
 
@@ -194,18 +183,17 @@ func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
 		{name: "explicit-override", contract: "standard-v1", duration: time.Hour, override: 7 * time.Second, want: 7 * time.Second},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-			session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-				return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled}, nil
-			}
+			session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+			session.On(mutant.ID).Return(gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled})
 			_, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
 				Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: testCase.duration,
 			}}, assure.MutationOptions{Root: t.TempDir(), Contract: testCase.contract, Timeout: testCase.override})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(session.requests) != 1 || session.requests[0].Timeout != testCase.want {
-				t.Fatalf("requests = %+v, want timeout %s", session.requests, testCase.want)
+			requests := session.Requests()
+			if len(requests) != 1 || requests[0].Timeout != testCase.want {
+				t.Fatalf("requests = %+v, want timeout %s", requests, testCase.want)
 			}
 		})
 	}
@@ -213,32 +201,28 @@ func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
 
 func TestEvaluateFailsClosedWhenNoTargetReachesMutant(t *testing.T) {
 	mutant := acceptedMutant()
-	session := &fakeSession{
-		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
-		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-			if request.Package != mutant.Package {
-				t.Fatalf("fallback package = %q", request.Package)
-			}
-			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
-		},
-	}
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Do(func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		if request.Package != mutant.Package {
+			t.Fatalf("fallback package = %q", request.Package)
+		}
+		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
+	})
 	result, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{Root: t.TempDir(), Contract: "standard-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Findings) != 1 || result.Findings[0].Kind != "unreached-mutant" || len(session.requests) != 1 {
+	if len(result.Findings) != 1 || result.Findings[0].Kind != "unreached-mutant" || len(session.Requests()) != 1 {
 		t.Fatalf("findings = %+v", result.Findings)
 	}
 }
 
 func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
 	mutant := acceptedMutant()
-	session := &fakeSession{
-		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
-		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
-		},
-	}
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Do(func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	})
 	findingID := report.FindingID("mutation", mutant.ID)
 	result, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
 		Root: t.TempDir(), Contract: "standard-v1", Accepted: map[string]bool{findingID: true},
@@ -246,7 +230,7 @@ func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Evidence[0].Status != "accepted" || result.Evidence[0].Detail != findingID || len(session.requests) != 1 {
+	if len(result.Findings) != 0 || len(result.Evidence) != 1 || result.Evidence[0].Status != "accepted" || result.Evidence[0].Detail != findingID || len(session.Requests()) != 1 {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -254,8 +238,8 @@ func TestEvaluateHonoursAcceptanceForUnreachedMutant(t *testing.T) {
 func TestEvaluatePromotesTargetedFuzzArtifactAndRequestsFreshRound(t *testing.T) {
 	root := t.TempDir()
 	mutant := acceptedMutant()
-	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Do(func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		if hasArgPrefix(request.Args, "-test.fuzz=") {
 			return gomutants.MutantResult{
 				ID: mutant.ID, Outcome: gomutants.OutcomeKilled,
@@ -266,7 +250,7 @@ func TestEvaluatePromotesTargetedFuzzArtifactAndRequestsFreshRound(t *testing.T)
 			}, nil
 		}
 		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
-	}
+	})
 	targets := []assure.TargetEvidence{{
 		Target: target("FuzzBoundary", goanalysis.KindFuzz), CoveredFiles: []string{"boundary.go"},
 	}}
@@ -280,8 +264,9 @@ func TestEvaluatePromotesTargetedFuzzArtifactAndRequestsFreshRound(t *testing.T)
 	if !result.Applied || len(result.Repairs) != 1 || result.Repairs[0].Status != "applied" {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(session.requests) != 2 || !hasArg(session.requests[1].Args, "-test.fuzztime=10000x") {
-		t.Fatalf("requests = %+v", session.requests)
+	requests := session.Requests()
+	if len(requests) != 2 || !hasArg(requests[1].Args, "-test.fuzztime=10000x") {
+		t.Fatalf("requests = %+v", requests)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "testdata", "fuzz", "FuzzBoundary", "a1b2c3"))
 	if err != nil || !strings.HasPrefix(string(data), "go test fuzz v1\n") {
@@ -292,15 +277,15 @@ func TestEvaluatePromotesTargetedFuzzArtifactAndRequestsFreshRound(t *testing.T)
 func TestEvaluateNoApplyLeavesFuzzKillInsufficient(t *testing.T) {
 	root := t.TempDir()
 	mutant := acceptedMutant()
-	session := &fakeSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
+	session.On(mutant.ID).Do(func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		if hasArgPrefix(request.Args, "-test.fuzz=") {
 			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled, Artifacts: []gomutants.Artifact{{
 				Path: "testdata/fuzz/FuzzBoundary/candidate", Data: []byte("go test fuzz v1\n[]byte(\"x\")\n"),
 			}}}, nil
 		}
 		return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
-	}
+	})
 	result, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
 		Target: target("FuzzBoundary", goanalysis.KindFuzz), CoveredFiles: []string{"boundary.go"},
 	}}, assure.MutationOptions{Root: root, Snapshot: "snapshot-a", Contract: "standard-v1", NoApply: true})
