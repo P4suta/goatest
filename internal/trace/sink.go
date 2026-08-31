@@ -64,8 +64,12 @@ type File interface {
 
 // Filesystem is the filesystem a DirSink writes through. Its zero value is the
 // os package; a test fills in only the operation it wants to drive.
+//
+// Mkdir creates one directory and fails when it exists, which is how a
+// recording claims a directory no other recording is writing.
 type Filesystem struct {
 	MkdirAll   func(path string, perm fs.FileMode) error
+	Mkdir      func(path string, perm fs.FileMode) error
 	OpenAppend func(path string, perm fs.FileMode) (File, error)
 	WriteFile  func(path string, data []byte, perm fs.FileMode) error
 }
@@ -75,6 +79,9 @@ type Filesystem struct {
 func (hooks Filesystem) resolved() Filesystem {
 	if hooks.MkdirAll == nil {
 		hooks.MkdirAll = os.MkdirAll
+	}
+	if hooks.Mkdir == nil {
+		hooks.Mkdir = os.Mkdir
 	}
 	if hooks.OpenAppend == nil {
 		hooks.OpenAppend = func(name string, perm fs.FileMode) (File, error) {
@@ -91,6 +98,12 @@ func (hooks Filesystem) resolved() Filesystem {
 // FileName, and the output of the commands that produced any in
 // OutputDirectoryName.
 //
+// The directory belongs to one recording. A run owns its own, named under the
+// trace root the caller collects recordings in, because everything in a
+// recording is numbered from the first event: a second run sharing a directory
+// would append to the first run's stream and write its output over the files
+// the first run's events digested.
+//
 // Each event is flushed as it arrives, so a run that hangs or is killed still
 // leaves everything it recorded readable on disk.
 type DirSink struct {
@@ -105,12 +118,20 @@ type DirSink struct {
 	dropped atomic.Int64
 }
 
-// NewDirSink creates the trace directory and opens its stream for appending.
+// NewDirSink creates the directory of one recording under the trace root and
+// opens its stream. The root collects recordings and may already hold them;
+// the run's own directory is created exclusively, so a name another recording
+// owns is refused rather than joined.
+//
 // It reports the error that stopped it rather than returning a sink that cannot
 // write; a caller that cannot trace runs untraced.
-func NewDirSink(directory string, hooks Filesystem) (*DirSink, error) {
+func NewDirSink(root, run string, hooks Filesystem) (*DirSink, error) {
 	hooks = hooks.resolved()
-	if err := hooks.MkdirAll(directory, directoryPermissions); err != nil {
+	if err := hooks.MkdirAll(root, directoryPermissions); err != nil {
+		return nil, fmt.Errorf("goatest: create trace directory %s: %w", root, err)
+	}
+	directory := filepath.Join(root, run)
+	if err := hooks.Mkdir(directory, directoryPermissions); err != nil {
 		return nil, fmt.Errorf("goatest: create trace directory %s: %w", directory, err)
 	}
 	stream := filepath.Join(directory, FileName)
@@ -120,6 +141,10 @@ func NewDirSink(directory string, hooks Filesystem) (*DirSink, error) {
 	}
 	return &DirSink{directory: directory, hooks: hooks, file: file}, nil
 }
+
+// Directory is where the recording is being written: the run's own directory
+// under the trace root it was opened in.
+func (sink *DirSink) Directory() string { return sink.directory }
 
 // Emit appends one event to the stream, preserving any captured output beside
 // it first, and flushes the line before returning.

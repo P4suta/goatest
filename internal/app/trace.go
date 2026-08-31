@@ -41,7 +41,7 @@ func (service Service) startTrace(root string, request cli.Request) (*trace.Reco
 		service.note(traceUnavailable, err.Error())
 		return nil, untraced
 	}
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	sink, err := trace.NewDirSink(directory, service.traceName(), trace.Filesystem{})
 	if err != nil {
 		service.note(traceUnavailable, err.Error())
 		return nil, untraced
@@ -55,15 +55,17 @@ func (service Service) startTrace(root string, request cli.Request) (*trace.Reco
 	}
 }
 
-// traceDirectory resolves where a request wants its trace written, defaulting
-// to a directory of the repository's own trace root named for the run.
+// traceDirectory resolves the trace root a request wants its recordings
+// collected in, defaulting to the repository's own. The run records into a
+// directory of its own underneath it, which is what lets one directory serve
+// every run a developer traces into it.
 //
 // A relative directory resolves against the repository, which is the root
 // every other path a request names is relative to.
 func (service Service) traceDirectory(root string, request cli.Request) (string, error) {
 	directory := strings.TrimSpace(request.TraceDirectory)
 	if directory == "" {
-		return filepath.Join(root, ".goatest", "trace", service.traceName()), nil
+		return filepath.Join(root, ".goatest", "trace"), nil
 	}
 	if !filepath.IsAbs(directory) {
 		directory = filepath.Join(root, directory)

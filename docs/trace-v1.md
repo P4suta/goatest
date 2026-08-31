@@ -20,7 +20,7 @@ nothing.
 | Form | Effect |
 | --- | --- |
 | `--trace` | record to the default directory |
-| `--trace=DIR` | record to `DIR`, resolved against the repository when relative |
+| `--trace=DIR` | collect the recording in `DIR`, resolved against the repository when relative |
 | `GOATEST_TRACE=1` or `true` | the same as a bare `--trace` |
 | `GOATEST_TRACE=DIR` | the same as `--trace=DIR` |
 | `GOATEST_TRACE` unset, empty, `0`, or `false` | no trace |
@@ -32,13 +32,21 @@ layer parses: no layer below the command line reads the environment. A
 `--trace` after the `--` separator is an argument for the test binary and stays
 one.
 
-The default directory is `<repository>/.goatest/trace/<UTC timestamp>-<pid>/`,
-named for the moment the run started and the process that started it, so two
-goatest processes tracing one repository never write into the same recording.
+A run records into a directory of its own, named `<UTC timestamp>-<pid>` for
+the moment the run started and the process that started it, inside the trace
+root the flag names — `<repository>/.goatest/trace/` when it names none. That
+is what lets the same `DIR` serve every run traced into it: recordings
+accumulate beside each other instead of over each other. They would otherwise
+collide, because everything in a recording is numbered from its first event,
+so a second run into one directory would append to the first run's stream and
+write its `output/<seq>.txt` over the files the first run's events digested.
+The name is also what keeps two goatest processes tracing one repository out
+of each other's recording.
 
 Two directories are refused, each with one `trace-unavailable` note on the
 progress stream and a run that continues untraced: one that cannot be created
-or opened, and one inside the repository but outside `.goatest`. The second
+or opened — which includes a run directory another recording already owns —
+and one inside the repository but outside `.goatest`. The second
 refusal is not fastidiousness. A trace grows while the run records into it, and
 the source snapshot digests the repository, so a stream written where the
 snapshot reads would make the repository change during verification and cost
@@ -48,10 +56,11 @@ the trace is what keeps the trace from failing the run.
 ## Directory layout
 
 ```text
-.goatest/trace/20260901T041636Z-31337/
-  trace.jsonl
-  output/12.txt
-  output/17.txt
+.goatest/trace/                        the trace root, one directory per run
+  20260901T041636Z-31337/
+    trace.jsonl
+    output/12.txt
+    output/17.txt
 ```
 
 `trace.jsonl` is JSON Lines: one event object per line, in sequence order, each

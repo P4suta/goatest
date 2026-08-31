@@ -485,11 +485,11 @@ func TestNewWithoutAClockUsesTheWallClock(t *testing.T) {
 
 func TestConcurrentRecordingKeepsEveryEventAndItsSequenceOrder(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	dirSink, err := trace.NewDirSink(directory, "20260102T030405Z-1234", trace.Filesystem{})
+	dirSink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	directory := dirSink.Directory()
 	memory := trace.NewMemorySink(0)
 	recorder := trace.New(trace.NewTeeSink(dirSink, memory), newClock().Now)
 

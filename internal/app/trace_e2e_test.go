@@ -129,7 +129,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		if event.Exec.OutputPath == "" {
 			continue
 		}
-		preserved := filepath.Join(directory, filepath.FromSlash(event.Exec.OutputPath))
+		preserved := filepath.Join(recording, filepath.FromSlash(event.Exec.OutputPath))
 		if info, err := os.Stat(preserved); err != nil || info.IsDir() {
 			t.Errorf("preserved output %s = %v", event.Exec.OutputPath, err)
 		}

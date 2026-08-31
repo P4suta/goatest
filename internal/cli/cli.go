@@ -86,7 +86,7 @@ const help = `Usage:
 	goatest report [--latest-full|--run=ID]
 	goatest cache status|gc
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
-Tracing: --trace writes diagnostic exhaust to DIR, or under .goatest/trace by default; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
+Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
 `
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {

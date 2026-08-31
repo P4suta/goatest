@@ -194,9 +194,10 @@ adds. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the complete set CI runs.
 ## Execution tracing
 
 `goatest verify --trace[=DIR]` and `goatest replay ID --trace[=DIR]` record
-what a run did while it did it. Without a directory the trace is written to
-`.goatest/trace/<UTC timestamp>-<pid>/`, which the source snapshot never
-reads; `GOATEST_TRACE=1` asks for the same location and `GOATEST_TRACE=DIR`
+what a run did while it did it. Each run records into a directory of its own,
+`<UTC timestamp>-<pid>/`, under the trace root the flag names; without a
+directory that root is `.goatest/trace/`, which the source snapshot never
+reads, and naming one collects its recordings there instead; `GOATEST_TRACE=1` asks for the same location and `GOATEST_TRACE=DIR`
 for a named one, so a job that cannot change a command line can still ask.
 The environment variable is read in `cmd/goatest` alone, where it becomes the
 flag the command layer parses: no layer below the command line reads the
