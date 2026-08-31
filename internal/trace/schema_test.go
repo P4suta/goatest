@@ -135,6 +135,48 @@ func TestSchemaRejectsIncompleteOrUnknownEvents(t *testing.T) {
 	}
 }
 
+func TestSchemaRejectsAPayloadThatIsNotTheEventsOwn(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	documents := decodeEvents(t, scriptedEvents(t))
+
+	// Every payload of the recording, indexed by the field it arrived under,
+	// so each event can be handed a payload belonging to another event.
+	payloads := map[string]any{}
+	for _, document := range documents {
+		for _, name := range []string{"phase", "exec", "mutant", "route", "progress", "artifact", "run"} {
+			if record, ok := document[name]; ok {
+				payloads[name] = record
+			}
+		}
+	}
+	if len(payloads) != 7 {
+		t.Fatalf("the recording holds %d payloads, want one of each", len(payloads))
+	}
+
+	for _, document := range documents {
+		eventType, _ := document["type"].(string)
+		for name, record := range payloads {
+			if _, own := document[name]; own {
+				continue
+			}
+			amended := cloneDocument(t, document)
+			amended[name] = record
+			if err := compiled.Validate(amended); err == nil {
+				t.Errorf("a %s event carrying a %s payload passed the schema; an event carries its own payload alone", eventType, name)
+			}
+		}
+		if eventType == trace.TypeRunStart {
+			continue
+		}
+		identified := cloneDocument(t, document)
+		identified["schema"] = trace.SchemaV1
+		if err := compiled.Validate(identified); err == nil {
+			t.Errorf("a %s event carrying the format identity passed the schema; run-start carries it alone", eventType)
+		}
+	}
+}
+
 func TestSchemaRejectsEnvironmentValues(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
