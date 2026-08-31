@@ -149,6 +149,9 @@ func TestRunCoordinatorHandsTheRecorderToEveryTracedComponent(t *testing.T) {
 	if harness.workspaceOptions.Trace != harness.recorder {
 		t.Fatalf("workspace recorder = %v, want the run's recorder", harness.workspaceOptions.Trace)
 	}
+	if harness.mutationOptions.Trace != harness.recorder {
+		t.Fatalf("mutation recorder = %v, want the run's recorder", harness.mutationOptions.Trace)
+	}
 	if harness.generationOptions.RepositoryValidator.Trace != harness.recorder {
 		t.Fatalf("validation recorder = %v, want the run's recorder", harness.generationOptions.RepositoryValidator.Trace)
 	}
