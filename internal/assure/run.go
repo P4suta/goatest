@@ -443,6 +443,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
 			Progress:        mutationProgress(options),
 			OriginalControl: originalControl,
+			Trace:           options.Trace,
 		})
 		if err != nil {
 			_ = closeRound()

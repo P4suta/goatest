@@ -23,6 +23,7 @@ import (
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 const (
@@ -37,6 +38,16 @@ const (
 	maximumMutationBatchTargets     = 64
 	maximumMutationRunArgumentBytes = 8 << 10
 	maximumMutationBatchDuration    = time.Second
+)
+
+// The forms an entry of a recorded execution plan takes: one target run on its
+// own, several related targets of one package run together, the fuzzing of one
+// target, and the package suite a mutant no target reaches is left to.
+const (
+	mutationPlanIndividual   = "individual:"
+	mutationPlanBatch        = "batch:"
+	mutationPlanFuzz         = "fuzz:"
+	mutationPlanPackageSuite = "package-suite"
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
@@ -70,6 +81,9 @@ type MutationOptions struct {
 	Accepted        map[string]bool
 	Progress        func(completed, total int)
 	OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+	// Trace records how each mutant was routed. A nil recorder is an
+	// evaluation that records nothing and reaches the same result.
+	Trace *trace.Recorder
 }
 
 type MutationEvaluation struct {
@@ -312,9 +326,13 @@ type mutationSeed struct {
 	err        error
 }
 
+// mutationSeedExecution is one planned execution of a mutant: the request that
+// runs it, the detail that names it in the evidence, and the plan entry that
+// names it in a trace.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
+	plan    string
 }
 
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
@@ -353,6 +371,7 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	seed := mutationSeed{mutant: mutant, reaching: reachingTargets(mutant.Path, targets)}
 	if len(seed.reaching) == 0 {
+		options.Trace.Route(mutationSeedRoute(mutant, nil, nil))
 		request := gomutants.ExecRequest{
 			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(options.TestArgs),
 			Timeout: calibratedMutationTimeout(options.Contract, 0, options.Timeout),
@@ -386,7 +405,9 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		seed.resolved = true
 		return seed
 	}
-	for _, execution := range mutationSeedExecutions(mutant, seed.reaching, options) {
+	executions := mutationSeedExecutions(mutant, seed.reaching, options)
+	options.Trace.Route(mutationSeedRoute(mutant, seed.reaching, executions))
+	for _, execution := range executions {
 		result, err := session.Exec(ctx, execution.request)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
@@ -467,6 +488,7 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 		executions = append(executions, mutationSeedExecution{
 			request: request,
 			detail:  target.Target.Name,
+			plan:    mutationPlanIndividual + target.Target.Name,
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
@@ -476,6 +498,7 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 		executions = append(executions, mutationSeedExecution{
 			request: request,
 			detail:  batchMutationDetail(batch),
+			plan:    batchMutationPlan(batch),
 		})
 	}
 	return executions
@@ -517,6 +540,50 @@ func batchMutationDetail(targets []TargetEvidence) string {
 		return targets[0].Target.Name
 	}
 	return fmt.Sprintf("%s (%d related targets)", targets[0].Target.Package, len(targets))
+}
+
+// batchMutationPlan names a batched execution in a trace. A batch of one is an
+// individual run, which is exactly how it is requested.
+func batchMutationPlan(targets []TargetEvidence) string {
+	if len(targets) == 1 {
+		return mutationPlanIndividual + targets[0].Target.Name
+	}
+	return fmt.Sprintf("%s%s(%d)", mutationPlanBatch, targets[0].Target.Package, len(targets))
+}
+
+// mutationSeedRoute describes how a mutant was routed: the targets baseline
+// coverage proves reach it, the executions that routing planned for them, and
+// the reason the plan is what it is. A mutant no target reaches has no
+// coverage to route by and is left to its package suite.
+//
+// The reaching targets are named in the order they will be executed, which is
+// cheapest first, and the plan follows the same order: the individual runs,
+// the batches of related targets behind them, and the fuzzing that a
+// surviving mutant falls through to last. The line is clamped because a trace
+// records a position or nothing, never a negative one.
+func mutationSeedRoute(mutant gomutants.Mutant, reaching []TargetEvidence, executions []mutationSeedExecution) trace.RouteRecord {
+	record := trace.RouteRecord{
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: max(mutant.Line, 0),
+		Plan: []string{mutationPlanPackageSuite}, Reason: trace.ReasonUnreached,
+	}
+	if len(reaching) == 0 {
+		return record
+	}
+	record.Reason = trace.ReasonCoverageReaching
+	record.ReachingTargets = make([]string, len(reaching))
+	for index, target := range reaching {
+		record.ReachingTargets[index] = target.Target.ID
+	}
+	record.Plan = make([]string, 0, len(executions)+len(reaching))
+	for _, execution := range executions {
+		record.Plan = append(record.Plan, execution.plan)
+	}
+	for _, target := range reaching {
+		if target.Target.Kind == goanalysis.KindFuzz {
+			record.Plan = append(record.Plan, mutationPlanFuzz+target.Target.Name)
+		}
+	}
+	return record
 }
 
 func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
