@@ -224,7 +224,7 @@ Part of the contract; no run emits one yet.
 
 | Field | Meaning |
 | --- | --- |
-| `verdict` | the verdict the runner reached |
+| `verdict` | the verdict the runner reached, or how the run ended when it reached none |
 | `error` | the error that ended it, if one did |
 | `events_emitted` | events the sink kept |
 | `events_dropped` | events the sink could not keep |
@@ -237,6 +237,12 @@ report scopes it, so a changeset, package, or replay run records `ASSURED`
 where its report says `CHANGE_ASSURED`, `SCOPE_ASSURED`, or `RESOLVED`. The
 report is the authority on the verdict; the trace only says what the run
 reached.
+
+A run that reached no verdict is closed with how it ended instead, because
+those runs are exactly the ones that leave no report to say it elsewhere:
+`INTERRUPTED` when a cancelled or expired context ended it, `ERROR` when
+anything else did, and `UNKNOWN` for a run that returned neither a verdict nor
+an error. The field is therefore never empty on a `run-end` goatest wrote.
 
 ## What is deterministic
 

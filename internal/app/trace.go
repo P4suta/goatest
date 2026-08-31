@@ -4,6 +4,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,13 +17,23 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// traceDirectoryTimeFormat names a default trace directory after the moment
-// the run started, in the compact UTC shape run identities already use.
+// traceDirectoryTimeFormat names a run's trace directory after the moment the
+// run started, in the compact UTC shape run identities already use.
 const traceDirectoryTimeFormat = "20060102T150405Z"
 
 // traceUnavailable is the progress note a trace that could not be opened, or
 // could not be closed, reports itself under.
 const traceUnavailable = "trace-unavailable"
+
+// Terminal verdicts of a recording whose run reached none of its own. They are
+// trace vocabulary rather than report verdicts, because a run that ends this
+// way writes no report: an interrupted run is abandoned before one is
+// finalized, and a run that returns neither verdict nor error reached nothing
+// a report could carry.
+const (
+	traceVerdictInterrupted = "INTERRUPTED"
+	traceVerdictUnknown     = "UNKNOWN"
+)
 
 // startTrace opens the recording a request asked for, and returns it with the
 // closer that ends it.
@@ -48,10 +60,31 @@ func (service Service) startTrace(root string, request cli.Request) (*trace.Reco
 	}
 	recorder := trace.New(sink, service.Now)
 	return recorder, func(result report.Report, runErr error) {
-		recorder.RunEnd(string(result.Verdict), runErr)
+		recorder.RunEnd(traceVerdict(result, runErr), runErr)
 		if closeErr := sink.Close(); closeErr != nil {
 			service.note(traceUnavailable, closeErr.Error())
 		}
+	}
+}
+
+// traceVerdict names how a run ended for the recording that is closing.
+//
+// The runner's own verdict is the answer wherever it reached one. Where it did
+// not, the error it stopped on is: a cancelled or expired context ended the run
+// from outside, anything else ended it as an error, and a run that returned
+// neither is an outcome a reader should see named rather than left blank. The
+// service settles this rather than the recorder, because the vocabulary of a
+// verdict belongs to the report layer that owns the rest of it.
+func traceVerdict(result report.Report, runErr error) string {
+	switch {
+	case result.Verdict != "":
+		return string(result.Verdict)
+	case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
+		return traceVerdictInterrupted
+	case runErr != nil:
+		return string(report.VerdictError)
+	default:
+		return traceVerdictUnknown
 	}
 }
 
@@ -78,9 +111,9 @@ func (service Service) traceDirectory(root string, request cli.Request) (string,
 	return directory, nil
 }
 
-// traceName names a default trace directory after the moment the run started
-// and the process that started it, which is what keeps two runs of the same
-// repository out of each other's recording.
+// traceName names the directory of one recording after the moment the run
+// started and the process that started it, which is what keeps two runs
+// tracing into one trace root out of each other's recording.
 func (service Service) traceName() string {
 	processID := os.Getpid
 	if service.ProcessID != nil {
