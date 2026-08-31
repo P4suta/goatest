@@ -67,13 +67,11 @@ func productionRunDependencies() runDependencies {
 		concurrencyPackages:    goanalysis.ConcurrencyPackages,
 		relevantRacePackages:   RelevantRacePackages,
 		collectRaceWithOptions: CollectRaceWithOptions,
-		prepareSession: func(ctx context.Context, workspace *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
-			return workspace.Prepare(ctx, options)
-		},
-		evaluateMutations: EvaluateMutations,
-		attemptRepairs:    AttemptGeneratedRepairs,
-		buildGraph:        buildGraph,
-		mergeGraph:        mergeGraph,
-		saveGraph:         evidence.SaveGraph,
+		prepareSession:         prepareTracedSession,
+		evaluateMutations:      EvaluateMutations,
+		attemptRepairs:         AttemptGeneratedRepairs,
+		buildGraph:             buildGraph,
+		mergeGraph:             mergeGraph,
+		saveGraph:              evidence.SaveGraph,
 	}
 }
