@@ -393,9 +393,46 @@ func TestRunEndCountsTheEventsTheSinkDropped(t *testing.T) {
 	if last.Type != trace.TypeRunEnd || last.Run == nil {
 		t.Fatalf("last event = %+v, want run-end", last)
 	}
-	if last.Run.EventsEmitted != 4 || last.Run.EventsDropped != 6 {
-		t.Fatalf("run-end accounting = %d emitted, %d dropped; want 4 and 6 for a ring of 4 fed 10 events",
+	if last.Run.EventsEmitted != 3 || last.Run.EventsDropped != 7 {
+		t.Fatalf("run-end accounting = %d emitted, %d dropped; want 3 and 7 for a ring of 4 fed 10 events, one slot held for the run-end",
 			last.Run.EventsEmitted, last.Run.EventsDropped)
+	}
+}
+
+func TestAFullRingAccountsForTheEventTheRunEndDisplaces(t *testing.T) {
+	t.Parallel()
+	for _, capacity := range []int{1, 2, 3, 4} {
+		for _, notes := range []int{0, 1, 5} {
+			clock := newClock()
+			sink := trace.NewMemorySink(capacity)
+			recorder := trace.New(sink, clock.Now)
+			for range notes {
+				recorder.Progress("mutation-progress", "1/5")
+			}
+			recorder.RunEnd("assured", nil)
+
+			events := sink.Events()
+			last := events[len(events)-1]
+			if last.Type != trace.TypeRunEnd || last.Run == nil {
+				t.Fatalf("ring of %d fed %d notes ended with %+v, want a run-end", capacity, notes, last)
+			}
+			// A recording is honest when its own accounting still describes
+			// the recording after the run-end was written: as many events
+			// beside it as it claims to have kept, and no drop it never
+			// counted, however little room the ring had.
+			if kept := int64(len(events)) - 1; kept != last.Run.EventsEmitted {
+				t.Errorf("ring of %d fed %d notes holds %d events beside its run-end but accounts for %d",
+					capacity, notes, kept, last.Run.EventsEmitted)
+			}
+			if last.Run.EventsDropped != sink.Dropped() {
+				t.Errorf("ring of %d fed %d notes reported %d drops, the sink counted %d; a lossy trace must not read as complete",
+					capacity, notes, last.Run.EventsDropped, sink.Dropped())
+			}
+			if attempts := int64(1 + notes); last.Run.EventsEmitted+last.Run.EventsDropped != attempts {
+				t.Errorf("ring of %d fed %d notes accounts for %d of %d recorded events",
+					capacity, notes, last.Run.EventsEmitted+last.Run.EventsDropped, attempts)
+			}
+		}
 	}
 }
 

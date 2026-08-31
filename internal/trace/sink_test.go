@@ -336,11 +336,44 @@ func TestMemorySinkDropsTheOldestEventsWhenItsRingIsFull(t *testing.T) {
 	for _, event := range sink.Events() {
 		got = append(got, event.Seq)
 	}
-	if !reflect.DeepEqual(got, []int64{3, 4, 5}) {
-		t.Fatalf("Events = %v, want the last three", got)
+	// A ring of three holds two events of a run in progress: the last slot
+	// belongs to the run-end, so the event that closes the recording never
+	// costs the recording an event it already accounted for.
+	if !reflect.DeepEqual(got, []int64{4, 5}) {
+		t.Fatalf("Events = %v, want the last two beside the room held for the run-end", got)
 	}
-	if sink.Dropped() != 2 {
-		t.Fatalf("Dropped = %d, want 2", sink.Dropped())
+	if sink.Dropped() != 3 {
+		t.Fatalf("Dropped = %d, want 3", sink.Dropped())
+	}
+}
+
+func TestMemorySinkKeepsItsLastSlotForTheRunEnd(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(2)
+	for seq := int64(1); seq <= 3; seq++ {
+		if err := sink.Emit(sampleEvent(seq)); err != nil {
+			t.Fatalf("Emit(%d) = %v", seq, err)
+		}
+	}
+	runEnd := trace.Event{
+		Seq:       4,
+		Type:      trace.TypeRunEnd,
+		Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"),
+		Run:       &trace.RunRecord{Verdict: "assured", EventsEmitted: 1, EventsDropped: 2},
+	}
+	dropped := sink.Dropped()
+	if err := sink.Emit(runEnd); err != nil {
+		t.Fatalf("Emit(run-end) = %v", err)
+	}
+	if sink.Dropped() != dropped {
+		t.Fatalf("the run-end displaced an event: Dropped = %d, was %d", sink.Dropped(), dropped)
+	}
+	var got []int64
+	for _, event := range sink.Events() {
+		got = append(got, event.Seq)
+	}
+	if !reflect.DeepEqual(got, []int64{3, 4}) {
+		t.Fatalf("Events = %v, want the last event of the run and the run-end", got)
 	}
 }
 
