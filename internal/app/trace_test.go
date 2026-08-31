@@ -286,6 +286,105 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 	}
 }
 
+// symlinkTo links name at target, skipping the test where the filesystem or
+// the platform will not have one.
+func symlinkTo(t *testing.T, target, name string) string {
+	t.Helper()
+	if err := os.Symlink(target, name); err != nil {
+		t.Skipf("symbolic links are unavailable here: %v", err)
+	}
+	return name
+}
+
+func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name      string
+		directory func(t *testing.T, root string) string
+		refused   bool
+	}{
+		{
+			name: "symlink-to-the-repository",
+			directory: func(t *testing.T, root string) string {
+				return filepath.Join(symlinkTo(t, root, filepath.Join(t.TempDir(), "alias")), "trace")
+			},
+			refused: true,
+		},
+		{
+			name: "symlink-to-a-directory-of-the-repository",
+			directory: func(t *testing.T, root string) string {
+				inside := filepath.Join(root, "internal")
+				if err := os.MkdirAll(inside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// The trace directory itself does not exist yet, so only the
+				// path above it can be resolved.
+				return filepath.Join(symlinkTo(t, inside, filepath.Join(t.TempDir(), "alias")), "traces", "run")
+			},
+			refused: true,
+		},
+		{
+			name: "symlink-outside-the-repository",
+			directory: func(t *testing.T, root string) string {
+				return filepath.Join(symlinkTo(t, t.TempDir(), filepath.Join(t.TempDir(), "alias")), "trace")
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			directory := testCase.directory(t, root)
+			var progress bytes.Buffer
+			traced := false
+			service := app.Service{
+				Root: root, Progress: &progress,
+				Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+					traced = options.Trace != nil
+					return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
+				},
+			}
+			result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, "")
+			if err != nil || result.Verdict != report.VerdictAssured {
+				t.Fatalf("verify = %+v, %v", result, err)
+			}
+
+			if !testCase.refused {
+				if !traced {
+					t.Fatalf("a directory outside the repository was refused: %q", progress.String())
+				}
+				if events := readTrace(t, traceRun(t, directory)); len(events) < 2 {
+					t.Fatalf("recorded events = %+v", events)
+				}
+				if progress.Len() != 0 {
+					t.Fatalf("progress = %q", progress.String())
+				}
+				return
+			}
+			// A trace stream growing where the source snapshot reads costs the
+			// run its evidence, and a symbolic link is not a way around that.
+			if traced {
+				t.Fatal("a trace that lands inside the repository handed the run a recorder")
+			}
+			warning := progress.String()
+			if !strings.Contains(warning, "trace-unavailable") || !strings.Contains(warning, "inside the repository") {
+				t.Fatalf("warning = %q", warning)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if entry.Name() == ".goatest" {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(root, entry.Name(), "trace")); err == nil {
+					t.Fatalf("a refused trace was written into the repository at %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
 func TestATraceMayBeWrittenUnderTheRepositoryReportDirectory(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
