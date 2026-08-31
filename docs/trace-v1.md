@@ -96,6 +96,12 @@ many goroutines record at once.
 | `artifact` | `artifact` | the run wrote a file |
 | `run-end` | `run` | the recording closes; always the last line |
 
+The type and the payload are one contract, in both directions: a line carries
+the payload its type names and never another one, and a payload appears only on
+the event type it belongs to. `schema` is the same kind of pairing, which is why
+`run-start` is the only line that may carry it. The schema enforces all of it,
+so a reader may switch on `type` and reach for that payload alone.
+
 ### `phase`
 
 | Field | Meaning |

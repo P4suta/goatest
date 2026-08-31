@@ -85,6 +85,38 @@
     {
       "if": { "required": ["type"], "properties": { "type": { "const": "run-end" } } },
       "then": { "required": ["run"] }
+    },
+    {
+      "if": { "required": ["schema"] },
+      "then": { "properties": { "type": { "const": "run-start" } } }
+    },
+    {
+      "if": { "required": ["phase"] },
+      "then": { "properties": { "type": { "enum": ["phase-start", "phase-end"] } } }
+    },
+    {
+      "if": { "required": ["exec"] },
+      "then": { "properties": { "type": { "const": "exec" } } }
+    },
+    {
+      "if": { "required": ["mutant"] },
+      "then": { "properties": { "type": { "const": "mutant-exec" } } }
+    },
+    {
+      "if": { "required": ["route"] },
+      "then": { "properties": { "type": { "const": "route" } } }
+    },
+    {
+      "if": { "required": ["progress"] },
+      "then": { "properties": { "type": { "const": "progress" } } }
+    },
+    {
+      "if": { "required": ["artifact"] },
+      "then": { "properties": { "type": { "const": "artifact" } } }
+    },
+    {
+      "if": { "required": ["run"] },
+      "then": { "properties": { "type": { "const": "run-end" } } }
     }
   ],
   "$defs": {
