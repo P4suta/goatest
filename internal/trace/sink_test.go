@@ -403,6 +403,61 @@ func TestMemorySinkEventsAreASnapshot(t *testing.T) {
 	}
 }
 
+func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(0)
+	exec := &trace.ExecRecord{
+		Argv:     []string{"go", "test", "./..."},
+		EnvNames: []string{"GOCACHE", "GOFLAGS"},
+		ExitCode: 1,
+		Output:   []byte("--- FAIL: TestBoundary\n"),
+	}
+	route := &trace.RouteRecord{
+		MutantID:        "m-0001",
+		Path:            "internal/assure/run.go",
+		ReachingTargets: []string{"TestRun"},
+		Plan:            []string{"TestRun"},
+		Reason:          trace.ReasonCoverageReaching,
+	}
+	execEvent := trace.Event{Seq: 1, Type: trace.TypeExec, Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"), Exec: exec}
+	routeEvent := trace.Event{Seq: 2, Type: trace.TypeRoute, Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"), Route: route}
+	for _, event := range []trace.Event{execEvent, routeEvent} {
+		if err := sink.Emit(event); err != nil {
+			t.Fatalf("Emit(%d) = %v", event.Seq, err)
+		}
+	}
+
+	// The caller amends the records it emitted. A sink whose state a caller
+	// can reach past its own mutex is a sink whose events are not what was
+	// recorded.
+	exec.Argv[0] = "rm"
+	exec.EnvNames[0] = "GOATEST_TOKEN=super-secret"
+	exec.Output[0] = 'X'
+	exec.ExitCode = 137
+	route.Plan[0] = "TestSomethingElse"
+	route.Reason = trace.ReasonUnreached
+
+	kept := sink.Events()
+	if kept[0].Exec.Argv[0] != "go" || kept[0].Exec.EnvNames[0] != "GOCACHE" || kept[0].Exec.ExitCode != 1 {
+		t.Fatalf("a caller amended the exec record the sink kept: %+v", kept[0].Exec)
+	}
+	if string(kept[0].Exec.Output) != "--- FAIL: TestBoundary\n" {
+		t.Fatalf("a caller amended the output the sink kept: %q", kept[0].Exec.Output)
+	}
+	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonCoverageReaching {
+		t.Fatalf("a caller amended the route record the sink kept: %+v", kept[1].Route)
+	}
+
+	// The snapshot is the caller's own, down to the payload it points at.
+	kept[0].Exec.Argv[0] = "rm"
+	kept[0].Exec.Output[0] = 'X'
+	kept[1].Route.ReachingTargets[0] = "TestSomethingElse"
+	again := sink.Events()
+	if again[0].Exec.Argv[0] != "go" || again[0].Exec.Output[0] != '-' || again[1].Route.ReachingTargets[0] != "TestRun" {
+		t.Fatalf("a returned snapshot shares its payload with the sink: %+v %+v", again[0].Exec, again[1].Route)
+	}
+}
+
 func TestMemorySinkRejectsEmitAfterClose(t *testing.T) {
 	t.Parallel()
 	sink := trace.NewMemorySink(0)
