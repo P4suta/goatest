@@ -152,6 +152,52 @@ func TestTraceRecordsTheErrorThatEndedTheRun(t *testing.T) {
 	}
 }
 
+func TestARunThatReachedNoVerdictIsTracedWithHowItEnded(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name    string
+		runErr  error
+		verdict string
+	}{
+		{name: "canceled", runErr: context.Canceled, verdict: "INTERRUPTED"},
+		{name: "deadline", runErr: context.DeadlineExceeded, verdict: "INTERRUPTED"},
+		{name: "failed", runErr: errors.New("mutation workspace failed"), verdict: string(report.VerdictError)},
+		{name: "silent", verdict: "UNKNOWN"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			directory := filepath.Join(t.TempDir(), "trace")
+			service := app.Service{
+				Root: t.TempDir(),
+				Run: func(context.Context, assure.Options) (report.Report, error) {
+					// A runner that stops early answers with the report it had,
+					// which on the interrupted path is no report at all.
+					return report.Report{}, testCase.runErr
+				},
+			}
+			_, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, "")
+			if testCase.runErr != nil && !errors.Is(err, testCase.runErr) {
+				t.Fatalf("verify error = %v, want %v", err, testCase.runErr)
+			}
+
+			events := readTrace(t, traceRun(t, directory))
+			last := events[len(events)-1]
+			if last.Type != trace.TypeRunEnd || last.Run == nil {
+				t.Fatalf("last event = %+v, want a run-end", last)
+			}
+			// A recording says how the run it recorded ended. An empty verdict
+			// says nothing, and an interrupted run leaves no report to say it
+			// elsewhere.
+			if last.Run.Verdict != testCase.verdict {
+				t.Fatalf("run-end verdict = %q, want %q", last.Run.Verdict, testCase.verdict)
+			}
+			if testCase.runErr != nil && last.Run.Error != testCase.runErr.Error() {
+				t.Fatalf("run-end error = %q, want %q", last.Run.Error, testCase.runErr)
+			}
+		})
+	}
+}
+
 func TestUnrequestedTraceRecordsNothingAtAll(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
