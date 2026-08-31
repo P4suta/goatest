@@ -4,7 +4,6 @@
 package assure_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,22 +13,13 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/testkit"
 )
-
-type fakeWorkspace struct {
-	commands []gomutants.Command
-	run      func(gomutants.Command) gomutants.CommandResult
-}
-
-func (workspace *fakeWorkspace) Exec(_ context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
-	workspace.commands = append(workspace.commands, command)
-	return workspace.run(command), nil
-}
 
 func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *testing.T) {
 	artifacts := t.TempDir()
-	workspace := &fakeWorkspace{}
-	workspace.run = func(command gomutants.Command) gomutants.CommandResult {
+	workspace := testkit.NewWorkspace()
+	workspace.On().Do(func(command gomutants.Command) (gomutants.CommandResult, error) {
 		for _, argument := range command.Argv {
 			if strings.HasPrefix(argument, "-test.coverprofile=") {
 				path := strings.TrimPrefix(argument, "-test.coverprofile=")
@@ -39,8 +29,8 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 				}
 			}
 		}
-		return gomutants.CommandResult{Duration: 1375 * time.Millisecond}
-	}
+		return gomutants.CommandResult{Duration: 1375 * time.Millisecond}, nil
+	})
 	model := goanalysis.Model{ModulePath: "fixture.example/module", Packages: []goanalysis.Package{{
 		ImportPath: "fixture.example/module", RelativeDir: ".", Dependencies: []string{"fmt"},
 	}}}
@@ -66,7 +56,8 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 	}
 	compileCount := 0
 	invocationCount := 0
-	for _, command := range workspace.commands {
+	commands := workspace.Calls()
+	for _, command := range commands {
 		if len(command.Argv) >= 3 && command.Argv[0] == "go" && command.Argv[1] == "test" && command.Argv[2] == "-c" {
 			compileCount++
 		}
@@ -75,7 +66,7 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 		}
 	}
 	if compileCount != 1 || invocationCount != 2 {
-		t.Fatalf("compile=%d invoke=%d commands=%+v", compileCount, invocationCount, workspace.commands)
+		t.Fatalf("compile=%d invoke=%d commands=%+v", compileCount, invocationCount, commands)
 	}
 }
 
@@ -90,14 +81,15 @@ func TestCollectBaselineClassifiesRepeatableFailureAndFlake(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			index := 0
-			workspace := &fakeWorkspace{run: func(command gomutants.Command) gomutants.CommandResult {
+			workspace := testkit.NewWorkspace()
+			workspace.On().Do(func(command gomutants.Command) (gomutants.CommandResult, error) {
 				if len(command.Argv) > 0 && strings.HasSuffix(command.Argv[0], testBinarySuffix()) {
 					code := testCase.exitCodes[index]
 					index++
-					return gomutants.CommandResult{ExitCode: code, Output: []byte("boom")}
+					return gomutants.CommandResult{ExitCode: code, Output: []byte("boom")}, nil
 				}
-				return gomutants.CommandResult{}
-			}}
+				return gomutants.CommandResult{}, nil
+			})
 			model := goanalysis.Model{ModulePath: "fixture.example/module", Packages: []goanalysis.Package{{ImportPath: "fixture.example/module", RelativeDir: "."}}}
 			result, err := assure.CollectBaseline(t.Context(), workspace, model, []assure.BaselineTarget{{Target: target("TestOne", goanalysis.KindTest)}}, assure.BaselineOptions{ArtifactDirectory: t.TempDir()})
 			if err != nil {
@@ -114,12 +106,13 @@ func TestCollectBaselineClassifiesRepeatableFailureAndFlake(t *testing.T) {
 }
 
 func TestCollectBaselineFailsAsInfrastructureWhenVetOrBuildCannotComplete(t *testing.T) {
-	workspace := &fakeWorkspace{run: func(command gomutants.Command) gomutants.CommandResult {
+	workspace := testkit.NewWorkspace()
+	workspace.On().Do(func(command gomutants.Command) (gomutants.CommandResult, error) {
 		if len(command.Argv) > 1 && command.Argv[1] == "vet" {
-			return gomutants.CommandResult{ExitCode: 2, Output: []byte("bad package")}
+			return gomutants.CommandResult{ExitCode: 2, Output: []byte("bad package")}, nil
 		}
-		return gomutants.CommandResult{}
-	}}
+		return gomutants.CommandResult{}, nil
+	})
 	_, err := assure.CollectBaseline(t.Context(), workspace, goanalysis.Model{ModulePath: "fixture.example/module"}, nil, assure.BaselineOptions{ArtifactDirectory: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "go vet") {
 		t.Fatalf("error = %v", err)

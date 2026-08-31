@@ -29,7 +29,8 @@ The test suite exercises the real Go toolchain and takes a few minutes. Use
   `docs:`, `chore:`, `ci:`. The release changelog excludes `docs:`, `test:`,
   `chore:`, and `build:` entries.
 - Behavior changes need tests. Development is test-driven; see the
-  `Development` section of the README for what the suite covers.
+  `Development` section of the README for what the suite covers, and
+  [docs/development.md](docs/development.md) for the test harness and workflow.
 
 ## Source conventions
 
