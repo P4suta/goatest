@@ -193,8 +193,45 @@ adds. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the complete set CI runs.
 
 ## Execution tracing
 
-Not yet implemented. There is no tracing facility for a run's internal phases
-beyond the progress events described above.
+`goatest verify --trace[=DIR]` and `goatest replay ID --trace[=DIR]` record
+what a run did while it did it. Without a directory the trace is written to
+`.goatest/trace/<UTC timestamp>-<pid>/`, which the source snapshot never
+reads; `GOATEST_TRACE=1` asks for the same location and `GOATEST_TRACE=DIR`
+for a named one, so a job that cannot change a command line can still ask.
+The environment variable is read in `cmd/goatest` alone, where it becomes the
+flag the command layer parses: no layer below the command line reads the
+environment.
+
+A trace directory holds `trace.jsonl`, one JSON object per line in sequence
+order, and `output/<seq>.txt`, the captured output of the commands that
+produced any, truncated at 1 MiB with a marker. Every line is an event of one
+of nine types — `run-start`, `phase-start`, `phase-end`, `exec`,
+`mutant-exec`, `route`, `progress`, `artifact`, `run-end` — and validates
+against `internal/trace/schema.json`, which the package embeds and returns
+from `trace.JSONSchema()`. Every field of an event is deterministic except
+its timestamp and durations.
+
+Three rules make a trace safe to read and safe to write:
+
+- **A trace is never evidence.** No trace option takes part in the identity a
+  cached result is keyed on, and a trace never changes what a run decides.
+- **A trace never costs the run.** Diagnostic exhaust is exempt from
+  fail-closed: a directory that cannot be opened, an event that cannot be
+  written, or a directory inside the repository that the next snapshot would
+  read as source, costs a `trace-unavailable` note on the progress stream and
+  nothing else. The run continues untraced.
+- **A trace is honest about what it lost.** Sinks count their drops and the
+  `run-end` event always carries `events_emitted` and `events_dropped`, so a
+  reader can tell a complete recording from a lossy one. Each line is flushed
+  as it is written, so a run that is killed still leaves everything it
+  recorded readable.
+
+The recorder itself is `trace.Recorder`. Every method is safe on a nil
+receiver, which is the disabled trace: callers record unconditionally and a
+run nobody asked to trace pays nothing. Environment variables reach an event
+as sorted names alone — a trace records which part of the environment a
+command could see, never what it held — and captured output is digested into
+the event and preserved beside the stream rather than serialised into it.
 
 ## Failure diagnostics and keep-temp
 

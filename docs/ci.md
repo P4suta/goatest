@@ -35,6 +35,14 @@ jobs:
           path: reports/
 ```
 
+To diagnose a run that only misbehaves on the runner, set `GOATEST_TRACE: '1'`
+on the verify step and upload `.goatest/trace/` with the reports; each run
+writes its own directory there, named for its start and its process. A trace
+records the phases, commands, and mutant routing of a run; it is diagnostic
+exhaust, never evidence, and asking for one changes neither the verdict nor
+the cache identity of the run. See
+[development](development.md#execution-tracing) for the format.
+
 For this repository itself, the minimum pre-merge checks are `go test ./...`,
 `go test -race ./...`, and `go vet ./...`. A release workflow still needs a
 three-OS matrix, supported architectures/CGO fixtures, report schema checks,
