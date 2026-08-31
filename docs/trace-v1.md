@@ -270,6 +270,9 @@ reported:
   always carries `events_emitted` and `events_dropped`;
 - a sink that reports its own drops is authoritative, so a bounded reader that
   discards an old event counts it even though nothing failed;
+- a bounded ring keeps its last slot for the `run-end`, because the accounting
+  is taken before that event is written and a ring with no room left for it
+  would drop an event no line could report;
 - each line is flushed as it is written, so a killed run leaves a readable
   prefix.
 

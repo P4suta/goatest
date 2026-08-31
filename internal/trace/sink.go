@@ -223,6 +223,12 @@ type MemorySink struct {
 
 // NewMemorySink returns a sink holding at most capacity events. A capacity of
 // zero or less is unbounded.
+//
+// The last slot of a bounded ring belongs to the run-end event, so a run in
+// progress fills capacity-1 slots. That reservation is what keeps the
+// accounting honest: a recorder counts the loss before it writes the run-end,
+// and a ring with no room left for that write would drop an event nothing
+// could report. A ring of one therefore keeps the run-end alone.
 func NewMemorySink(capacity int) *MemorySink { return &MemorySink{capacity: capacity} }
 
 // Emit keeps one event, dropping the oldest ones the ring no longer has room
@@ -235,8 +241,15 @@ func (sink *MemorySink) Emit(event Event) error {
 		return errSinkClosed
 	}
 	sink.events = append(sink.events, event)
-	if sink.capacity > 0 && len(sink.events) > sink.capacity {
-		overflow := len(sink.events) - sink.capacity
+	if sink.capacity <= 0 {
+		return nil
+	}
+	room := sink.capacity
+	if event.Type != TypeRunEnd {
+		// The run-end has not arrived yet, and its slot is not on offer.
+		room--
+	}
+	if overflow := len(sink.events) - room; overflow > 0 {
 		sink.events = append(sink.events[:0], sink.events[overflow:]...)
 		sink.dropped.Add(int64(overflow))
 	}

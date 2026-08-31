@@ -451,11 +451,14 @@ func TestTeeSinkSumsTheDropsOfEverySink(t *testing.T) {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
 	}
-	if first.Dropped() != 3 || second.Dropped() != 2 {
-		t.Fatalf("sink drops = %d and %d, want 3 and 2", first.Dropped(), second.Dropped())
+	// Neither ring has seen a run-end, so each is one slot smaller than its
+	// capacity: the ring of one keeps nothing, the ring of two keeps the last
+	// event.
+	if first.Dropped() != 4 || second.Dropped() != 3 {
+		t.Fatalf("sink drops = %d and %d, want 4 and 3", first.Dropped(), second.Dropped())
 	}
-	if tee.Dropped() != 5 {
-		t.Fatalf("Dropped = %d, want the sum 5", tee.Dropped())
+	if tee.Dropped() != 7 {
+		t.Fatalf("Dropped = %d, want the sum 7", tee.Dropped())
 	}
 }
 
