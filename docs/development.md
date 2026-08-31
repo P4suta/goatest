@@ -204,34 +204,51 @@ environment.
 
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
-produced any, truncated at 1 MiB with a marker. Every line is an event of one
-of nine types — `run-start`, `phase-start`, `phase-end`, `exec`,
-`mutant-exec`, `route`, `progress`, `artifact`, `run-end` — and validates
-against `internal/trace/schema.json`, which the package embeds and returns
-from `trace.JSONSchema()`. Every field of an event is deterministic except
-its timestamp and durations.
+produced any. The stream, its nine event types, and the fields of each are
+specified in [trace v1](trace-v1.md); the rules behind them are recorded in
+[ADR 0002](adr/0002-trace-is-not-evidence.md). In short: a trace is never
+evidence, it never costs the run, and it is honest about what it dropped.
 
-Three rules make a trace safe to read and safe to write:
+### Recording from a new call site
 
-- **A trace is never evidence.** No trace option takes part in the identity a
-  cached result is keyed on, and a trace never changes what a run decides.
-- **A trace never costs the run.** Diagnostic exhaust is exempt from
-  fail-closed: a directory that cannot be opened, an event that cannot be
-  written, or a directory inside the repository that the next snapshot would
-  read as source, costs a `trace-unavailable` note on the progress stream and
-  nothing else. The run continues untraced.
-- **A trace is honest about what it lost.** Sinks count their drops and the
-  `run-end` event always carries `events_emitted` and `events_dropped`, so a
-  reader can tell a complete recording from a lossy one. Each line is flushed
-  as it is written, so a run that is killed still leaves everything it
-  recorded readable.
+The recorder is a `*trace.Recorder` reached through the options of the package
+that owns the work — `assure.Options`, `MutationOptions`,
+`RepositoryValidatorOptions`, `mutationbridge.Options` — and constructed once,
+in `internal/app`, from the request. There is no package-level recorder and no
+global seam: a test that wants a recording builds the options with one.
 
-The recorder itself is `trace.Recorder`. Every method is safe on a nil
-receiver, which is the disabled trace: callers record unconditionally and a
-run nobody asked to trace pays nothing. Environment variables reach an event
-as sorted names alone — a trace records which part of the environment a
-command could see, never what it held — and captured output is digested into
-the event and preserved beside the stream rather than serialised into it.
+Record unconditionally. Every method is safe on a nil receiver, which is the
+disabled trace, so `options.Trace.Route(...)` costs a nil check when nobody
+asked to trace and no call site branches on whether tracing is on. That is what
+keeps the traced and the untraced path one path.
+
+Two constraints hold below the command layer. `internal/assure` and
+`internal/trace` read no environment variables — `GOATEST_TRACE` becomes a flag
+in `cmd/goatest` and nothing under it learns the environment exists — and no
+trace option may enter `modeIdentity`, the assurance inputs, or the evidence
+digest, because a run must decide the same thing traced and untraced.
+
+### Testing a recording
+
+- `trace.NewMemorySink(capacity)` keeps events in a ring buffer and returns
+  them from `Events()`, which is how a unit test asserts on a stream without
+  writing a directory. A capacity of zero or less is unbounded; a full ring
+  drops its oldest event and counts it, which is the loss a `run-end` reports.
+- `trace.Filesystem` is the filesystem a `DirSink` writes through, passed to
+  `NewDirSink` as an ordinary argument. Fill in only the operation a test wants
+  to drive — `MkdirAll`, `OpenAppend`, or `WriteFile` — and the rest comes from
+  the `os` package.
+- `trace.JSONSchema()` returns the embedded schema.
+  `internal/trace/schema_test.go` validates recorded events against it with the
+  same compiler the report schema uses, and `internal/app/trace_e2e_test.go`
+  validates every line of a real `verify --trace`, decoding with
+  `DisallowUnknownFields` so a field outside the contract fails too.
+
+A new event or a new call site is proven end to end there: the test drives
+`cli.Run` over a real `go` on a `testkit` fixture and asserts on the recording
+against the report the same run produced — that every phase is closed before
+the next one opens, that a mutant's `route` precedes every `mutant-exec` that
+names it, and that the accounting in `run-end` matches the lines in the file.
 
 ## Failure diagnostics and keep-temp
 
