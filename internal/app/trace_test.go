@@ -49,6 +49,27 @@ func readTrace(t *testing.T, directory string) []trace.Event {
 	return events
 }
 
+// traceRun returns the run directory a traced run wrote under a trace root.
+// A root collects the recordings of the runs written into it, one directory
+// each, so a test that asked for one trace finds exactly one.
+func traceRun(t *testing.T, root string) string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			runs = append(runs, filepath.Join(root, entry.Name()))
+		}
+	}
+	if len(runs) != 1 {
+		t.Fatalf("trace root %s holds %d recordings, want one", root, len(runs))
+	}
+	return runs[0]
+}
+
 // traceOfType returns the events of one type, in the order they were recorded.
 func traceOfType(events []trace.Event, kind string) []trace.Event {
 	var selected []trace.Event
@@ -83,7 +104,7 @@ func TestTraceRequestRecordsTheRunAndClosesItWithItsVerdict(t *testing.T) {
 		t.Fatal("the run was handed no recorder")
 	}
 
-	events := readTrace(t, directory)
+	events := readTrace(t, traceRun(t, directory))
 	if len(events) < 3 {
 		t.Fatalf("recorded events = %+v", events)
 	}
@@ -124,7 +145,7 @@ func TestTraceRecordsTheErrorThatEndedTheRun(t *testing.T) {
 	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, ""); !errors.Is(err, sentinel) {
 		t.Fatalf("verify error = %v", err)
 	}
-	events := readTrace(t, directory)
+	events := readTrace(t, traceRun(t, directory))
 	last := events[len(events)-1]
 	if last.Type != trace.TypeRunEnd || last.Run == nil || last.Run.Error != sentinel.Error() {
 		t.Fatalf("run-end = %+v", last)
@@ -234,8 +255,55 @@ func TestATraceMayBeWrittenUnderTheRepositoryReportDirectory(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if events := readTrace(t, filepath.Join(root, ".goatest", "chosen")); len(events) < 2 {
+	if events := readTrace(t, traceRun(t, filepath.Join(root, ".goatest", "chosen"))); len(events) < 2 {
 		t.Fatalf("recorded events = %+v", events)
+	}
+	if progress.Len() != 0 {
+		t.Fatalf("progress = %q", progress.String())
+	}
+}
+
+func TestASecondRunTracedToOneDirectoryKeepsTheRecordingOfTheFirst(t *testing.T) {
+	t.Parallel()
+	directory := filepath.Join(t.TempDir(), "traces")
+	var progress bytes.Buffer
+	moment := time.Date(2026, 9, 1, 10, 11, 12, 0, time.UTC)
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress,
+		Now:       func() time.Time { return moment },
+		ProcessID: func() int { return 4242 },
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			options.Trace.Progress("snapshot", moment.Format(time.RFC3339))
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	// The same directory every time is what a developer does with --trace=DIR,
+	// and each run of it is a recording of its own: the second must not append
+	// to the stream of the first, whose events number from one and whose
+	// preserved output is named after those numbers.
+	for range 2 {
+		if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, ""); err != nil {
+			t.Fatal(err)
+		}
+		moment = moment.Add(time.Minute)
+	}
+
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("%s holds %d recordings, want one for each run", directory, len(entries))
+	}
+	for _, entry := range entries {
+		events := readTrace(t, filepath.Join(directory, entry.Name()))
+		if len(events) < 3 || events[0].Type != trace.TypeRunStart || events[0].Seq != 1 {
+			t.Fatalf("recording %s = %+v", entry.Name(), events)
+		}
+		last := events[len(events)-1]
+		if last.Type != trace.TypeRunEnd || last.Run == nil || last.Run.EventsDropped != 0 {
+			t.Fatalf("recording %s ended with %+v", entry.Name(), last)
+		}
 	}
 	if progress.Len() != 0 {
 		t.Fatalf("progress = %q", progress.String())

@@ -78,8 +78,9 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		t.Fatalf("report = %+v", result)
 	}
 
-	validateTraceStream(t, directory)
-	events := readTrace(t, directory)
+	recording := traceRun(t, directory)
+	validateTraceStream(t, recording)
+	events := readTrace(t, recording)
 	if len(events) < 2 || events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
 		t.Fatalf("recorded %d events beginning %+v", len(events), events[0])
 	}

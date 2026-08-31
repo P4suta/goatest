@@ -72,12 +72,34 @@ func sampleEvent(seq int64) trace.Event {
 	}
 }
 
+// execEvent is one exec event carrying captured output, enough to drive the
+// output a sink preserves beside its stream.
+func execEvent(seq int64, output []byte) trace.Event {
+	digest := sha256.Sum256(output)
+	return trace.Event{
+		Seq:       seq,
+		Type:      trace.TypeExec,
+		Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"),
+		Exec: &trace.ExecRecord{
+			Argv:         []string{"go", "test", "./..."},
+			ExitCode:     1,
+			Output:       output,
+			OutputBytes:  len(output),
+			OutputSHA256: hex.EncodeToString(digest[:]),
+		},
+	}
+}
+
 func TestDirSinkCreatesItsDirectoryAndAppendsJSONL(t *testing.T) {
 	t.Parallel()
-	directory := filepath.Join(t.TempDir(), "trace", "20260102T030405Z-1234")
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	root := filepath.Join(t.TempDir(), "trace")
+	sink, err := trace.NewDirSink(root, "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
+	}
+	directory := sink.Directory()
+	if want := filepath.Join(root, "20260102T030405Z-1234"); directory != want {
+		t.Fatalf("Directory = %s, want the run's own directory %s", directory, want)
 	}
 	for seq := int64(1); seq <= 3; seq++ {
 		if err := sink.Emit(sampleEvent(seq)); err != nil {
@@ -110,13 +132,100 @@ func TestDirSinkCreatesItsDirectoryAndAppendsJSONL(t *testing.T) {
 	}
 }
 
-func TestDirSinkMakesEachEventReadableBeforeClose(t *testing.T) {
+func TestDirSinkGivesEachRunItsOwnDirectoryUnderOneRoot(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	root := t.TempDir()
+	// The same root, twice, is the developer who passes --trace=DIR to every
+	// run: a second recording joins the first rather than writing over it.
+	first, err := trace.NewDirSink(root, "20260102T030405Z-1234", trace.Filesystem{})
+	if err != nil {
+		t.Fatalf("first NewDirSink = %v", err)
+	}
+	if err := first.Emit(execEvent(1, []byte("first run\n"))); err != nil {
+		t.Fatalf("first Emit = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close = %v", err)
+	}
+	second, err := trace.NewDirSink(root, "20260102T030406Z-5678", trace.Filesystem{})
+	if err != nil {
+		t.Fatalf("second NewDirSink = %v", err)
+	}
+	if err := second.Emit(execEvent(1, []byte("second run\n"))); err != nil {
+		t.Fatalf("second Emit = %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
+	}
+
+	if first.Directory() == second.Directory() {
+		t.Fatalf("both runs recorded into %s", first.Directory())
+	}
+	for directory, want := range map[string]string{
+		first.Directory():  "first run\n",
+		second.Directory(): "second run\n",
+	} {
+		data, err := os.ReadFile(filepath.Join(directory, trace.FileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lines := jsonLines(t, data); len(lines) != 1 {
+			t.Fatalf("%s holds %d lines, want the single event of its own run", directory, len(lines))
+		}
+		// A second run restarts at sequence one, so a shared directory would
+		// have written over the output the first run's event digested.
+		preserved, err := os.ReadFile(filepath.Join(directory, trace.OutputDirectoryName, "1.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(preserved) != want {
+			t.Fatalf("%s preserved %q, want %q", directory, preserved, want)
+		}
+	}
+}
+
+func TestDirSinkRefusesADirectoryARecordingAlreadyOwns(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	first, err := trace.NewDirSink(root, "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	if err := first.Emit(sampleEvent(1)); err != nil {
+		t.Fatalf("Emit = %v", err)
+	}
+	second, err := trace.NewDirSink(root, "20260102T030405Z-1234", trace.Filesystem{})
+	if err == nil {
+		t.Fatal("a second recording opened the directory of the first")
+	}
+	if second != nil {
+		t.Fatal("NewDirSink returned a sink alongside an error")
+	}
+	if !strings.Contains(err.Error(), "20260102T030405Z-1234") {
+		t.Errorf("error = %v, want the directory it refused", err)
+	}
+	if err := first.Emit(sampleEvent(2)); err != nil {
+		t.Fatalf("the refused recording disturbed the open one: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(first.Directory(), trace.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := jsonLines(t, data); len(lines) != 2 {
+		t.Fatalf("the open recording holds %d lines, want its own two", len(lines))
+	}
+}
+
+func TestDirSinkMakesEachEventReadableBeforeClose(t *testing.T) {
+	t.Parallel()
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	directory := sink.Directory()
 	t.Cleanup(func() { _ = sink.Close() })
 	if err := sink.Emit(sampleEvent(1)); err != nil {
 		t.Fatalf("Emit = %v", err)
@@ -132,11 +241,11 @@ func TestDirSinkMakesEachEventReadableBeforeClose(t *testing.T) {
 
 func TestDirSinkPreservesCommandOutputBesideTheTrace(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	directory := sink.Directory()
 	output := []byte("--- FAIL: TestBoundary\n\tboundary_test.go:12: want 3, got 4\n")
 	digest := sha256.Sum256(output)
 	event := trace.Event{
@@ -186,11 +295,11 @@ func TestDirSinkPreservesCommandOutputBesideTheTrace(t *testing.T) {
 
 func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	directory := sink.Directory()
 	output := bytes.Repeat([]byte("x"), trace.OutputFileLimit+4096)
 	digest := sha256.Sum256(output)
 	if err := sink.Emit(trace.Event{
@@ -232,13 +341,13 @@ func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 
 func TestDirSinkKeepsTheEventWhenPreservingOutputFails(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
 		WriteFile: func(string, []byte, fs.FileMode) error { return errors.New("no space left on device") },
 	})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	directory := sink.Directory()
 	if err := sink.Emit(trace.Event{
 		Seq:       1,
 		Type:      trace.TypeExec,
@@ -262,7 +371,7 @@ func TestDirSinkKeepsTheEventWhenPreservingOutputFails(t *testing.T) {
 
 func TestDirSinkCountsTheEventsItCouldNotWrite(t *testing.T) {
 	t.Parallel()
-	sink, err := trace.NewDirSink(t.TempDir(), trace.Filesystem{
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
 		OpenAppend: func(string, fs.FileMode) (trace.File, error) {
 			return failingFile{err: errors.New("input/output error")}, nil
 		},
@@ -285,7 +394,7 @@ func TestDirSinkCountsTheEventsItCouldNotWrite(t *testing.T) {
 
 func TestDirSinkFailsToOpenWhenItsDirectoryCannotBeCreated(t *testing.T) {
 	t.Parallel()
-	sink, err := trace.NewDirSink(t.TempDir(), trace.Filesystem{
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
 		MkdirAll: func(string, fs.FileMode) error { return errors.New("permission denied") },
 	})
 	if err == nil {
@@ -298,11 +407,11 @@ func TestDirSinkFailsToOpenWhenItsDirectoryCannotBeCreated(t *testing.T) {
 
 func TestDirSinkRejectsEmitAfterCloseAndClosesOnce(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	sink, err := trace.NewDirSink(directory, trace.Filesystem{})
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
+	directory := sink.Directory()
 	if err := sink.Close(); err != nil {
 		t.Fatalf("Close = %v", err)
 	}
@@ -546,7 +655,7 @@ func TestTeeSinkWithoutSinksAcceptsEverything(t *testing.T) {
 
 func TestARecorderCountsTheDropsOfASinkThatReportsThem(t *testing.T) {
 	t.Parallel()
-	failing, err := trace.NewDirSink(t.TempDir(), trace.Filesystem{
+	failing, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
 		OpenAppend: func(string, fs.FileMode) (trace.File, error) {
 			return failingFile{err: errors.New("input/output error")}, nil
 		},
