@@ -62,6 +62,14 @@ func (file failingFile) Write([]byte) (int, error) { return 0, file.err }
 func (file failingFile) Sync() error               { return nil }
 func (file failingFile) Close() error              { return nil }
 
+// unclosableFile is a trace file that takes every write and fails on close,
+// which is how a filesystem reports the write it never actually completed.
+type unclosableFile struct{ err error }
+
+func (file unclosableFile) Write(data []byte) (int, error) { return len(data), nil }
+func (file unclosableFile) Sync() error                    { return nil }
+func (file unclosableFile) Close() error                   { return file.err }
+
 // sampleEvent is one minimal event, enough to drive a sink.
 func sampleEvent(seq int64) trace.Event {
 	return trace.Event{
@@ -295,7 +303,13 @@ func TestDirSinkPreservesCommandOutputBesideTheTrace(t *testing.T) {
 
 func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 	t.Parallel()
-	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
+	room := 0
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		WriteFile: func(name string, data []byte, perm fs.FileMode) error {
+			room = cap(data)
+			return os.WriteFile(name, data, perm)
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewDirSink = %v", err)
 	}
@@ -337,6 +351,46 @@ func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 	if !bytes.HasSuffix(preserved, []byte(trace.TruncationMarker)) {
 		t.Fatal("a truncated file does not say so")
 	}
+	// The capped copy is a megabyte the sink lifts out of the event, and the
+	// marker it ends with is part of what it is making room for. A copy sized
+	// for the limit alone would be grown and moved again by the marker.
+	if want := trace.OutputFileLimit + len(trace.TruncationMarker); room != want {
+		t.Errorf("the truncated copy was made with room for %d bytes, want the limit and its marker %d", room, want)
+	}
+}
+
+func TestDirSinkPreservesAnOutputThatExactlyFillsTheFileLimit(t *testing.T) {
+	t.Parallel()
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	directory := sink.Directory()
+	// The limit is what a file may hold, not what it must stay under: an
+	// output of exactly the limit is preserved whole and says nothing about
+	// truncation, because nothing was cut.
+	output := bytes.Repeat([]byte("x"), trace.OutputFileLimit)
+	if err := sink.Emit(execEvent(3, output)); err != nil {
+		t.Fatalf("Emit = %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+
+	record := emittedExecRecord(t, directory)
+	if _, truncated := record["output_truncated"]; truncated {
+		t.Errorf("an output that fits exactly was marked truncated: %v", record["output_truncated"])
+	}
+	preserved, err := os.ReadFile(filepath.Join(directory, trace.OutputDirectoryName, "3.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preserved) != trace.OutputFileLimit {
+		t.Fatalf("preserved %d bytes, want the whole %d", len(preserved), trace.OutputFileLimit)
+	}
+	if !bytes.Equal(preserved, output) {
+		t.Fatal("an output that fits exactly was not preserved as it was captured")
+	}
 }
 
 func TestDirSinkKeepsTheEventWhenPreservingOutputFails(t *testing.T) {
@@ -366,6 +420,96 @@ func TestDirSinkKeepsTheEventWhenPreservingOutputFails(t *testing.T) {
 	}
 	if sink.Dropped() != 0 {
 		t.Errorf("Dropped = %d, want 0; the event itself was written", sink.Dropped())
+	}
+}
+
+func TestDirSinkKeepsTheEventWhenItsOutputDirectoryCannotBeCreated(t *testing.T) {
+	t.Parallel()
+	var written []string
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		MkdirAll: func(name string, perm fs.FileMode) error {
+			if filepath.Base(name) == trace.OutputDirectoryName {
+				return errors.New("permission denied")
+			}
+			return os.MkdirAll(name, perm)
+		},
+		WriteFile: func(name string, data []byte, perm fs.FileMode) error {
+			written = append(written, name)
+			return os.WriteFile(name, data, perm)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	directory := sink.Directory()
+	if err := sink.Emit(execEvent(1, []byte("captured output\n"))); err != nil {
+		t.Fatalf("Emit = %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+
+	// An output directory that cannot be created costs the output its path,
+	// never the event: the record still digests what the command printed.
+	record := emittedExecRecord(t, directory)
+	if _, ok := record["output_path"]; ok {
+		t.Fatalf("output_path names a file no output directory could hold: %v", record)
+	}
+	if record["output_sha256"] == nil || record["output_bytes"] == nil {
+		t.Fatalf("the event lost its own accounting of the output: %v", record)
+	}
+	// Nothing is written into a directory the sink knows it never created.
+	if len(written) != 0 {
+		t.Fatalf("preserved output was written to %v without its directory", written)
+	}
+	if sink.Dropped() != 0 {
+		t.Errorf("Dropped = %d, want 0; the event itself was written", sink.Dropped())
+	}
+}
+
+func TestDirSinkCreatesItsOutputDirectoryOnceForTheWholeRecording(t *testing.T) {
+	t.Parallel()
+	var created []string
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		MkdirAll: func(name string, perm fs.FileMode) error {
+			created = append(created, name)
+			return os.MkdirAll(name, perm)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	directory := sink.Directory()
+	for seq := int64(1); seq <= 3; seq++ {
+		if err := sink.Emit(execEvent(seq, []byte("output of "+strconv.FormatInt(seq, 10)+"\n"))); err != nil {
+			t.Fatalf("Emit(%d) = %v", seq, err)
+		}
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+
+	// The output directory is made when the first output needs one, and the
+	// sink remembers it: preserving output is a write per event, not a
+	// directory per event.
+	output := filepath.Join(directory, trace.OutputDirectoryName)
+	var creations int
+	for _, name := range created {
+		if name == output {
+			creations++
+		}
+	}
+	if creations != 1 {
+		t.Fatalf("the output directory was created %d times, want once for the recording", creations)
+	}
+	for seq := int64(1); seq <= 3; seq++ {
+		preserved, err := os.ReadFile(filepath.Join(output, strconv.FormatInt(seq, 10)+".txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "output of " + strconv.FormatInt(seq, 10) + "\n"; string(preserved) != want {
+			t.Errorf("preserved output %d = %q, want %q", seq, preserved, want)
+		}
 	}
 }
 
@@ -402,6 +546,59 @@ func TestDirSinkFailsToOpenWhenItsDirectoryCannotBeCreated(t *testing.T) {
 	}
 	if sink != nil {
 		t.Fatal("NewDirSink returned a sink alongside an error")
+	}
+}
+
+func TestDirSinkFailsToOpenWhenItsStreamCannotBeOpened(t *testing.T) {
+	t.Parallel()
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		OpenAppend: func(string, fs.FileMode) (trace.File, error) {
+			return nil, errors.New("too many open files")
+		},
+	})
+	// A sink whose stream never opened would write every event into a file it
+	// does not have. It reports the failure instead, so that the caller runs
+	// untraced rather than believing it is being recorded.
+	if err == nil {
+		t.Fatal("NewDirSink returned a sink for a stream it could not open")
+	}
+	if sink != nil {
+		t.Fatal("NewDirSink returned a sink alongside an error")
+	}
+	if !strings.Contains(err.Error(), trace.FileName) || !strings.Contains(err.Error(), "too many open files") {
+		t.Errorf("error = %v, want the stream it could not open and the reason", err)
+	}
+}
+
+func TestDirSinkReportsAStreamItCouldNotClose(t *testing.T) {
+	t.Parallel()
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		OpenAppend: func(string, fs.FileMode) (trace.File, error) {
+			return unclosableFile{err: errors.New("no space left on device")}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	if err := sink.Emit(sampleEvent(1)); err != nil {
+		t.Fatalf("Emit = %v", err)
+	}
+	// Closing is the last moment a filesystem can report what it never wrote,
+	// and a recording that hid it would claim a stream nothing can read.
+	closeErr := sink.Close()
+	if closeErr == nil {
+		t.Fatal("Close hid the failure of the stream it was closing")
+	}
+	if !strings.Contains(closeErr.Error(), "no space left on device") {
+		t.Errorf("Close = %v, want the failure it was answered with", closeErr)
+	}
+	// The recording is over either way: a stream that failed to close is not
+	// reopened, and a second close is not a second failure.
+	if err := sink.Close(); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
+	}
+	if err := sink.Emit(sampleEvent(2)); err == nil {
+		t.Fatal("Emit after a failed Close reported success")
 	}
 }
 
@@ -630,12 +827,19 @@ func TestTeeSinkClosesEverySinkAndReportsTheFirstFailure(t *testing.T) {
 	t.Parallel()
 	first := &recordingSink{closeErr: errors.New("close failed")}
 	second := &recordingSink{}
-	tee := trace.NewTeeSink(first, second)
-	if err := tee.Close(); err == nil || !strings.Contains(err.Error(), "close failed") {
+	// A second failure is not a better answer than the first: the failure that
+	// ended the first recording is the one a reader is told about.
+	third := &recordingSink{closeErr: errors.New("a later close failed")}
+	tee := trace.NewTeeSink(first, second, third)
+	err := tee.Close()
+	if err == nil || !strings.Contains(err.Error(), "close failed") {
 		t.Fatalf("Close = %v, want the first failure", err)
 	}
-	if first.closes != 1 || second.closes != 1 {
-		t.Fatalf("closed %d and %d times, want both closed once", first.closes, second.closes)
+	if strings.Contains(err.Error(), "a later close failed") {
+		t.Fatalf("Close = %v, want the first failure rather than the last", err)
+	}
+	if first.closes != 1 || second.closes != 1 || third.closes != 1 {
+		t.Fatalf("closed %d, %d and %d times, want every sink closed once", first.closes, second.closes, third.closes)
 	}
 }
 

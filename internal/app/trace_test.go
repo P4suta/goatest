@@ -385,6 +385,54 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 	}
 }
 
+func TestATraceDirectoryBesideTheRepositoryIsRecordedInto(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name      string
+		directory func(parent string) string
+	}{
+		// The directory the repository sits in is not inside it, and neither is
+		// anything beside it. A run traced there leaves the snapshot alone, so
+		// refusing it would cost a developer the recording for nothing.
+		{name: "the-directory-holding-the-repository", directory: func(parent string) string { return parent }},
+		{name: "a-sibling-of-the-repository", directory: func(parent string) string { return filepath.Join(parent, "traces") }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			parent := t.TempDir()
+			root := filepath.Join(parent, "repository")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			directory := testCase.directory(parent)
+			var progress bytes.Buffer
+			traced := false
+			service := app.Service{
+				Root: root, Progress: &progress,
+				Now:       func() time.Time { return time.Date(2026, 9, 1, 10, 11, 12, 0, time.UTC) },
+				ProcessID: func() int { return 4242 },
+				Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+					traced = options.Trace != nil
+					return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
+				},
+			}
+			result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, "")
+			if err != nil || result.Verdict != report.VerdictAssured {
+				t.Fatalf("verify = %+v, %v", result, err)
+			}
+			if !traced {
+				t.Fatalf("a trace directory outside the repository was refused: %q", progress.String())
+			}
+			if events := readTrace(t, filepath.Join(directory, "20260901T101112Z-4242")); len(events) < 2 {
+				t.Fatalf("recorded events = %+v", events)
+			}
+			if progress.Len() != 0 {
+				t.Fatalf("progress = %q", progress.String())
+			}
+		})
+	}
+}
+
 func TestATraceMayBeWrittenUnderTheRepositoryReportDirectory(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
