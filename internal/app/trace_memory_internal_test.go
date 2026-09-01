@@ -141,3 +141,41 @@ func TestTheRecordingInMemoryIsBoundedAndSaysWhatItDropped(t *testing.T) {
 		t.Fatalf("first kept event = %+v, want the oldest events to have fallen out", events[0])
 	}
 }
+
+func TestTheRecordingInMemoryLeavesARecordItHasNothingToShortenAlone(t *testing.T) {
+	t.Parallel()
+	recording, _ := Service{}.startTrace(t.TempDir(), cli.Request{})
+	// A command that printed nothing carries no bytes for the ring to leave
+	// out. Its record reaches the ring as the run described it, which is what
+	// lets a reader tell a command that produced no output from one whose
+	// output the ring dropped.
+	recording.recorder.Exec(trace.ExecRecord{Argv: []string{"go", "build", "./..."}, Output: []byte{}})
+
+	exec := recordedExec(t, recording.Events())
+	if exec.Output == nil {
+		t.Fatalf("exec record = %+v, want the empty capture the command produced", exec)
+	}
+	if exec.OutputBytes != 0 || exec.OutputSHA256 != "" {
+		t.Fatalf("exec record = %+v, want no account of an output there was none of", exec)
+	}
+}
+
+func TestARecordingThatHasEndedKeepsNothingMore(t *testing.T) {
+	t.Parallel()
+	recording, finish := Service{}.startTrace(t.TempDir(), cli.Request{})
+	recording.recorder.Progress("snapshot", "captured")
+	finish(report.Report{Verdict: report.VerdictAssured}, nil)
+	ended := recording.Events()
+
+	// The run-end is the last word of a recording, and the accounting it
+	// carries is the accounting of everything before it. A note that arrives
+	// afterwards belongs to nothing a reader could account for, so the closed
+	// recording refuses it rather than growing past the end it reported.
+	late := trace.Event{Type: trace.TypeProgress, Progress: &trace.ProgressRecord{Kind: "late", Detail: "after the run ended"}}
+	if err := recording.sink.Emit(late); err == nil {
+		t.Fatal("a recording that had ended accepted another event")
+	}
+	if kept := recording.Events(); len(kept) != len(ended) {
+		t.Fatalf("the recording holds %d events after it ended, want the %d it closed with", len(kept), len(ended))
+	}
+}

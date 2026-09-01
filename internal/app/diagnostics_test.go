@@ -269,3 +269,72 @@ func TestABundleOfATracedRunNamesTheRecordingRatherThanCopyingIt(t *testing.T) {
 		t.Fatal("environment.txt is empty")
 	}
 }
+
+// chainOf returns the entries of the error chain in error.txt, in the order the
+// bundle wrote them.
+func chainOf(t *testing.T, failure string) []string {
+	t.Helper()
+	_, chain, found := strings.Cut(failure, "error chain:\n")
+	if !found {
+		t.Fatalf("error.txt carries no chain: %q", failure)
+	}
+	var entries []string
+	for _, line := range strings.Split(chain, "\n") {
+		if strings.TrimSpace(line) != "" {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+// chainIndent reports how far behind the error the run reported one entry of
+// its chain is.
+func chainIndent(entry string) int { return len(entry) - len(strings.TrimLeft(entry, " ")) }
+
+func TestABundleReportsEveryErrorBehindTheOneThatEndedTheRun(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mutation := errors.New("prepare mutation workspace: no space left on device")
+	cleanup := errors.New("remove candidate tree: directory not empty")
+	service := app.Service{
+		Root: root,
+		Run: func(context.Context, assure.Options) (report.Report, error) {
+			// A run that failed while cleaning up after another failure reports
+			// both, and neither of them explains the other.
+			return report.Report{}, fmt.Errorf("goatest: assurance run: %w", errors.Join(mutation, cleanup))
+		},
+	}
+	_, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+	if !errors.Is(err, mutation) || !errors.Is(err, cleanup) {
+		t.Fatalf("verify error = %v", err)
+	}
+
+	failure := bundleFile(t, diagnosticsBundle(t, root), "error.txt")
+	entries := chainOf(t, failure)
+	// The message a wrapper shows is rarely the one that explains the failure,
+	// so the bundle writes one entry per error behind it: what the run
+	// reported, what that wrapped, and then each branch of the join.
+	if len(entries) != 4 {
+		t.Fatalf("error chain = %q, want an entry for the wrapper, the join, and both of its branches", entries)
+	}
+	if !strings.HasSuffix(entries[2], mutation.Error()) || !strings.HasSuffix(entries[3], cleanup.Error()) {
+		t.Fatalf("error chain = %q, want every branch of the join followed", entries)
+	}
+	// Each entry is indented by how far behind the first one it is, which is
+	// what lets a reader tell what wrapped what.
+	if chainIndent(entries[0]) >= chainIndent(entries[1]) {
+		t.Fatalf("error chain = %q, want what the run reported ahead of what it wrapped", entries)
+	}
+	if chainIndent(entries[2]) <= chainIndent(entries[1]) {
+		t.Fatalf("error chain = %q, want the branches of the join behind the join itself", entries)
+	}
+	if chainIndent(entries[3]) != chainIndent(entries[2]) {
+		t.Fatalf("error chain = %q, want the branches of one join beside each other", entries)
+	}
+	// A message carrying more than one line stays one entry a reader can count.
+	for _, entry := range entries {
+		if strings.Contains(entry, "\n") {
+			t.Fatalf("chain entry %q spans more than one line", entry)
+		}
+	}
+}
