@@ -25,6 +25,12 @@ const traceDirectoryTimeFormat = "20060102T150405Z"
 // could not be closed, reports itself under.
 const traceUnavailable = "trace-unavailable"
 
+// alwaysOnTraceEvents bounds the recording a run keeps in memory when no trace
+// directory was asked for. It is the window a failure is diagnosed through:
+// wide enough to hold the phases, routes, and executions that led to one, and
+// fixed, so that a run of any length pays the same bounded price for it.
+const alwaysOnTraceEvents = 4096
+
 // Terminal verdicts of a recording whose run reached none of its own. They are
 // trace vocabulary rather than report verdicts, because a run that ends this
 // way writes no report: an interrupted run is abandoned before one is
@@ -35,37 +41,113 @@ const (
 	traceVerdictUnknown     = "UNKNOWN"
 )
 
-// startTrace opens the recording a request asked for, and returns it with the
-// closer that ends it.
+// traceRecording is the recording of one run: the recorder the run records
+// into, and where the events it recorded can be read back from afterwards.
 //
-// A trace is diagnostic exhaust, never evidence, so nothing about one costs
-// the run: a directory that cannot be opened, or one the next snapshot would
-// read as source, is reported as a single progress note and the run continues
-// untraced. A request that asked for no trace pays nothing at all, because a
-// nil recorder is the disabled trace every layer below records into.
-func (service Service) startTrace(root string, request cli.Request) (*trace.Recorder, func(report.Report, error)) {
-	untraced := func(report.Report, error) {}
-	if !request.Trace {
-		return nil, untraced
+// A run asked to trace records to a trace directory, where a developer reads
+// the whole of it. Every other run records into a bounded ring in memory,
+// which is what a failure nobody saw coming is diagnosed from.
+type traceRecording struct {
+	recorder *trace.Recorder
+	// sink is what the recorder records through, closed when the run ends.
+	sink trace.Sink
+	// ring holds the events of a recording kept in memory, and is nil for one
+	// written to a directory.
+	ring *trace.MemorySink
+	// directory is the trace directory the run recorded into, empty for a
+	// recording kept in memory.
+	directory string
+}
+
+// Events returns the events a recording kept in memory, oldest first, and the
+// caller's own to keep. A run recorded to a trace directory kept its events
+// there in full and answers with none.
+func (recording traceRecording) Events() []trace.Event {
+	if recording.ring == nil {
+		return nil
 	}
-	directory, err := service.traceDirectory(root, request)
-	if err != nil {
-		service.note(traceUnavailable, err.Error())
-		return nil, untraced
-	}
-	sink, err := trace.NewDirSink(directory, service.traceName(), service.TraceFilesystem)
-	if err != nil {
-		service.note(traceUnavailable, err.Error())
-		return nil, untraced
-	}
-	recorder := trace.New(sink, service.Now)
-	return recorder, func(result report.Report, runErr error) {
-		recorder.RunEnd(traceVerdict(result, runErr), runErr)
-		if closeErr := sink.Close(); closeErr != nil {
+	return recording.ring.Events()
+}
+
+// startTrace opens the recording of a run, and returns it with the closer that
+// ends it.
+//
+// Every run records. A failure nobody expected is the failure nobody asked for
+// a trace of, so what --trace decides is where a recording is kept rather than
+// whether the run keeps one: a request that named a trace directory records
+// there, and a request that named none records into a ring in memory that
+// writes no file and leaves nothing behind.
+//
+// A trace is diagnostic exhaust, never evidence, so nothing about one costs the
+// run: a directory that cannot be opened, or one the next snapshot would read
+// as source, is reported as a single progress note, and the run records where
+// an untraced run records.
+func (service Service) startTrace(root string, request cli.Request) (traceRecording, func(report.Report, error)) {
+	recording := service.openRecording(root, request)
+	return recording, func(result report.Report, runErr error) {
+		recording.recorder.RunEnd(traceVerdict(result, runErr), runErr)
+		if closeErr := recording.sink.Close(); closeErr != nil {
 			service.note(traceUnavailable, closeErr.Error())
 		}
 	}
 }
+
+// openRecording opens the recording a request asked for, falling back to the
+// one in memory wherever a trace directory is unavailable.
+func (service Service) openRecording(root string, request cli.Request) traceRecording {
+	if !request.Trace {
+		return service.recordInMemory()
+	}
+	directory, err := service.traceDirectory(root, request)
+	if err != nil {
+		service.note(traceUnavailable, err.Error())
+		return service.recordInMemory()
+	}
+	sink, err := trace.NewDirSink(directory, service.traceName(), service.TraceFilesystem)
+	if err != nil {
+		service.note(traceUnavailable, err.Error())
+		return service.recordInMemory()
+	}
+	return traceRecording{recorder: trace.New(sink, service.Now), sink: sink, directory: sink.Directory()}
+}
+
+// recordInMemory opens the recording a run keeps to itself: a ring of the last
+// alwaysOnTraceEvents events, which a failure is diagnosed from and which
+// nothing else ever reads.
+func (service Service) recordInMemory() traceRecording {
+	ring := trace.NewMemorySink(alwaysOnTraceEvents)
+	sink := digestedSink{ring: ring}
+	return traceRecording{recorder: trace.New(sink, service.Now), sink: sink, ring: ring}
+}
+
+// digestedSink keeps events in a ring with the captured output of a command
+// left out of them.
+//
+// A recording in memory lasts as long as the run does, and a run captures the
+// output of every command it executes. The size and the digest of an output are
+// in the record already, the bytes are never serialised into an event, and
+// nothing reads the ring but the diagnostics a failure writes; keeping them
+// would grow with the run rather than with the ring, and buy a reader nothing.
+type digestedSink struct{ ring *trace.MemorySink }
+
+// Emit keeps one event, without the captured output of the command it
+// describes. The record is copied rather than amended, so an event this sink
+// shortens is still whole for whoever else holds it.
+func (sink digestedSink) Emit(event trace.Event) error {
+	if event.Exec != nil && len(event.Exec.Output) > 0 {
+		record := *event.Exec
+		record.Output = nil
+		event.Exec = &record
+	}
+	return sink.ring.Emit(event)
+}
+
+// Close stops the ring from accepting events.
+func (sink digestedSink) Close() error { return sink.ring.Close() }
+
+// Dropped reports the events the ring did not keep, which is what lets a run
+// that outgrew its window say so in its own run-end event.
+func (sink digestedSink) Dropped() int64 { return sink.ring.Dropped() }
 
 // traceVerdict names how a run ended for the recording that is closing.
 //
