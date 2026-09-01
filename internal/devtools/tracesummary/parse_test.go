@@ -237,6 +237,22 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			stream: stream(`{"seq":0,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0}`),
 			want:   []string{"line 1", "seq"},
 		},
+		{
+			name:   "recording that opens above the first sequence",
+			stream: stream(`{"seq":2,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0}`),
+			want:   []string{"line 1", "seq 2", "opens"},
+		},
+		{
+			name:   "null payload on the event that requires it",
+			stream: stream(runStart, `{"seq":2,"type":"phase-start","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"phase":null}`),
+			want:   []string{"line 2", "null", "phase"},
+		},
+		{
+			name: "null run payload on the run-end",
+			stream: stream(runStart,
+				`{"seq":2,"type":"run-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"run":null}`),
+			want: []string{"line 2", "null", "run"},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
