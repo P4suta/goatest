@@ -316,6 +316,45 @@ func TestTraceTakesNoPartInCacheIdentity(t *testing.T) {
 	}
 }
 
+// Keeping the temporary directories of a run is a debugging aid, exactly as a
+// trace is. It changes nothing a run decides, so it changes nothing a cached
+// result is keyed on: a kept run and a removed run answer from the same cache
+// entry, and neither poisons the other's.
+func TestKeepTempTakesNoPartInCacheIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeRunHelperFile(t, root, "value.go", "package fixture\n")
+	loaded := config.Config{Execution: config.Execution{Environment: []string{"A"}}}
+	metadata := roundMetadata{toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"}}
+	removing := Options{
+		NoApply: true, Changed: true, ChangedRef: "HEAD~1", Packages: []string{"./internal/..."},
+		CommandTimeout: time.Minute, Environment: []string{"A=1", "GOFLAGS=-trimpath"},
+	}
+	keeping := removing
+	keeping.KeepTemp = true
+	if !keeping.KeepTemp {
+		t.Fatal("the keeping options keep nothing")
+	}
+	if modeIdentity(keeping) != modeIdentity(removing) {
+		t.Fatalf("keeping mode identity = %q, removing = %q", modeIdentity(keeping), modeIdentity(removing))
+	}
+	if modeIdentity(Options{KeepTemp: true}) != modeIdentity(Options{}) {
+		t.Fatalf("keeping default mode identity = %q", modeIdentity(Options{KeepTemp: true}))
+	}
+	removingInputs, removingDigest, err := assuranceInputs(root, "deep-v1", removing, loaded, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepingInputs, keepingDigest, err := assuranceInputs(root, "deep-v1", keeping, loaded, metadata)
+	if err != nil || keepingDigest != removingDigest || !reflect.DeepEqual(keepingInputs, removingInputs) {
+		t.Fatalf("keeping assurance inputs = (%+v, %q, %v), want (%+v, %q)",
+			keepingInputs, keepingDigest, err, removingInputs, removingDigest)
+	}
+	if evidence.Digest(keepingInputs) != evidence.Digest(removingInputs) {
+		t.Fatalf("keeping evidence digest = %q, removing = %q", evidence.Digest(keepingInputs), evidence.Digest(removingInputs))
+	}
+}
+
 func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{}); got != ";apply=true;changed=false;ref=" {
 		t.Fatalf("default mode identity = %q", got)

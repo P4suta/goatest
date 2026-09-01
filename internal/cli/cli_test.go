@@ -31,7 +31,10 @@ func TestHelpListsPublicSurfaceWithoutRunningService(t *testing.T) {
 		if exit := cli.Run(t.Context(), []string{flag}, &stdout, &stderr, fake); exit != cli.ExitAssured {
 			t.Fatalf("%s exit = %d, stderr = %q", flag, exit, stderr.String())
 		}
-		for _, expected := range []string{"--changed[=REF]", "--contract=standard-v1|deep-v1", "--trace[=DIR]", "GOATEST_TRACE", "init", "explain ID", "replay ID", "accept ID", "report"} {
+		for _, expected := range []string{
+			"--changed[=REF]", "--contract=standard-v1|deep-v1", "--trace[=DIR]", "GOATEST_TRACE",
+			"--keep-temp", "GOATEST_KEEP_TEMP", "init", "explain ID", "replay ID", "accept ID", "report",
+		} {
 			if !strings.Contains(stdout.String(), expected) {
 				t.Errorf("%s help omitted %q:\n%s", flag, expected, stdout.String())
 			}
@@ -125,6 +128,53 @@ func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
 	}
 }
 
+// --keep-temp leaves the temporary directories of a run on the disk and names
+// each of them in the recording. Only the commands that open a recording accept
+// it, because a command that keeps a directory it can never name would leave
+// litter nothing accounts for.
+func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		command cli.Command
+		id      string
+	}{
+		{name: "default command", args: []string{"--keep-temp"}, command: cli.CommandVerify},
+		{name: "verify", args: []string{"verify", "--keep-temp"}, command: cli.CommandVerify},
+		{name: "traced verify", args: []string{"verify", "--trace", "--keep-temp"}, command: cli.CommandVerify},
+		{name: "replay", args: []string{"replay", "finding-a", "--keep-temp"}, command: cli.CommandReplay, id: "finding-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
+			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
+				t.Fatalf("%v => exit %d command %s id %q", test.args, exit, fake.command, fake.id)
+			}
+			if !fake.request.KeepTemp {
+				t.Fatalf("%v => request %+v", test.args, fake.request)
+			}
+		})
+	}
+	unrequested := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"verify"}, &bytes.Buffer{}, &bytes.Buffer{}, unrequested); exit != cli.ExitAssured || unrequested.request.KeepTemp {
+		t.Fatalf("unrequested verify = exit %d request %+v", exit, unrequested.request)
+	}
+	separated := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"verify", "--", "--keep-temp"}, &bytes.Buffer{}, &bytes.Buffer{}, separated); exit != cli.ExitAssured || separated.request.KeepTemp {
+		t.Fatalf("test-binary --keep-temp = exit %d request %+v", exit, separated.request)
+	}
+	// The flag is a request and never a setting: a value on it is a mistake
+	// worth reporting rather than one worth guessing at.
+	for _, args := range [][]string{{"verify", "--keep-temp=1"}, {"verify", "--keep-temp=maybe"}} {
+		refusing := &service{}
+		var stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), args, &bytes.Buffer{}, &stderr, refusing); exit != cli.ExitError ||
+			refusing.command != "" || !strings.Contains(stderr.String(), "keep-temp") {
+			t.Fatalf("%v => exit %d command %q stderr %q", args, exit, refusing.command, stderr.String())
+		}
+	}
+}
+
 func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 	for _, test := range []struct {
 		args    []string
@@ -149,6 +199,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{"verify", "--apply"}, {"doctor", "--changed"}, {"init", "--contract=deep-v1"},
 		{"verify", "--latest-full"}, {"fix", "--reason=reviewed"}, {"report", "--apply"},
 		{"doctor", "--trace"}, {"plan", "--trace=out"}, {"report", "--trace"}, {"fix", "--trace"},
+		{"doctor", "--keep-temp"}, {"plan", "--keep-temp"}, {"report", "--keep-temp"}, {"fix", "--keep-temp"},
 		{"plan", "--", "-short"}, {"doctor", "--", "-short"}, {"report", "--", "-short"},
 		{"init", "extra"}, {"report", "extra"}, {"replay", ""}, {"accept", "finding-c"},
 	} {

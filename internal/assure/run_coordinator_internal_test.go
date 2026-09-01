@@ -66,6 +66,7 @@ type runCoordinatorHarness struct {
 	digest       string
 	events       []Event
 	recorder     *trace.Recorder
+	scratch      string
 
 	openCalls       int
 	workspaceCloses int
@@ -80,6 +81,7 @@ type runCoordinatorHarness struct {
 	buildGraphCalls int
 	mergeGraphCalls int
 	saveGraphCalls  int
+	scratchRemovals int
 
 	workspaceOptions  mutationbridge.Options
 	preparedOptions   mutationbridge.PrepareOptions
@@ -187,9 +189,16 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			if pattern != "goatest-baseline-" {
 				t.Fatalf("scratch pattern = %q", pattern)
 			}
-			return filepath.Join(parent, "baseline-scratch"), nil
+			harness.scratch = filepath.Join(parent, "baseline-scratch")
+			return harness.scratch, nil
 		},
-		removeBaselineScratch: func(string) error { return nil },
+		removeBaselineScratch: func(directory string) error {
+			harness.scratchRemovals++
+			if directory != harness.scratch {
+				t.Fatalf("removed scratch = %q, want %q", directory, harness.scratch)
+			}
+			return nil
+		},
 		collectBaseline: func(_ context.Context, _ CommandWorkspace, model goanalysis.Model, targets []BaselineTarget, options BaselineOptions) (BaselineResult, error) {
 			harness.baselineCalls++
 			harness.baselineOptions = options
