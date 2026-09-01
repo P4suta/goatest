@@ -105,6 +105,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	if options.Root == "" {
 		return MutationEvaluation{}, fmt.Errorf("goatest: mutation evaluation requires a repository root")
 	}
+	options.OriginalControl = memoizedOriginalControl(options.OriginalControl)
 	executions := fuzzExecutions(options.Contract, options.FuzzExecutions)
 	catalog := session.Catalog()
 	if err := validateMutationCatalog(catalog); err != nil {
@@ -452,6 +453,43 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 type confirmationFinding struct {
 	kind    string
 	summary string
+}
+
+// controlOutcome is one remembered original-control run: what it printed and
+// how it ended, or the infrastructure error that stopped it from ending.
+type controlOutcome struct {
+	once   sync.Once
+	result gomutants.CommandResult
+	err    error
+}
+
+// memoizedOriginalControl runs each distinct control command once per
+// evaluation and hands every later kill the remembered outcome. The command is
+// determined by the package, the arguments, and the environment of the request
+// — never by the mutant, which the original code does not contain — and the
+// snapshot an evaluation runs against is frozen, so within one evaluation a
+// deterministic control cannot answer differently twice. A control that failed
+// is remembered exactly like one that passed: every kill sharing the command
+// reports the same flaky-mutation-control evidence without watching the
+// control fail again.
+func memoizedOriginalControl(control func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	if control == nil {
+		return nil
+	}
+	var mutex sync.Mutex
+	outcomes := make(map[string]*controlOutcome)
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		key := request.Package + "\x00" + strings.Join(request.Args, "\x00") + "\x00" + strings.Join(request.Env, "\x00")
+		mutex.Lock()
+		outcome, remembered := outcomes[key]
+		if !remembered {
+			outcome = &controlOutcome{}
+			outcomes[key] = outcome
+		}
+		mutex.Unlock()
+		outcome.once.Do(func() { outcome.result, outcome.err = control(ctx, request) })
+		return outcome.result, outcome.err
+	}
 }
 
 func confirmMutationKill(ctx context.Context, session MutationSession, mutant gomutants.Mutant, request gomutants.ExecRequest, first gomutants.MutantResult, options MutationOptions) (bool, confirmationFinding, gomutants.MutantResult, error) {
