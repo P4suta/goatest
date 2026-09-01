@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,6 +284,53 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 				t.Fatalf("warning is not one line: %q", warning)
 			}
 		})
+	}
+}
+
+// unclosableStream is a trace stream that takes every write and fails when it
+// is closed, which is how a filesystem reports a write it never completed.
+type unclosableStream struct{ err error }
+
+func (stream unclosableStream) Write(data []byte) (int, error) { return len(data), nil }
+func (stream unclosableStream) Sync() error                    { return nil }
+func (stream unclosableStream) Close() error                   { return stream.err }
+
+func TestARecordingThatCannotBeClosedWarnsAndLeavesTheRunAlone(t *testing.T) {
+	t.Parallel()
+	directory := filepath.Join(t.TempDir(), "trace")
+	var progress bytes.Buffer
+	traced := false
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress,
+		TraceFilesystem: trace.Filesystem{
+			OpenAppend: func(string, fs.FileMode) (trace.File, error) {
+				return unclosableStream{err: errors.New("no space left on device")}, nil
+			},
+		},
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			traced = options.Trace != nil
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
+		},
+	}
+	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, "")
+	// Closing is the last moment a recording can discover that what it wrote
+	// was never kept. A trace is diagnostic exhaust, so that discovery is a
+	// note to the developer and never the verdict of the run.
+	if err != nil || result.Verdict != report.VerdictAssured {
+		t.Fatalf("verify = %+v, %v", result, err)
+	}
+	if !traced {
+		t.Fatal("a recording that would fail to close was never handed to the run")
+	}
+	warning := progress.String()
+	if !strings.Contains(warning, "trace-unavailable") {
+		t.Fatalf("warning = %q, want the note a recording that cannot be closed leaves", warning)
+	}
+	if !strings.Contains(warning, "no space left on device") {
+		t.Fatalf("warning = %q, want the reason the recording could not be closed", warning)
+	}
+	if strings.Count(warning, "\n") != 1 {
+		t.Fatalf("warning is not one line: %q", warning)
 	}
 }
 

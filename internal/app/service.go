@@ -29,6 +29,7 @@ import (
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type RunFunc func(context.Context, assure.Options) (report.Report, error)
@@ -47,7 +48,13 @@ type Service struct {
 	// after, so that two goatest processes tracing one repository never write
 	// into the same recording. A nil value is the running process.
 	ProcessID func() int
-	absolute  func(string) (string, error)
+	// TraceFilesystem is the filesystem a recording is written through. Its
+	// zero value is the os package, which is what a traced run records into.
+	// A caller fills in the one operation it wants to answer for, because the
+	// failures a recording must survive are not failures a disk produces on
+	// demand.
+	TraceFilesystem trace.Filesystem
+	absolute        func(string) (string, error)
 }
 
 var (
