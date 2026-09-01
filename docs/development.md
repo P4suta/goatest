@@ -215,7 +215,9 @@ order, and `output/<seq>.txt`, the captured output of the commands that
 produced any. The stream, its nine event types, and the fields of each are
 specified in [trace v1](trace-v1.md); the rules behind them are recorded in
 [ADR 0002](adr/0002-trace-is-not-evidence.md). In short: a trace is never
-evidence, it never costs the run, and it is honest about what it dropped.
+evidence, nothing about one changes what a run decides — a sink that fails
+costs a `trace-unavailable` note and never the run — and it is honest about
+what it dropped.
 
 ### Recording from a new call site
 
@@ -225,10 +227,18 @@ that owns the work — `assure.Options`, `MutationOptions`,
 in `internal/app`, from the request. There is no package-level recorder and no
 global seam: a test that wants a recording builds the options with one.
 
-Record unconditionally. Every method is safe on a nil receiver, which is the
-disabled trace, so `options.Trace.Route(...)` costs a nil check when nobody
-asked to trace and no call site branches on whether tracing is on. That is what
+Record unconditionally. Every method of a `*trace.Recorder` is safe on a nil
+receiver, so `options.Trace.Route(...)` costs a nil check where a caller passed
+no recorder, and no call site branches on whether tracing is on. That is what
 keeps the traced and the untraced path one path.
+
+The nil recorder and the recording every run keeps are two different mechanisms,
+and only the first of them is free. The nil recorder belongs to `internal/trace`:
+it is the disabled trace a caller that passes none is left with, which is how a
+unit test builds options without a recording. A run of the tool is never in that
+position. `internal/app` opens a recording for every run and hands it down, so a
+run that asked for no `--trace` is still handed a live recorder and still
+records — into the bounded ring above rather than into nothing.
 
 Two constraints hold below the command layer. `internal/assure` and
 `internal/trace` read no environment variables — `GOATEST_TRACE` becomes a flag
