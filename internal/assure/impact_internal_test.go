@@ -401,7 +401,8 @@ func TestScopedMutationIncludeIsOneNonRecursiveGlobPerResolvedPackage(t *testing
 		{ImportPath: "fixture.example/module", RelativeDir: "."},
 		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
 		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
-		{ImportPath: "fixture.example/module/windows", RelativeDir: `windows\sub`},
+		// RelativeDir carries the platform separator; the glob must not.
+		{ImportPath: "fixture.example/module/windows", RelativeDir: filepath.FromSlash("windows/sub")},
 	}}
 	got := scopedMutationInclude(model)
 	want := []string{"*.go", "internal/report/*.go", "windows/sub/*.go"}
