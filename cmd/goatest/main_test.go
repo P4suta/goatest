@@ -157,6 +157,63 @@ func TestEnvironmentTraceReachesTheServiceWithoutDisturbingVersionOrHelp(t *test
 	}
 }
 
+// A job that cannot change a command line can still ask a run to keep what it
+// would otherwise remove. The variable becomes the flag the command layer
+// parses, and nothing below this layer learns that an environment was involved.
+func TestEnvironmentKeepTempBecomesTheFlagTheCommandLayerParses(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		value     string
+		arguments []string
+		want      []string
+	}{
+		{name: "unset", value: "", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
+		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp"}},
+		{name: "true", value: "true", arguments: nil, want: []string{"--keep-temp"}},
+		// An unrecognized value becomes a flag the command layer refuses,
+		// because a setting nobody understood is a mistake to report rather
+		// than a default to fall back on.
+		{name: "unknown", value: "maybe", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp=maybe"}},
+		{name: "explicit-flag-wins", value: "maybe", arguments: []string{"verify", "--keep-temp"}, want: []string{"verify", "--keep-temp"}},
+		{name: "before-test-arguments", value: "1", arguments: []string{"verify", "--", "-short"}, want: []string{"verify", "--keep-temp", "--", "-short"}},
+		{name: "help", value: "1", arguments: []string{"--help"}, want: []string{"--help"}},
+		{name: "help-short", value: "1", arguments: []string{"-h"}, want: []string{"-h"}},
+		{name: "version", value: "1", arguments: []string{"--version"}, want: []string{"--version"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := withKeepTempEnvironment(testCase.arguments, testCase.value); !slices.Equal(got, testCase.want) {
+				t.Fatalf("arguments = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestEnvironmentKeepTempReachesTheServiceBesideAnEnvironmentTrace(t *testing.T) {
+	t.Setenv("GOATEST_KEEP_TEMP", "1")
+	t.Setenv("GOATEST_TRACE", "1")
+	var requested cli.Request
+	service := mainServiceFunc(func(_ context.Context, _ cli.Command, request cli.Request, _ string) (report.Report, error) {
+		requested = request
+		return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := realMainWith([]string{"verify"}, &stdout, &stderr, service); exit != cli.ExitAssured {
+		t.Fatalf("verify exit = %d stderr = %q", exit, stderr.String())
+	}
+	if !requested.KeepTemp || !requested.Trace {
+		t.Fatalf("request = %+v", requested)
+	}
+	t.Setenv("GOATEST_KEEP_TEMP", "maybe")
+	stderr.Reset()
+	if exit := realMainWith([]string{"verify"}, &stdout, &stderr, service); exit != cli.ExitError ||
+		!bytes.Contains(stderr.Bytes(), []byte("keep-temp")) {
+		t.Fatalf("unknown value exit = %d stderr = %q", exit, stderr.String())
+	}
+}
+
 func TestInterruptedExitDistinguishesInterruptAndTermination(t *testing.T) {
 	if got := interruptedExit(cli.ExitInterrupted, os.Interrupt); got != cli.ExitInterrupted {
 		t.Fatalf("interrupt exit = %d", got)

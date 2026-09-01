@@ -68,6 +68,7 @@ type Request struct {
 	Ticket           string
 	ReplayFindingID  string
 	ReplayMutantID   string
+	KeepTemp         bool
 }
 
 type Service interface {
@@ -75,18 +76,19 @@ type Service interface {
 }
 
 const help = `Usage:
-	goatest verify [packages...] [--changed[=REF]] [--contract=standard-v1|deep-v1] [--ui=auto|plain|jsonl] [--trace[=DIR]] [-- test-binary-args...]
+	goatest verify [packages...] [--changed[=REF]] [--contract=standard-v1|deep-v1] [--ui=auto|plain|jsonl] [--trace[=DIR]] [--keep-temp] [-- test-binary-args...]
 	goatest plan [packages...]
 	goatest doctor
 	goatest init
 	goatest explain ID
-	goatest replay ID [--trace[=DIR]]
+	goatest replay ID [--trace[=DIR]] [--keep-temp]
 	goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 	goatest fix [ID...] [--apply]
 	goatest report [--latest-full|--run=ID]
 	goatest cache status|gc
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
 Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
+Keeping temporaries: --keep-temp leaves the baseline scratch and candidate trees on disk and records each kept path in the trace; GOATEST_KEEP_TEMP=1 asks for the same. Nothing removes them afterwards.
 `
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
@@ -161,6 +163,10 @@ func parse(args []string) (Command, Request, string, error) {
 		case strings.HasPrefix(argument, "--trace="):
 			request.Trace = true
 			request.TraceDirectory = strings.TrimPrefix(argument, "--trace=")
+		case argument == "--keep-temp":
+			request.KeepTemp = true
+		case strings.HasPrefix(argument, "--keep-temp="):
+			return "", Request{}, "", errors.New("--keep-temp takes no value")
 		case argument == "--latest-full":
 			request.ReportLatestFull = true
 		case strings.HasPrefix(argument, "--run="):
@@ -248,6 +254,11 @@ func parsedCommand(command Command, request Request, id string) (Command, Reques
 	}
 	if request.Trace && command != CommandVerify && command != CommandReplay {
 		return "", Request{}, "", errors.New("--trace is only valid with verify or replay")
+	}
+	// A kept directory is accounted for by the recording that names it, so the
+	// commands that keep one are the commands that open a recording.
+	if request.KeepTemp && command != CommandVerify && command != CommandReplay {
+		return "", Request{}, "", errors.New("--keep-temp is only valid with verify or replay")
 	}
 	if (request.ReportLatestFull || request.ReportRunID != "") && command != CommandReport {
 		return "", Request{}, "", errors.New("--latest-full and --run are only valid with report")

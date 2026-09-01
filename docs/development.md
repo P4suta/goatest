@@ -203,12 +203,21 @@ The environment variable is read in `cmd/goatest` alone, where it becomes the
 flag the command layer parses: no layer below the command line reads the
 environment.
 
+A run that asked for no trace still records, into a ring of its last 4096 events
+in memory: no file, no directory, and a bounded price a run of any length pays
+once. Nothing reads that ring unless the run fails, and then it becomes the
+`trace.jsonl` of the diagnostics bundle below. That is what lets a failure
+nobody expected be read as a recording, when nobody thought to pass `--trace`
+for it.
+
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
 produced any. The stream, its nine event types, and the fields of each are
 specified in [trace v1](trace-v1.md); the rules behind them are recorded in
 [ADR 0002](adr/0002-trace-is-not-evidence.md). In short: a trace is never
-evidence, it never costs the run, and it is honest about what it dropped.
+evidence, nothing about one changes what a run decides — a sink that fails
+costs a `trace-unavailable` note and never the run — and it is honest about
+what it dropped.
 
 ### Recording from a new call site
 
@@ -218,10 +227,18 @@ that owns the work — `assure.Options`, `MutationOptions`,
 in `internal/app`, from the request. There is no package-level recorder and no
 global seam: a test that wants a recording builds the options with one.
 
-Record unconditionally. Every method is safe on a nil receiver, which is the
-disabled trace, so `options.Trace.Route(...)` costs a nil check when nobody
-asked to trace and no call site branches on whether tracing is on. That is what
+Record unconditionally. Every method of a `*trace.Recorder` is safe on a nil
+receiver, so `options.Trace.Route(...)` costs a nil check where a caller passed
+no recorder, and no call site branches on whether tracing is on. That is what
 keeps the traced and the untraced path one path.
+
+The nil recorder and the recording every run keeps are two different mechanisms,
+and only the first of them is free. The nil recorder belongs to `internal/trace`:
+it is the disabled trace a caller that passes none is left with, which is how a
+unit test builds options without a recording. A run of the tool is never in that
+position. `internal/app` opens a recording for every run and hands it down, so a
+run that asked for no `--trace` is still handed a live recorder and still
+records — into the bounded ring above rather than into nothing.
 
 Two constraints hold below the command layer. `internal/assure` and
 `internal/trace` read no environment variables — `GOATEST_TRACE` becomes a flag
@@ -262,9 +279,101 @@ names it, and that the accounting in `run-end` matches the lines in the file.
 
 ## Failure diagnostics and keep-temp
 
-Not yet implemented. Fixture and run temporary directories are removed by the
-test framework when a test finishes, and there is no option to retain them for
-inspection after a failure.
+A run that ends in an error leaves a bundle of what it knew behind it, and
+`--keep-temp` leaves the directories it would otherwise have removed. Both are
+diagnostic exhaust in the sense [ADR 0002](adr/0002-trace-is-not-evidence.md)
+fixes for a trace: they are best-effort, they take no part in a verdict or in
+the identity a cached result is keyed on, and what they could not do they report
+rather than hide.
+
+### The failure diagnostics bundle
+
+`internal/app` writes one when the assurance run behind `verify` or `replay`
+returns an error — the branch of `runAndWrite` that turns that error into an
+`ERROR` report. A run that ended in `context.Canceled` returns before it: an
+interrupt is not a failure to diagnose. The bundle is written from the finalized
+report, so nothing in it can reach the report, the verdict, or the exit code.
+
+It lands in `<repository>/.goatest/diagnostics/<run>/`, one directory per failed
+run. `<run>` is the run identity of the report; a run that stopped before it had
+one — the failure a bundle is most needed for — is named `<UTC timestamp>-<pid>`
+instead, the name a recording of the same run takes, from the same injected
+clock and process id.
+
+| File | What it holds |
+| --- | --- |
+| `trace.jsonl` | the events of the recording the run kept in memory, as the JSON Lines stream and under the `goatest-trace-v1` schema a trace directory holds |
+| `error.txt` | the run identity and verdict, the error as `%+v`, then one line per error behind it, named by its type and indented by how far behind the first it is, following every branch of a joined error |
+| `environment.txt` | the toolchain that decided the result, the `go` binary and temporary directory it used, then the environment variable *names*, sorted and deduplicated |
+| `preserved-paths.txt` | a `kind`/`path` table of what the run left on disk: the trace directory when it recorded into one, and every `artifact` event of the recording |
+
+A file with nothing to say is not written, because an empty file in a bundle
+reads as a fact about the run rather than as the absence of one. A run that
+traced to a directory kept its stream there in full, so its bundle carries no
+`trace.jsonl` and its `preserved-paths.txt` names that directory instead of
+repeating a part of it. `preserved-paths.txt` itself is always written, saying
+`# this run left nothing behind` when there was nothing, because a reader must
+be able to tell an empty answer from a missing one.
+
+`environment.txt` names the environment and never quotes it, exactly as an
+`exec` event does. That is what makes a bundle safe to attach to a bug report
+from a machine holding real credentials.
+
+The bundle reports itself on the progress stream, which is stderr for the
+binary: a `diagnostics` note saying where it was written, and a single
+`diagnostics-unavailable` note carrying everything it could not write. Neither
+changes the exit code, and a bundle that failed entirely leaves a failed run
+reported exactly as it would have been reported without one.
+
+`Service.DiagnosticsFilesystem` is the seam a test drives those failures
+through. Fill in `MkdirAll` or `WriteFile` alone and the rest comes from the
+`os` package, the way `trace.Filesystem` works for a recording; there is no
+package-level seam and no global.
+
+### Keeping the temporary directories
+
+`verify` and `replay` accept `--keep-temp`, and `GOATEST_KEEP_TEMP=1` or `true`
+asks for the same, so a job that cannot change a command line can still ask. An
+unset, empty, `0`, or `false` variable asks for nothing, which is how a nested
+job neutralizes a setting it inherited, and any other value becomes
+`--keep-temp=VALUE`, which the command layer refuses with `--keep-temp takes no
+value` rather than guessing which of keeping and removing was meant. The
+variable is read in `cmd/goatest` alone, where it becomes the flag the command
+layer parses, on the same terms as `GOATEST_TRACE`.
+
+The flag becomes `assure.Options.KeepTemp`, which the run passes on to
+`RepositoryValidatorOptions.KeepTemp`. `internal/assure/keep_temp.go` holds both
+release points:
+
+| Directory | Made | Kept as |
+| --- | --- | --- |
+| the baseline scratch of a round, `goatest-baseline-*` | once per round, under `TempDirectory` or the system temporary directory | `artifact` event `baseline-scratch` |
+| the tree a generated candidate is validated in, `goatest-candidate-*` | once per `OriginalStable`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
+
+Keeping is the whole of the change: the directory stays where it was made, and
+the `artifact` event is the run's account of having left it there. That account
+is also the only place a kept path is named. With `--trace` it is in the
+recording; on a failure it reaches `preserved-paths.txt` through the recording
+in memory. A successful, untraced `--keep-temp` run therefore leaves directories
+only the temporary directory itself lists, and nothing removes any of them
+afterwards.
+
+Three things are not kept. The mutation workspace's snapshot belongs to
+go-mutants, which creates and removes it; see [limitations](limitations.md). The
+fuzz cache an original-control execution makes for a `-test.fuzz` argument is
+removed when that command returns. And a test's own fixtures are removed by
+`t.TempDir()` when the test ends, because `--keep-temp` is an option of the tool
+rather than of the suite: a test that drives a real one points `TempDirectory`
+at a `t.TempDir()`, so the framework still removes what the run kept, and
+asserts on the recording and on the directory it names instead.
+`TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid` is the
+reference for that, and `TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle`
+for the path from a kept directory to `preserved-paths.txt`.
+
+`--keep-temp` takes no part in `modeIdentity`, in the assurance inputs, or in
+the evidence digest, and `TestKeepTempTakesNoPartInCacheIdentity` pins that
+beside the same test for `--trace`. A debugging aid that changed what a run
+decides would be worse than no aid at all.
 
 ## Seam policy
 

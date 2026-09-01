@@ -84,7 +84,16 @@ type Options struct {
 	// caller that asked for no trace gets. A trace is never evidence, so it
 	// takes no part in the identity a cached result is keyed on.
 	Trace *trace.Recorder
-	Now   func() time.Time
+	// KeepTemp keeps the temporary directories a run would otherwise remove:
+	// the scratch directory a round collects its baseline in, and the isolated
+	// tree a generated candidate is validated in. What a run keeps it records
+	// as an artifact of the recording, because a directory left behind and
+	// never named is litter rather than something a developer can find.
+	//
+	// Keeping a directory is a debugging aid and never evidence, so it takes no
+	// part in the identity a cached result is keyed on.
+	KeepTemp bool
+	Now      func() time.Time
 }
 
 type roundMetadata struct {
@@ -309,7 +318,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			ClassifyUserFailures: true,
 			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout,
 		})
-		removeErr := dependencies.removeBaselineScratch(artifactDirectory)
+		removeErr := releaseBaselineScratch(options, dependencies.removeBaselineScratch, artifactDirectory)
 		if err != nil || removeErr != nil {
 			_ = closeRound()
 			return report.Report{}, errors.Join(err, removeErr)
@@ -465,7 +474,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					TempDirectory: options.TempDirectory, Environment: validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
 					MutationOperators: options.MutationOperators, Packages: options.Packages,
 					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
-					Trace: options.Trace,
+					Trace: options.Trace, KeepTemp: options.KeepTemp,
 				},
 			})
 			if err != nil {

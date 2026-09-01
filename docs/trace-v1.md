@@ -23,7 +23,7 @@ nothing.
 | `--trace=DIR` | collect the recording in `DIR`, resolved against the repository when relative |
 | `GOATEST_TRACE=1` or `true` | the same as a bare `--trace` |
 | `GOATEST_TRACE=DIR` | the same as `--trace=DIR` |
-| `GOATEST_TRACE` unset, empty, `0`, or `false` | no trace |
+| `GOATEST_TRACE` unset, empty, `0`, or `false` | no trace directory; the run records in memory |
 
 An explicit flag always wins over the environment, so a job may ask for a trace
 it cannot add a flag to and a nested job may switch an inherited one off. The
@@ -44,11 +44,11 @@ The name is also what keeps two goatest processes tracing one repository out
 of each other's recording.
 
 Two directories are refused, each with one `trace-unavailable` note on the
-progress stream and a run that continues untraced: one that cannot be created
-or opened — which includes a run directory another recording already owns —
-and one inside the repository but outside `.goatest`. The second
-refusal is not fastidiousness. A trace grows while the run records into it, and
-the source snapshot digests the repository, so a stream written where the
+progress stream and a run that goes on recording in memory: one that cannot
+be created or opened — which includes a run directory another recording
+already owns — and one inside the repository but outside `.goatest`. The
+second refusal is not fastidiousness. A trace grows while the run records into
+it, and the source snapshot digests the repository, so a stream written where the
 snapshot reads would make the repository change during verification and cost
 the run its evidence with `repository changed during verification`. Refusing
 the trace is what keeps the trace from failing the run.
@@ -59,6 +59,30 @@ not a way past that refusal: `--trace=/tmp/alias/run` is refused when
 refused whatever it points at. Only the part of the path that already exists
 can be resolved, which is the part that decides where the directory the sink
 is about to create will land.
+
+## Recording without a flag
+
+A run that asked for no trace still records. It keeps its last 4096 events in
+a ring in memory: no file, no directory, and a bounded price a run of any
+length pays once. The reason is that a failure nobody expected is exactly the
+failure nobody thought to pass `--trace` for, so the recording that explains
+one cannot be a recording a flag had to open in advance.
+
+That recording is the same event stream this page describes, read back in
+process rather than from a file, with two differences a reader should expect.
+It holds the last events rather than all of them, and says in `events_dropped`
+how many fell out. And it keeps the size and digest of a captured output
+without keeping the bytes, which are never serialised into an event anyway and
+would otherwise grow with the run instead of with the ring.
+
+A refused trace directory falls back to it, which is what a refusal costs: the
+file, never the account of the run.
+
+A run that failed writes that recording out, as `trace.jsonl` in the diagnostics
+bundle under `.goatest/diagnostics/<run>/`. It is this stream under this schema,
+so everything that reads a trace reads that file too; a run that recorded into a
+trace directory keeps its stream there instead, and its bundle names the
+directory. See [development](development.md) for the rest of a bundle.
 
 ## Directory layout
 
@@ -222,10 +246,16 @@ half of one.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | what kind of file it is |
-| `path` | the file, relative to the repository |
+| `kind` | what kind of directory or file it is |
+| `path` | where it is, as the run recorded it |
 
-Part of the contract; no run emits one yet.
+A run emits one for each temporary directory `--keep-temp` asked it to keep:
+`baseline-scratch` for the scratch directory a round collected its baseline in,
+and `candidate-tree` for the isolated tree a generated candidate was validated
+in. Those paths are absolute and outside the repository, because that is where a
+temporary directory is made, so a `path` is read as it was recorded rather than
+resolved against anything. Nothing else emits an `artifact` event yet. See
+[development](development.md) for what is kept and what is not.
 
 ### `run`
 

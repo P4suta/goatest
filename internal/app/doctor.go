@@ -50,10 +50,7 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 	if goBinary == "" {
 		goBinary = "go"
 	}
-	environment := service.Environment
-	if environment == nil {
-		environment = os.Environ()
-	}
+	environment := service.environment()
 	offline := withEnvironment(environment, map[string]string{
 		"GOPROXY": "off", "GOSUMDB": "off", "GOTELEMETRY": "off", "GOTOOLCHAIN": "local",
 	})

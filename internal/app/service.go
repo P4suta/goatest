@@ -54,7 +54,10 @@ type Service struct {
 	// failures a recording must survive are not failures a disk produces on
 	// demand.
 	TraceFilesystem trace.Filesystem
-	absolute        func(string) (string, error)
+	// DiagnosticsFilesystem is the filesystem a failure bundle is written
+	// through, filled in the same way and for the same reason.
+	DiagnosticsFilesystem DiagnosticsFilesystem
+	absolute              func(string) (string, error)
 }
 
 var (
@@ -184,13 +187,18 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 func (service Service) runAndWrite(ctx context.Context, root string, request cli.Request) (report.Report, error) {
 	clock := service.clock()
 	started := clock().UTC()
-	result, err := service.run(ctx, root, request)
+	// The recording outlives the run it records, because what a run left
+	// behind is read after it ended and, on the paths below, after it failed.
+	recording, finishRecording := service.startTrace(root, request)
+	result, err := service.run(ctx, root, request, recording.recorder)
+	finishRecording(result, err)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return report.Report{}, err
 		}
 		result = infrastructureErrorReport(result, request, err)
 		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+		service.writeDiagnostics(root, result, recording, err)
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
@@ -222,13 +230,12 @@ func infrastructureErrorReport(partial report.Report, request cli.Request, cause
 	return result
 }
 
-func (service Service) run(ctx context.Context, root string, request cli.Request) (report.Report, error) {
+func (service Service) run(ctx context.Context, root string, request cli.Request, recorder *trace.Recorder) (report.Report, error) {
 	runner := service.Run
 	if runner == nil {
 		runner = assure.Run
 	}
 	options := service.assureOptions(root, request)
-	recorder, finishTrace := service.startTrace(root, request)
 	options.Trace = recorder
 	cacheHit := false
 	var mutex sync.Mutex
@@ -241,7 +248,6 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 		service.note(event.Kind, event.Detail)
 	}
 	result, err := runner(ctx, options)
-	finishTrace(result, err)
 	mutex.Lock()
 	derived := cacheHit
 	mutex.Unlock()
@@ -282,6 +288,7 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		Packages: slices.Clone(request.Packages), PackageScope: explicitPackageScope(request.Packages),
 		TestArgs: slices.Clone(request.TestArgs),
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
+		KeepTemp: request.KeepTemp,
 	}
 }
 

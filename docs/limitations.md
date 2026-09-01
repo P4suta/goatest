@@ -34,12 +34,26 @@ self-dogfood is not external compatibility evidence.
   generation providers, and the `git` invocations of changeset selection and
   report metadata. `--trace` is accepted by `verify` and `replay` alone, so a
   `fix --apply` validation runs untraced.
-- The `artifact` trace event is part of `goatest-trace-v1`, but no run emits
-  one yet. Nothing else in the schema is unimplemented.
-- Trace directories are never pruned. `.goatest/trace/` keeps one directory per
-  traced run until something outside goatest removes them, and a preserved
-  command output is capped at 1 MiB per file, so a long capture is truncated
-  with a marker even though its event digests the whole of it.
+- The `artifact` trace event names the temporary directories `--keep-temp` kept
+  and nothing else yet. Nothing else in the schema is unimplemented.
+- `--keep-temp` keeps the baseline scratch of each round and the tree each
+  generated candidate was validated in. It cannot keep the mutation workspace's
+  snapshot: go-mutants creates, owns, and removes that tree behind
+  `mutationbridge.Open` and `Workspace.Close`, goatest never holds its path, and
+  the pinned API exposes no retention option. The fuzz cache an original-control
+  execution makes for a `-test.fuzz` argument is removed regardless.
+- A kept directory is reported only as an `artifact` event of the recording, so
+  it reaches a trace directory, and the `preserved-paths.txt` of a failed run's
+  diagnostics bundle, but never the progress stream: a successful, untraced
+  `--keep-temp` run leaves directories only the temporary directory itself
+  lists. Like `--trace`, `--keep-temp` is accepted by `verify` and `replay`
+  alone, so a `fix --apply` validation removes its candidate trees.
+- Diagnostic exhaust is never pruned. `.goatest/trace/` keeps one directory per
+  traced run, `.goatest/diagnostics/` one per failed run, and a kept temporary
+  directory stays where it was made, until something outside goatest removes
+  them. A preserved command output is capped at 1 MiB per file, so a long
+  capture is truncated with a marker even though its event digests the whole of
+  it.
 - Only the directory sink is reachable from the command line; the in-memory and
   fan-out sinks are in-process. There is no reader tooling for a trace either:
   it is JSON Lines for `jq` and the embedded schema, with no subcommand that

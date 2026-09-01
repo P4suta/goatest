@@ -199,22 +199,26 @@ func TestARunThatReachedNoVerdictIsTracedWithHowItEnded(t *testing.T) {
 	}
 }
 
-func TestUnrequestedTraceRecordsNothingAtAll(t *testing.T) {
+func TestAnUnrequestedTraceIsRecordedInMemoryAndWritesNothing(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	traced := true
+	traced := false
 	service := app.Service{
 		Root: root,
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			traced = options.Trace != nil
+			options.Trace.Progress("snapshot", "captured")
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
 	}
 	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if traced {
-		t.Fatal("an unrequested trace handed the run a recorder")
+	// Every run records, because a failure nobody expected is the one nobody
+	// asked for a trace of. What a flag buys is where the recording is kept,
+	// not whether the run keeps one.
+	if !traced {
+		t.Fatal("a run nobody asked to trace was handed no recorder")
 	}
 	if _, err := os.Stat(filepath.Join(root, ".goatest", "trace")); !os.IsNotExist(err) {
 		t.Fatalf("an unrequested trace created a directory: %v", err)
@@ -261,7 +265,7 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			var progress bytes.Buffer
-			traced := true
+			traced := false
 			service := app.Service{
 				Root: root, Progress: &progress,
 				Run: func(_ context.Context, options assure.Options) (report.Report, error) {
@@ -273,8 +277,11 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 			if err != nil || result.Verdict != report.VerdictAssured {
 				t.Fatalf("verify = %+v, %v", result, err)
 			}
-			if traced {
-				t.Fatal("a trace that cannot be written handed the run a recorder")
+			// A directory that cannot be written costs the recording its file
+			// and nothing else: the run goes on recording where every untraced
+			// run records, in memory.
+			if !traced {
+				t.Fatal("a trace directory that cannot be written left the run with no recording at all")
 			}
 			warning := progress.String()
 			if !strings.Contains(warning, "trace-unavailable") || !strings.Contains(warning, testCase.want) {
@@ -410,8 +417,10 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 			}
 			// A trace stream growing where the source snapshot reads costs the
 			// run its evidence, and a symbolic link is not a way around that.
-			if traced {
-				t.Fatal("a trace that lands inside the repository handed the run a recorder")
+			// What the refusal takes away is the directory, not the recording:
+			// the run records in memory as an untraced run does.
+			if !traced {
+				t.Fatal("a refused trace directory left the run with no recording at all")
 			}
 			warning := progress.String()
 			if !strings.Contains(warning, "trace-unavailable") || !strings.Contains(warning, "inside the repository") {
