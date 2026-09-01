@@ -28,6 +28,9 @@ func TestMutationJobLimitParallelizesLocalWorkAndSerializesExclusiveResources(t 
 	if got := mutationJobLimit(Options{}, config.Config{}); got < 1 || got > 4 {
 		t.Fatalf("default mutation jobs = %d, want 1..4", got)
 	}
+	if got := mutationJobLimit(Options{MutationJobs: 12}, config.Config{}); got != 12 {
+		t.Fatalf("explicit mutation jobs = %d, want 12: an operator's explicit choice is respected, only the default is capped", got)
+	}
 }
 
 func TestMutationProgressReportsFirstPercentMilestonesAndLast(t *testing.T) {
