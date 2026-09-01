@@ -60,7 +60,9 @@ goatest plan ./...
 goatest verify ./...
 goatest verify --changed=origin/main ./... -- -short
 goatest verify --contract=deep-v1 ./...
-``` `goatest init` writes an
+```
+
+`goatest init` writes an
 annotated `.goatest.toml` and suggests the next steps, including adding
 `.goatest/` and `reports/` - the directories every verification writes - to
 `.gitignore`. A bare `goatest` prints the help text; `goatest help COMMAND` or
