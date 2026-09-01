@@ -288,6 +288,7 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		Packages: slices.Clone(request.Packages), PackageScope: explicitPackageScope(request.Packages),
 		TestArgs: slices.Clone(request.TestArgs),
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
+		KeepTemp: request.KeepTemp,
 	}
 }
 

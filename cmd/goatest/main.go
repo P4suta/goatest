@@ -19,11 +19,13 @@ import (
 	"github.com/P4suta/goatest/internal/cli"
 )
 
-// traceEnvironmentVariable asks for a run trace from an environment that
-// cannot pass a flag, such as a job wrapping an existing command line. It is
-// read here and nowhere else: every layer below the command line is configured
-// through options alone.
-const traceEnvironmentVariable = "GOATEST_TRACE"
+// The variables an environment that cannot pass a flag asks with, such as a job
+// wrapping an existing command line. They are read here and nowhere else: every
+// layer below the command line is configured through options alone.
+const (
+	traceEnvironmentVariable    = "GOATEST_TRACE"
+	keepTempEnvironmentVariable = "GOATEST_KEEP_TEMP"
+)
 
 func main() {
 	os.Exit(realMain(os.Args[1:]))
@@ -38,28 +40,43 @@ func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Serv
 		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.GoatestVersion)
 		return 0
 	}
-	return runWithServiceWriters(withTraceEnvironment(arguments, os.Getenv(traceEnvironmentVariable)), service, stdout, stderr)
+	arguments = withTraceEnvironment(arguments, os.Getenv(traceEnvironmentVariable))
+	arguments = withKeepTempEnvironment(arguments, os.Getenv(keepTempEnvironmentVariable))
+	return runWithServiceWriters(arguments, service, stdout, stderr)
 }
 
 // withTraceEnvironment renders a trace asked for by the environment as the flag
-// the command layer parses, which is what keeps the environment out of every
-// layer below this one.
+// the command layer parses.
+func withTraceEnvironment(arguments []string, value string) []string {
+	flag, requested := traceFlag(value)
+	return withEnvironmentFlag(arguments, flag, requested)
+}
+
+// withKeepTempEnvironment renders temporary directories asked for by the
+// environment as the flag the command layer parses.
+func withKeepTempEnvironment(arguments []string, value string) []string {
+	flag, requested := keepTempFlag(value)
+	return withEnvironmentFlag(arguments, flag, requested)
+}
+
+// withEnvironmentFlag inserts the flag an environment variable asked for, which
+// is what keeps the environment out of every layer below this one.
 //
 // An explicit flag always wins, an argument list that only asks for the help
 // text or the version is left exactly as it is, and the flag is inserted ahead
 // of the test-binary separator so that it reaches goatest rather than a test
 // binary.
-func withTraceEnvironment(arguments []string, value string) []string {
-	flag, requested := traceFlag(value)
+func withEnvironmentFlag(arguments []string, flag string, requested bool) []string {
 	if !requested {
 		return arguments
 	}
+	name, _, _ := strings.Cut(flag, "=")
 	for _, argument := range arguments {
 		if argument == "--" {
 			break
 		}
 		switch {
-		case argument == "--trace", strings.HasPrefix(argument, "--trace="),
+		case argument == name, strings.HasPrefix(argument, name+"="),
 			argument == "--help", argument == "-h", argument == "--version":
 			return arguments
 		}
@@ -82,6 +99,22 @@ func traceFlag(value string) (string, bool) {
 		return "--trace", true
 	default:
 		return "--trace=" + value, true
+	}
+}
+
+// keepTempFlag is the flag a GOATEST_KEEP_TEMP value asks for. Keeping
+// temporary directories is asked for and never configured, so an unrecognized
+// value becomes a flag carrying it: the command layer is the one authority on
+// what a flag may say, and it refuses that one rather than guessing which of
+// keeping and removing a job meant.
+func keepTempFlag(value string) (string, bool) {
+	switch value {
+	case "", "0", "false":
+		return "", false
+	case "1", "true":
+		return "--keep-temp", true
+	default:
+		return "--keep-temp=" + value, true
 	}
 }
 

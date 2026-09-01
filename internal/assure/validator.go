@@ -40,6 +40,11 @@ type RepositoryValidatorOptions struct {
 	// Trace records the commands that validate a candidate. A nil recorder
 	// validates untraced.
 	Trace *trace.Recorder
+	// KeepTemp keeps the isolated tree a candidate was validated in instead of
+	// removing it, and records the tree as an artifact of the recording. It is
+	// a debugging aid: what a validation decided is decided the same way
+	// whether the tree survives it or not.
+	KeepTemp bool
 }
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
@@ -262,7 +267,7 @@ func (validator *repositoryValidator) withCandidate(ctx context.Context, candida
 	if err != nil {
 		return err
 	}
-	defer func() { _ = removeCandidateTemp(root) }()
+	defer validator.releaseCandidate(root)
 	if err := copyCandidateRepository(validator.options.Root, root); err != nil {
 		return err
 	}
