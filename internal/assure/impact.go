@@ -204,6 +204,23 @@ func mergeGraph(current evidence.Graph, prior *evidence.GraphRecord, selection i
 	return merged
 }
 
+// scopedMutationInclude bounds the mutation catalog to the resolved packages
+// of an explicit scope, one non-recursive glob per package directory, because
+// a Go package's non-test sources live in exactly its own directory.
+func scopedMutationInclude(model goanalysis.Model) []string {
+	include := make([]string, 0, len(model.Packages))
+	for _, item := range model.Packages {
+		directory := filepath.ToSlash(item.RelativeDir)
+		if directory == "" || directory == "." {
+			include = append(include, "*.go")
+			continue
+		}
+		include = append(include, directory+"/*.go")
+	}
+	slices.Sort(include)
+	return slices.Compact(include)
+}
+
 func mutationScope(selection impactSelection) (include, packages []string) {
 	if selection.broad {
 		return nil, nil

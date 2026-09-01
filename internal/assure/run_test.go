@@ -557,3 +557,49 @@ func tomlArgv(argv []string) string {
 	}
 	return strings.Join(quoted, ", ")
 }
+
+// A package-scoped verify must bound the mutation catalog to the resolved
+// scope. Include selects mutation candidates while Packages only selects test
+// binaries, so a mutant in a package outside the scope has no prepared test
+// binary; executing its package suite used to fail the whole run instead of
+// the mutant never entering the catalog.
+func TestRunPackageScopeBoundsTheMutationCatalogToTheResolvedPackages(t *testing.T) {
+	repository := testkit.NewRepo(t).
+		File("go.mod", crlfFixture("module fixture.example/scoped\n\ngo 1.26.0\n")).
+		File("naked.go", crlfFixture("package scoped\n\nfunc Naked(value int) bool { return value < 10 }\n")).
+		File("covered/covered.go", crlfFixture(`package covered
+
+func Boundary(value int) int {
+	if value < 10 { return value }
+	return 9
+}
+`)).
+		File("covered/covered_test.go", crlfFixture(`package covered
+
+import "testing"
+
+func TestBoundary(t *testing.T) {
+	for _, value := range []int{5, 10} {
+		want := value
+		if value >= 10 { want = 9 }
+		if got := Boundary(value); got != want { t.Fatalf("Boundary(%d) = %d, want %d", value, got, want) }
+	}
+}
+`))
+	result, err := assure.Run(t.Context(), assure.Options{
+		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t),
+		TempDirectory: t.TempDir(), MutationOperators: []string{"comparison"},
+		Packages: []string{"./covered"}, PackageScope: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Verdict != report.VerdictAssured || result.Accounting.Mutants.Executed == 0 {
+		t.Fatalf("scoped report = verdict %s accounting %+v", result.Verdict, result.Accounting.Mutants)
+	}
+	for _, mutant := range result.Mutants {
+		if !strings.HasPrefix(filepath.ToSlash(mutant.Path), "covered/") {
+			t.Fatalf("catalog reached beyond the scope: %+v", mutant)
+		}
+	}
+}
