@@ -42,10 +42,11 @@ go install github.com/P4suta/goatest/cmd/goatest@latest
 
 Prebuilt archives for Linux, macOS, and Windows (amd64/arm64) are on the
 [releases page](https://github.com/P4suta/goatest/releases), each with a syft
-SBOM and a GitHub build-provenance attestation:
+SBOM and a GitHub build-provenance attestation. Verify the one archive you
+downloaded, for example:
 
 ```console
-gh attestation verify goatest_*.tar.gz --repo P4suta/goatest
+gh attestation verify goatest_0.1.0_Linux_x86_64.tar.gz --repo P4suta/goatest
 ```
 
 Building from a checkout works the same way: `go build -o goatest ./cmd/goatest`.
