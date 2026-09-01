@@ -30,6 +30,7 @@ import (
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
+	"github.com/P4suta/goatest/internal/ui"
 )
 
 type RunFunc func(context.Context, assure.Options) (report.Report, error)
@@ -40,10 +41,19 @@ type Service struct {
 	TempDirectory string
 	Environment   []string
 	Progress      io.Writer
-	Run           RunFunc
-	Plan          RunFunc
-	FixValidator  repair.Validator
-	Now           func() time.Time
+	// Output is the stream the final report is rendered to. A jsonl UI streams
+	// its progress events there so that one pipe carries the whole stream; a
+	// service without one falls back to the plain progress stream.
+	Output io.Writer
+	// Interactive reports whether the progress stream reaches a terminal that
+	// can render an in-place dashboard. Its zero value is not interactive, so
+	// that only a composition root that probed a real terminal turns the
+	// dashboard on.
+	Interactive  func(io.Writer) bool
+	Run          RunFunc
+	Plan         RunFunc
+	FixValidator repair.Validator
+	Now          func() time.Time
 	// ProcessID identifies the process a default trace directory is named
 	// after, so that two goatest processes tracing one repository never write
 	// into the same recording. A nil value is the running process.
@@ -58,6 +68,14 @@ type Service struct {
 	// through, filled in the same way and for the same reason.
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
+	// notes is the renderer the current run reports its progress through,
+	// selected per request by runAndWrite; every note of a run funnels through
+	// it. Its zero value renders plain lines to Progress, which is what every
+	// path outside a verify or replay reports through.
+	notes ui.Notes
+	// doctorFilesystem is the filesystem the doctor's writability probe runs
+	// through; its zero value is the os package.
+	doctorFilesystem doctorProbeFilesystem
 }
 
 var (
@@ -102,7 +120,15 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		}
 		return finishOperation(report.Report{
 			Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
-			Evidence: []report.Evidence{{Kind: "configuration", ID: config.FileName, Status: "initialized"}},
+			Evidence: []report.Evidence{
+				{Kind: "configuration", ID: config.FileName, Status: "initialized"},
+				// The next steps a fresh project takes, in the report itself so
+				// that every UI renders them: runs write caches under .goatest/
+				// and reports under reports/, and nothing else says so first.
+				{Kind: "next-step", ID: "gitignore", Status: "suggested", Detail: "add .goatest/ and reports/ to .gitignore; verifications write caches and reports there"},
+				{Kind: "next-step", ID: "doctor", Status: "suggested", Detail: "run 'goatest doctor' to check everything a verification needs"},
+				{Kind: "next-step", ID: "verify", Status: "suggested", Detail: "run 'goatest verify ./...' for a first full assurance"},
+			},
 		}, nil)
 	case cli.CommandReport:
 		return loadSelected(absolute, request)
@@ -187,6 +213,13 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 func (service Service) runAndWrite(ctx context.Context, root string, request cli.Request) (report.Report, error) {
 	clock := service.clock()
 	started := clock().UTC()
+	// The renderer the request asked for reports everything below: the run's
+	// own progress, and what the recording and the diagnostics bundle note on
+	// the way out. The service is a value, so the selection lives exactly as
+	// long as this run.
+	notes := service.selectNotes(request)
+	defer notes.Close()
+	service.notes = notes
 	// The recording outlives the run it records, because what a run left
 	// behind is read after it ended and, on the paths below, after it failed.
 	recording, finishRecording := service.startTrace(root, request)
@@ -270,14 +303,31 @@ func (service Service) clock() func() time.Time {
 	return time.Now
 }
 
-// note writes one line to the progress stream, escaped onto a single line so
-// that nothing a run reports can forge a note of its own. A service without a
-// progress stream reports nothing.
+// note reports one progress note through the renderer of the current run, and
+// through a deterministic plain line on the progress stream wherever no run
+// selected one. A service without a progress stream reports nothing.
 func (service Service) note(kind, detail string) {
-	if service.Progress == nil {
+	if service.notes != nil {
+		service.notes.Note(kind, detail)
 		return
 	}
-	_, _ = fmt.Fprintf(service.Progress, "goatest: %-18s %s\n", report.LineText(kind), report.LineText(detail))
+	ui.NewPlain(service.Progress).Note(kind, detail)
+}
+
+// selectNotes picks the renderer a request's --ui asks for. A jsonl stream
+// belongs on the output stream its final report event will follow; a service
+// without one falls back to plain rather than guessing where the stream went.
+// The dashboard renders only where a composition root probed an interactive
+// terminal, so that every test and every pipe keeps deterministic lines.
+func (service Service) selectNotes(request cli.Request) ui.Notes {
+	switch {
+	case request.UI == cli.UIJSONL && service.Output != nil:
+		return ui.NewJSONL(service.Output, service.Now)
+	case request.UI == cli.UIAuto && service.Interactive != nil && service.Interactive(service.Progress):
+		return ui.NewDashboard(service.Progress, ui.DashboardOptions{Now: service.Now})
+	default:
+		return ui.NewPlain(service.Progress)
+	}
 }
 
 func (service Service) assureOptions(root string, request cli.Request) assure.Options {

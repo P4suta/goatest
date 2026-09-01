@@ -4,6 +4,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,53 @@ func TestDoctorProviderCommandResolvesRepositoryRelativePathsAndRejectsDirectori
 	}
 	if err := doctorProviderCommand(root, "tools/"); err == nil {
 		t.Fatal("provider directory was accepted as a command")
+	}
+}
+
+// The writability probe proves a directory can be written and leaves the tree
+// exactly as it found it: no probe file, and no directory the probe itself
+// created.
+func TestProbeWritableDirectoryRestoresWhatItCreated(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, ".goatest")
+	if err := probeWritableDirectory(doctorProbeFilesystem{}, directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("probe left the directory it created: %v", err)
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := probeWritableDirectory(doctorProbeFilesystem{}, directory); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("probe littered the existing directory: %v, %v", entries, err)
+	}
+}
+
+func TestProbeWritableDirectoryReportsInjectedFailures(t *testing.T) {
+	boom := errors.New("disk says no")
+	root := t.TempDir()
+	directory := filepath.Join(root, "reports")
+	if err := probeWritableDirectory(doctorProbeFilesystem{MkdirAll: func(string, os.FileMode) error { return boom }}, directory); !errors.Is(err, boom) {
+		t.Fatalf("mkdir failure = %v", err)
+	}
+	removed := ""
+	hooks := doctorProbeFilesystem{
+		WriteFile: func(string, []byte, os.FileMode) error { return boom },
+		Remove:    func(path string) error { removed = path; return os.Remove(path) },
+	}
+	if err := probeWritableDirectory(hooks, directory); !errors.Is(err, boom) {
+		t.Fatalf("write failure = %v", err)
+	}
+	if removed != directory {
+		t.Fatalf("created directory was not removed after the failed write: %q", removed)
+	}
+	if err := probeWritableDirectory(doctorProbeFilesystem{Stat: func(string) (os.FileInfo, error) { return nil, boom }}, directory); !errors.Is(err, boom) {
+		t.Fatalf("stat failure = %v", err)
 	}
 }
 

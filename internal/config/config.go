@@ -288,7 +288,58 @@ func Load(root string) (Config, error) {
 	return result, nil
 }
 
-// Init creates the smallest strict v1 configuration and never overwrites an
+// initTemplate is what Init writes: the two active keys the strict defaults
+// need, and every other section as commented guidance, so that turning a
+// setting on is uncommenting a line rather than hunting documentation. The
+// strict parser ignores comments, so loading this file yields exactly the
+// defaults.
+const initTemplate = `# goatest strict configuration, version 1.
+# Every key is optional and unknown keys are refused. The commented values
+# below are the defaults or examples; uncomment a line to change a setting.
+version = 1
+
+# contract selects the fault model: "standard-v1" or "deep-v1".
+contract = "standard-v1"
+
+# [project]
+# packages = ["./..."]        # Go package patterns the assurance covers
+# exclude = ["generated/**"]  # path patterns recorded as explicit limitations
+
+# [execution]
+# build_tags = ["integration"]   # tags applied to every build and test
+# test_binary_args = ["-short"]  # only -short and -test.parallel are accepted
+# environment = ["FEATURE_MODE"] # variable names tests may read; values never reach reports
+# timeout = "10m"                # budget for each executed command
+# jobs = 4                       # mutation workers (bounded at 4)
+
+# [cache]
+# max_bytes = 5368709120 # 5 GiB evidence cache budget
+# ttl = "720h"           # entries older than this are collected
+
+# One table per managed test resource; docs/protocols.md defines the provider
+# contract. Tests declare a capability with goatest.Integration("postgres") or
+# a //goatest:resources directive.
+# [resources.postgres]
+# command = ["./tools/postgres-provider"]
+# timeout = "30s"
+# shared = true                    # one instance serves every target; exclusive = true serializes instead
+# environment = ["POSTGRES_IMAGE"] # variable names forwarded to the provider
+
+# [generation]
+# command = ["./tools/test-generator"] # candidate generator; docs/protocols.md defines the contract
+# allowed_paths = ["**/*_test.go", "**/testdata/fuzz/**"]
+# environment = ["GENERATOR_TOKEN"]
+
+# Explicit, expiring finding acceptances, normally written by 'goatest accept'.
+# [[acceptance]]
+# id = "0123456789abcdef"
+# reason = "reviewed equivalent boundary"
+# expires = "2026-12-31T00:00:00Z"
+# owner = "quality-team"
+# ticket = "QA-123"
+`
+
+// Init creates the annotated strict v1 configuration and never overwrites an
 // existing file.
 func Init(root string) error {
 	path := filepath.Join(root, FileName)
@@ -299,7 +350,7 @@ func Init(root string) error {
 		}
 		return fmt.Errorf("goatest: create %s: %w", FileName, err)
 	}
-	data := []byte("version = 1\ncontract = \"standard-v1\"\n")
+	data := []byte(initTemplate)
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		_ = removeConfigFile(path)
