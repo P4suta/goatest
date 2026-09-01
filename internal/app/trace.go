@@ -53,7 +53,7 @@ func (service Service) startTrace(root string, request cli.Request) (*trace.Reco
 		service.note(traceUnavailable, err.Error())
 		return nil, untraced
 	}
-	sink, err := trace.NewDirSink(directory, service.traceName(), trace.Filesystem{})
+	sink, err := trace.NewDirSink(directory, service.traceName(), service.TraceFilesystem)
 	if err != nil {
 		service.note(traceUnavailable, err.Error())
 		return nil, untraced
