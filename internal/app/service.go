@@ -401,7 +401,14 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		})
 	}
 	if result.Toolchain.GoMutants == "" {
-		result.Toolchain.GoMutants = assure.GoMutantsVersion
+		if version, versionErr := assure.GoMutantsVersion(); versionErr == nil {
+			result.Toolchain.GoMutants = version
+		} else {
+			result.Toolchain.GoMutants = "unavailable"
+			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
+				Code: "go-mutants-metadata-unavailable", Summary: "The go-mutants version could not be resolved from build info",
+			})
+		}
 	}
 	if result.Toolchain.OS == "" {
 		result.Toolchain.OS = runtime.GOOS

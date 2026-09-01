@@ -13,9 +13,12 @@ builds:
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags:
+      # The stamped version keeps the v prefix every other build shape carries
+      # (the v0.1.0-dev default, git tags), because this string participates in
+      # evidence identity and must not fork between build shapes.
       - >-
         -s -w
-        -X github.com/P4suta/goatest/internal/assure.GoatestVersion={{ .Version }}
+        -X github.com/P4suta/goatest/internal/assure.GoatestVersion=v{{ .Version }}
 
 archives:
   - id: goatest
@@ -33,6 +36,9 @@ archives:
 checksum:
   name_template: checksums.txt
   algorithm: sha256
+
+sboms:
+  - artifacts: archive
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
