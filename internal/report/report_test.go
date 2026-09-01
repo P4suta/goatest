@@ -172,6 +172,52 @@ func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
 	}
 }
 
+func TestTargetInventoryRanksSlowestFirstAndResumeIsOptionalAuditMetadata(t *testing.T) {
+	input := persistedFixture()
+	input.Accounting.Targets = report.CountAccounting{Discovered: 3, Selected: 3, Executed: 3}
+	input.Targets = []report.TargetDisposition{
+		{ID: "target-b", Name: "TestB", Kind: "test", Package: "example.test/fixture", Status: "passed", DurationMS: 100},
+		{ID: "target-slow", Name: "TestSlow", Kind: "test", Package: "example.test/fixture", Status: "passed", DurationMS: 200},
+		{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/fixture", Status: "passed", DurationMS: 100},
+	}
+	input.Resume = &report.Resume{Attempts: 2, ReusedTargets: 1}
+	data := report.JSON(input)
+	if bytes.Index(data, []byte(`"id": "target-slow"`)) > bytes.Index(data, []byte(`"id": "target-a"`)) ||
+		bytes.Index(data, []byte(`"id": "target-a"`)) > bytes.Index(data, []byte(`"id": "target-b"`)) {
+		t.Fatalf("target inventory is not duration-descending with ID tie-break:\n%s", data)
+	}
+	html := string(report.HTML(input))
+	if strings.Index(html, "target-slow") > strings.Index(html, "target-a") || !strings.Contains(html, "attempt 2") || !strings.Contains(html, "Targets (slowest first)") {
+		t.Fatalf("HTML target ranking/resume metadata missing: %s", html)
+	}
+	if err := report.Validate(input); err != nil {
+		t.Fatalf("target/resume report rejected: %v", err)
+	}
+	input.Resume.ReusedTargets = 4
+	if err := report.Validate(input); err == nil || !strings.Contains(err.Error(), "resume") {
+		t.Fatalf("impossible resume metadata error = %v", err)
+	}
+}
+
+func TestTargetInventoryMustAccountForEverySelectedTarget(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		targets []report.TargetDisposition
+	}{
+		{name: "empty"},
+		{name: "partial", targets: []report.TargetDisposition{{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/fixture", Status: "passed"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := persistedFixture()
+			input.Accounting.Targets = report.CountAccounting{Discovered: 2, Selected: 2, Executed: 2}
+			input.Targets = test.targets
+			if err := report.ValidateForPersistence(input); err == nil || !strings.Contains(err.Error(), "target inventory") {
+				t.Fatalf("incomplete target inventory error = %v", err)
+			}
+		})
+	}
+}
+
 func TestFindingIDIsStableAndInputSensitive(t *testing.T) {
 	one := report.FindingID("survivor", "a.go", "mutant-a")
 	two := report.FindingID("survivor", "a.go", "mutant-a")

@@ -37,7 +37,9 @@ type cacheWritableFile interface {
 
 func New(root string) *Store { return &Store{root: root} }
 
-// NewWithPolicy enables bounded automatic collection after successful writes.
+// NewWithPolicy enables bounded automatic collection after successful
+// completed-report writes. Checkpoint writes defer collection to avoid a full
+// cache walk at every durable scheduling boundary.
 func NewWithPolicy(root string, maxBytes int64, ttl time.Duration) *Store {
 	return &Store{root: root, maxBytes: maxBytes, ttl: ttl, now: time.Now}
 }

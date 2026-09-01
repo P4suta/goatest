@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/repair"
@@ -143,7 +144,9 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 	case cli.CommandFix:
 		return finishOperation(service.fix(ctx, absolute, request))
 	case cli.CommandCache:
-		return finishOperation(service.cache(absolute, id))
+		return finishOperation(service.cache(ctx, absolute, id))
+	case cli.CommandTrace:
+		return finishOperation(service.readTrace(absolute, id, request.IDs))
 	case cli.CommandExplain:
 		latest, err := loadLatestAny(absolute)
 		if err != nil {
@@ -223,8 +226,33 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 	// The recording outlives the run it records, because what a run left
 	// behind is read after it ended and, on the paths below, after it failed.
 	recording, finishRecording := service.startTrace(root, request)
-	result, err := service.run(ctx, root, request, recording.recorder)
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	lease, err := cache.Acquire(ctx, cacheRoot, func() {
+		service.note("cache-wait", "another goatest process is using this repository cache")
+	})
+	ownsCacheLease := err == nil
+	if ownsCacheLease {
+		defer func() {
+			if releaseErr := lease.Release(); releaseErr != nil {
+				service.note("cache-lock-warning", releaseErr.Error())
+			}
+		}()
+	}
+	var result report.Report
+	if err == nil {
+		result, err = service.run(ctx, root, request, recording.recorder)
+	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// If the cache root itself is unusable, no checkpoint/cache writer can
+		// race through it. Let the run produce its ordinary infrastructure
+		// report and join the lock failure to whatever it observes.
+		runResult, runErr := service.run(ctx, root, request, recording.recorder)
+		result = runResult
+		err = errors.Join(err, runErr)
+	}
 	finishRecording(result, err)
+	if ownsCacheLease {
+		service.collectDiagnosticRetention(root)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return report.Report{}, err
@@ -232,6 +260,9 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		result = infrastructureErrorReport(result, request, err)
 		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
 		service.writeDiagnostics(root, result, recording, err)
+		if ownsCacheLease {
+			service.collectDiagnosticRetention(root)
+		}
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
@@ -242,7 +273,26 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 	if err := WriteReports(root, result); err != nil {
 		return report.Report{}, err
 	}
+	if checkpointDigest(result.Snapshot) {
+		if err := cache.New(cacheRoot).DeleteCheckpoint(result.Snapshot); err != nil {
+			service.note("checkpoint-warning", err.Error())
+		}
+	}
 	return result, nil
+}
+
+func checkpointDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func infrastructureErrorReport(partial report.Report, request cli.Request, cause error) report.Report {

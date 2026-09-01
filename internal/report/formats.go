@@ -197,7 +197,7 @@ func JSONSchema() []byte {
 		"additionalProperties": false,
 		"required": []string{
 			"schema", "run_id", "run_kind", "verdict", "contract", "snapshot", "scope", "repository",
-			"configuration", "toolchain", "timing", "cache", "accounting", "mutants", "acceptances", "evidence", "findings",
+			"configuration", "toolchain", "timing", "cache", "accounting", "targets", "mutants", "acceptances", "evidence", "findings",
 			"repairs", "limitations",
 		},
 		"properties": map[string]any{
@@ -218,7 +218,9 @@ func JSONSchema() []byte {
 			"timing":        map[string]any{"$ref": "#/$defs/timing"},
 			"cache":         map[string]any{"$ref": "#/$defs/cache"},
 			"accounting":    map[string]any{"$ref": "#/$defs/accounting"},
+			"targets":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/targetDisposition"}},
 			"mutants":       map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/mutantDisposition"}},
+			"resume":        map[string]any{"$ref": "#/$defs/resume"},
 			"acceptances":   map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/acceptance"}},
 			"evidence":      map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/evidence"}},
 			"findings":      map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/finding"}},
@@ -262,6 +264,14 @@ func JSONSchema() []byte {
 			}),
 			"countAccounting": objectSchema([]string{"discovered", "selected", "executed", "skipped", "excluded"}, map[string]any{
 				"discovered": integerType, "selected": integerType, "executed": integerType, "skipped": integerType, "excluded": integerType,
+			}),
+			"targetDisposition": objectSchema([]string{"id", "name", "kind", "package", "path", "line", "status", "duration_ms"}, map[string]any{
+				"id": nonEmptyString, "name": nonEmptyString, "kind": nonEmptyString, "package": nonEmptyString,
+				"path": stringType, "line": integerType, "status": nonEmptyString, "duration_ms": integerType, "detail": stringType,
+			}),
+			"resume": objectSchema([]string{"attempts", "reused_targets", "reused_race_packages", "reused_mutants"}, map[string]any{
+				"attempts":       map[string]any{"type": "integer", "minimum": 1},
+				"reused_targets": integerType, "reused_race_packages": integerType, "reused_mutants": integerType,
 			}),
 			"mutantAccounting": objectSchema([]string{
 				"discovered", "selected", "executed", "killed", "survived", "inconclusive",

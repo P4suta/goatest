@@ -187,6 +187,8 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{[]string{"replay", "finding-b"}, cli.CommandReplay, "finding-b"},
 		{[]string{"accept", "finding-c", "--reason=reviewed", "--expires=2026-12-01T00:00:00Z"}, cli.CommandAccept, "finding-c"},
 		{[]string{"report"}, cli.CommandReport, ""},
+		{[]string{"trace", "summary"}, cli.CommandTrace, "summary"},
+		{[]string{"trace", "diff", "run-a", "run-b"}, cli.CommandTrace, "diff"},
 	} {
 		fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 		exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
@@ -203,10 +205,27 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{"doctor", "--keep-temp"}, {"plan", "--keep-temp"}, {"report", "--keep-temp"}, {"fix", "--keep-temp"},
 		{"plan", "--", "-short"}, {"doctor", "--", "-short"}, {"report", "--", "-short"},
 		{"init", "extra"}, {"report", "extra"}, {"replay", ""}, {"accept", "finding-c"},
+		{"trace"}, {"trace", "summary", "a", "b"}, {"trace", "diff", "a"}, {"trace", "unknown"},
 	} {
 		var stderr bytes.Buffer
 		if exit := cli.Run(t.Context(), args, &bytes.Buffer{}, &stderr, &service{}); exit != cli.ExitError || stderr.Len() == 0 {
 			t.Errorf("%v => exit %d stderr %q", args, exit, stderr.String())
+		}
+	}
+}
+
+func TestTraceReaderArgumentsReachServiceWithoutBecomingVerificationScope(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		id   string
+		ids  []string
+	}{
+		{args: []string{"trace", "summary", "run-a"}, id: "summary", ids: []string{"run-a"}},
+		{args: []string{"trace", "diff", "run-a", "run-b"}, id: "diff", ids: []string{"run-a", "run-b"}},
+	} {
+		fake := &service{report: report.Report{Verdict: report.VerdictCompleted}}
+		if exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake); exit != cli.ExitAssured || fake.command != cli.CommandTrace || fake.id != test.id || !slices.Equal(fake.request.IDs, test.ids) {
+			t.Fatalf("%v => exit=%d command=%s id=%q request=%+v", test.args, exit, fake.command, fake.id, fake.request)
 		}
 	}
 }
@@ -288,7 +307,7 @@ func TestCommandHelpIsAvailablePerSubcommand(t *testing.T) {
 			t.Fatalf("%v stdout = %q", args, stdout.String())
 		}
 	}
-	for _, command := range []string{"plan", "doctor", "init", "explain", "replay", "accept", "fix", "report", "cache"} {
+	for _, command := range []string{"plan", "doctor", "init", "explain", "replay", "accept", "fix", "report", "cache", "trace"} {
 		fake := &service{}
 		var stdout, stderr bytes.Buffer
 		if exit := cli.Run(t.Context(), []string{"help", command}, &stdout, &stderr, fake); exit != cli.ExitAssured || fake.command != "" {

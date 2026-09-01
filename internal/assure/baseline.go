@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -41,14 +42,17 @@ type BaselineOptions struct {
 	TestArgs             []string
 	UseTest2JSON         bool
 	ClassifyUserFailures bool
+	Resume               *checkpoint.Baseline
+	Checkpoint           func(checkpoint.Baseline)
 }
 
 type BaselineResult struct {
-	Evidence []report.Evidence
-	Findings []report.Finding
-	Targets  []TargetEvidence
-	Executed int
-	Skipped  int
+	Evidence  []report.Evidence
+	Findings  []report.Finding
+	Targets   []TargetEvidence
+	Inventory []report.TargetDisposition
+	Executed  int
+	Skipped   int
 }
 
 const (
@@ -78,17 +82,45 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 		targetTimeout = defaultBaselineTimeout
 	}
 	var result BaselineResult
+	completed := make(map[string]checkpoint.BaselineTarget)
+	buildVetComplete := false
+	if options.Resume != nil {
+		buildVetComplete = options.Resume.BuildVetComplete
+		result.Evidence = append(result.Evidence, options.Resume.Evidence...)
+		result.Findings = append(result.Findings, options.Resume.Findings...)
+		for _, unit := range options.Resume.Targets {
+			completed[unit.ID] = unit
+			appendBaselineUnit(&result, unit)
+		}
+	}
+	checkpointNow := func(complete bool) {
+		if options.Checkpoint == nil {
+			return
+		}
+		units := make([]checkpoint.BaselineTarget, 0, len(completed))
+		for _, unit := range completed {
+			units = append(units, unit)
+		}
+		options.Checkpoint(checkpoint.Baseline{
+			BuildVetComplete: buildVetComplete, Complete: complete,
+			Evidence: baselineCheckEvidence(result.Evidence), Targets: units,
+		})
+	}
 	patterns := slices.Clone(options.Packages)
 	if len(patterns) == 0 {
 		patterns = []string{"./..."}
 	}
-	for _, check := range []struct {
+	checks := []struct {
 		name string
 		argv []string
 	}{
 		{name: "go vet", argv: baselineGoCommand("vet", options.BuildTags, patterns)},
 		{name: "go build", argv: baselineGoCommand("build", options.BuildTags, patterns)},
-	} {
+	}
+	if buildVetComplete {
+		checks = nil
+	}
+	for _, check := range checks {
 		run, err := workspace.Exec(ctx, gomutants.Command{Argv: check.argv, Timeout: commandTimeout})
 		if err != nil {
 			return BaselineResult{}, fmt.Errorf("goatest: %s: %w", check.name, err)
@@ -105,14 +137,28 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				ID: report.FindingID("baseline", kind), Kind: kind,
 				Summary: check.name + " rejected the project: " + summarize(run.Output),
 			})
-			markTargetsNotRun(&result, targets, check.name+" failed")
+			for _, target := range targets {
+				if _, done := completed[target.Target.ID]; done {
+					continue
+				}
+				unit := baselineClassifiedUnit(target, "not-run", check.name+" failed", 0, false, true, nil, nil, nil)
+				completed[unit.ID] = unit
+				appendBaselineUnit(&result, unit)
+			}
 			return result, nil
 		}
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "baseline", ID: check.name, Status: "passed"})
 	}
+	if !buildVetComplete {
+		buildVetComplete = true
+		checkpointNow(false)
+	}
 
 	packageTargets := make(map[string][]BaselineTarget)
 	for _, target := range targets {
+		if _, done := completed[target.Target.ID]; done {
+			continue
+		}
 		packageTargets[target.Target.Package] = append(packageTargets[target.Target.Package], target)
 	}
 	packageByImport := make(map[string]goanalysis.Package, len(model.Packages))
@@ -149,7 +195,12 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				ID: report.FindingID("test-binary-build", importPath), Kind: "test-binary-build-failure",
 				Summary: "the package test binary did not compile: " + summarize(compiled.Output),
 			})
-			markTargetsNotRun(&result, packageTargets[importPath], "test binary did not compile")
+			for _, target := range packageTargets[importPath] {
+				unit := baselineClassifiedUnit(target, "not-run", "test binary did not compile", 0, false, true, nil, nil, nil)
+				completed[unit.ID] = unit
+				appendBaselineUnit(&result, unit)
+				checkpointNow(false)
+			}
 			continue
 		}
 		for _, target := range packageTargets[importPath] {
@@ -168,11 +219,14 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				return BaselineResult{}, fmt.Errorf("goatest: decode test2json for %s: %w", target.Target.Name, eventErr)
 			}
 			if skipped {
-				result.Skipped++
-				result.Evidence = append(result.Evidence, report.Evidence{
+				evidenceItem := report.Evidence{
 					Kind: "target", ID: target.Target.ID, Status: "skipped", Detail: target.Target.Name,
-				})
-				result.Findings = append(result.Findings, targetFinding(target.Target, skipKind, skipSummary))
+				}
+				finding := targetFinding(target.Target, skipKind, skipSummary)
+				unit := baselineClassifiedUnit(target, "skipped", skipSummary, first.Duration, false, true, nil, []report.Evidence{evidenceItem}, []report.Finding{finding})
+				completed[unit.ID] = unit
+				appendBaselineUnit(&result, unit)
+				checkpointNow(false)
 				continue
 			}
 			if first.TimedOut || first.ExitCode != 0 {
@@ -185,8 +239,11 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 					attempts = append(attempts, retry)
 				}
 				kind, summary := classifyTargetFailure(attempts)
-				result.Findings = append(result.Findings, targetFinding(target.Target, kind, summary))
-				result.Executed++
+				finding := targetFinding(target.Target, kind, summary)
+				unit := baselineClassifiedUnit(target, "failed", summary, first.Duration, true, false, nil, nil, []report.Finding{finding})
+				completed[unit.ID] = unit
+				appendBaselineUnit(&result, unit)
+				checkpointNow(false)
 				continue
 			}
 			profileData, err := os.ReadFile(profile)
@@ -197,16 +254,86 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			if err != nil {
 				return BaselineResult{}, fmt.Errorf("goatest: coverage for %s: %w", target.Target.Name, err)
 			}
-			result.Targets = append(result.Targets, TargetEvidence{
+			targetEvidence := TargetEvidence{
 				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment), Duration: first.Duration,
-			})
-			result.Evidence = append(result.Evidence, report.Evidence{
+			}
+			evidenceItem := report.Evidence{
 				Kind: "target", ID: target.Target.ID, Status: "passed", Detail: target.Target.Name,
-			})
-			result.Executed++
+			}
+			unit := baselineClassifiedUnit(target, "passed", "", first.Duration, true, false, &targetEvidence, []report.Evidence{evidenceItem}, nil)
+			completed[unit.ID] = unit
+			appendBaselineUnit(&result, unit)
+			checkpointNow(false)
 		}
 	}
+	checkpointNow(true)
 	return result, nil
+}
+
+func baselineCheckEvidence(items []report.Evidence) []report.Evidence {
+	result := make([]report.Evidence, 0, 2)
+	for _, item := range items {
+		if item.Kind == "baseline" {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func baselineClassifiedUnit(target BaselineTarget, status, detail string, duration time.Duration, executed, skipped bool, evidence *TargetEvidence, evidenceItems []report.Evidence, findings []report.Finding) checkpoint.BaselineTarget {
+	if status == "not-run" && len(evidenceItems) == 0 {
+		evidenceItems = []report.Evidence{{Kind: "target", ID: target.Target.ID, Status: status, Detail: detail}}
+	}
+	unit := checkpoint.BaselineTarget{
+		ID: target.Target.ID, Executed: executed, Skipped: skipped,
+		Evidence: slices.Clone(evidenceItems), Findings: slices.Clone(findings),
+		Inventory: report.TargetDisposition{
+			ID: target.Target.ID, Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package,
+			Path: target.Target.Path, Line: max(target.Target.Line, 0), Status: status,
+			DurationMS: max(duration.Milliseconds(), 0), Detail: detail,
+		},
+	}
+	if evidence != nil {
+		unit.Target = checkpointTargetEvidence(*evidence)
+	}
+	return unit
+}
+
+func appendBaselineUnit(result *BaselineResult, unit checkpoint.BaselineTarget) {
+	result.Evidence = append(result.Evidence, unit.Evidence...)
+	result.Findings = append(result.Findings, unit.Findings...)
+	result.Inventory = append(result.Inventory, unit.Inventory)
+	if unit.Executed {
+		result.Executed++
+	}
+	if unit.Skipped {
+		result.Skipped++
+	}
+	if unit.Target != nil {
+		result.Targets = append(result.Targets, restoreTargetEvidence(*unit.Target))
+	}
+}
+
+func checkpointTargetEvidence(input TargetEvidence) *checkpoint.TargetEvidence {
+	return &checkpoint.TargetEvidence{
+		Target: checkpoint.Target{
+			ID: input.Target.ID, Name: input.Target.Name, Kind: string(input.Target.Kind), Package: input.Target.Package,
+			RelativeDir: input.Target.RelativeDir, Path: input.Target.Path, Line: input.Target.Line,
+			Capability: input.Target.Capability, Capabilities: slices.Clone(input.Target.Capabilities), Dependencies: slices.Clone(input.Target.Dependencies),
+		},
+		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), DurationNS: int64(input.Duration),
+	}
+}
+
+func restoreTargetEvidence(input checkpoint.TargetEvidence) TargetEvidence {
+	return TargetEvidence{
+		Target: goanalysis.Target{
+			ID: input.Target.ID, Name: input.Target.Name, Kind: goanalysis.TargetKind(input.Target.Kind), Package: input.Target.Package,
+			RelativeDir: input.Target.RelativeDir, Path: input.Target.Path, Line: input.Target.Line,
+			Capability: input.Target.Capability, Capabilities: slices.Clone(input.Target.Capabilities), Dependencies: slices.Clone(input.Target.Dependencies),
+		},
+		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), Duration: time.Duration(input.DurationNS),
+	}
 }
 
 func baselineGoCommand(operation string, tags, packages []string) []string {
@@ -224,15 +351,6 @@ func baselineCompileCommand(modulePath, importPath, binary string, tags []string
 	}
 	argv = append(argv, "-coverpkg="+modulePath+"/...", "-o", binary, importPath)
 	return argv
-}
-
-func markTargetsNotRun(result *BaselineResult, targets []BaselineTarget, reason string) {
-	for _, target := range targets {
-		result.Evidence = append(result.Evidence, report.Evidence{
-			Kind: "target", ID: target.Target.ID, Status: "not-run", Detail: reason,
-		})
-		result.Skipped++
-	}
 }
 
 func test2JSONCommand(importPath string, target gomutants.Command) gomutants.Command {

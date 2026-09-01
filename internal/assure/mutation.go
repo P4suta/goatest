@@ -8,6 +8,9 @@ package assure
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -69,17 +72,21 @@ type TargetEvidence struct {
 }
 
 type MutationOptions struct {
-	Root            string
-	Snapshot        string
-	Contract        string
-	NoApply         bool
-	ReplayMutantID  string
-	TestArgs        []string
-	FuzzExecutions  int
-	Timeout         time.Duration
-	Jobs            int
-	Accepted        map[string]bool
-	Progress        func(completed, total int)
+	Root           string
+	Snapshot       string
+	Contract       string
+	NoApply        bool
+	ReplayMutantID string
+	TestArgs       []string
+	FuzzExecutions int
+	Timeout        time.Duration
+	Jobs           int
+	Accepted       map[string]bool
+	Progress       func(completed, total int)
+	Resume         map[string]MutationEvaluation
+	// Checkpoint records one terminal mutant evaluation. Worker goroutines may
+	// call it concurrently, so callers must provide a concurrency-safe callback.
+	Checkpoint      func(string, MutationEvaluation)
 	OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
 	// Trace records how each mutant was routed. A nil recorder is an
 	// evaluation that records nothing and reaches the same result.
@@ -110,24 +117,42 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	if err := validateMutationCatalog(catalog); err != nil {
 		return MutationEvaluation{}, err
 	}
+	var evaluation MutationEvaluation
 	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
+	resumed := make(map[string]bool, len(options.Resume))
+	replayPresent := options.ReplayMutantID == ""
 	for _, mutant := range catalog.Mutants {
 		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
 			continue
 		}
+		replayPresent = true
+		if saved, ok := options.Resume[mutant.ID]; ok {
+			evaluation.append(saved)
+			resumed[mutant.ID] = true
+			continue
+		}
 		mutants = append(mutants, mutant)
 	}
-	if options.ReplayMutantID != "" && len(mutants) == 0 {
-		return MutationEvaluation{}, fmt.Errorf("goatest: replay mutant %s is absent from prepared catalog", options.ReplayMutantID)
-	}
-	var evaluation MutationEvaluation
 	for _, rejection := range catalog.Rejections {
 		if options.ReplayMutantID != "" && rejection.ID != options.ReplayMutantID {
 			continue
 		}
-		evaluation.Evidence = append(evaluation.Evidence, report.Evidence{
+		replayPresent = true
+		if saved, ok := options.Resume[rejection.ID]; ok {
+			if !resumed[rejection.ID] {
+				evaluation.append(saved)
+				resumed[rejection.ID] = true
+			}
+			continue
+		}
+		unit := MutationEvaluation{Evidence: []report.Evidence{{
 			Kind: "mutation", ID: rejection.ID, Status: "compile-rejected", Detail: rejection.Diagnostic,
-		})
+		}}}
+		evaluation.append(unit)
+		checkpointMutation(options, rejection.ID, unit)
+	}
+	if !replayPresent {
+		return MutationEvaluation{}, fmt.Errorf("goatest: replay mutant %s is absent from prepared catalog", options.ReplayMutantID)
 	}
 	seeds := evaluateMutationSeeds(ctx, session, mutants, targets, options)
 	for _, seed := range seeds {
@@ -139,6 +164,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
+		unit := seed.evaluation
 		var killed, blocked bool
 		for _, target := range seed.reaching {
 			if target.Target.Kind != goanalysis.KindFuzz {
@@ -157,13 +183,13 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 					return MutationEvaluation{}, confirmErr
 				}
 				if !confirmed {
-					evaluation.addFinding(seed.mutant, confirmFinding.kind, confirmFinding.summary, options.Accepted)
+					unit.addFinding(seed.mutant, confirmFinding.kind, confirmFinding.summary, options.Accepted)
 					blocked = true
 					break
 				}
 				result = confirmedResult
 				if options.NoApply {
-					stored, storeErr := storeTargetArtifacts(options.Root, options.Snapshot, seed.mutant, target.Target.Name, result.Artifacts, &evaluation)
+					stored, storeErr := storeTargetArtifacts(options.Root, options.Snapshot, seed.mutant, target.Target.Name, result.Artifacts, &unit)
 					if storeErr != nil {
 						return MutationEvaluation{}, storeErr
 					}
@@ -171,27 +197,27 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 					if stored {
 						summary = "targeted fuzzing found a killing input; a validated corpus candidate was stored for explicit fix --apply"
 					}
-					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", summary, options.Accepted)
+					unit.addFinding(seed.mutant, "unpersisted-fuzz-kill", summary, options.Accepted)
 					killed = true
 					break
 				}
-				promoted, err := promoteTargetArtifacts(options.Root, seed.mutant, target.Target.Name, result.Artifacts, &evaluation)
+				promoted, err := promoteTargetArtifacts(options.Root, seed.mutant, target.Target.Name, result.Artifacts, &unit)
 				if err != nil {
 					return MutationEvaluation{}, err
 				}
 				if !promoted {
-					evaluation.addFinding(seed.mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input", options.Accepted)
+					unit.addFinding(seed.mutant, "unpersisted-fuzz-kill", "targeted fuzzing killed the mutant without a promotable standard corpus input", options.Accepted)
 				} else {
-					evaluation.Applied = true
+					unit.Applied = true
 				}
 				killed = true
 			case gomutants.OutcomeSurvived:
 				// Try another covering fuzz target, if present.
 			case gomutants.OutcomeTimedOut:
-				evaluation.addFinding(seed.mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout", options.Accepted)
+				unit.addFinding(seed.mutant, "fuzz-timeout", "targeted fuzzing reached its safety timeout", options.Accepted)
 				blocked = true
 			case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-				evaluation.addFinding(seed.mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome", options.Accepted)
+				unit.addFinding(seed.mutant, "fuzz-inconclusive", "targeted fuzzing could not establish a deterministic outcome", options.Accepted)
 				blocked = true
 			default:
 				return MutationEvaluation{}, fmt.Errorf("goatest: mutant %s returned unknown fuzz outcome %q", seed.mutant.DisplayID, result.Outcome)
@@ -201,13 +227,65 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			}
 		}
 		if killed || blocked {
+			evaluation.append(unit)
+			checkpointMutation(options, seed.mutant.ID, unit)
 			continue
 		}
 
-		evaluation.addFinding(seed.mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		unit.addFinding(seed.mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		evaluation.append(unit)
+		checkpointMutation(options, seed.mutant.ID, unit)
 	}
 	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation)
 	return evaluation, nil
+}
+
+func checkpointMutation(options MutationOptions, id string, evaluation MutationEvaluation) {
+	if options.Checkpoint != nil {
+		options.Checkpoint(id, evaluation)
+	}
+}
+
+// MutationCatalogFingerprint identifies the catalog facts that decide whether
+// saved mutant dispositions still name the same source mutations.
+func MutationCatalogFingerprint(catalog gomutants.Catalog) string {
+	type identity struct {
+		id, path, pkg, rule string
+		line                int
+	}
+	items := make([]identity, 0, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		items = append(items, identity{mutant.ID, filepath.ToSlash(mutant.Path), mutant.Package, mutant.Rule, mutant.Line})
+	}
+	slices.SortFunc(items, func(a, b identity) int {
+		if compared := strings.Compare(a.id, b.id); compared != 0 {
+			return compared
+		}
+		if compared := strings.Compare(a.path, b.path); compared != 0 {
+			return compared
+		}
+		if compared := strings.Compare(a.pkg, b.pkg); compared != 0 {
+			return compared
+		}
+		if compared := strings.Compare(a.rule, b.rule); compared != 0 {
+			return compared
+		}
+		return cmp.Compare(a.line, b.line)
+	})
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("goatest-mutation-catalog-v1\x00"))
+	for _, item := range items {
+		for _, field := range []string{item.id, item.path, item.pkg, item.rule} {
+			var length [4]byte
+			binary.BigEndian.PutUint32(length[:], uint32(len(field)))
+			_, _ = hash.Write(length[:])
+			_, _ = hash.Write([]byte(field))
+		}
+		var line [8]byte
+		binary.BigEndian.PutUint64(line[:], uint64(int64(item.line)))
+		_, _ = hash.Write(line[:])
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func validateMutationCatalog(catalog gomutants.Catalog) error {
@@ -351,6 +429,9 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 			defer workers.Done()
 			for index := range indexes {
 				results[index] = evaluateMutationSeed(ctx, session, mutants[index], targets, options)
+				if results[index].err == nil && results[index].resolved {
+					checkpointMutation(options, mutants[index].ID, results[index].evaluation)
+				}
 				progress.Lock()
 				completed++
 				if options.Progress != nil {

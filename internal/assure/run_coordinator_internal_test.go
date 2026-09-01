@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/evidence"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
@@ -23,12 +24,17 @@ import (
 )
 
 type coordinatorCache struct {
-	getReport report.Report
-	found     bool
-	getErr    error
-	putErr    error
-	gets      []string
-	puts      []report.Report
+	getReport         report.Report
+	found             bool
+	getErr            error
+	putErr            error
+	gets              []string
+	puts              []report.Report
+	checkpoint        checkpoint.State
+	checkpointFound   bool
+	checkpointGetErr  error
+	checkpointPutErr  error
+	checkpointDeletes int
 }
 
 func (cache *coordinatorCache) Get(digest string) (report.Report, bool, error) {
@@ -39,6 +45,26 @@ func (cache *coordinatorCache) Get(digest string) (report.Report, bool, error) {
 func (cache *coordinatorCache) Put(_ string, value report.Report) error {
 	cache.puts = append(cache.puts, value)
 	return cache.putErr
+}
+
+func (cache *coordinatorCache) GetCheckpoint(string) (checkpoint.State, bool, error) {
+	return cache.checkpoint, cache.checkpointFound, cache.checkpointGetErr
+}
+
+func (cache *coordinatorCache) PutCheckpoint(_ string, state checkpoint.State) error {
+	if cache.checkpointPutErr != nil {
+		return cache.checkpointPutErr
+	}
+	cache.checkpoint = state
+	cache.checkpointFound = true
+	return nil
+}
+
+func (cache *coordinatorCache) DeleteCheckpoint(string) error {
+	cache.checkpointDeletes++
+	cache.checkpoint = checkpoint.State{}
+	cache.checkpointFound = false
+	return nil
 }
 
 type coordinatorCloser struct {
@@ -120,7 +146,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		generation: GenerationEvaluation{},
 		catalog:    gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-a", Accepted: true}}},
 		inputs:     evidence.Inputs{Contract: "digest-a"},
-		digest:     "digest-a",
+		digest:     strings.Repeat("a", 64),
 	}
 	harness.dependencies = runDependencies{
 		repositoryRoot: func(root string) (string, error) {
