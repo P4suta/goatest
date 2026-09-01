@@ -260,6 +260,36 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "seq"},
 		},
 		{
+			name:   "null phase payload on a phase-end",
+			stream: stream(runStart, `{"seq":2,"type":"phase-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"phase":null}`),
+			want:   []string{"line 2", "null", "phase"},
+		},
+		{
+			name:   "null exec payload",
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":null}`),
+			want:   []string{"line 2", "null", "exec"},
+		},
+		{
+			name:   "null mutant payload",
+			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":null}`),
+			want:   []string{"line 2", "null", "mutant"},
+		},
+		{
+			name:   "null route payload",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":null}`),
+			want:   []string{"line 2", "null", "route"},
+		},
+		{
+			name:   "null progress payload",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":null}`),
+			want:   []string{"line 2", "null", "progress"},
+		},
+		{
+			name:   "null artifact payload",
+			stream: stream(runStart, `{"seq":2,"type":"artifact","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"artifact":null}`),
+			want:   []string{"line 2", "null", "artifact"},
+		},
+		{
 			name:   "missing seq",
 			stream: stream(runStart, `{"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{"kind":"note"}}`),
 			want:   []string{"line 2", "seq"},
@@ -411,6 +441,14 @@ func TestReadEventsReportsAReaderThatFailedMidStream(t *testing.T) {
 	events, err := readEvents(&failingReader{content: stream(runStart)})
 	if err == nil || !strings.Contains(err.Error(), "the disk fell over") {
 		t.Fatalf("read %d events with error %v, want the reader's failure", len(events), err)
+	}
+}
+
+func TestReadEventsAcceptsAStreamWithoutAFinalNewline(t *testing.T) {
+	t.Parallel()
+	events, err := readEvents(strings.NewReader(runStart))
+	if err != nil || len(events) != 1 {
+		t.Fatalf("read (%d events, %v), want the one event the unfinished line carries", len(events), err)
 	}
 }
 

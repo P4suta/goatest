@@ -55,6 +55,8 @@ func TestIsAbsolutePathRecognizesBothRecordingPlatforms(t *testing.T) {
 		{"c:/tool", true},
 		{"Z:/x", true},
 		{"z:\\x", true},
+		{"a:/x", true},
+		{"A:\\x", true},
 		{"c:/", true},
 		{"c:x", false},
 		{"c:", false},
@@ -166,6 +168,47 @@ func TestMutantBlockAccountsForTheRestBeyondTheTop(t *testing.T) {
 	joined = strings.Join(mutantBlock(within), "\n")
 	if strings.Contains(joined, "top") || strings.Contains(joined, "more mutant") {
 		t.Fatalf("block within the cap still truncates:\n%s", joined)
+	}
+}
+
+func TestExecBlockCapsItsTableAndAccountsForTheRest(t *testing.T) {
+	t.Parallel()
+	events := make([]trace.Event, 0, execClassLimit+2)
+	for index := range execClassLimit + 2 {
+		events = append(events, execEvent([]string{"tool", fmt.Sprintf("verb-%02d", index)}, int64(100+index)))
+	}
+	joined := strings.Join(execBlock(events), "\n")
+	if !strings.Contains(joined, fmt.Sprintf("(top %d of %d)", execClassLimit, execClassLimit+2)) {
+		t.Fatalf("block does not name its cap:\n%s", joined)
+	}
+	// The two cheapest classes fall past the cap: 100+101 ms across 2 calls.
+	if !strings.Contains(joined, "2 more classes: 2 calls, 201ms") {
+		t.Fatalf("block does not account for the rest:\n%s", joined)
+	}
+	within := events[:execClassLimit]
+	joined = strings.Join(execBlock(within), "\n")
+	if strings.Contains(joined, "top") || strings.Contains(joined, "more class") {
+		t.Fatalf("block within the cap still truncates:\n%s", joined)
+	}
+}
+
+func TestExecTotalsSkipWhatCarriesNoPayload(t *testing.T) {
+	t.Parallel()
+	totals := execTotals([]trace.Event{
+		execEvent([]string{"go", "vet"}, 4),
+		{Type: trace.TypeExec, Exec: nil},
+		{Type: trace.TypeProgress, Progress: &trace.ProgressRecord{Kind: "note"}},
+	})
+	if len(totals) != 1 || totals[0].calls != 1 {
+		t.Fatalf("totals = %+v, want the one exec that carried a payload", totals)
+	}
+}
+
+func TestPhaseBlockNamesARecordingWhereNoPhaseEnded(t *testing.T) {
+	t.Parallel()
+	lines := phaseBlock([]trace.Event{{Type: trace.TypeRunStart}})
+	if len(lines) != 2 || !strings.Contains(lines[1], "no phase ended") {
+		t.Fatalf("block without phases = %q", lines)
 	}
 }
 
