@@ -1,0 +1,45 @@
+trace: testdata/sample-trace.jsonl
+schema: goatest-trace-v1
+elapsed: 2m35.256s
+events: 29 (run-start 1, phase-start 6, phase-end 6, exec 6, mutant-exec 6, route 1, progress 1, artifact 1, run-end 1)
+
+phases by total duration
+duration  share  passes  phase
+    1m0s  63.0%       2  mutation
+     30s  31.5%       1  baseline
+      5s   5.3%       1  repair
+   120ms   0.1%       1  snapshot
+   118ms   0.1%       1  finalize
+total: 1m35.238s across 5 phases in 6 passes
+
+exec classes by total duration
+duration  share  calls   mean  class
+      9s  79.9%      1     9s  go test -c -coverpkg=<value> -o <path> ...
+      2s  17.8%      2     1s  go test -count=<value> github.com/P4suta/goatest/internal/assure -args -test.run=<value>
+   167ms   1.5%      1  167ms  go list -json ./...
+    65ms   0.6%      1   65ms  go version
+    30ms   0.3%      1   30ms  go tool test2json -t -p github.com/P4suta/goatest/internal/assure
+total: 11.262s across 6 calls in 5 classes
+
+mutant executions
+executions: 6 across 4 mutants (1.50 per mutant)
+duration: 1m2.225s total, 10.37s mean
+
+outcomes by executions
+outcome    executions  share  duration
+killed              3  50.0%      15ms
+timed_out           1  16.7%      1m0s
+survived            1  16.7%      2.2s
+(none)              1  16.7%      10ms
+
+mutants by executions
+executions  duration  mutant                package
+         3      15ms  a1b2c3d4e5f60718293a  github.com/P4suta/goatest/internal/assure
+         1      1m0s  c1d2e3f405162738495a  github.com/P4suta/goatest/internal/repair
+         1      2.2s  b1c2d3e4f5061728394a  github.com/P4suta/goatest/internal/assure
+         1      10ms  d1e2f30415263748596a  -
+
+run
+verdict: INSUFFICIENT
+events emitted: 28
+events dropped: 1

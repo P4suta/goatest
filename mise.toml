@@ -61,3 +61,7 @@ run_windows = [
   "go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
   '.\dist\dogfood\goatest.exe verify --ui=plain',
 ]
+
+[tasks.trace-summary]
+description = "Summarize a goatest-trace-v1 stream into the run's performance breakdown"
+run = "go run ./internal/devtools/tracesummary"
