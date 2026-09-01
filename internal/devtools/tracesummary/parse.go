@@ -80,6 +80,9 @@ func checkOrder(event trace.Event, kept int, previousSeq int64, ended bool) erro
 		if event.Type != trace.TypeRunStart {
 			return fmt.Errorf("the stream opens with a %s event, want a %s event", event.Type, trace.TypeRunStart)
 		}
+		if event.Seq != firstSequence {
+			return fmt.Errorf("the stream opens at seq %d, want seq %d; the events before it are missing", event.Seq, firstSequence)
+		}
 		return nil
 	}
 	if event.Type == trace.TypeRunStart {
@@ -158,6 +161,9 @@ func validateEvent(event trace.Event, fields map[string]json.RawMessage) error {
 	if err := checkPairing(event.Type, payload, fields); err != nil {
 		return err
 	}
+	if payload != "" && !payloadPresent(event) {
+		return fmt.Errorf("a %s event carries a null %s payload", event.Type, payload)
+	}
 	if err := checkSchema(event, fields); err != nil {
 		return err
 	}
@@ -194,6 +200,30 @@ func payloadOf(eventType string) (string, bool) {
 		return "run", true
 	default:
 		return "", false
+	}
+}
+
+// payloadPresent reports whether the payload an event's type names was
+// actually decoded. A JSON null leaves the field present in the raw object but
+// the pointer nil, which pairing alone cannot tell from a real payload.
+func payloadPresent(event trace.Event) bool {
+	switch event.Type {
+	case trace.TypePhaseStart, trace.TypePhaseEnd:
+		return event.Phase != nil
+	case trace.TypeExec:
+		return event.Exec != nil
+	case trace.TypeMutantExec:
+		return event.Mutant != nil
+	case trace.TypeRoute:
+		return event.Route != nil
+	case trace.TypeProgress:
+		return event.Progress != nil
+	case trace.TypeArtifact:
+		return event.Artifact != nil
+	case trace.TypeRunEnd:
+		return event.Run != nil
+	default:
+		return true
 	}
 }
 
