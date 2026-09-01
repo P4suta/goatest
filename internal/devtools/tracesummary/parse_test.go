@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,6 +254,126 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 				`{"seq":2,"type":"run-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"run":null}`),
 			want: []string{"line 2", "null", "run"},
 		},
+		{
+			name:   "null line",
+			stream: stream(runStart, `null`),
+			want:   []string{"line 2", "seq"},
+		},
+		{
+			name:   "missing seq",
+			stream: stream(runStart, `{"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{"kind":"note"}}`),
+			want:   []string{"line 2", "seq"},
+		},
+		{
+			name:   "second value after a valid one",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{"kind":"note"}} {"seq":3}`),
+			want:   []string{"line 2", "more than one value"},
+		},
+		{
+			name:   "negative elapsed_ms",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":-1,"progress":{"kind":"note"}}`),
+			want:   []string{"line 2", "elapsed_ms"},
+		},
+		{
+			name:   "empty timestamp",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"","elapsed_ms":1,"progress":{"kind":"note"}}`),
+			want:   []string{"line 2", "timestamp"},
+		},
+		{
+			name:   "phase without its name field",
+			stream: stream(runStart, `{"seq":2,"type":"phase-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"phase":{"duration_ms":1}}`),
+			want:   []string{"line 2", "name"},
+		},
+		{
+			name:   "phase with an empty name",
+			stream: stream(runStart, `{"seq":2,"type":"phase-start","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"phase":{"name":""}}`),
+			want:   []string{"line 2", "phase.name"},
+		},
+		{
+			name:   "phase with a negative duration",
+			stream: stream(runStart, `{"seq":2,"type":"phase-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"phase":{"name":"baseline","duration_ms":-1}}`),
+			want:   []string{"line 2", "phase.duration_ms"},
+		},
+		{
+			name:   "exec with a negative timeout",
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"timeout_ms":-1}}`),
+			want:   []string{"line 2", "exec.timeout_ms"},
+		},
+		{
+			name:   "exec with a negative duration",
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"duration_ms":-1}}`),
+			want:   []string{"line 2", "exec.duration_ms"},
+		},
+		{
+			name:   "exec with negative output bytes",
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"output_bytes":-1}}`),
+			want:   []string{"line 2", "exec.output_bytes"},
+		},
+		{
+			name:   "output digest of the right length with the wrong alphabet",
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"output_sha256":"`+strings.Repeat("Z", 64)+`"}}`),
+			want:   []string{"line 2", "output_sha256"},
+		},
+		{
+			name:   "mutant without its id field",
+			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":{"outcome":"killed"}}`),
+			want:   []string{"line 2", "id"},
+		},
+		{
+			name:   "mutant with a negative timeout",
+			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":{"id":"m","timeout_ms":-1}}`),
+			want:   []string{"line 2", "mutant.timeout_ms"},
+		},
+		{
+			name:   "mutant with a negative duration",
+			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":{"id":"m","duration_ms":-1}}`),
+			want:   []string{"line 2", "mutant.duration_ms"},
+		},
+		{
+			name:   "route without its path field",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"reason":"unreached"}}`),
+			want:   []string{"line 2", "path"},
+		},
+		{
+			name:   "route with a negative line",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","line":-1}}`),
+			want:   []string{"line 2", "route.line"},
+		},
+		{
+			name:   "progress without its kind field",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{}}`),
+			want:   []string{"line 2", "kind"},
+		},
+		{
+			name:   "progress with an empty kind",
+			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{"kind":""}}`),
+			want:   []string{"line 2", "progress.kind"},
+		},
+		{
+			name:   "artifact without its kind field",
+			stream: stream(runStart, `{"seq":2,"type":"artifact","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"artifact":{"path":"kept"}}`),
+			want:   []string{"line 2", "kind"},
+		},
+		{
+			name:   "artifact with an empty kind",
+			stream: stream(runStart, `{"seq":2,"type":"artifact","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"artifact":{"kind":"","path":"kept"}}`),
+			want:   []string{"line 2", "artifact.kind"},
+		},
+		{
+			name:   "artifact with an empty path",
+			stream: stream(runStart, `{"seq":2,"type":"artifact","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"artifact":{"kind":"baseline-scratch","path":""}}`),
+			want:   []string{"line 2", "artifact.path"},
+		},
+		{
+			name:   "run-end without its accounting",
+			stream: stream(runStart, `{"seq":2,"type":"run-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"run":{"events_dropped":0}}`),
+			want:   []string{"line 2", "events_emitted"},
+		},
+		{
+			name:   "run-end with a negative drop count",
+			stream: stream(runStart, `{"seq":2,"type":"run-end","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"run":{"events_emitted":1,"events_dropped":-1}}`),
+			want:   []string{"line 2", "events_dropped"},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -267,6 +388,29 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// failingReader hands out its content and then fails, the way a disk that
+// died mid-read does.
+type failingReader struct {
+	content string
+	served  bool
+}
+
+func (reader *failingReader) Read(buffer []byte) (int, error) {
+	if reader.served {
+		return 0, errors.New("the disk fell over")
+	}
+	reader.served = true
+	return copy(buffer, reader.content), nil
+}
+
+func TestReadEventsReportsAReaderThatFailedMidStream(t *testing.T) {
+	t.Parallel()
+	events, err := readEvents(&failingReader{content: stream(runStart)})
+	if err == nil || !strings.Contains(err.Error(), "the disk fell over") {
+		t.Fatalf("read %d events with error %v, want the reader's failure", len(events), err)
 	}
 }
 
