@@ -1,6 +1,7 @@
 # CI usage before a packaged Action exists
 
-No GitHub Action or tagged release is published yet. A repository can build the
+No GitHub Action is published yet. A repository can install a tagged release
+with `go install github.com/P4suta/goatest/cmd/goatest@latest`, or build the
 checked-out source and use the CLI directly:
 
 ```yaml
@@ -20,7 +21,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - name: Build unreleased goatest
+      - name: Build goatest from the checkout
         run: go build -o "$RUNNER_TEMP/goatest" ./cmd/goatest
       - name: Pull-request scope
         if: github.event_name == 'pull_request'
