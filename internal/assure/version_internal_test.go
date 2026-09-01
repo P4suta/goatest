@@ -33,3 +33,23 @@ func TestGoMutantsVersionFromFailsClosedAndHonorsReplacements(t *testing.T) {
 		t.Fatalf("replaced dependency = (%q, %v); the replacement is what actually ran", version, err)
 	}
 }
+
+func TestResolvedGoatestVersionPrefersStampThenModuleVersion(t *testing.T) {
+	stamped := resolvedGoatestVersionFrom("v0.2.0", &debug.BuildInfo{Main: debug.Module{Version: "v9.9.9"}})
+	if stamped != "v0.2.0" {
+		t.Fatalf("stamped = %q; a release stamp always wins", stamped)
+	}
+	installed := resolvedGoatestVersionFrom(goatestDevelVersion, &debug.BuildInfo{Main: debug.Module{Version: "v0.1.0"}})
+	if installed != "v0.1.0" {
+		t.Fatalf("go-install build = %q; the module version is the truthful identity", installed)
+	}
+	for name, info := range map[string]*debug.BuildInfo{
+		"no build info": nil,
+		"devel":         {Main: debug.Module{Version: "(devel)"}},
+		"empty":         {},
+	} {
+		if got := resolvedGoatestVersionFrom(goatestDevelVersion, info); got != goatestDevelVersion {
+			t.Fatalf("%s = %q, want the development default", name, got)
+		}
+	}
+}

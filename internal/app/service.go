@@ -392,7 +392,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		}
 	}
 	if result.Toolchain.Goatest == "" {
-		result.Toolchain.Goatest = assure.GoatestVersion
+		result.Toolchain.Goatest = assure.ResolvedGoatestVersion()
 	}
 	if result.Toolchain.Go == "" {
 		result.Toolchain.Go = "unavailable"

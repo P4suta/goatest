@@ -83,9 +83,36 @@ func goMutantsVersionFrom(info *debug.BuildInfo) (string, error) {
 	return "", fmt.Errorf("goatest: %s is absent from build info", goMutantsModulePath)
 }
 
+// goatestDevelVersion is the unstamped default of GoatestVersion. A binary
+// still carrying it was not built by the release pipeline, so the module
+// version its build info records - what `go install module@version` stamps -
+// is the truthful identity wherever one exists.
+const goatestDevelVersion = "v0.1.0-dev"
+
 // GoatestVersion is stamped by release builds and participates in evidence
-// cache identity.
-var GoatestVersion = "v0.1.0-dev"
+// cache identity. Readers resolve it through ResolvedGoatestVersion.
+var GoatestVersion = goatestDevelVersion
+
+// ResolvedGoatestVersion reports the goatest version this binary carries: the
+// release-stamped value when one was stamped, otherwise the module version of
+// a `go install` build, and the development default for a checkout build or a
+// test binary.
+func ResolvedGoatestVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return resolvedGoatestVersionFrom(GoatestVersion, info)
+}
+
+// resolvedGoatestVersionFrom settles the version from what a binary knows
+// about itself.
+func resolvedGoatestVersionFrom(stamped string, info *debug.BuildInfo) string {
+	if stamped != goatestDevelVersion {
+		return stamped
+	}
+	if info == nil || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return stamped
+	}
+	return info.Main.Version
+}
 
 var (
 	absoluteRepositoryPath = filepath.Abs
@@ -293,7 +320,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Schema: report.SchemaV1, Verdict: report.VerdictChangeAssured, Contract: contract, Snapshot: digest,
 				Scope:      reportScope(options, metadata.model, selection),
 				Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
-				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: inputs.GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
+				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: inputs.GoatestVersion, GoMutants: inputs.GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
 				Accounting: report.Accounting{
 					Targets: report.CountAccounting{Discovered: len(allTargets), Excluded: len(allTargets)},
 					Race:    report.CountAccounting{Discovered: len(metadata.model.Packages), Excluded: len(metadata.model.Packages)},
@@ -372,7 +399,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Scope:      reportScope(options, metadata.model, selection),
 			Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
 			Toolchain: report.Toolchain{
-				Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: inputs.GoMutantsVersion,
+				Go: metadata.toolchain, Goatest: inputs.GoatestVersion, GoMutants: inputs.GoMutantsVersion,
 				OS: runtime.GOOS, Arch: runtime.GOARCH,
 			},
 			Accounting: report.Accounting{Targets: report.CountAccounting{
@@ -841,7 +868,7 @@ func assuranceInputs(root, contract string, options Options, loaded config.Confi
 		Files: files, Corpus: corpus, Dependencies: metadata.dependencies,
 		Toolchain: metadata.toolchain, Platform: runtime.GOOS + "/" + runtime.GOARCH,
 		Environment: selectedEnvironment(environment, loaded.Execution.Environment), Resources: resources,
-		Contract: contract + modeIdentity(options), GoatestVersion: GoatestVersion, GoMutantsVersion: goMutants,
+		Contract: contract + modeIdentity(options), GoatestVersion: ResolvedGoatestVersion(), GoMutantsVersion: goMutants,
 	}
 	return inputs, evidence.Digest(inputs), nil
 }

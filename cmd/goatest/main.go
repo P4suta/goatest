@@ -52,7 +52,7 @@ func interactiveTerminal(writer io.Writer) bool {
 
 func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Service) int {
 	if len(arguments) == 1 && arguments[0] == "--version" {
-		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.GoatestVersion)
+		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.ResolvedGoatestVersion())
 		return 0
 	}
 	arguments = withTraceEnvironment(arguments, os.Getenv(traceEnvironmentVariable))
