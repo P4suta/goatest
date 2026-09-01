@@ -19,7 +19,10 @@ line. Loading the untouched skeleton yields exactly the defaults.
   logical CPU count capped at four, and an exclusive resource forces one job
   regardless. The decided value is announced as the `mutation-jobs` progress
   note.
-- `[cache]`: non-negative `max_bytes` and positive `ttl`.
+- `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
+  applied independently to exact-input cache entries, trace run directories,
+  and failure-diagnostics directories. Checkpoints live inside their
+  exact-input cache entry and are collected with it.
 - `[resources.<capability>]`: provider `command`, positive `timeout`, one of
   `shared` or `exclusive`, and environment-name allowlist.
 - `[generation]`: provider `command`, `allowed_paths`, and environment-name
@@ -53,3 +56,12 @@ process isolation is not a security sandbox. Keep provider commands under the
 same review and supply-chain policy as build tooling.
 
 Protocol details are in [protocols](protocols.md).
+
+## Cache maintenance
+
+`goatest cache status` reports the exact-input cache, `.goatest/trace`, and
+`.goatest/diagnostics`. `goatest cache gc` removes expired entries first and
+then the oldest entries until each store meets `max_bytes`. Verification and
+maintenance hold one OS advisory lock rooted at `.goatest/cache`; a contending
+process reports `cache-wait`, and interrupting that wait does not start work or
+run GC without the lock.

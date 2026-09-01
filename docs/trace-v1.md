@@ -346,6 +346,27 @@ was interrupted; one whose count is not zero is lossy, and says so.
 The schema is `internal/trace/schema.json`, embedded in the binary and returned
 by `trace.JSONSchema()`. Each line of `trace.jsonl` is one instance of it.
 
+The built-in readers inspect default `.goatest/trace` recordings without
+replaying a run:
+
+```console
+goatest trace summary
+goatest trace summary 20260901T120000Z-1234
+goatest trace diff 20260901T120000Z-1234 20260901T123000Z-5678
+```
+
+With no run name, `summary` selects the lexically latest confined run
+directory. A missing stream is returned explicitly as `missing`; a readable
+prefix without `run-end` is `incomplete-no-run-end`; sequence gaps or a
+positive `events_dropped` count are `lossy`. The reader strictly rejects
+unknown fields, trailing values, invalid envelopes, unexpected payloads,
+duplicate `run-end` events, and non-increasing sequence numbers.
+
+`diff` includes both summaries, then reports event, gap, and drop deltas,
+verdict and `run-end` changes, per-event-type count deltas, and phase-duration
+deltas. It is a read-only diagnostic comparison, not evidence and not a
+verdict comparison contract.
+
 ```console
 $ jq -r 'select(.type=="exec") | [.exec.duration_ms, (.exec.argv|join(" "))] | @tsv' \
     .goatest/trace/*/trace.jsonl | sort -rn | head
@@ -357,3 +378,15 @@ $ tail -n1 .goatest/trace/*/trace.jsonl | jq .run
 `internal/trace/schema_test.go` validates recorded events against the embedded
 schema, and `internal/app/trace_e2e_test.go` validates every line a real run
 produced, so a field that drifts from this page fails the suite.
+
+## Retention
+
+Trace runs and failure-diagnostics bundles use the `[cache]` TTL and byte
+budget as independent stores. Collection removes expired run directories
+first, then the oldest until the store is within budget. It runs best-effort
+after a recording or diagnostics bundle closes, and explicitly through
+`goatest cache gc`; status for all stores is available through
+`goatest cache status`. Verification and explicit GC share the repository
+cache advisory lock, so collection cannot race a live recording owned by
+another goatest process. Symlinks and irregular files are never followed or
+removed through retention.

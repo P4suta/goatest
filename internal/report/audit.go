@@ -26,6 +26,17 @@ func Validate(input Report) error {
 	if err := validateCount("race", input.Accounting.Race); err != nil {
 		return err
 	}
+	if err := validateTargets(input.Accounting.Targets, input.Targets); err != nil {
+		return err
+	}
+	if input.Resume != nil {
+		if input.Resume.Attempts < 1 || input.Resume.ReusedTargets < 0 || input.Resume.ReusedRacePackages < 0 || input.Resume.ReusedMutants < 0 {
+			return errors.New("goatest: resume metadata contains an invalid count")
+		}
+		if input.Resume.ReusedTargets > input.Accounting.Targets.Selected || input.Resume.ReusedRacePackages > input.Accounting.Race.Selected || input.Resume.ReusedMutants > input.Accounting.Mutants.Selected {
+			return errors.New("goatest: resume metadata exceeds selected work")
+		}
+	}
 	if err := validateMutants(input.Accounting.Mutants, input.Mutants, input.Verdict); err != nil {
 		return err
 	}
@@ -38,6 +49,26 @@ func Validate(input Report) error {
 		return err
 	}
 	return validateVerdictScope(input)
+}
+
+func validateTargets(accounting CountAccounting, targets []TargetDisposition) error {
+	if len(targets) != accounting.Selected {
+		return fmt.Errorf("goatest: target inventory contains %d entries for %d selected targets", len(targets), accounting.Selected)
+	}
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target.ID) == "" || strings.TrimSpace(target.Name) == "" || strings.TrimSpace(target.Kind) == "" || strings.TrimSpace(target.Package) == "" || strings.TrimSpace(target.Status) == "" {
+			return errors.New("goatest: target inventory contains an incomplete identity")
+		}
+		if target.Line < 0 || target.DurationMS < 0 {
+			return fmt.Errorf("goatest: target %s contains a negative line or duration", target.ID)
+		}
+		if _, duplicate := seen[target.ID]; duplicate {
+			return fmt.Errorf("goatest: target inventory contains duplicate ID %s", target.ID)
+		}
+		seen[target.ID] = struct{}{}
+	}
+	return nil
 }
 
 func validateAcceptances(input Report) error {

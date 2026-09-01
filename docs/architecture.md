@@ -13,7 +13,7 @@ CLI/config
    ├─ race checks
    ├─ go-mutants catalog + execution + paired confirmation
    ├─ targeted native fuzz / generation candidate validation
-   └─ report v1 + exact cache
+   └─ report v1 + exact cache/checkpoint
 ```
 
 The `internal/assure` package coordinates a round. `internal/golang` discovers
@@ -30,6 +30,12 @@ only authorized source/corpus mutation.
 Reports are the durable boundary. Before a report can advance a latest index,
 it must satisfy the scope/verdict rules, timing and toolchain requirements,
 mutant inventory equations, acceptance linkage, and cache provenance checks.
+
+One OS advisory lock covers the repository cache and the full verification
+lifetime. Interrupted scheduling state is written separately as strict
+`assurance-checkpoint-v1`; it can skip only exact-input, fully classified units
+and never acts as evidence or advances a latest-report index. See
+[checkpoint v1](checkpoint-v1.md).
 
 The current implementation supports one main Go module per run. Detecting
 multiple main modules causes an error rather than an aggregate that could omit

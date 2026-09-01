@@ -90,6 +90,20 @@ func TestEvaluateMutationsReplaysOnlyRequestedMutantAndFailsClosedWhenAbsent(t *
 		session.requests[0].Mutant != second.ID || !reflect.DeepEqual(progress, [][2]int{{1, 1}}) {
 		t.Fatalf("replay evaluation = (%+v, %v), requests=%+v progress=%v", evaluation, err, session.requests, progress)
 	}
+	rejected := &mutationUnitSession{
+		catalog: session.catalog,
+		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			t.Fatal("compile-rejected replay mutant executed")
+			return gomutants.MutantResult{}, nil
+		},
+	}
+	evaluation, err = EvaluateMutations(t.Context(), rejected, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), ReplayMutantID: "rejected-other",
+	})
+	if err != nil || len(evaluation.Evidence) != 1 || evaluation.Evidence[0].Status != "compile-rejected" ||
+		evaluation.Accounting.Selected != 1 || evaluation.Accounting.CompileRejected != 1 || len(rejected.requests) != 0 {
+		t.Fatalf("compile-rejected replay = (%+v, %v), requests=%+v", evaluation, err, rejected.requests)
+	}
 
 	absent := &mutationUnitSession{
 		catalog: session.catalog,

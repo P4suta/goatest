@@ -57,7 +57,7 @@ func (clock *fixedClock) Advance(delta time.Duration) {
 func TestDashboardRendersPhaseElapsedAndMutationEstimate(t *testing.T) {
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()
-	tick := make(chan time.Time)
+	tick := make(chan time.Time, 1)
 	notes := ui.NewDashboard(buffer, ui.DashboardOptions{Now: clock.Now, Tick: tick})
 	notes.Note("snapshot", "captured")
 	if got := buffer.String(); !strings.Contains(got, "\r\x1b[K") || !strings.Contains(got, "snapshot") || !strings.Contains(got, "00:00") || !strings.Contains(got, "captured") {
@@ -102,7 +102,7 @@ func TestDashboardPrintsUnknownKindsAsPermanentLines(t *testing.T) {
 func TestDashboardTicksKeepTheElapsedTimeMoving(t *testing.T) {
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()
-	tick := make(chan time.Time)
+	tick := make(chan time.Time, 1)
 	notes := ui.NewDashboard(buffer, ui.DashboardOptions{Now: clock.Now, Tick: tick})
 	defer notes.Close()
 	notes.Note("race", "3 packages")

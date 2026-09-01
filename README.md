@@ -81,6 +81,8 @@ goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 goatest fix [ID...] [--apply]
 goatest report [--latest-full|--run=ID]
 goatest cache status|gc
+goatest trace summary [RUN]
+goatest trace diff RUN-A RUN-B
 goatest help [command]
 ```
 
@@ -101,7 +103,18 @@ each mutant) as JSON Lines under `DIR`, or under `.goatest/trace/` by default.
 `GOATEST_TRACE=1` or `GOATEST_TRACE=DIR` asks for the same without a flag. A
 trace is diagnostic exhaust, never evidence: it takes no part in a verdict or
 in the identity a cached result is keyed on, and a trace that cannot be
-written costs a warning rather than the run.
+written costs a warning rather than the run. `goatest trace summary [RUN]`
+reports missing streams, sequence gaps, a missing `run-end`, and dropped-event
+counts; `goatest trace diff RUN-A RUN-B` compares event counts and phase
+durations without replaying either run.
+
+Verification holds an OS advisory lock on `.goatest/cache/` for the whole run.
+A second process reports `cache-wait` and waits interruptibly. If a run stops
+before producing its durable report, a strict exact-input checkpoint remains
+under `.goatest/cache/v1/<digest>/checkpoint-v1.json`; the next identical run
+automatically reuses completed baseline targets, the complete race phase, and
+terminal mutant results. There is no resume flag. See
+[checkpoint v1](docs/checkpoint-v1.md) for invalidation and lifecycle rules.
 
 ## Verdicts and report history
 
@@ -197,6 +210,11 @@ Environment entries are names, never `KEY=value`. Only explicitly named
 variables (plus the minimum process-launch environment) reach resource or
 generation providers. Values are not written to reports.
 
+The cache capacity and TTL also bound `.goatest/trace/` and
+`.goatest/diagnostics/`, independently. `goatest cache status` reports all
+three stores and `goatest cache gc` collects all three while holding the same
+repository lock.
+
 See [configuration and protocols](docs/configuration.md) for details.
 
 ## Repair boundary
@@ -216,12 +234,11 @@ The implementation deliberately fails closed where support is incomplete:
 - a `go.work` containing multiple main modules is rejected rather than partly
   assured;
 - symbolic links in the evidence tree are rejected;
-- cache coordination is process-local, and interrupted runs do not yet resume
-  from target-level checkpoints;
 - the resource protocol currently supports start/ready/stop and shared or
   exclusive instances, but not health/reset/log-artifact operations; and
-- external-repository compatibility and performance gates have not yet been
-  demonstrated, so this project does not claim proof or production readiness.
+- local benchmarks watch critical paths, but they are observations rather than
+  a performance contract, and this project does not claim proof or production
+  readiness.
 
 The complete list is maintained in [limitations](docs/limitations.md).
 
@@ -231,6 +248,7 @@ The complete list is maintained in [limitations](docs/limitations.md).
 go test ./...
 go test -race ./...
 go vet ./...
+go test -run '^$' -bench 'Benchmark(CheckpointIO|Digest|MutationAccounting|ReportGeneration)$' ./internal/cache ./internal/evidence ./internal/assure ./internal/report
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the `mise`-based workflow, pull

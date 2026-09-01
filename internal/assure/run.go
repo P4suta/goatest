@@ -23,6 +23,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	"github.com/P4suta/goatest/internal/config"
 	envselect "github.com/P4suta/goatest/internal/environment"
 	"github.com/P4suta/goatest/internal/evidence"
@@ -176,6 +177,9 @@ type roundMetadata struct {
 type runCache interface {
 	Get(string) (report.Report, bool, error)
 	Put(string, report.Report) error
+	GetCheckpoint(string) (checkpoint.State, bool, error)
+	PutCheckpoint(string, checkpoint.State) error
+	DeleteCheckpoint(string) error
 }
 
 type runRoundCloser interface {
@@ -338,6 +342,11 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 			return result, nil
 		}
+		checkpointController := openRunCheckpoint(cacheStore, digest, options, round == 0 && len(loaded.Resources) == 0)
+		baselineResume := checkpointController.baseline(targets)
+		if baselineResume != nil {
+			emit(options, "resume-baseline", fmt.Sprintf("%d targets", len(baselineResume.Targets)))
+		}
 		phases.enter(phaseResources)
 		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets, options.Environment)
 		if err != nil {
@@ -388,6 +397,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			BuildTags: slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
 			ClassifyUserFailures: true,
 			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout,
+			Resume: baselineResume, Checkpoint: checkpointController.saveBaseline,
 		})
 		removeErr := releaseBaselineScratch(options, dependencies.removeBaselineScratch, artifactDirectory)
 		if err != nil || removeErr != nil {
@@ -409,6 +419,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}, Race: report.CountAccounting{
 				Discovered: len(metadata.model.Packages), Excluded: len(metadata.model.Packages),
 			}},
+			Targets:     slices.Clone(baseline.Inventory),
+			Resume:      checkpointController.resumeMetadata(),
 			Acceptances: slices.Clone(acceptances),
 		}
 		baseReport.Limitations = append(baseReport.Limitations, projectExcludeLimitations(loaded.Project.Exclude)...)
@@ -467,13 +479,21 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Executed: raceCount, Excluded: len(metadata.model.Packages) - raceCount,
 		}
 		emit(options, "race", fmt.Sprintf("%d packages", raceCount))
-		raceResult, err := dependencies.collectRaceWithOptions(ctx, workspace, raceModel, racePackages, contract, RaceOptions{
-			Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
-		})
-		if err != nil {
-			_ = closeRound()
-			return report.Report{}, err
+		var raceResult RaceResult
+		if savedRace, reused := checkpointController.race(racePackages); reused {
+			raceResult = RaceResult{Evidence: slices.Clone(savedRace.Evidence), Findings: slices.Clone(savedRace.Findings)}
+			emit(options, "resume-race", fmt.Sprintf("%d packages", len(racePackages)))
+		} else {
+			raceResult, err = dependencies.collectRaceWithOptions(ctx, workspace, raceModel, racePackages, contract, RaceOptions{
+				Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
+			})
+			if err != nil {
+				_ = closeRound()
+				return report.Report{}, err
+			}
+			checkpointController.saveRace(racePackages, raceResult)
 		}
+		baseReport.Resume = checkpointController.resumeMetadata()
 		baseReport.Evidence = append(baseReport.Evidence, raceResult.Evidence...)
 		if len(raceResult.Findings) != 0 {
 			baseReport.Verdict = report.VerdictDefect
@@ -514,7 +534,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
-		mutationCount := mutationTargetCount(session.Catalog(), options.ReplayMutantID)
+		catalog := session.Catalog()
+		mutationCount := mutationTargetCount(catalog, options.ReplayMutantID)
 		mutationDetail := fmt.Sprintf("%d mutants", mutationCount)
 		if mutationCount == 1 {
 			mutationDetail = "1 mutant"
@@ -522,13 +543,15 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		emit(options, "mutation-target", mutationDetail)
 
 		phases.enter(phaseMutation)
+		mutationResume := checkpointController.mutation(catalog, root)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
 			Root: root, Snapshot: digest, Contract: contract, NoApply: options.NoApply,
 			ReplayMutantID: options.ReplayMutantID,
 			TestArgs:       slices.Clone(options.TestArgs),
 			FuzzExecutions: options.FuzzExecutions, Timeout: options.CommandTimeout,
 			Jobs: mutationJobs, Accepted: accepted,
-			Progress:        mutationProgress(options),
+			Progress: mutationProgress(options),
+			Resume:   mutationResume, Checkpoint: checkpointController.saveMutant,
 			OriginalControl: originalControl,
 			Trace:           options.Trace,
 		})
@@ -536,8 +559,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
+		checkpointController.completeMutation()
 		baseReport.Accounting.Mutants = mutation.Accounting
 		baseReport.Mutants = slices.Clone(mutation.Mutants)
+		baseReport.Resume = checkpointController.resumeMetadata()
 
 		phases.enter(phaseRepair)
 		generated := GenerationEvaluation{Findings: slices.Clone(mutation.Findings)}
@@ -566,6 +591,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		roundRepairs := append(slices.Clone(mutation.Repairs), generated.Repairs...)
 		if mutation.Applied || generated.Applied {
+			checkpointController.discard()
 			appliedRepairs = append(appliedRepairs, roundRepairs...)
 			emit(options, "repair-applied", fmt.Sprintf("%d files", len(roundRepairs)))
 			if round+1 == maximumRounds {
@@ -594,6 +620,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Findings: generated.Findings, Repairs: append(slices.Clone(appliedRepairs), roundRepairs...),
 			Scope: baseReport.Scope, Repository: baseReport.Repository, Toolchain: baseReport.Toolchain,
 			Accounting: baseReport.Accounting, Mutants: slices.Clone(baseReport.Mutants),
+			Targets: slices.Clone(baseReport.Targets), Resume: baseReport.Resume,
 			Acceptances: slices.Clone(baseReport.Acceptances), Limitations: slices.Clone(baseReport.Limitations),
 		}
 		result.Accounting.Mutants = mutation.Accounting

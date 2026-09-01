@@ -84,13 +84,13 @@ func NewDashboard(writer io.Writer, options DashboardOptions) Notes {
 // dashboard knows the kind at all.
 func dashboardPhase(kind string) (string, bool) {
 	switch kind {
-	case "snapshot", "cache-hit":
+	case "snapshot", "cache-hit", "cache-wait":
 		return "snapshot", true
 	case "impact-broad", "impact-targeted":
 		return "impact", true
-	case "baseline-target":
+	case "baseline-target", "resume-baseline":
 		return "baseline", true
-	case "race":
+	case "race", "resume-race":
 		return "race", true
 	case "mutation-prepare", "mutation-target", "mutation-progress":
 		return "mutation", true
@@ -225,9 +225,7 @@ func (renderer *dashboard) estimatedRemainder() (time.Duration, bool) {
 
 // formatElapsed renders a duration the way a human reads a stopwatch.
 func formatElapsed(elapsed time.Duration) string {
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed = max(elapsed, 0)
 	total := int(elapsed.Seconds())
 	if total >= 3600 {
 		return fmt.Sprintf("%d:%02d:%02d", total/3600, total%3600/60, total%60)
