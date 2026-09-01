@@ -1242,6 +1242,20 @@ func executionEnvironment(input []string) []string {
 		values[key] = value
 		names[key] = key
 	}
+	// Snapshots exclude every .git by design and their identity is the
+	// assurance digest, so VCS stamping has nothing true to stamp — while a
+	// stray .git above the temporary root turns it into a hard failure for
+	// every go command in the snapshot.
+	if !strings.Contains(values["GOFLAGS"], "-buildvcs=") {
+		flags := strings.TrimSpace(values["GOFLAGS"])
+		if flags != "" {
+			flags += " "
+		}
+		values["GOFLAGS"] = flags + "-buildvcs=false"
+		if _, declared := names["GOFLAGS"]; !declared {
+			names["GOFLAGS"] = "GOFLAGS"
+		}
+	}
 	result := make([]string, 0, len(values))
 	for upper, value := range values {
 		result = append(result, names[upper]+"="+value)
