@@ -1,4 +1,4 @@
-# Current limitations and release gates
+# Current limitations and deferred work
 
 This is a pre-release alpha. The implementation has strong self-tests, but
 self-dogfood is not external compatibility evidence.
@@ -20,8 +20,6 @@ self-dogfood is not external compatibility evidence.
 - `replay` currently accepts only mutation-backed findings with a recorded
   mutant identity. Other finding kinds are rejected instead of executing an
   unrelated mutation set.
-- Cache locking is process-local. Concurrent goatest processes, target-level
-  checkpoints, and interrupted-run resume are not implemented.
 - Resource providers support start/ready/stop and shared/exclusive instances,
   but not health, reset, per-target scope, or log artifacts.
 - The `--ui=auto` dashboard renders only on an interactive ANSI-capable
@@ -31,8 +29,6 @@ self-dogfood is not external compatibility evidence.
   projected from the average executed mutant, never a contract. The shape of a
   streamed `--ui=jsonl` progress event is diagnostic and may change between
   versions; only the final `{"type":"report",...}` line is a stable contract.
-- The HTML report supports local search/filtering but does not yet compute a
-  dedicated slow-target ranking beyond searchable evidence details.
 - A trace records the commands the mutation workspace runs and the mutants it
   executes. Subprocesses started outside it are not recorded: resource and
   generation providers, and the `git` invocations of changeset selection and
@@ -52,28 +48,24 @@ self-dogfood is not external compatibility evidence.
   `--keep-temp` run leaves directories only the temporary directory itself
   lists. Like `--trace`, `--keep-temp` is accepted by `verify` and `replay`
   alone, so a `fix --apply` validation removes its candidate trees.
-- Diagnostic exhaust is never pruned. `.goatest/trace/` keeps one directory per
-  traced run, `.goatest/diagnostics/` one per failed run, and a kept temporary
-  directory stays where it was made, until something outside goatest removes
-  them. A preserved command output is capped at 1 MiB per file, so a long
-  capture is truncated with a marker even though its event digests the whole of
-  it.
+- Trace and diagnostics directories use the cache TTL and byte budget, each as
+  an independent retention store. Directories kept with `--keep-temp` remain
+  outside that GC and require manual removal. A preserved command output is
+  capped at 1 MiB per file, so a long capture is truncated with a marker even
+  though its event digests the whole of it.
 - Only the directory sink is reachable from the command line; the in-memory and
-  fan-out sinks are in-process. There is no reader tooling for a trace either:
-  it is JSON Lines for `jq` and the embedded schema, with no subcommand that
-  summarizes or diffs one. See [trace v1](trace-v1.md).
-- Release archives carry an SBOM and a GitHub build-provenance attestation,
-  but no cosign-signed checksums. There is no benchmark/performance contract
-  or GitHub Action yet.
+  fan-out sinks remain in-process. `trace summary` and `trace diff` are bounded
+  readers, not a query language over individual execution records. See
+  [trace v1](trace-v1.md).
+- Checkpoint I/O, evidence digesting, mutant accounting, and report rendering
+  have local Go benchmarks. They establish a self-application baseline, not a
+  cross-repository compatibility or performance contract.
 
-## Release blockers
+## Deferred until this repository needs them
 
-The first beta must retain ordinary/race tests and schema validation, add the
-cross-platform CI/release pipeline, and demonstrate that no mutant disappears,
-no changeset is labeled as a full assurance, and no flaky kill becomes assured.
-
-v1.0 additionally requires compatibility runs across at least 20 external Go
-repositories with at least 90% completing without source changes, plus evidence
-from multiple teams that findings led to real test-gap repairs. Until those
-gates are measured, documentation must not call goatest “ultimate”, a proof, or
-production-ready.
+Confined symbolic-link traversal, a richer resource protocol, and aggregation
+of multiple main modules in one `go.work` are intentionally deferred. The
+repository does not currently exercise those layouts, so support begins only
+when a concrete self-application case requires it. Packaging, signing, a
+published GitHub Action, and a broad external-repository harness are outside
+the current roadmap.

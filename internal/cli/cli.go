@@ -39,6 +39,7 @@ const (
 	CommandDoctor  Command = "doctor"
 	CommandFix     Command = "fix"
 	CommandCache   Command = "cache"
+	CommandTrace   Command = "trace"
 )
 
 type UI string
@@ -87,6 +88,8 @@ const help = `Usage:
 	goatest fix [ID...] [--apply]
 	goatest report [--latest-full|--run=ID]
 	goatest cache status|gc
+	goatest trace summary [RUN]
+	goatest trace diff RUN-A RUN-B
 	goatest help [command]
 Every command accepts --ui=auto|plain|jsonl and --json for its output; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
@@ -167,6 +170,14 @@ Print the latest report, the latest full-project report, or one recorded run.
 
 Show the evidence cache policy and contents, or collect expired and
 over-budget entries.
+`, true
+	case CommandTrace:
+		return `Usage:	goatest trace summary [RUN]
+	goatest trace diff RUN-A RUN-B
+
+Read a default .goatest/trace recording without replaying it. Summary makes
+missing streams, missing run-end events, sequence gaps, and dropped events
+explicit; diff compares event counts and phase durations.
 `, true
 	default:
 		return "", false
@@ -387,6 +398,25 @@ func parse(args []string) (Command, Request, string, error) {
 			return "", Request{}, "", usageError{command, errors.New("cache requires status or gc")}
 		}
 		return parsedCommand(command, request, rest[0])
+	case CommandTrace:
+		if len(rest) == 0 {
+			return "", Request{}, "", usageError{command, errors.New("trace requires summary or diff")}
+		}
+		action := rest[0]
+		switch action {
+		case "summary":
+			if len(rest) > 2 {
+				return "", Request{}, "", usageError{command, errors.New("trace summary accepts at most one run")}
+			}
+		case "diff":
+			if len(rest) != 3 {
+				return "", Request{}, "", usageError{command, errors.New("trace diff requires exactly two runs")}
+			}
+		default:
+			return "", Request{}, "", usageError{command, errors.New("trace requires summary or diff")}
+		}
+		request.IDs = append([]string(nil), rest[1:]...)
+		return parsedCommand(command, request, action)
 	default:
 		return "", Request{}, "", fmt.Errorf("unknown command %q", command)
 	}

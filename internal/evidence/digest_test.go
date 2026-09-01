@@ -81,6 +81,7 @@ func TestScanHashesContentModeAndCorpusSeparately(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	for name, contents := range map[string]string{
+		".goatest.toml":                   "version = 1\ncontract = \"standard-v1\"\n",
 		"source.go":                       "package fixture\n",
 		"source_test.go":                  "package fixture\n",
 		"testdata/fuzz/FuzzX/seed":        "[]byte seed",
@@ -102,7 +103,7 @@ func TestScanHashesContentModeAndCorpusSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || len(corpus) != 2 || files["source.go"] == "" || corpus["testdata/fuzz/FuzzX/seed"] == "" || corpus["nested/testdata/fuzz/FuzzY/seed"] == "" {
+	if len(files) != 3 || len(corpus) != 2 || files[".goatest.toml"] == "" || files["source.go"] == "" || corpus["testdata/fuzz/FuzzX/seed"] == "" || corpus["nested/testdata/fuzz/FuzzY/seed"] == "" {
 		t.Fatalf("files/corpus = %v / %v", files, corpus)
 	}
 }

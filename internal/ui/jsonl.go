@@ -42,13 +42,13 @@ func NewJSONL(writer io.Writer, now func() time.Time) Notes {
 func (renderer *jsonl) Note(kind, detail string) {
 	renderer.mutex.Lock()
 	defer renderer.mutex.Unlock()
-	data, err := json.Marshal(progressEvent{
+	// progressEvent contains only strings and an integer, so json.Marshal
+	// cannot reject its value. Writer failures remain best-effort like every
+	// other progress renderer.
+	data, _ := json.Marshal(progressEvent{
 		Type: "progress", Kind: kind, Detail: detail,
 		ElapsedMS: max(0, renderer.now().Sub(renderer.started).Milliseconds()),
 	})
-	if err != nil {
-		return
-	}
 	_, _ = renderer.writer.Write(append(data, '\n'))
 }
 

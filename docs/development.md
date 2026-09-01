@@ -551,7 +551,20 @@ result by mutation — break a hook in production and confirm the test that
 should catch it does — and finish with a repeated race run of the package
 (`-race -count=4`) and `go test ./internal/devgates/`.
 
-## Profiling
+## Local performance baselines
 
-Not yet implemented. There is no benchmark or performance contract for the
-runner; see [limitations](limitations.md).
+Four Go benchmarks cover the critical self-application paths without an
+external repository harness:
+
+```console
+go test -run '^$' -bench BenchmarkCheckpointIO ./internal/cache
+go test -run '^$' -bench BenchmarkDigest ./internal/evidence
+go test -run '^$' -bench BenchmarkMutationAccounting ./internal/assure
+go test -run '^$' -bench BenchmarkReportGeneration ./internal/report
+```
+
+They measure checkpoint write/read I/O, a 10,000-file input digest, accounting
+for a 10,000-mutant catalog, and JSON plus HTML rendering for a 5,000-mutant
+report. Record `benchstat` comparisons when changing one of those paths. The
+numbers are a local regression signal, not a compatibility or performance
+contract across unrelated repositories.

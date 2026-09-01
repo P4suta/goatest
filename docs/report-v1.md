@@ -35,6 +35,8 @@ A durable report must include:
 - RFC3339 start/finish times and duration;
 - cache-derived state and source run ID when applicable;
 - target, race, and mutant accounting;
+- every selected baseline target with its terminal status and measured
+  `duration_ms`;
 - every ID-level mutant disposition;
 - acceptance metadata, evidence, findings, repair candidates, and structured
   limitations.
@@ -48,10 +50,21 @@ The JSON Schema rejects unknown fields and constrains every nested object. Go
 validation additionally enforces arithmetic, scope/verdict, acceptance, cache,
 and unavailable-metadata invariants that JSON Schema alone cannot express.
 
+`targets` is canonically ordered by descending duration, then ascending target
+ID for equal durations. A completed run may also carry `resume` with the total
+attempt count and the numbers of baseline targets, race packages, and mutants
+reused from an exact-input checkpoint. Those counts are audit metadata; the
+restored units still contribute their ordinary evidence and accounting.
+
+An interrupted checkpoint is not a partial report and cannot advance any
+latest-report index. Its separate strict contract and deletion rules are in
+[checkpoint v1](checkpoint-v1.md).
+
 ## Projections
 
 JSON is the canonical complete model. HTML is self-contained and provides
-scope/accounting/audit tables plus client-side search and section filtering.
+scope/accounting/audit tables, a slowest-first target table, and client-side
+search and section filtering.
 SARIF carries findings and the audit model in run properties. JUnit represents
 evidence as passing cases, findings as failures, and embeds core identity as
 properties.

@@ -7,6 +7,7 @@ package report
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -161,6 +162,30 @@ type Accounting struct {
 	Race    CountAccounting  `json:"race"`
 }
 
+// TargetDisposition is the durable inventory entry for one selected baseline
+// target. DurationMS is the measured baseline runtime and is zero when the
+// target was not executed.
+type TargetDisposition struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Package    string `json:"package"`
+	Path       string `json:"path"`
+	Line       int    `json:"line"`
+	Status     string `json:"status"`
+	DurationMS int64  `json:"duration_ms"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+// Resume records how much exact-input checkpoint work contributed to a
+// completed report. Attempts includes the current attempt.
+type Resume struct {
+	Attempts           int `json:"attempts"`
+	ReusedTargets      int `json:"reused_targets"`
+	ReusedRacePackages int `json:"reused_race_packages"`
+	ReusedMutants      int `json:"reused_mutants"`
+}
+
 type Limitation struct {
 	Code      string `json:"code"`
 	Summary   string `json:"summary"`
@@ -220,7 +245,9 @@ type Report struct {
 	Timing        Timing              `json:"timing"`
 	Cache         Cache               `json:"cache"`
 	Accounting    Accounting          `json:"accounting"`
+	Targets       []TargetDisposition `json:"targets"`
 	Mutants       []MutantDisposition `json:"mutants"`
+	Resume        *Resume             `json:"resume,omitempty"`
 	Acceptances   []Acceptance        `json:"acceptances"`
 	Evidence      []Evidence          `json:"evidence"`
 	Findings      []Finding           `json:"findings"`
@@ -237,7 +264,12 @@ func canonical(input Report) Report {
 	result.Scope.Resolved = canonicalScope(result.Scope.Resolved)
 	result.Repository.Packages = canonicalStrings(result.Repository.Packages)
 	result.Repository.Git.ChangedFiles = canonicalStrings(result.Repository.Git.ChangedFiles)
+	result.Targets = slices.Clone(input.Targets)
 	result.Mutants = slices.Clone(input.Mutants)
+	if input.Resume != nil {
+		resume := *input.Resume
+		result.Resume = &resume
+	}
 	result.Acceptances = slices.Clone(input.Acceptances)
 	result.Evidence = slices.Clone(input.Evidence)
 	result.Findings = slices.Clone(input.Findings)
@@ -250,6 +282,12 @@ func canonical(input Report) Report {
 		return strings.Compare(a.ID, b.ID)
 	})
 	slices.SortFunc(result.Acceptances, func(a, b Acceptance) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(result.Targets, func(a, b TargetDisposition) int {
+		if compared := cmp.Compare(b.DurationMS, a.DurationMS); compared != 0 {
+			return compared
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	slices.SortFunc(result.Mutants, func(a, b MutantDisposition) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(result.Findings, func(a, b Finding) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(result.Repairs, func(a, b Repair) int { return strings.Compare(a.ID, b.ID) })
@@ -264,6 +302,9 @@ func canonical(input Report) Report {
 	}
 	if result.Acceptances == nil {
 		result.Acceptances = []Acceptance{}
+	}
+	if result.Targets == nil {
+		result.Targets = []TargetDisposition{}
 	}
 	if result.Mutants == nil {
 		result.Mutants = []MutantDisposition{}
@@ -395,6 +436,7 @@ var page = template.Must(template.New("report").Parse(`<!doctype html>
 <tr><th>Git</th><td>available={{.Repository.Git.Available}} · commit <code>{{.Repository.Git.Commit}}</code> · dirty={{.Repository.Git.Dirty}} · merge-base <code>{{.Repository.Git.MergeBase}}</code>{{range .Repository.Git.ChangedFiles}}<br><code>{{.}}</code>{{end}}</td></tr>
 <tr><th>Configuration</th><td><code>{{.Configuration.Digest}}</code></td></tr><tr><th>Toolchain</th><td>{{.Toolchain.Go}} · goatest {{.Toolchain.Goatest}} · go-mutants {{.Toolchain.GoMutants}} · {{.Toolchain.OS}}/{{.Toolchain.Arch}}</td></tr>
 <tr><th>Timing</th><td>{{.Timing.StartedAt}} → {{.Timing.FinishedAt}} · {{.Timing.DurationMS}} ms</td></tr><tr><th>Cache</th><td>derived={{.Cache.Derived}}{{if .Cache.SourceRunID}} · source <code>{{.Cache.SourceRunID}}</code>{{end}}</td></tr>
+{{if .Resume}}<tr><th>Resume</th><td>attempt {{.Resume.Attempts}} · reused {{.Resume.ReusedTargets}} targets, {{.Resume.ReusedRacePackages}} race packages, {{.Resume.ReusedMutants}} mutants</td></tr>{{end}}
 </tbody></table></div></section>
 <section><h2>Scope</h2><div class="scope-grid"><article class="scope-card"><h3>Requested</h3><p><code>{{.Scope.Requested.Kind}}</code> · project <code>{{.Scope.Requested.Project}}</code>{{if .Scope.Requested.Ref}} · ref <code>{{.Scope.Requested.Ref}}</code>{{end}}</p><strong>Modules</strong><ul>{{range .Scope.Requested.Modules}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul><strong>Packages</strong><ul>{{range .Scope.Requested.Packages}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul><strong>Files</strong><ul>{{range .Scope.Requested.Files}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul></article>
 <article class="scope-card"><h3>Resolved</h3><p><code>{{.Scope.Resolved.Kind}}</code> · project <code>{{.Scope.Resolved.Project}}</code>{{if .Scope.Resolved.Ref}} · ref <code>{{.Scope.Resolved.Ref}}</code>{{end}}</p><strong>Modules</strong><ul>{{range .Scope.Resolved.Modules}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul><strong>Packages</strong><ul>{{range .Scope.Resolved.Packages}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul><strong>Files</strong><ul>{{range .Scope.Resolved.Files}}<li><code>{{.}}</code></li>{{else}}<li class="empty">none</li>{{end}}</ul></article></div></section>
@@ -402,7 +444,8 @@ var page = template.Must(template.New("report").Parse(`<!doctype html>
 <tr><td>Targets</td><td>{{.Accounting.Targets.Discovered}}</td><td>{{.Accounting.Targets.Selected}}</td><td>{{.Accounting.Targets.Executed}}</td><td>{{.Accounting.Targets.Skipped}}</td><td>{{.Accounting.Targets.Excluded}}</td></tr>
 <tr><td>Mutants</td><td>{{.Accounting.Mutants.Discovered}}</td><td>{{.Accounting.Mutants.Selected}}</td><td>{{.Accounting.Mutants.Executed}} (killed {{.Accounting.Mutants.Killed}}, survived {{.Accounting.Mutants.Survived}}, inconclusive {{.Accounting.Mutants.Inconclusive}})</td><td>compile-rejected {{.Accounting.Mutants.CompileRejected}}, accepted {{.Accounting.Mutants.Accepted}}, unknown {{.Accounting.Mutants.Unknown}}</td><td>{{.Accounting.Mutants.OutOfScope}}</td></tr>
 <tr><td>Race packages</td><td>{{.Accounting.Race.Discovered}}</td><td>{{.Accounting.Race.Selected}}</td><td>{{.Accounting.Race.Executed}}</td><td>{{.Accounting.Race.Skipped}}</td><td>{{.Accounting.Race.Excluded}}</td></tr></tbody></table></section>{{end}}
-<div class="controls"><label>Search report<input id="report-search" type="search" placeholder="ID, path, status, summary…"></label><label>Section<select id="report-section"><option value="all">All</option><option value="mutants">Mutants</option><option value="findings">Findings</option><option value="evidence">Evidence</option><option value="repairs">Repairs</option><option value="acceptances">Acceptances</option><option value="limitations">Limitations</option></select></label></div>
+<div class="controls"><label>Search report<input id="report-search" type="search" placeholder="ID, path, status, summary…"></label><label>Section<select id="report-section"><option value="all">All</option><option value="targets">Targets</option><option value="mutants">Mutants</option><option value="findings">Findings</option><option value="evidence">Evidence</option><option value="repairs">Repairs</option><option value="acceptances">Acceptances</option><option value="limitations">Limitations</option></select></label></div>
+<section data-filterable data-section="targets"><h2>Targets (slowest first)</h2><table><thead><tr><th>ID</th><th>Target</th><th>Status</th><th>Location</th><th>Duration</th></tr></thead><tbody>{{range .Targets}}<tr data-row><td><code>{{.ID}}</code></td><td>{{.Kind}} <code>{{.Package}}/{{.Name}}</code></td><td>{{.Status}}{{if .Detail}}<br>{{.Detail}}{{end}}</td><td>{{.Path}}{{if .Line}}:{{.Line}}{{end}}</td><td>{{.DurationMS}} ms</td></tr>{{end}}</tbody></table><p class="empty" data-empty{{if .Targets}} hidden{{end}}>No matching targets.</p></section>
 <section data-filterable data-section="mutants"><h2>Mutants</h2><table><thead><tr><th>ID</th><th>Status</th><th>Location</th><th>Package / rule</th><th>Detail</th></tr></thead><tbody>{{range .Mutants}}<tr data-row><td><code>{{.ID}}</code></td><td>{{.Status}}</td><td>{{.Path}}{{if .Line}}:{{.Line}}{{end}}</td><td><code>{{.Package}}</code><br>{{.Rule}}</td><td>{{.Detail}}</td></tr>{{end}}</tbody></table><p class="empty" data-empty{{if .Mutants}} hidden{{end}}>No matching mutants.</p></section>
 <section data-filterable data-section="findings"><h2>Findings</h2><table><thead><tr><th>ID</th><th>Kind</th><th>Location</th><th>Summary and replay</th></tr></thead><tbody>{{range .Findings}}<tr data-row><td><code>{{.ID}}</code></td><td>{{.Kind}}</td><td>{{.Path}}{{if .Line}}:{{.Line}}{{end}}</td><td>{{.Summary}}{{if .Mutant}}<br><code>{{.Mutant}}</code>{{end}}{{if .Replay}}<br><code>{{.Replay}}</code>{{end}}</td></tr>{{end}}</tbody></table><p class="empty" data-empty{{if .Findings}} hidden{{end}}>No matching findings.</p></section>
 <section data-filterable data-section="evidence"><h2>Evidence</h2><table><thead><tr><th>Kind</th><th>ID</th><th>Status</th><th>Detail</th></tr></thead><tbody>{{range .Evidence}}<tr data-row><td>{{.Kind}}</td><td><code>{{.ID}}</code></td><td>{{.Status}}</td><td>{{.Detail}}</td></tr>{{end}}</tbody></table><p class="empty" data-empty{{if .Evidence}} hidden{{end}}>No matching evidence.</p></section>

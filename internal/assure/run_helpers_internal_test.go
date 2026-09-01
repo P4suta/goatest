@@ -418,6 +418,30 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	}
 }
 
+func TestModeIdentityInvalidatesEveryCheckpointExecutionDimension(t *testing.T) {
+	base := modeIdentity(Options{})
+	variants := []struct {
+		name    string
+		options Options
+	}{
+		{name: "package pattern", options: Options{Packages: []string{"./internal/ui"}}},
+		{name: "package scope", options: Options{PackageScope: true}},
+		{name: "test arguments", options: Options{TestArgs: []string{"-test.short=true"}}},
+		{name: "build tags", options: Options{BuildTags: []string{"integration"}}},
+		{name: "mutation operators", options: Options{MutationOperators: []string{"conditional-boundary"}}},
+		{name: "fuzz executions", options: Options{FuzzExecutions: 10}},
+		{name: "mutation jobs", options: Options{MutationJobs: 2}},
+		{name: "command timeout", options: Options{CommandTimeout: time.Minute}},
+		{name: "target timeout", options: Options{TargetTimeout: time.Second}},
+		{name: "changeset scope", options: Options{Changed: true, ChangedRef: "origin/main"}},
+	}
+	for _, variant := range variants {
+		if got := modeIdentity(variant.options); got == base {
+			t.Errorf("%s did not invalidate mode identity: %q", variant.name, got)
+		}
+	}
+}
+
 func TestProjectExcludeMatchingAndLimitationsAreExplicit(t *testing.T) {
 	patterns := []string{"generated/**", "**/*_generated.go", "exact_test.go"}
 	for path, want := range map[string]bool{
