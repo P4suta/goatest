@@ -70,12 +70,14 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           version: 2026.8.14
-          install_args: go golangci-lint actionlint typos gitleaks
+          install_args: go golangci-lint actionlint typos gitleaks taplo
       - name: Lint
         env:
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
         run: mise run lint
+      - name: TOML formatting
+        run: taplo fmt --check
 
   package:
     runs-on: ubuntu-latest
@@ -88,6 +90,8 @@ jobs:
         with:
           go-version: 1.26.6
           cache: false
+      # The snapshot exercises the same SBOM generation a release runs.
+      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser

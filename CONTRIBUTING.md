@@ -10,12 +10,15 @@ mise install
 mise run check
 ```
 
-`mise run check` runs the same gates as CI: formatting (`gofmt`, `taplo`),
+`mise run check` runs the local gates: formatting (`gofmt`, `taplo`),
 build and vet, the full test suite, and lint (`golangci-lint`, `actionlint`,
-`typos`, `gitleaks`). Individual tasks are listed by `mise tasks`.
+`typos`, `gitleaks`). CI runs the same gates plus what a single machine
+cannot: the three-OS test matrix, the race job, and the goreleaser snapshot
+packaging. Individual tasks are listed by `mise tasks`.
 
 The test suite exercises the real Go toolchain and takes a few minutes. Use
-`mise run test-race` before opening a pull request that touches concurrency.
+`mise run test-race` before opening a pull request that touches concurrency,
+and `mise run package` to reproduce the packaging job locally.
 
 ## Pull requests
 

@@ -28,7 +28,11 @@ func TestGoMutantsEvidenceVersionMatchesPinnedModule(t *testing.T) {
 		t.Fatal("go-mutants version pin is absent from go.mod")
 	}
 	pinned := strings.TrimSpace(string(match[1]))
-	if pinned != assure.GoMutantsVersion {
-		t.Fatalf("evidence version = %q, pinned module = %q", assure.GoMutantsVersion, pinned)
+	resolved, err := assure.GoMutantsVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned != resolved {
+		t.Fatalf("evidence version = %q, pinned module = %q", resolved, pinned)
 	}
 }

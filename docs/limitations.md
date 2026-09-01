@@ -62,8 +62,9 @@ self-dogfood is not external compatibility evidence.
   fan-out sinks are in-process. There is no reader tooling for a trace either:
   it is JSON Lines for `jq` and the embedded schema, with no subcommand that
   summarizes or diffs one. See [trace v1](trace-v1.md).
-- There is no benchmark/performance contract, signed release, SBOM, provenance
-  bundle, GitHub Action, or tagged binary distribution yet.
+- Release archives carry an SBOM and a GitHub build-provenance attestation,
+  but no cosign-signed checksums. There is no benchmark/performance contract,
+  GitHub Action, or tagged binary distribution yet.
 
 ## Release blockers
 

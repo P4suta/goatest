@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+version: "2"
+
+linters:
+  # The standard set (errcheck, govet, ineffassign, staticcheck, unused) plus
+  # additions the codebase passes today. Grow this list only with linters the
+  # whole tree satisfies, so the gate stays a gate rather than a suggestion.
+  default: standard
+  enable:
+    - copyloopvar
+    - misspell
+    - nolintlint
+    - unconvert
+    - whitespace

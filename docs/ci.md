@@ -45,6 +45,9 @@ the cache identity of the run. See [trace v1](trace-v1.md) for the format and
 fails the step.
 
 For this repository itself, the minimum pre-merge checks are `go test ./...`,
-`go test -race ./...`, and `go vet ./...`. A release workflow still needs a
-three-OS matrix, supported architectures/CGO fixtures, report schema checks,
-signed checksums, SBOM, and provenance verification before the first beta.
+`go test -race ./...`, and `go vet ./...`. The release workflow builds a
+three-OS matrix through goreleaser, produces one SBOM per archive through
+syft, and signs a build-provenance attestation for every archive
+(verifiable with `gh attestation verify <archive> --repo P4suta/goatest`).
+Still open before the first beta: supported architectures/CGO fixtures,
+report schema checks in CI, and cosign-signed checksums.
