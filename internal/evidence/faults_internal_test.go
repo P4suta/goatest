@@ -83,8 +83,10 @@ func (file *stubEvidenceFile) Close() error {
 }
 
 func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"walk", "callback", "relative", "symlink", "info", "irregular", "digest"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			failure := errors.New(stage + " failure")
 			hooks := scanHooks{}
 			entry := stubEvidenceEntry{
@@ -127,6 +129,7 @@ func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
 }
 
 func TestFileDigestPropagatesOpenAndCopyFailures(t *testing.T) {
+	t.Parallel()
 	openFailure := errors.New("open failure")
 	openHooks := scanHooks{open: func(string) (io.ReadCloser, error) { return nil, openFailure }}
 	if _, err := fileDigestWithHooks("missing", 0o644, openHooks); !errors.Is(err, openFailure) {
@@ -147,6 +150,7 @@ func TestFileDigestPropagatesOpenAndCopyFailures(t *testing.T) {
 // TestScanDigestsThroughItsOpenHook keeps the wiring the default digest hook
 // depends on: a scan that is given only an open hook still digests through it.
 func TestScanDigestsThroughItsOpenHook(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("open failure")
 	entry := stubEvidenceEntry{name: "sample", info: stubEvidenceInfo{name: "sample", mode: 0o644}}
 	hooks := scanHooks{
@@ -161,6 +165,7 @@ func TestScanDigestsThroughItsOpenHook(t *testing.T) {
 }
 
 func TestGraphJSONPropagatesMarshalFailure(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("graph marshal failure")
 	hooks := graphHooks{marshalGraph: func(any, string, string) ([]byte, error) { return nil, failure }}
 	if data, err := (Graph{}).jsonWithHooks(hooks); !errors.Is(err, failure) || data != nil {
@@ -169,6 +174,7 @@ func TestGraphJSONPropagatesMarshalFailure(t *testing.T) {
 }
 
 func TestLoadGraphReturnsReadFailureWithoutDecodeFallback(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("read failure")
 	hooks := graphHooks{
 		readGraph: func(string) ([]byte, error) { return []byte(`{"schema":"evidence-graph-v1"}`), failure },
@@ -180,8 +186,10 @@ func TestLoadGraphReturnsReadFailureWithoutDecodeFallback(t *testing.T) {
 }
 
 func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"graph-marshal", "graph-unmarshal", "record-marshal", "mkdir", "create", "write", "sync", "close"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			failure := errors.New(stage + " failure")
 			file := &stubEvidenceFile{name: filepath.Join(root, "temporary")}
@@ -214,6 +222,7 @@ func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
 }
 
 func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
+	t.Parallel()
 	firstRename := errors.New("first rename")
 	secondRename := errors.New("second rename")
 	removeFailure := errors.New("remove destination")
@@ -230,6 +239,7 @@ func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testin
 		{name: "remove-failure", removeErr: removeFailure, want: firstRename, wantJoined: removeFailure, wantCalls: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			temporary := filepath.Join(root, "temporary")
 			destination := filepath.Join(root, "graph.json")

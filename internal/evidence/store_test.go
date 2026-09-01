@@ -14,6 +14,7 @@ import (
 )
 
 func TestGraphStoreRoundTripsCanonicalRecord(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "nested", "graph.json")
 	want := evidence.GraphRecord{
@@ -46,6 +47,7 @@ func TestGraphStoreRoundTripsCanonicalRecord(t *testing.T) {
 }
 
 func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
+	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	if got, ok, err := evidence.LoadGraph(missing); err != nil || ok || !reflect.DeepEqual(got, evidence.GraphRecord{}) {
 		t.Fatalf("missing LoadGraph = %+v, ok %v, err %v", got, ok, err)
@@ -64,6 +66,7 @@ func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
 		{name: "module", data: `{"schema":"evidence-graph-v1","module_path":"","graph":{}}`, want: "identity mismatch"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "graph.json")
 			if testCase.directory {
 				if err := os.Mkdir(path, 0o755); err != nil {
@@ -82,6 +85,7 @@ func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
 }
 
 func TestSaveGraphRejectsEmptyModuleBeforeCreatingOutput(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "graph.json")
 	err := evidence.SaveGraph(path, evidence.GraphRecord{})
@@ -94,6 +98,7 @@ func TestSaveGraphRejectsEmptyModuleBeforeCreatingOutput(t *testing.T) {
 }
 
 func TestSaveGraphReportsDirectoryFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	blocking := filepath.Join(root, "parent")
 	if err := os.WriteFile(blocking, []byte("file"), 0o644); err != nil {

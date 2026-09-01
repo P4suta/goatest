@@ -14,6 +14,7 @@ import (
 )
 
 func TestGraphNarrowsKnownChangesAndBroadensUnknownOnes(t *testing.T) {
+	t.Parallel()
 	graph := evidence.Graph{
 		FilePackages: map[string]string{
 			"a/a.go": "example/a",
@@ -40,6 +41,7 @@ func TestGraphNarrowsKnownChangesAndBroadensUnknownOnes(t *testing.T) {
 }
 
 func TestGraphAffectedIsolatesTestStructureDependencyAndCoverageEdges(t *testing.T) {
+	t.Parallel()
 	graph := evidence.Graph{
 		FilePackages: map[string]string{
 			"pkg/code.go":        "example/pkg",
@@ -65,6 +67,7 @@ func TestGraphAffectedIsolatesTestStructureDependencyAndCoverageEdges(t *testing
 		{name: "wrong-test-package", changed: "other/code_test.go", want: []string{"unrelated"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			got := graph.Affected([]string{testCase.changed})
 			if got.Broad || !slices.Equal(got.Targets, testCase.want) {
 				t.Fatalf("Affected(%q) = %+v, want %v", testCase.changed, got, testCase.want)
@@ -81,6 +84,7 @@ func TestGraphAffectedIsolatesTestStructureDependencyAndCoverageEdges(t *testing
 }
 
 func TestGraphBytesAreCanonical(t *testing.T) {
+	t.Parallel()
 	graph := evidence.Graph{
 		FilePackages: map[string]string{"z.go": "z", "a.go": "a"},
 		Targets: []evidence.Target{

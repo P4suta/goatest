@@ -13,6 +13,7 @@ import (
 )
 
 func TestDigestIsDeterministicAndEveryInputInvalidatesIt(t *testing.T) {
+	t.Parallel()
 	base := evidence.Inputs{
 		Files:            map[string]string{"a.go": "aaa", "a_test.go": "bbb"},
 		Dependencies:     map[string]string{"example.com/dep": "v1.2.3:sum"},
@@ -53,6 +54,7 @@ func TestDigestIsDeterministicAndEveryInputInvalidatesIt(t *testing.T) {
 }
 
 func TestInputsCloneIsEqualAndOwnsEveryMutableCollection(t *testing.T) {
+	t.Parallel()
 	original := evidence.Inputs{
 		Files:        map[string]string{"a.go": "one"},
 		Dependencies: map[string]string{"example/dep": "v1"},
@@ -76,6 +78,7 @@ func TestInputsCloneIsEqualAndOwnsEveryMutableCollection(t *testing.T) {
 }
 
 func TestScanHashesContentModeAndCorpusSeparately(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	for name, contents := range map[string]string{
 		"source.go":                       "package fixture\n",
