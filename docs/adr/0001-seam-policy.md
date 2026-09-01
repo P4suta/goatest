@@ -90,9 +90,20 @@ Behaviour a test replaces travels as an argument. Concretely:
    the package-level seams it finds against `internal/devgates/seam_allowlist.txt`.
    The scan and the ledger must agree exactly: a seam the ledger does not name
    fails the gate as a new global, and a ledger entry the tree no longer has
-   fails it as a removal that was not recorded. The ledger may shrink and never
-   grow.
-7. **Migration is per package, in the pull request that touches it.** There is
+   fails it as a removal that was not recorded. Agreement is all the gate
+   reads, so a seam and the ledger line naming it are green when they arrive
+   together; what refuses that pair is the next point, and a reviewer, not the
+   test.
+7. **The ledger grows only by amending this record.** The ledger's own header
+   and the gate's failure message state the rule unqualified — it may shrink
+   and never grow — and this record is the one place an addition is allowed. A
+   pull request may add a line only when a single commit carries three things
+   together: the seam, its line in the ledger, and an entry under
+   [Exceptions](#exceptions) naming that line, why the behaviour cannot travel
+   as an argument, and the date by which the seam goes. An addition missing
+   any of the three is the growth the ratchet refuses, however green the gate
+   is, and the review rejects it.
+8. **Migration is per package, in the pull request that touches it.** There is
    no flag day and no branch that converts everything. A package moves when a
    change reaches it: a test-first commit that pins what the seams left
    implicit and passes against the old code, a refactor commit that introduces
@@ -114,10 +125,13 @@ remain across nine packages, thirty of them in `internal/assure`.
   `internal/processtree/tree_windows.go` costs a line on every platform. The
   ledger therefore measures the shape the repository is moving away from, not
   the number of tests that currently depend on it.
-- A line may still be added, and the gate's failure message says so explicitly:
-  it is a reviewed exception, argued in the pull request that adds it, not the
-  ordinary way past a red gate. The ledger records the exception where a
-  reviewer will see it instead of leaving it in the package where nobody will.
+- The gate cannot tell an exception from an ordinary addition. A seam and the
+  line that names it agree with each other, so the test is green whichever one
+  it is, and the failure message says as much before a printed line is pasted
+  in: adding a line to the ledger is a reviewed exception, not the fix. What
+  separates the two is the amendment decision 7 requires, which puts the reason
+  and the expiry in front of a reviewer instead of leaving them in the package
+  where nobody will see them.
 - A default that is not a plain `os` call is a place a bug can hide.
   `storeHooks.collect` defaults to the unlocked collector rather than the
   exported `Collect`, because the commit that calls it already holds the write
@@ -134,3 +148,12 @@ remain across nine packages, thirty of them in `internal/assure`.
   indefinitely, and the ledger is the only measure of progress. The decision
   this record makes is about direction and about what the gate refuses, not
   about when the count reaches zero.
+
+## Exceptions
+
+The ledger lines added under decision 7, one entry each: the `package-path
+name` of the line, why the behaviour cannot travel as an argument, and the date
+by which the seam goes.
+
+None. Every line in `internal/devgates/seam_allowlist.txt` predates this record
+and is covered by the migration, not by an exception.

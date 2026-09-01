@@ -409,17 +409,25 @@ literal of a package-local struct whose every field is a function. Data is not:
 a `//go:embed` var, a sentinel from `errors.New` or `fmt.Errorf`, a basic
 literal, a slice or map literal, a zero-valued mutex, `sync.Once`, or atomic.
 Test files are never scanned, build constraints are never applied — a
-Windows-only indirection counts on Linux too — and `dist`, `reports`,
-`testdata`, `vendor`, and dot directories are skipped.
+Windows-only indirection counts on Linux too — and `testdata`, `vendor`, and
+directories whose name opens with `.` or `_` are skipped wherever they sit.
+`dist` and `reports` are skipped at the repository root only, where the
+generated output that `.gitignore` also names lands; a directory called `dist`
+further down, such as `kept/nested/dist`, is production code and is scanned
+like any other.
 
 The scan and the ledger must agree exactly, in both directions.
 
 **A seam the ledger does not name** fails
 `TestPackageLevelSeamsMatchAllowlist`, printing the offending declarations in
 ledger format. It means a new global arrived. The fix is to not introduce it —
-write the [hooks](#writing-hooks) below instead. Pasting the printed line into
-the ledger is a reviewed exception to argue in the pull request, not the
-routine way to a green gate.
+write the [hooks](#writing-hooks) below instead. Pasting the printed line in
+turns the gate green, because the scan and the ledger then agree, and that is
+not enough to land the change: the ledger grows only under the exception in
+[ADR 0001](adr/0001-seam-policy.md), which wants the seam, its ledger line, and
+an entry in the ADR giving the reason and the date the seam goes — all in one
+commit. Without that entry the addition is refused in review, however green the
+gate is.
 
 **A ledger entry the tree no longer has** fails the same test from the other
 side: a seam went away without the ledger being updated. Delete its line in the
