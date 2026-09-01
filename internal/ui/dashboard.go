@@ -153,14 +153,19 @@ func (renderer *dashboard) Close() {
 }
 
 // watch redraws the status line on every tick, which is what keeps the
-// elapsed time moving through the phases that emit nothing for a while.
+// elapsed time moving through the phases that emit nothing for a while. A tick
+// stream that closes ends the watching, because a closed channel would
+// otherwise be ready forever.
 func (renderer *dashboard) watch(tick <-chan time.Time) {
 	defer close(renderer.done)
 	for {
 		select {
 		case <-renderer.stop:
 			return
-		case <-tick:
+		case _, open := <-tick:
+			if !open {
+				return
+			}
 			renderer.mutex.Lock()
 			if !renderer.closed && renderer.phase != "" {
 				renderer.renderLocked()

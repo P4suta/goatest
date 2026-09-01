@@ -245,13 +245,18 @@ func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 // labeled its error: the service layer wraps most of its errors under the same
 // prefix this layer writes.
 func TestErrorPrefixIsNeverDoubled(t *testing.T) {
-	fake := &service{err: errors.New("goatest: read latest report: file is absent")}
-	var stderr bytes.Buffer
-	if exit := cli.Run(t.Context(), []string{"report"}, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
-		t.Fatalf("exit = %d", exit)
-	}
-	if got, want := stderr.String(), "goatest: read latest report: file is absent\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
+	for _, wrapped := range []string{
+		"goatest: read latest report: file is absent",
+		"goatest: goatest: read latest report: file is absent",
+	} {
+		fake := &service{err: errors.New(wrapped)}
+		var stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), []string{"report"}, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
+			t.Fatalf("exit = %d", exit)
+		}
+		if got, want := stderr.String(), "goatest: read latest report: file is absent\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
 	}
 }
 

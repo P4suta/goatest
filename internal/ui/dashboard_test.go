@@ -130,6 +130,23 @@ func TestDashboardBoundsTheStatusLineWidth(t *testing.T) {
 	}
 }
 
+// A tick stream that closes must end the watcher rather than leave a receive
+// that is ready forever: the buggy shape redraws in a busy loop until Close.
+func TestDashboardStopsWatchingWhenTheTickStreamCloses(t *testing.T) {
+	buffer := &lockedBuffer{}
+	tick := make(chan time.Time)
+	notes := ui.NewDashboard(buffer, ui.DashboardOptions{Now: newFixedClock().Now, Tick: tick})
+	notes.Note("snapshot", "captured")
+	close(tick)
+	time.Sleep(10 * time.Millisecond)
+	before := len(buffer.String())
+	time.Sleep(20 * time.Millisecond)
+	if after := len(buffer.String()); after != before {
+		t.Fatalf("watcher kept redrawing after the tick stream closed: %d -> %d bytes", before, after)
+	}
+	notes.Close()
+}
+
 func TestDashboardSurvivesConcurrentNotesTicksAndClose(t *testing.T) {
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()

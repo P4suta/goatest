@@ -293,9 +293,9 @@ func Load(root string) (Config, error) {
 // setting on is uncommenting a line rather than hunting documentation. The
 // strict parser ignores comments, so loading this file yields exactly the
 // defaults.
-const initTemplate = `# goatest strict configuration, version 1.
-# Every key is optional and unknown keys are refused. The commented values
-# below are the defaults or examples; uncomment a line to change a setting.
+const initTemplate = `# goatest strict configuration. version is required; every other key is
+# optional and unknown keys are refused. The commented values below are the
+# defaults or examples; uncomment a line to change a setting.
 version = 1
 
 # contract selects the fault model: "standard-v1" or "deep-v1".
@@ -322,7 +322,8 @@ contract = "standard-v1"
 # [resources.postgres]
 # command = ["./tools/postgres-provider"]
 # timeout = "30s"
-# shared = true                    # one instance serves every target; exclusive = true serializes instead
+# shared = true                    # one instance serves every target
+# exclusive = true                 # serializes access instead; at most one of shared and exclusive
 # environment = ["POSTGRES_IMAGE"] # variable names forwarded to the provider
 
 # [generation]

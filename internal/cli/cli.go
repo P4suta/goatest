@@ -212,9 +212,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 
 // diagnose writes one diagnostic line under exactly one "goatest: " prefix,
 // escaped onto a single line so that nothing a run reports can forge a line of
-// its own, however the layer below labeled its error.
+// its own, however many times the layers below labeled their error.
 func diagnose(stderr io.Writer, message string) {
-	_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(strings.TrimPrefix(message, "goatest: ")))
+	for strings.HasPrefix(message, "goatest: ") {
+		message = strings.TrimPrefix(message, "goatest: ")
+	}
+	_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(message))
 }
 
 // usageError is a parse error raised after the command was recognized, which
