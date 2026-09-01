@@ -1,0 +1,5 @@
+{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0}
+{"seq":2,"type":"phase-start","timestamp":"2026-01-01T00:00:00.010Z","elapsed_ms":10,"phase":{"name":"snapshot"}}
+{"seq":3,"type":"progress","timestamp":"2026-01-01T00:00:00.120Z","elapsed_ms":120,"progress":{"kind":"snapshot","detail":"digest complete"}}
+{"seq":4,"type":"phase-end","timestamp":"2026-01-01T00:00:00.130Z","elapsed_ms":130,"phase":{"name":"snapshot","duration_ms":120}}
+{"seq":5,"type":"phase-start","timestamp":"2026-01-01T00:00:00.131Z","elapsed_ms":131,"phase":{"name":"cache-check"}}

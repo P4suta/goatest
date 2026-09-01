@@ -210,6 +210,15 @@ once. Nothing reads that ring unless the run fails, and then it becomes the
 nobody expected be read as a recording, when nobody thought to pass `--trace`
 for it.
 
+`mise run trace-summary <trace.jsonl>` aggregates one recording into the
+performance breakdown of its run: phase durations, the command classes the run
+spent its time in, and what became of the mutants it executed. Every number
+comes from a recorded value, so summarizing a trace twice prints the same
+bytes; a line the trace contract does not allow is an error naming the line,
+because a total that quietly skipped an event would be a confident wrong
+number. This is how the mutation phase was measured at 98% of a full run
+before the performance work started — measure before attributing.
+
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
 produced any. The stream, its nine event types, and the fields of each are

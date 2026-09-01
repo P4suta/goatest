@@ -14,7 +14,11 @@ line. Loading the untouched skeleton yields exactly the defaults.
 - `[project]`: `packages` and explicit `exclude` patterns. Excludes are project
   boundaries and appear as report limitations.
 - `[execution]`: `build_tags`, `test_binary_args`, environment-name allowlist,
-  positive `timeout`, and non-negative `jobs`.
+  positive `timeout`, and non-negative `jobs`. An explicit `jobs` value is the
+  mutation parallelism used as written; when it is absent the run uses the
+  logical CPU count capped at four, and an exclusive resource forces one job
+  regardless. The decided value is announced as the `mutation-jobs` progress
+  note.
 - `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
   applied independently to exact-input cache entries, trace run directories,
   and failure-diagnostics directories. Checkpoints live inside their

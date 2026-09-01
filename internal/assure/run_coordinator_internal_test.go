@@ -334,12 +334,13 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		harness.generationOptions.RepositoryValidator.Contract != "standard-v1" || harness.generationOptions.RepositoryValidator.GoBinary != "go-custom" {
 		t.Fatalf("generation options = %+v", harness.generationOptions)
 	}
-	wantKinds := []string{"snapshot", "impact-broad", "baseline-target", "race", "mutation-prepare", "mutation-target"}
+	wantKinds := []string{"snapshot", "impact-broad", "baseline-target", "race", "mutation-prepare", "mutation-jobs", "mutation-target"}
 	gotKinds := make([]string, len(harness.events))
 	for index, event := range harness.events {
 		gotKinds[index] = event.Kind
 	}
-	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[3].Detail != "1 packages" || harness.events[5].Detail != "1 mutant" {
+	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[3].Detail != "1 packages" ||
+		harness.events[5].Detail != "3" || harness.events[6].Detail != "1 mutant" {
 		t.Fatalf("events = %+v", harness.events)
 	}
 }

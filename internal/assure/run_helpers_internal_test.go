@@ -253,7 +253,7 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 		inputs.Dependencies["dependency"] != "digest" || inputs.Resources["postgres"] == "" || len(inputs.Files) == 0 || len(inputs.Corpus) == 0 {
 		t.Fatalf("assuranceInputs = (%+v, %q, %v)", inputs, digest, err)
 	}
-	for _, expected := range []string{"B=2", "a=1", "GOFLAGS=-trimpath", "GOTOOLCHAIN=local"} {
+	for _, expected := range []string{"B=2", "a=1", "GOFLAGS=-trimpath -buildvcs=false", "GOTOOLCHAIN=local"} {
 		if !slices.Contains(inputs.Environment, expected) {
 			t.Fatalf("selected environment missing %q: %v", expected, inputs.Environment)
 		}
@@ -477,7 +477,7 @@ func TestMutationJobLimitAndProgressCoverEveryBoundary(t *testing.T) {
 	if got := mutationJobLimit(Options{MutationJobs: 4}, config.Config{Resources: map[string]config.Resource{"db": {Exclusive: true}}}); got != 1 {
 		t.Fatalf("exclusive jobs = %d", got)
 	}
-	for _, test := range []struct{ requested, want int }{{-1, 2}, {0, 2}, {1, 1}, {4, 4}, {5, 4}} {
+	for _, test := range []struct{ requested, want int }{{-1, 2}, {0, 2}, {1, 1}, {4, 4}, {5, 5}} {
 		if got := mutationJobLimit(Options{MutationJobs: test.requested}, config.Config{}); got != test.want {
 			t.Errorf("mutationJobLimit(%d) = %d, want %d", test.requested, got, test.want)
 		}
@@ -571,6 +571,21 @@ func TestBaselineVerdictRepositoryRootExecutionEnvironmentAndEmit(t *testing.T) 
 		containsEnvironment(environment, "__MISE_SESSION", "changes-every-shell") ||
 		slices.Contains(environment, "invalid=") || slices.Contains(environment, "=empty") {
 		t.Fatalf("executionEnvironment = %v", environment)
+	}
+	// Snapshots exclude every .git by design and their identity is goatest's
+	// own digest, so VCS stamping has nothing to stamp — and a stray .git
+	// above the temporary root (a real /tmp/.git broke two dogfood runs)
+	// otherwise fails every go command in the snapshot.
+	if !containsEnvironment(environment, "GOFLAGS", "-buildvcs=false") {
+		t.Fatalf("executionEnvironment did not disable VCS stamping: %v", environment)
+	}
+	merged := executionEnvironment([]string{"GOFLAGS=-trimpath"})
+	if !containsEnvironment(merged, "GOFLAGS", "-trimpath -buildvcs=false") {
+		t.Fatalf("executionEnvironment did not merge GOFLAGS: %v", merged)
+	}
+	already := executionEnvironment([]string{"GOFLAGS=-buildvcs=false"})
+	if !containsEnvironment(already, "GOFLAGS", "-buildvcs=false") {
+		t.Fatalf("executionEnvironment duplicated the flag: %v", already)
 	}
 	if input[0] != "b=2" {
 		t.Fatal("executionEnvironment mutated input")

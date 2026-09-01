@@ -41,8 +41,15 @@ contract must be explicit rather than treating ordinary benchmarks as tests.
 A mutant is `killed` only after:
 
 1. an initial mutant execution fails;
-2. the immediately preceding original-code control passes; and
+2. the original-code control for that request passes; and
 3. a second execution of the same mutant/request also fails.
+
+Each distinct control command — the package, arguments, and environment of the
+killing request, which the original code does not vary by mutant — runs once
+per mutation phase and its outcome answers every kill that shares it. The
+snapshot is frozen for the whole phase and re-verified afterwards, so a
+remembered control is the same evidence as a repeated one without the repeated
+cost.
 
 An original control failure is `flaky-mutation-control`; a non-reproducing kill
 is `flaky-mutation-kill`. Both are inconclusive evidence and prevent an assured
