@@ -40,7 +40,7 @@ func TestSignalProcessHelper(t *testing.T) {
 	if os.Getenv(signalHelperEnvironment) != "1" {
 		return
 	}
-	os.Exit(runWithService(nil, signalBlockingService{ready: os.Getenv("GOATEST_SIGNAL_READY")}))
+	os.Exit(runWithService([]string{"verify"}, signalBlockingService{ready: os.Getenv("GOATEST_SIGNAL_READY")}))
 }
 
 func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {

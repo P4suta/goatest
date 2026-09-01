@@ -65,9 +65,10 @@ func withKeepTempEnvironment(arguments []string, value string) []string {
 // An explicit flag always wins, an argument list that only asks for the help
 // text or the version is left exactly as it is, and the flag is inserted ahead
 // of the test-binary separator so that it reaches goatest rather than a test
-// binary.
+// binary. An empty argument list asks for the help text, so it stays empty
+// rather than becoming a run nobody asked for.
 func withEnvironmentFlag(arguments []string, flag string, requested bool) []string {
-	if !requested {
+	if !requested || len(arguments) == 0 {
 		return arguments
 	}
 	name, _, _ := strings.Cut(flag, "=")
