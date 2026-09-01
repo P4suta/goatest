@@ -185,6 +185,29 @@ func TestPutTreatsPostCommitCollectionAsBestEffort(t *testing.T) {
 	}
 }
 
+// TestPutTrimsTheBoundedCacheAfterCommittingAnEntry pins the collection a
+// policy store runs for itself. Every other collection test replaces the
+// collector, so without this one nothing exercises the default: a store wired
+// to the locking Collect, or to no collector at all, would still pass them.
+func TestPutTrimsTheBoundedCacheAfterCommittingAnEntry(t *testing.T) {
+	root := t.TempDir()
+	store := NewWithPolicy(root, 1, time.Hour)
+	if err := store.Put("digest-a", cachedReport()); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.Get("digest-a")
+	if err != nil || found {
+		t.Fatalf("entry over the byte budget survived its own write: (%+v, %t, %v)", got, found, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("collected cache still holds %v", entries)
+	}
+}
+
 type cacheIOHooks struct {
 	read   func(string) ([]byte, error)
 	mkdir  func(string, os.FileMode) error
