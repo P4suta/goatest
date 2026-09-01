@@ -78,6 +78,12 @@ would otherwise grow with the run instead of with the ring.
 A refused trace directory falls back to it, which is what a refusal costs: the
 file, never the account of the run.
 
+A run that failed writes that recording out, as `trace.jsonl` in the diagnostics
+bundle under `.goatest/diagnostics/<run>/`. It is this stream under this schema,
+so everything that reads a trace reads that file too; a run that recorded into a
+trace directory keeps its stream there instead, and its bundle names the
+directory. See [development](development.md) for the rest of a bundle.
+
 ## Directory layout
 
 ```text
@@ -240,10 +246,16 @@ half of one.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | what kind of file it is |
-| `path` | the file, relative to the repository |
+| `kind` | what kind of directory or file it is |
+| `path` | where it is, as the run recorded it |
 
-Part of the contract; no run emits one yet.
+A run emits one for each temporary directory `--keep-temp` asked it to keep:
+`baseline-scratch` for the scratch directory a round collected its baseline in,
+and `candidate-tree` for the isolated tree a generated candidate was validated
+in. Those paths are absolute and outside the repository, because that is where a
+temporary directory is made, so a `path` is read as it was recorded rather than
+resolved against anything. Nothing else emits an `artifact` event yet. See
+[development](development.md) for what is kept and what is not.
 
 ### `run`
 
