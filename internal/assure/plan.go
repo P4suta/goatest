@@ -135,11 +135,15 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		Kind: "plan", ID: "summary", Status: "completed",
 		Detail: fmt.Sprintf("targets=%d mutants=%d compile-rejected=%d resources=%d jobs=%d estimated-mutation-waves=%d", len(targets), selectedMutants, compileRejected, len(resources), jobs, waves),
 	})
+	goMutants, err := GoMutantsVersion()
+	if err != nil {
+		return report.Report{}, err
+	}
 	return report.Report{
 		Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted, Contract: contract,
 		Scope:       reportScope(options, metadata.model, selection),
 		Repository:  report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
-		Toolchain:   report.Toolchain{Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
+		Toolchain:   report.Toolchain{Go: metadata.toolchain, Goatest: ResolvedGoatestVersion(), GoMutants: goMutants, OS: runtime.GOOS, Arch: runtime.GOARCH},
 		Evidence:    evidenceItems,
 		Limitations: append(projectExcludeLimitations(loaded.Project.Exclude), report.Limitation{Code: "plan-cost-estimate", Summary: "mutation waves exclude target-specific runtime, resource startup, race, and fuzz escalation", Estimated: true}),
 	}, nil

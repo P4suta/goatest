@@ -242,6 +242,15 @@ These are the same notes the run reports to the progress stream, forwarded into
 the recording so that a trace is a complete account of one run rather than a
 half of one.
 
+A `--ui=jsonl` run streams the same notes to stdout as
+`{"type":"progress","kind":...,"detail":...,"elapsed_ms":...}` lines: same
+`kind`, same `detail`, so a note reads the same wherever it is watched. The two
+pipelines stay separate on purpose - the UI stream is diagnostic and carries no
+schema or completeness contract, its `elapsed_ms` is stamped by the renderer,
+and only the final `{"type":"report",...}` line of stdout is stable - while the
+recording keeps the `events_emitted`/`events_dropped` accounting a trace is
+audited by.
+
 ### `artifact`
 
 | Field | Meaning |

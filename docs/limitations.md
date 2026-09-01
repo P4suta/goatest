@@ -1,6 +1,6 @@
 # Current limitations and release gates
 
-This is an unreleased alpha. The implementation has strong self-tests, but
+This is a pre-release alpha. The implementation has strong self-tests, but
 self-dogfood is not external compatibility evidence.
 
 ## Fail-closed implementation limits
@@ -24,9 +24,13 @@ self-dogfood is not external compatibility evidence.
   checkpoints, and interrupted-run resume are not implemented.
 - Resource providers support start/ready/stop and shared/exclusive instances,
   but not health, reset, per-target scope, or log artifacts.
-- The compact TTY dashboard and streaming phase-level JSONL events are not yet
-  implemented; `auto` and `plain` currently use deterministic line output and
-  JSONL emits the final report event.
+- The `--ui=auto` dashboard renders only on an interactive ANSI-capable
+  terminal and falls back to deterministic plain lines everywhere else
+  (pipes, `TERM=dumb`, `NO_COLOR`, and a legacy Windows console that refuses
+  virtual-terminal processing). Its remaining-time figure is a heuristic
+  projected from the average executed mutant, never a contract. The shape of a
+  streamed `--ui=jsonl` progress event is diagnostic and may change between
+  versions; only the final `{"type":"report",...}` line is a stable contract.
 - The HTML report supports local search/filtering but does not yet compute a
   dedicated slow-target ranking beyond searchable evidence details.
 - A trace records the commands the mutation workspace runs and the mutants it
@@ -58,8 +62,9 @@ self-dogfood is not external compatibility evidence.
   fan-out sinks are in-process. There is no reader tooling for a trace either:
   it is JSON Lines for `jq` and the embedded schema, with no subcommand that
   summarizes or diffs one. See [trace v1](trace-v1.md).
-- There is no benchmark/performance contract, signed release, SBOM, provenance
-  bundle, GitHub Action, or tagged binary distribution yet.
+- Release archives carry an SBOM and a GitHub build-provenance attestation,
+  but no cosign-signed checksums. There is no benchmark/performance contract
+  or GitHub Action yet.
 
 ## Release blockers
 

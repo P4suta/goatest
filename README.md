@@ -5,9 +5,8 @@ connects native Go tests and fuzz targets with coverage routing, mutation
 testing, targeted native fuzzing, race checks, explicit integration resources,
 and reviewable repair candidates.
 
-This repository has not published a release yet. The current code is a
-pre-release alpha; `v1` is the first intended public contract and is defined
-directly, without a legacy compatibility layer.
+The current release line is a pre-release alpha; `v1` is the first intended
+public contract and is defined directly, without a legacy compatibility layer.
 
 The goal is narrower than proving program correctness. `ASSURED` means that a
 recorded full-project scope completed its configured fault model without
@@ -35,21 +34,37 @@ For `standard-v1`, goatest:
 `deep-v1` expands operators and exploration limits and requires race execution
 for every resolved package.
 
-## Build and try the unreleased CLI
-
-There is no `@latest` installation path until the first tag is published.
-From a checkout:
+## Install
 
 ```console
-go build -o goatest ./cmd/goatest
-./goatest doctor
-./goatest plan ./...
-./goatest verify ./...
-./goatest verify --changed=origin/main ./... -- -short
-./goatest verify --contract=deep-v1 ./...
+go install github.com/P4suta/goatest/cmd/goatest@latest
 ```
 
-On Windows, run `goatest.exe` instead of `./goatest`.
+Prebuilt archives for Linux, macOS, and Windows (amd64/arm64) are on the
+[releases page](https://github.com/P4suta/goatest/releases), each with a syft
+SBOM and a GitHub build-provenance attestation. Verify the one archive you
+downloaded, for example:
+
+```console
+gh attestation verify goatest_0.1.0_Linux_x86_64.tar.gz --repo P4suta/goatest
+```
+
+Building from a checkout works the same way: `go build -o goatest ./cmd/goatest`.
+
+## Try it
+
+```console
+goatest init
+goatest doctor
+goatest plan ./...
+goatest verify ./...
+goatest verify --changed=origin/main ./... -- -short
+goatest verify --contract=deep-v1 ./...
+``` `goatest init` writes an
+annotated `.goatest.toml` and suggests the next steps, including adding
+`.goatest/` and `reports/` - the directories every verification writes - to
+`.gitignore`. A bare `goatest` prints the help text; `goatest help COMMAND` or
+`goatest COMMAND --help` explains one command.
 
 The command surface is:
 
@@ -64,9 +79,16 @@ goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 goatest fix [ID...] [--apply]
 goatest report [--latest-full|--run=ID]
 goatest cache status|gc
+goatest help [command]
 ```
 
-Use `--ui=auto|plain|jsonl`; `--json` emits the report object. Exit codes are
+Every command accepts `--ui=auto|plain|jsonl` and `--json`. `auto` renders a
+compact in-place dashboard - current phase, elapsed time, mutant progress, and
+an estimated remainder - on an interactive terminal and deterministic plain
+lines everywhere else; `plain` always renders the deterministic lines; `jsonl`
+streams one JSON progress event per note to stdout and ends with the final
+`{"type":"report",...}` event, which is the stream's one stable contract.
+`--json` emits the report object. Exit codes are
 `0` for an assured/resolved/completed operation, `1` for `DEFECT` or
 `REPRODUCED`, `2` for `INSUFFICIENT`, `3` for configuration/tool errors, and
 `130`/`143` for interruption/termination.
@@ -195,9 +217,7 @@ The implementation deliberately fails closed where support is incomplete:
 - cache coordination is process-local, and interrupted runs do not yet resume
   from target-level checkpoints;
 - the resource protocol currently supports start/ready/stop and shared or
-  exclusive instances, but not health/reset/log-artifact operations;
-- `--ui=auto` currently renders deterministic plain output rather than a TTY
-  dashboard; and
+  exclusive instances, but not health/reset/log-artifact operations; and
 - external-repository compatibility and performance gates have not yet been
   demonstrated, so this project does not claim proof or production readiness.
 

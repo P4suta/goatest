@@ -17,6 +17,7 @@ import (
 	"github.com/P4suta/goatest/internal/app"
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cli"
+	"github.com/P4suta/goatest/internal/ui"
 )
 
 // The variables an environment that cannot pass a flag asks with, such as a job
@@ -32,12 +33,26 @@ func main() {
 }
 
 func realMain(arguments []string) int {
-	return realMainWith(arguments, os.Stdout, os.Stderr, app.Service{Root: ".", Progress: os.Stderr})
+	return realMainWith(arguments, os.Stdout, os.Stderr, app.Service{
+		Root: ".", Progress: os.Stderr, Output: os.Stdout, Interactive: interactiveTerminal,
+	})
+}
+
+// interactiveTerminal reports whether the progress stream can carry the
+// in-place dashboard. The environment is read here and nowhere else: TERM=dumb
+// and NO_COLOR both ask for deterministic plain lines, a writer that is no
+// terminal cannot render in place, and a console that refuses ANSI escape
+// processing would show litter instead of a dashboard.
+func interactiveTerminal(writer io.Writer) bool {
+	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	return ui.IsTerminalWriter(writer) && ui.EnableVirtualTerminal(writer)
 }
 
 func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Service) int {
 	if len(arguments) == 1 && arguments[0] == "--version" {
-		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.GoatestVersion)
+		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.ResolvedGoatestVersion())
 		return 0
 	}
 	arguments = withTraceEnvironment(arguments, os.Getenv(traceEnvironmentVariable))
@@ -65,9 +80,10 @@ func withKeepTempEnvironment(arguments []string, value string) []string {
 // An explicit flag always wins, an argument list that only asks for the help
 // text or the version is left exactly as it is, and the flag is inserted ahead
 // of the test-binary separator so that it reaches goatest rather than a test
-// binary.
+// binary. An empty argument list asks for the help text, so it stays empty
+// rather than becoming a run nobody asked for.
 func withEnvironmentFlag(arguments []string, flag string, requested bool) []string {
-	if !requested {
+	if !requested || len(arguments) == 0 {
 		return arguments
 	}
 	name, _, _ := strings.Cut(flag, "=")

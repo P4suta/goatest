@@ -27,6 +27,8 @@ import (
 	"github.com/P4suta/goatest/internal/evidence"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
+	"runtime/debug"
+
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
@@ -35,14 +37,82 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-const (
-	GoMutantsVersion = "v0.1.2"
-	maximumRounds    = 3
-)
+const maximumRounds = 3
+
+// goMutantsModulePath is the module the mutation bridge freezes; its version
+// is part of every audited identity.
+const goMutantsModulePath = "github.com/P4suta/go-mutants"
+
+// goMutantsFallbackVersion answers for the one binary shape that records no
+// dependency modules in its build info: a test binary. It must match go.mod,
+// and TestGoMutantsEvidenceVersionMatchesPinnedModule holds it there; every
+// built binary reports the version its build info actually linked instead, so
+// a shipped identity can never drift behind this constant.
+const goMutantsFallbackVersion = "v0.1.2"
+
+// GoMutantsVersion resolves the go-mutants version linked into this binary
+// from its build info, honoring a replace directive because the replacement
+// is what actually ran. A binary without build info fails closed rather than
+// attest a version nothing linked.
+func GoMutantsVersion() (string, error) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", errors.New("goatest: build info is unavailable; the go-mutants version cannot be audited")
+	}
+	return goMutantsVersionFrom(info)
+}
+
+// goMutantsVersionFrom picks the go-mutants module out of one build info.
+func goMutantsVersionFrom(info *debug.BuildInfo) (string, error) {
+	for _, dependency := range info.Deps {
+		if dependency.Path != goMutantsModulePath {
+			continue
+		}
+		module := dependency
+		if dependency.Replace != nil {
+			module = dependency.Replace
+		}
+		if module.Version == "" {
+			return "", fmt.Errorf("goatest: %s carries no version in build info", goMutantsModulePath)
+		}
+		return module.Version, nil
+	}
+	if len(info.Deps) == 0 {
+		return goMutantsFallbackVersion, nil
+	}
+	return "", fmt.Errorf("goatest: %s is absent from build info", goMutantsModulePath)
+}
+
+// goatestDevelVersion is the unstamped default of GoatestVersion. A binary
+// still carrying it was not built by the release pipeline, so the module
+// version its build info records - what `go install module@version` stamps -
+// is the truthful identity wherever one exists.
+const goatestDevelVersion = "v0.1.0-dev"
 
 // GoatestVersion is stamped by release builds and participates in evidence
-// cache identity.
-var GoatestVersion = "v0.1.0-dev"
+// cache identity. Readers resolve it through ResolvedGoatestVersion.
+var GoatestVersion = goatestDevelVersion
+
+// ResolvedGoatestVersion reports the goatest version this binary carries: the
+// release-stamped value when one was stamped, otherwise the module version of
+// a `go install` build, and the development default for a checkout build or a
+// test binary.
+func ResolvedGoatestVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return resolvedGoatestVersionFrom(GoatestVersion, info)
+}
+
+// resolvedGoatestVersionFrom settles the version from what a binary knows
+// about itself.
+func resolvedGoatestVersionFrom(stamped string, info *debug.BuildInfo) string {
+	if stamped != goatestDevelVersion {
+		return stamped
+	}
+	if info == nil || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return stamped
+	}
+	return info.Main.Version
+}
 
 var (
 	absoluteRepositoryPath = filepath.Abs
@@ -250,7 +320,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Schema: report.SchemaV1, Verdict: report.VerdictChangeAssured, Contract: contract, Snapshot: digest,
 				Scope:      reportScope(options, metadata.model, selection),
 				Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
-				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
+				Toolchain:  report.Toolchain{Go: metadata.toolchain, Goatest: inputs.GoatestVersion, GoMutants: inputs.GoMutantsVersion, OS: runtime.GOOS, Arch: runtime.GOARCH},
 				Accounting: report.Accounting{
 					Targets: report.CountAccounting{Discovered: len(allTargets), Excluded: len(allTargets)},
 					Race:    report.CountAccounting{Discovered: len(metadata.model.Packages), Excluded: len(metadata.model.Packages)},
@@ -329,7 +399,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Scope:      reportScope(options, metadata.model, selection),
 			Repository: report.Repository{Module: metadata.model.ModulePath, Packages: modelPackagePaths(metadata.model)},
 			Toolchain: report.Toolchain{
-				Go: metadata.toolchain, Goatest: GoatestVersion, GoMutants: GoMutantsVersion,
+				Go: metadata.toolchain, Goatest: inputs.GoatestVersion, GoMutants: inputs.GoMutantsVersion,
 				OS: runtime.GOOS, Arch: runtime.GOARCH,
 			},
 			Accounting: report.Accounting{Targets: report.CountAccounting{
@@ -421,6 +491,11 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		include, packages := mutationScope(selection)
 		if !defaultPackagePatterns(options.Packages) && !options.Changed {
 			packages = slices.Clone(options.Packages)
+			// The catalog must not reach beyond the resolved package scope:
+			// Include selects mutation candidates while Packages only selects
+			// test binaries, and a mutant outside every prepared binary would
+			// fail its package-suite confirmation instead of being scoped out.
+			include = scopedMutationInclude(metadata.model)
 		}
 		verifyArgv := plannedVerifyArgv(options)
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
@@ -784,12 +859,16 @@ func assuranceInputs(root, contract string, options Options, loaded config.Confi
 		sum := sha256.Sum256(encoded)
 		resources[name] = hex.EncodeToString(sum[:])
 	}
+	goMutants, err := GoMutantsVersion()
+	if err != nil {
+		return evidence.Inputs{}, "", err
+	}
 	environment := executionEnvironment(options.Environment)
 	inputs := evidence.Inputs{
 		Files: files, Corpus: corpus, Dependencies: metadata.dependencies,
 		Toolchain: metadata.toolchain, Platform: runtime.GOOS + "/" + runtime.GOARCH,
 		Environment: selectedEnvironment(environment, loaded.Execution.Environment), Resources: resources,
-		Contract: contract + modeIdentity(options), GoatestVersion: GoatestVersion, GoMutantsVersion: GoMutantsVersion,
+		Contract: contract + modeIdentity(options), GoatestVersion: ResolvedGoatestVersion(), GoMutantsVersion: goMutants,
 	}
 	return inputs, evidence.Digest(inputs), nil
 }

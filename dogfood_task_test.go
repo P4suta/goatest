@@ -26,11 +26,13 @@ func TestDogfoodTaskRunsBuiltCLIWithoutGoRunWrapper(t *testing.T) {
 	if strings.Contains(task, "go run") {
 		t.Fatal("dogfood uses a go run wrapper that can retain the CLI after Ctrl-C")
 	}
+	// The task names the verify command explicitly, because a bare invocation
+	// prints the help text rather than starting a run.
 	for _, required := range []string{
 		"go build -o ./dist/dogfood/goatest ./cmd/goatest",
-		"./dist/dogfood/goatest --ui=plain",
+		"./dist/dogfood/goatest verify --ui=plain",
 		"go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
-		`.\dist\dogfood\goatest.exe --ui=plain`,
+		`.\dist\dogfood\goatest.exe verify --ui=plain`,
 	} {
 		if !strings.Contains(task, required) {
 			t.Errorf("dogfood task omitted %q", required)

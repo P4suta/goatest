@@ -243,9 +243,13 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 	metadata := roundMetadata{
 		toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"},
 	}
+	linkedGoMutants, err := GoMutantsVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
 	inputs, digest, err := assuranceInputs(root, "deep-v1", options, loaded, metadata)
 	if err != nil || digest != evidence.Digest(inputs) || inputs.Toolchain != metadata.toolchain || inputs.Platform != runtime.GOOS+"/"+runtime.GOARCH ||
-		inputs.Contract != "deep-v1;apply=false;changed=true;ref=HEAD~1" || inputs.GoatestVersion != GoatestVersion || inputs.GoMutantsVersion != GoMutantsVersion ||
+		inputs.Contract != "deep-v1;apply=false;changed=true;ref=HEAD~1" || inputs.GoatestVersion != GoatestVersion || inputs.GoMutantsVersion != linkedGoMutants ||
 		inputs.Dependencies["dependency"] != "digest" || inputs.Resources["postgres"] == "" || len(inputs.Files) == 0 || len(inputs.Corpus) == 0 {
 		t.Fatalf("assuranceInputs = (%+v, %q, %v)", inputs, digest, err)
 	}

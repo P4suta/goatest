@@ -9,6 +9,7 @@ taplo = "0.10.0"
 golangci-lint = "2.12.2"
 typos = "1.48.0"
 gitleaks = "8.30.1"
+syft = "1.51.1"
 
 [tasks.build]
 description = "Build the public library and single CLI"
@@ -54,9 +55,9 @@ run = "goreleaser release --snapshot --clean"
 description = "Run goatest against its own repository"
 run = [
   "go build -o ./dist/dogfood/goatest ./cmd/goatest",
-  "./dist/dogfood/goatest --ui=plain",
+  "./dist/dogfood/goatest verify --ui=plain",
 ]
 run_windows = [
   "go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
-  '.\dist\dogfood\goatest.exe --ui=plain',
+  '.\dist\dogfood\goatest.exe verify --ui=plain',
 ]

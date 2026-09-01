@@ -52,22 +52,12 @@ func (service Service) fix(ctx context.Context, root string, request cli.Request
 		}
 		closeResources = close
 		defer func() { _ = closeResources() }()
-		contract := request.Contract
-		if contract == "" {
-			contract = loaded.Contract
-		}
-		packages := slices.Clone(request.Packages)
-		if len(packages) == 0 {
-			packages = slices.Clone(loaded.Project.Packages)
-		}
-		testArgs := slices.Clone(request.TestArgs)
-		if len(testArgs) == 0 {
-			testArgs = slices.Clone(loaded.Execution.TestBinaryArgs)
-		}
+		// The command layer refuses --contract, packages, and test-binary
+		// arguments on fix, so the loaded configuration is the one authority.
 		validator = assure.NewRepositoryValidator(assure.RepositoryValidatorOptions{
-			Root: root, Contract: contract, GoBinary: service.GoBinary, TempDirectory: service.TempDirectory,
-			Environment: environment, Packages: packages, BuildTags: loaded.Execution.BuildTags,
-			TestArgs: testArgs, Timeout: loaded.Execution.Timeout,
+			Root: root, Contract: loaded.Contract, GoBinary: service.GoBinary, TempDirectory: service.TempDirectory,
+			Environment: environment, Packages: slices.Clone(loaded.Project.Packages), BuildTags: loaded.Execution.BuildTags,
+			TestArgs: slices.Clone(loaded.Execution.TestBinaryArgs), Timeout: loaded.Execution.Timeout,
 		})
 	}
 	validated := make([]provider.Candidate, len(records))
