@@ -1,6 +1,6 @@
 # Current limitations and release gates
 
-This is an unreleased alpha. The implementation has strong self-tests, but
+This is a pre-release alpha. The implementation has strong self-tests, but
 self-dogfood is not external compatibility evidence.
 
 ## Fail-closed implementation limits
@@ -63,8 +63,8 @@ self-dogfood is not external compatibility evidence.
   it is JSON Lines for `jq` and the embedded schema, with no subcommand that
   summarizes or diffs one. See [trace v1](trace-v1.md).
 - Release archives carry an SBOM and a GitHub build-provenance attestation,
-  but no cosign-signed checksums. There is no benchmark/performance contract,
-  GitHub Action, or tagged binary distribution yet.
+  but no cosign-signed checksums. There is no benchmark/performance contract
+  or GitHub Action yet.
 
 ## Release blockers
 
