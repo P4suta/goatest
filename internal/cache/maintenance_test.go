@@ -13,6 +13,7 @@ import (
 )
 
 func TestCollectExpiresThenBoundsCacheAndStatusIsAuditable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	writeCacheEntry(t, root, "expired", 20, now.Add(-31*24*time.Hour))
@@ -36,6 +37,7 @@ func TestCollectExpiresThenBoundsCacheAndStatusIsAuditable(t *testing.T) {
 }
 
 func TestCollectRejectsNegativePolicyAndConfinedIrregularEntries(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if _, err := cache.Collect(root, -1, 0, time.Now()); err == nil {
 		t.Fatal("negative capacity accepted")

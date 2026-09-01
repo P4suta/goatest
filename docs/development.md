@@ -377,9 +377,179 @@ decides would be worse than no aid at all.
 
 ## Seam policy
 
-Not yet implemented. The rule that decides which dependencies become injected
-interfaces, and which stay concrete, is not written down; `CommandWorkspace`
-and `MutationSession` are the existing examples.
+Behaviour a test replaces is passed to the call that uses it. A package-level
+`var readCacheFile = os.ReadFile` that a test overwrites is a *seam*, and the
+repository is moving away from them: one seam holds every test in its package
+serial, because a test that writes it owns the package while it runs, and the
+external `package cache_test` tests share the binary with the internal ones.
+The rule and the reasoning are [ADR 0001](adr/0001-seam-policy.md); what
+follows is how to work with it.
+
+`internal/testkit`'s scripted fakes are not affected. A collaborator with state
+or several methods stays an interface — `CommandWorkspace`, `MutationSession` —
+and hooks are for the leaf operations a single call performs.
+
+### The ratchet
+
+`internal/devgates` holds the gate. It carries no production code: it parses
+every production `.go` file with `go/ast`, collects the package-level seams,
+and compares them against `internal/devgates/seam_allowlist.txt`, the ledger of
+the ones the repository still has. Run it alone with:
+
+```console
+go test ./internal/devgates/
+```
+
+`mise run test` runs it with the rest of the suite, so CI does too.
+
+A `var` counts as a seam when its declared type is a function type, or when it
+has no declared type and its value is a function literal, a package-level
+function, a selector qualified by an import (`os.Remove`), or a composite
+literal of a package-local struct whose every field is a function. Data is not:
+a `//go:embed` var, a sentinel from `errors.New` or `fmt.Errorf`, a basic
+literal, a slice or map literal, a zero-valued mutex, `sync.Once`, or atomic.
+Test files are never scanned, build constraints are never applied — a
+Windows-only indirection counts on Linux too — and `testdata`, `vendor`, and
+directories whose name opens with `.` or `_` are skipped wherever they sit.
+`dist` and `reports` are skipped at the repository root only, where the
+generated output that `.gitignore` also names lands; a directory called `dist`
+further down, such as `kept/nested/dist`, is production code and is scanned
+like any other.
+
+The scan and the ledger must agree exactly, in both directions.
+
+**A seam the ledger does not name** fails
+`TestPackageLevelSeamsMatchAllowlist`, printing the offending declarations in
+ledger format. It means a new global arrived. The fix is to not introduce it —
+write the [hooks](#writing-hooks) below instead. Pasting the printed line in
+turns the gate green, because the scan and the ledger then agree, and that is
+not enough to land the change: the ledger grows only under the exception in
+[ADR 0001](adr/0001-seam-policy.md), which wants the seam, its ledger line, and
+an entry in the ADR giving the reason and the date the seam goes — all in one
+commit. Without that entry the addition is refused in review, however green the
+gate is.
+
+**A ledger entry the tree no longer has** fails the same test from the other
+side: a seam went away without the ledger being updated. Delete its line in the
+commit that removed it, so the shrink is reviewed with the change that earned
+it. Deleting a line ahead of the seam it names fails the gate from the first
+side instead, so the ledger and the tree move together or not at all.
+
+`TestSeamAllowlistIsSortedAndFreeOfDuplicates` keeps the file itself readable
+as a diff: entries are `package-path name`, sorted by package and then by name,
+with no duplicates. Lines opening with `#` are comments.
+
+### Writing hooks
+
+Three pieces, taking `internal/cache` as the worked example. First, one
+immutable struct per concern in the package's `hooks.go`, with a `resolved()`
+that fills every unset field from the real implementation:
+
+```go
+type storeHooks struct {
+	// read reads a stored report.
+	read func(path string) ([]byte, error)
+	// ... one field per operation the calls perform
+}
+
+func (hooks storeHooks) resolved() storeHooks {
+	if hooks.read == nil {
+		hooks.read = os.ReadFile
+	}
+	// ...
+	return hooks
+}
+```
+
+Second, the exported function keeps its signature and delegates to an
+unexported `xxxWithHooks` that resolves once, at the top:
+
+```go
+func (store *Store) Get(digest string) (report.Report, bool, error) {
+	return store.getWithHooks(digest, storeHooks{})
+}
+
+// getWithHooks is Get against a filesystem the caller supplies.
+func (store *Store) getWithHooks(digest string, hooks storeHooks) (report.Report, bool, error) {
+	hooks = hooks.resolved()
+	// ...
+}
+```
+
+Third, a test fills in the one operation it drives and passes the value to the
+call. Nothing is installed, nothing is restored, and the test is parallel:
+
+```go
+func TestGetReturnsTheReadFailureWithoutDecodingFallbackBytes(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("read failure")
+	hooks := storeHooks{
+		read: func(string) ([]byte, error) { return []byte(`{"schema":"assurance-report-v1"}`), failure },
+	}
+	got, ok, err := New(t.TempDir()).getWithHooks("digest-a", hooks)
+	if !errors.Is(err, failure) || ok || !reflect.DeepEqual(got, report.Report{}) {
+		t.Fatalf("Get = %+v, ok %v, err %v", got, ok, err)
+	}
+}
+```
+
+Four details decide whether the shape holds up:
+
+- **Resolve at the entry point and pass the resolved value down.**
+  `saveGraphWithHooks` resolves once and hands the same `graphHooks` to
+  `Graph.jsonWithHooks`, so one call sees one filesystem. `resolved()` is
+  idempotent, so a helper that both an exported function and another
+  `xxxWithHooks` call — `Graph.jsonWithHooks` is one — may resolve again
+  without changing what a caller supplied.
+- **A default that reads another hook must snapshot what it needs.**
+  `scanHooks.digestFile` defaults to digesting through the resolved `open`
+  hook, so `resolved()` builds `digestThrough := scanHooks{open: hooks.open}`
+  and closes over that — never over `hooks`, the field it is about to fill.
+- **A real implementation returning a concrete type needs a small interface.**
+  `os.CreateTemp` returns `*os.File`, so the field is
+  `createTemporary func(directory, pattern string) (cacheWritableFile, error)`
+  and the default wraps the call. `cacheWritableFile` names only the four
+  methods the write path uses, which is also all a test's stub has to provide.
+- **A default that is not a plain `os` call needs a test that reaches it
+  through the zero value.** `storeHooks.collect` defaults to `collectUnlocked`
+  rather than the exported `Collect`, because the commit that calls it already
+  holds the write lock; every other test replaces the collector, so
+  `TestPutTrimsTheBoundedCacheAfterCommittingAnEntry` drives a real policy
+  store and asserts on the directory instead. Without it, a wrong default is
+  invisible until production deadlocks.
+
+Where the hooks belong to an exported constructor or a long-lived service, they
+are an exported argument or field rather than an internal struct:
+`trace.NewDirSink(root, run, hooks)` takes a `trace.Filesystem`, and
+`app.Service` carries `TraceFilesystem` and `DiagnosticsFilesystem`. The
+`resolved()` contract is identical.
+
+### Migrating a package
+
+A package moves when a change reaches it, not on a migration branch, in three
+commits:
+
+1. **Pin what the seams left implicit.** The tests that replace an operation
+   never exercise the default behind it, so start with the test that does, and
+   make it pass against the unmodified code.
+   `TestPutTrimsTheBoundedCacheAfterCommittingAnEntry` is the reference: it is
+   the net the refactor lands on.
+2. **Introduce the hooks and shrink the ledger in one diff.** Add `hooks.go`,
+   route the exported functions through `xxxWithHooks`, delete the `var` block,
+   rewrite each fault-injection test to pass its hooks, and delete the same
+   seams' lines from `seam_allowlist.txt`. Take the package's seams in one go:
+   a single one left behind keeps the whole package serial, so a partial move
+   buys nothing.
+3. **Turn the suite parallel.** Add `t.Parallel()` to the top-level tests and
+   to the subtest bodies, and delete the `installXxx`/`t.Cleanup` restore
+   helper the seams needed. Serial exceptions are fine when a test asserts on
+   shared state after a loop, but say why in a comment.
+
+Rewrite the fault injection one-for-one: every stage the old test drove must
+still be driven, or the refactor traded coverage for parallelism. Check the
+result by mutation — break a hook in production and confirm the test that
+should catch it does — and finish with a repeated race run of the package
+(`-race -count=4`) and `go test ./internal/devgates/`.
 
 ## Profiling
 

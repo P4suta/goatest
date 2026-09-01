@@ -28,20 +28,13 @@ type evidenceWritableFile interface {
 	Close() error
 }
 
-var (
-	readGraphFile      = os.ReadFile
-	unmarshalGraphJSON = json.Unmarshal
-	marshalGraphRecord = json.MarshalIndent
-	mkdirGraphAll      = os.MkdirAll
-	createGraphTemp    = func(directory, pattern string) (evidenceWritableFile, error) {
-		return os.CreateTemp(directory, pattern)
-	}
-	removeGraphFile = os.Remove
-	renameGraphFile = os.Rename
-)
-
 func LoadGraph(path string) (GraphRecord, bool, error) {
-	data, err := readGraphFile(path)
+	return loadGraphWithHooks(path, graphHooks{})
+}
+
+// loadGraphWithHooks is LoadGraph against a filesystem the caller supplies.
+func loadGraphWithHooks(path string, hooks graphHooks) (GraphRecord, bool, error) {
+	data, err := hooks.resolved().readGraph(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return GraphRecord{}, false, nil
 	}
@@ -64,33 +57,39 @@ func LoadGraph(path string) (GraphRecord, bool, error) {
 }
 
 func SaveGraph(path string, record GraphRecord) error {
+	return saveGraphWithHooks(path, record, graphHooks{})
+}
+
+// saveGraphWithHooks is SaveGraph against a filesystem the caller supplies.
+func saveGraphWithHooks(path string, record GraphRecord, hooks graphHooks) error {
+	hooks = hooks.resolved()
 	if record.ModulePath == "" {
 		return fmt.Errorf("goatest: evidence graph requires a module path")
 	}
 	record.Schema = GraphSchemaV1
-	graphData, err := record.Graph.JSON()
+	graphData, err := record.Graph.jsonWithHooks(hooks)
 	if err != nil {
 		return err
 	}
 	var canonicalGraph Graph
-	if err := unmarshalGraphJSON(graphData, &canonicalGraph); err != nil {
+	if err := hooks.unmarshalGraph(graphData, &canonicalGraph); err != nil {
 		return err
 	}
 	record.Graph = canonicalGraph
-	data, err := marshalGraphRecord(record, "", "  ")
+	data, err := hooks.marshalRecord(record, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	if err := mkdirGraphAll(filepath.Dir(path), 0o755); err != nil {
+	if err := hooks.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary, err := createGraphTemp(filepath.Dir(path), ".graph-*.tmp")
+	temporary, err := hooks.createTemporary(filepath.Dir(path), ".graph-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = removeGraphFile(temporaryPath) }()
+	defer func() { _ = hooks.remove(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -102,11 +101,11 @@ func SaveGraph(path string, record GraphRecord) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := renameGraphFile(temporaryPath, path); err != nil {
-		if removeErr := removeGraphFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := hooks.rename(temporaryPath, path); err != nil {
+		if removeErr := hooks.remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		return renameGraphFile(temporaryPath, path)
+		return hooks.rename(temporaryPath, path)
 	}
 	return nil
 }

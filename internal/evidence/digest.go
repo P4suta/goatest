@@ -12,7 +12,6 @@ import (
 	"hash"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,13 +29,6 @@ type Inputs struct {
 	GoatestVersion   string
 	GoMutantsVersion string
 }
-
-var (
-	walkEvidenceRoot     = filepath.WalkDir
-	relativeEvidencePath = filepath.Rel
-	digestEvidenceFile   = fileDigest
-	openEvidenceFile     = func(path string) (io.ReadCloser, error) { return os.Open(path) }
-)
 
 func (inputs Inputs) Clone() Inputs {
 	return Inputs{
@@ -107,13 +99,19 @@ func write(h hash.Hash, fields ...string) {
 // Scan hashes the repository's observable files, separating standard fuzz
 // corpus entries so callers can invalidate corpus evidence independently.
 func Scan(root string) (map[string]string, map[string]string, error) {
+	return scanWithHooks(root, scanHooks{})
+}
+
+// scanWithHooks is Scan against a filesystem the caller supplies.
+func scanWithHooks(root string, hooks scanHooks) (map[string]string, map[string]string, error) {
+	hooks = hooks.resolved()
 	files := make(map[string]string)
 	corpus := make(map[string]string)
-	err := walkEvidenceRoot(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := hooks.walk(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		relative, err := relativeEvidencePath(root, path)
+		relative, err := hooks.relative(root, path)
 		if err != nil {
 			return err
 		}
@@ -134,7 +132,7 @@ func Scan(root string) (map[string]string, map[string]string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("goatest: evidence refuses irregular file %s", relative)
 		}
-		digest, err := digestEvidenceFile(path, info.Mode())
+		digest, err := hooks.digestFile(path, info.Mode())
 		if err != nil {
 			return err
 		}
@@ -160,8 +158,10 @@ func isCorpus(relative string) bool {
 	return strings.HasPrefix(relative, "testdata/fuzz/") || strings.Contains(relative, "/testdata/fuzz/")
 }
 
-func fileDigest(path string, mode fs.FileMode) (string, error) {
-	file, err := openEvidenceFile(path)
+// fileDigestWithHooks hashes one file's mode and contents. It is the digest a
+// scan computes unless the caller supplies its own.
+func fileDigestWithHooks(path string, mode fs.FileMode, hooks scanHooks) (string, error) {
+	file, err := hooks.resolved().open(path)
 	if err != nil {
 		return "", err
 	}

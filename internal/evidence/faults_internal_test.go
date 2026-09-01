@@ -83,10 +83,12 @@ func (file *stubEvidenceFile) Close() error {
 }
 
 func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"walk", "callback", "relative", "symlink", "info", "irregular", "digest"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			failure := errors.New(stage + " failure")
-			hooks := evidenceHooks{}
+			hooks := scanHooks{}
 			entry := stubEvidenceEntry{
 				name: "sample", info: stubEvidenceInfo{name: "sample", mode: 0o644},
 			}
@@ -111,8 +113,7 @@ func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
 			case "digest":
 				hooks.digestFile = func(string, fs.FileMode) (string, error) { return "", failure }
 			}
-			installEvidenceHooks(t, hooks)
-			files, corpus, err := Scan(t.TempDir())
+			files, corpus, err := scanWithHooks(t.TempDir(), hooks)
 			if stage == "symlink" || stage == "irregular" {
 				if err == nil {
 					t.Fatalf("Scan error = nil, want refusal at %s", stage)
@@ -128,54 +129,72 @@ func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
 }
 
 func TestFileDigestPropagatesOpenAndCopyFailures(t *testing.T) {
+	t.Parallel()
 	openFailure := errors.New("open failure")
-	installEvidenceHooks(t, evidenceHooks{
-		open: func(string) (io.ReadCloser, error) { return nil, openFailure },
-	})
-	if _, err := fileDigest("missing", 0o644); !errors.Is(err, openFailure) {
+	openHooks := scanHooks{open: func(string) (io.ReadCloser, error) { return nil, openFailure }}
+	if _, err := fileDigestWithHooks("missing", 0o644, openHooks); !errors.Is(err, openFailure) {
 		t.Fatalf("open error = %v", err)
 	}
 
 	copyFailure := errors.New("copy failure")
 	reader := &failingEvidenceReader{err: copyFailure}
-	openEvidenceFile = func(string) (io.ReadCloser, error) { return reader, nil }
-	if _, err := fileDigest("unreadable", 0o644); !errors.Is(err, copyFailure) {
+	copyHooks := scanHooks{open: func(string) (io.ReadCloser, error) { return reader, nil }}
+	if _, err := fileDigestWithHooks("unreadable", 0o644, copyHooks); !errors.Is(err, copyFailure) {
 		t.Fatalf("copy error = %v", err)
 	}
 	if !reader.closed {
-		t.Fatal("fileDigest did not close its reader")
+		t.Fatal("fileDigestWithHooks did not close its reader")
+	}
+}
+
+// TestScanDigestsThroughItsOpenHook keeps the wiring the default digest hook
+// depends on: a scan that is given only an open hook still digests through it.
+func TestScanDigestsThroughItsOpenHook(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("open failure")
+	entry := stubEvidenceEntry{name: "sample", info: stubEvidenceInfo{name: "sample", mode: 0o644}}
+	hooks := scanHooks{
+		walk: func(root string, visit fs.WalkDirFunc) error {
+			return visit(filepath.Join(root, "sample"), entry, nil)
+		},
+		open: func(string) (io.ReadCloser, error) { return nil, failure },
+	}
+	if _, _, err := scanWithHooks(t.TempDir(), hooks); !errors.Is(err, failure) {
+		t.Fatalf("Scan error = %v, want %v", err, failure)
 	}
 }
 
 func TestGraphJSONPropagatesMarshalFailure(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("graph marshal failure")
-	installEvidenceHooks(t, evidenceHooks{
-		marshalGraph: func(any, string, string) ([]byte, error) { return nil, failure },
-	})
-	if data, err := (Graph{}).JSON(); !errors.Is(err, failure) || data != nil {
+	hooks := graphHooks{marshalGraph: func(any, string, string) ([]byte, error) { return nil, failure }}
+	if data, err := (Graph{}).jsonWithHooks(hooks); !errors.Is(err, failure) || data != nil {
 		t.Fatalf("Graph.JSON = %q, %v", data, err)
 	}
 }
 
 func TestLoadGraphReturnsReadFailureWithoutDecodeFallback(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("read failure")
-	installEvidenceHooks(t, evidenceHooks{
+	hooks := graphHooks{
 		readGraph: func(string) ([]byte, error) { return []byte(`{"schema":"evidence-graph-v1"}`), failure },
-	})
-	got, ok, err := LoadGraph("graph.json")
+	}
+	got, ok, err := loadGraphWithHooks("graph.json", hooks)
 	if !errors.Is(err, failure) || ok || !reflect.DeepEqual(got, GraphRecord{}) {
 		t.Fatalf("LoadGraph = %+v, ok %v, err %v", got, ok, err)
 	}
 }
 
 func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"graph-marshal", "graph-unmarshal", "record-marshal", "mkdir", "create", "write", "sync", "close"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			failure := errors.New(stage + " failure")
 			file := &stubEvidenceFile{name: filepath.Join(root, "temporary")}
-			hooks := evidenceHooks{
-				createGraph: func(string, string) (evidenceWritableFile, error) { return file, nil },
+			hooks := graphHooks{
+				createTemporary: func(string, string) (evidenceWritableFile, error) { return file, nil },
 			}
 			switch stage {
 			case "graph-marshal":
@@ -185,9 +204,9 @@ func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
 			case "record-marshal":
 				hooks.marshalRecord = func(any, string, string) ([]byte, error) { return nil, failure }
 			case "mkdir":
-				hooks.mkdirGraph = func(string, os.FileMode) error { return failure }
+				hooks.mkdirAll = func(string, os.FileMode) error { return failure }
 			case "create":
-				hooks.createGraph = func(string, string) (evidenceWritableFile, error) { return nil, failure }
+				hooks.createTemporary = func(string, string) (evidenceWritableFile, error) { return nil, failure }
 			case "write":
 				file.writeErr = failure
 			case "sync":
@@ -195,8 +214,7 @@ func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
 			case "close":
 				file.closeErr = failure
 			}
-			installEvidenceHooks(t, hooks)
-			if err := SaveGraph(filepath.Join(root, "graph.json"), graphRecord()); !errors.Is(err, failure) {
+			if err := saveGraphWithHooks(filepath.Join(root, "graph.json"), graphRecord(), hooks); !errors.Is(err, failure) {
 				t.Fatalf("SaveGraph error = %v, want %v", err, failure)
 			}
 		})
@@ -204,6 +222,7 @@ func TestSaveGraphPropagatesEverySerializationAndWriteStage(t *testing.T) {
 }
 
 func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
+	t.Parallel()
 	firstRename := errors.New("first rename")
 	secondRename := errors.New("second rename")
 	removeFailure := errors.New("remove destination")
@@ -220,14 +239,15 @@ func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testin
 		{name: "remove-failure", removeErr: removeFailure, want: firstRename, wantJoined: removeFailure, wantCalls: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			temporary := filepath.Join(root, "temporary")
 			destination := filepath.Join(root, "graph.json")
 			file := &stubEvidenceFile{name: temporary}
 			renames := 0
-			installEvidenceHooks(t, evidenceHooks{
-				createGraph: func(string, string) (evidenceWritableFile, error) { return file, nil },
-				renameGraph: func(oldPath, newPath string) error {
+			hooks := graphHooks{
+				createTemporary: func(string, string) (evidenceWritableFile, error) { return file, nil },
+				rename: func(oldPath, newPath string) error {
 					if oldPath != temporary || newPath != destination {
 						t.Fatalf("rename(%q, %q)", oldPath, newPath)
 					}
@@ -237,14 +257,14 @@ func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testin
 					}
 					return testCase.secondErr
 				},
-				removeGraph: func(path string) error {
+				remove: func(path string) error {
 					if path == destination {
 						return testCase.removeErr
 					}
 					return nil
 				},
-			})
-			err := SaveGraph(destination, graphRecord())
+			}
+			err := saveGraphWithHooks(destination, graphRecord(), hooks)
 			if testCase.want == nil {
 				if err != nil {
 					t.Fatalf("SaveGraph error = %v", err)
@@ -256,73 +276,6 @@ func TestSaveGraphRenameFallbackDistinguishesMissingAndRemovalFailures(t *testin
 				t.Fatalf("rename calls = %d, want %d", renames, testCase.wantCalls)
 			}
 		})
-	}
-}
-
-type evidenceHooks struct {
-	walk           func(string, fs.WalkDirFunc) error
-	relative       func(string, string) (string, error)
-	digestFile     func(string, fs.FileMode) (string, error)
-	open           func(string) (io.ReadCloser, error)
-	marshalGraph   func(any, string, string) ([]byte, error)
-	readGraph      func(string) ([]byte, error)
-	unmarshalGraph func([]byte, any) error
-	marshalRecord  func(any, string, string) ([]byte, error)
-	mkdirGraph     func(string, os.FileMode) error
-	createGraph    func(string, string) (evidenceWritableFile, error)
-	removeGraph    func(string) error
-	renameGraph    func(string, string) error
-}
-
-func installEvidenceHooks(t *testing.T, hooks evidenceHooks) {
-	t.Helper()
-	oldWalk, oldRelative, oldDigest := walkEvidenceRoot, relativeEvidencePath, digestEvidenceFile
-	oldOpen, oldMarshalGraph := openEvidenceFile, marshalGraphJSON
-	oldRead, oldUnmarshal, oldMarshalRecord := readGraphFile, unmarshalGraphJSON, marshalGraphRecord
-	oldMkdir, oldCreate := mkdirGraphAll, createGraphTemp
-	oldRemove, oldRename := removeGraphFile, renameGraphFile
-	t.Cleanup(func() {
-		walkEvidenceRoot, relativeEvidencePath, digestEvidenceFile = oldWalk, oldRelative, oldDigest
-		openEvidenceFile, marshalGraphJSON = oldOpen, oldMarshalGraph
-		readGraphFile, unmarshalGraphJSON, marshalGraphRecord = oldRead, oldUnmarshal, oldMarshalRecord
-		mkdirGraphAll, createGraphTemp = oldMkdir, oldCreate
-		removeGraphFile, renameGraphFile = oldRemove, oldRename
-	})
-	if hooks.walk != nil {
-		walkEvidenceRoot = hooks.walk
-	}
-	if hooks.relative != nil {
-		relativeEvidencePath = hooks.relative
-	}
-	if hooks.digestFile != nil {
-		digestEvidenceFile = hooks.digestFile
-	}
-	if hooks.open != nil {
-		openEvidenceFile = hooks.open
-	}
-	if hooks.marshalGraph != nil {
-		marshalGraphJSON = hooks.marshalGraph
-	}
-	if hooks.readGraph != nil {
-		readGraphFile = hooks.readGraph
-	}
-	if hooks.unmarshalGraph != nil {
-		unmarshalGraphJSON = hooks.unmarshalGraph
-	}
-	if hooks.marshalRecord != nil {
-		marshalGraphRecord = hooks.marshalRecord
-	}
-	if hooks.mkdirGraph != nil {
-		mkdirGraphAll = hooks.mkdirGraph
-	}
-	if hooks.createGraph != nil {
-		createGraphTemp = hooks.createGraph
-	}
-	if hooks.removeGraph != nil {
-		removeGraphFile = hooks.removeGraph
-	}
-	if hooks.renameGraph != nil {
-		renameGraphFile = hooks.renameGraph
 	}
 }
 
