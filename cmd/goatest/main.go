@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -16,6 +18,12 @@ import (
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cli"
 )
+
+// traceEnvironmentVariable asks for a run trace from an environment that
+// cannot pass a flag, such as a job wrapping an existing command line. It is
+// read here and nowhere else: every layer below the command line is configured
+// through options alone.
+const traceEnvironmentVariable = "GOATEST_TRACE"
 
 func main() {
 	os.Exit(realMain(os.Args[1:]))
@@ -30,7 +38,51 @@ func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Serv
 		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.GoatestVersion)
 		return 0
 	}
-	return runWithServiceWriters(arguments, service, stdout, stderr)
+	return runWithServiceWriters(withTraceEnvironment(arguments, os.Getenv(traceEnvironmentVariable)), service, stdout, stderr)
+}
+
+// withTraceEnvironment renders a trace asked for by the environment as the flag
+// the command layer parses, which is what keeps the environment out of every
+// layer below this one.
+//
+// An explicit flag always wins, an argument list that only asks for the help
+// text or the version is left exactly as it is, and the flag is inserted ahead
+// of the test-binary separator so that it reaches goatest rather than a test
+// binary.
+func withTraceEnvironment(arguments []string, value string) []string {
+	flag, requested := traceFlag(value)
+	if !requested {
+		return arguments
+	}
+	for _, argument := range arguments {
+		if argument == "--" {
+			break
+		}
+		switch {
+		case argument == "--trace", strings.HasPrefix(argument, "--trace="),
+			argument == "--help", argument == "-h", argument == "--version":
+			return arguments
+		}
+	}
+	if separator := slices.Index(arguments, "--"); separator >= 0 {
+		return slices.Insert(slices.Clone(arguments), separator, flag)
+	}
+	return append(slices.Clone(arguments), flag)
+}
+
+// traceFlag is the flag a GOATEST_TRACE value asks for: the default trace
+// location for the enabled forms, a named directory for anything else, and no
+// trace at all when the variable is unset, empty, or explicitly disabled, so
+// that a job can neutralize a setting it inherited.
+func traceFlag(value string) (string, bool) {
+	switch value {
+	case "", "0", "false":
+		return "", false
+	case "1", "true":
+		return "--trace", true
+	default:
+		return "--trace=" + value, true
+	}
 }
 
 func runWithService(arguments []string, service cli.Service) int {

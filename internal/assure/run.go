@@ -32,6 +32,7 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
 	"github.com/P4suta/goatest/internal/testargs"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 const (
@@ -77,7 +78,13 @@ type Options struct {
 	Validator              repair.Validator
 	AllowedGenerationPaths []string
 	Progress               func(Event)
-	Now                    func() time.Time
+	// Trace records the diagnostic exhaust of the run: the phases it passed
+	// through, the commands it ran, the mutants it executed, and how it routed
+	// them. A nil recorder is a run that records nothing, which is what a
+	// caller that asked for no trace gets. A trace is never evidence, so it
+	// takes no part in the identity a cached result is keyed on.
+	Trace *trace.Recorder
+	Now   func() time.Time
 }
 
 type roundMetadata struct {
@@ -162,12 +169,16 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	acceptances := activeAcceptanceMetadata(loaded, now())
 	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"), loaded.Cache)
 	var appliedRepairs []report.Repair
+	phases := runPhases{recorder: options.Trace}
+	defer phases.leave()
 
 	for round := 0; ; round++ {
+		phases.enter(phaseSnapshot)
 		emit(options, "snapshot", fmt.Sprintf("repair round %d", round+1))
 		workspace, err := dependencies.openWorkspace(ctx, root, mutationbridge.Options{
 			GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 			ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
+			Trace: options.Trace,
 		})
 		if err != nil {
 			return report.Report{}, err
@@ -190,6 +201,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
+		phases.enter(phaseCacheCheck)
 		if round == 0 && len(loaded.Resources) == 0 {
 			cached, found, cacheErr := cacheStore.Get(digest)
 			if cacheErr != nil {
@@ -205,6 +217,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 		}
 
+		phases.enter(phaseDiscover)
 		targets, err := dependencies.discoverTargets(root, metadata.model.Packages)
 		if err != nil {
 			_ = dependencies.closeWorkspace(workspace)
@@ -212,6 +225,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		allTargets := slices.Clone(targets)
 		targets = includedProjectTargets(targets, loaded.Project.Exclude)
+
+		phases.enter(phaseImpact)
 		selection := dependencies.selectImpact(ctx, root, metadata.model, targets, options)
 		if options.Changed {
 			if selection.broad {
@@ -243,6 +258,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 			return result, nil
 		}
+		phases.enter(phaseResources)
 		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets, options.Environment)
 		if err != nil {
 			_ = dependencies.closeWorkspace(workspace)
@@ -257,6 +273,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				opened, openErr := dependencies.openWorkspace(controlContext, root, mutationbridge.Options{
 					GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 					ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
+					Trace: options.Trace,
 				})
 				if openErr != nil {
 					return gomutants.CommandResult{}, openErr
@@ -277,6 +294,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			return errors.Join(closeControl(), manager.Close(), dependencies.closeWorkspace(workspace))
 		}
 
+		phases.enter(phaseBaseline)
 		artifactDirectory, err := dependencies.makeBaselineScratch(options.TempDirectory, "goatest-baseline-")
 		if err != nil {
 			_ = closeRound()
@@ -332,6 +350,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 			return baseReport, nil
 		}
+		phases.enter(phaseGraph)
 		currentGraph, err := dependencies.buildGraph(root, metadata.model, baseline.Targets)
 		if err != nil {
 			_ = closeRound()
@@ -344,6 +363,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeRound()
 			return report.Report{}, err
 		}
+		phases.enter(phaseRace)
 		concurrentPackages, err := dependencies.concurrencyPackages(root, metadata.model.Packages)
 		if err != nil {
 			_ = closeRound()
@@ -387,6 +407,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			return baseReport, nil
 		}
 
+		phases.enter(phaseMutationPrepare)
 		emit(options, "mutation-prepare", contract)
 		include, packages := mutationScope(selection)
 		if !defaultPackagePatterns(options.Packages) && !options.Changed {
@@ -412,6 +433,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			mutationDetail = "1 mutant"
 		}
 		emit(options, "mutation-target", mutationDetail)
+
+		phases.enter(phaseMutation)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
 			Root: root, Snapshot: digest, Contract: contract, NoApply: options.NoApply,
 			ReplayMutantID: options.ReplayMutantID,
@@ -420,6 +443,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
 			Progress:        mutationProgress(options),
 			OriginalControl: originalControl,
+			Trace:           options.Trace,
 		})
 		if err != nil {
 			_ = closeRound()
@@ -427,6 +451,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		baseReport.Accounting.Mutants = mutation.Accounting
 		baseReport.Mutants = slices.Clone(mutation.Mutants)
+
+		phases.enter(phaseRepair)
 		generated := GenerationEvaluation{Findings: slices.Clone(mutation.Findings)}
 		if !mutation.Applied {
 			generated, err = dependencies.attemptRepairs(ctx, root, mutation.Findings, GenerationOptions{
@@ -439,6 +465,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					TempDirectory: options.TempDirectory, Environment: validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
 					MutationOperators: options.MutationOperators, Packages: options.Packages,
 					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
+					Trace: options.Trace,
 				},
 			})
 			if err != nil {
@@ -446,6 +473,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				return report.Report{}, err
 			}
 		}
+		phases.enter(phaseFinalize)
 		if closeErr := closeRound(); closeErr != nil {
 			return report.Report{}, closeErr
 		}
@@ -1155,8 +1183,12 @@ func ephemeralEnvironmentKey(upper string) bool {
 	return upper == "STARSHIP_SESSION_KEY" || upper == "__MISE_SESSION"
 }
 
+// emit reports one progress note. The caller's callback and the trace are
+// independent destinations: a run records its notes whether or not anybody
+// asked to be told them.
 func emit(options Options, kind, detail string) {
 	if options.Progress != nil {
 		options.Progress(Event{Kind: kind, Detail: detail})
 	}
+	options.Trace.Progress(kind, detail)
 }

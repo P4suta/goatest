@@ -81,13 +81,19 @@ func TestRepositoryValidatorOpenPassesFrozenBridgeOptions(t *testing.T) {
 		options.Environment[0] = "MUTATED=yes"
 		return wantWorkspace, nil
 	}
+	_, recorder := newTraceRecording()
 	validator := NewRepositoryValidator(RepositoryValidatorOptions{
-		GoBinary: "go-custom", TempDirectory: "temp", Environment: []string{"DB=ready"},
+		GoBinary: "go-custom", TempDirectory: "temp", Environment: []string{"DB=ready"}, Trace: recorder,
 	})
 	workspace, err := validator.open(t.Context(), "snapshot")
 	if err != nil || workspace != wantWorkspace || gotRoot != "snapshot" || gotOptions.GoBinary != "go-custom" || gotOptions.TempDirectory != "temp" ||
 		gotOptions.ReportDirectory != ".goatest" || !slices.Equal(gotOptions.Environment, []string{"MUTATED=yes"}) || validator.options.Environment[0] != "DB=ready" {
 		t.Fatalf("open = (%T, %v), root=%q options=%+v validator=%+v", workspace, err, gotRoot, gotOptions, validator.options)
+	}
+	// A candidate is validated in a copy of the repository, and the commands
+	// that validate it belong to the recording of the run that generated it.
+	if gotOptions.Trace != recorder {
+		t.Fatalf("bridge recorder = %p, want %p", gotOptions.Trace, recorder)
 	}
 }
 

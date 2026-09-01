@@ -19,6 +19,7 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type coordinatorCache struct {
@@ -64,6 +65,7 @@ type runCoordinatorHarness struct {
 	inputs       evidence.Inputs
 	digest       string
 	events       []Event
+	recorder     *trace.Recorder
 
 	openCalls       int
 	workspaceCloses int
@@ -79,6 +81,7 @@ type runCoordinatorHarness struct {
 	mergeGraphCalls int
 	saveGraphCalls  int
 
+	workspaceOptions  mutationbridge.Options
 	preparedOptions   mutationbridge.PrepareOptions
 	mutationOptions   MutationOptions
 	generationOptions GenerationOptions
@@ -138,6 +141,7 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		},
 		openWorkspace: func(_ context.Context, root string, options mutationbridge.Options) (*mutationbridge.Workspace, error) {
 			harness.openCalls++
+			harness.workspaceOptions = options
 			if root != harness.root || options.ReportDirectory != ".goatest" {
 				t.Fatalf("open workspace = %q %+v", root, options)
 			}
@@ -250,7 +254,15 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 func (harness *runCoordinatorHarness) run(options Options) (report.Report, error) {
 	options.Root = harness.root
 	options.Progress = func(event Event) { harness.events = append(harness.events, event) }
+	options.Trace = harness.recorder
 	return runWithDependencies(harness.t.Context(), options, harness.dependencies)
+}
+
+// record traces the run of the harness and returns the sink that keeps it.
+func (harness *runCoordinatorHarness) record() *trace.MemorySink {
+	sink, recorder := newTraceRecording()
+	harness.recorder = recorder
+	return sink
 }
 
 func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing.T) {

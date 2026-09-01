@@ -71,6 +71,14 @@ Use `--ui=auto|plain|jsonl`; `--json` emits the report object. Exit codes are
 `REPRODUCED`, `2` for `INSUFFICIENT`, `3` for configuration/tool errors, and
 `130`/`143` for interruption/termination.
 
+`verify` and `replay` accept `--trace[=DIR]`, which records what the run did
+(the phases it passed through, the commands it ran, and how coverage routed
+each mutant) as JSON Lines under `DIR`, or under `.goatest/trace/` by default.
+`GOATEST_TRACE=1` or `GOATEST_TRACE=DIR` asks for the same without a flag. A
+trace is diagnostic exhaust, never evidence: it takes no part in a verdict or
+in the identity a cached result is keyed on, and a trace that cannot be
+written costs a warning rather than the run.
+
 ## Verdicts and report history
 
 - `ASSURED`: the resolved scope is the configured full project.

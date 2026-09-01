@@ -283,6 +283,39 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 	}
 }
 
+func TestTraceTakesNoPartInCacheIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeRunHelperFile(t, root, "value.go", "package fixture\n")
+	loaded := config.Config{Execution: config.Execution{Environment: []string{"A"}}}
+	metadata := roundMetadata{toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"}}
+	untraced := Options{
+		NoApply: true, Changed: true, ChangedRef: "HEAD~1", Packages: []string{"./internal/..."},
+		CommandTimeout: time.Minute, Environment: []string{"A=1", "GOFLAGS=-trimpath"},
+	}
+	_, recorder := newTraceRecording()
+	traced := untraced
+	traced.Trace = recorder
+	if traced.Trace == nil {
+		t.Fatal("the traced options carry no recorder")
+	}
+	if modeIdentity(traced) != modeIdentity(untraced) {
+		t.Fatalf("traced mode identity = %q, untraced = %q", modeIdentity(traced), modeIdentity(untraced))
+	}
+	if modeIdentity(Options{Trace: recorder}) != modeIdentity(Options{}) {
+		t.Fatalf("traced default mode identity = %q", modeIdentity(Options{Trace: recorder}))
+	}
+	untracedInputs, untracedDigest, err := assuranceInputs(root, "deep-v1", untraced, loaded, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracedInputs, tracedDigest, err := assuranceInputs(root, "deep-v1", traced, loaded, metadata)
+	if err != nil || tracedDigest != untracedDigest || !reflect.DeepEqual(tracedInputs, untracedInputs) {
+		t.Fatalf("traced assurance inputs = (%+v, %q, %v), want (%+v, %q)",
+			tracedInputs, tracedDigest, err, untracedInputs, untracedDigest)
+	}
+}
+
 func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{}); got != ";apply=true;changed=false;ref=" {
 		t.Fatalf("default mode identity = %q", got)

@@ -23,6 +23,7 @@ import (
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type RepositoryValidatorOptions struct {
@@ -36,6 +37,9 @@ type RepositoryValidatorOptions struct {
 	BuildTags         []string
 	TestArgs          []string
 	Timeout           time.Duration
+	// Trace records the commands that validate a candidate. A nil recorder
+	// validates untraced.
+	Trace *trace.Recorder
 }
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
@@ -199,7 +203,7 @@ func (validator *repositoryValidator) open(ctx context.Context, root string) (va
 	}
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
-		ReportDirectory: ".goatest", Environment: environment,
+		ReportDirectory: ".goatest", Environment: environment, Trace: validator.options.Trace,
 	})
 }
 

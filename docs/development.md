@@ -193,8 +193,72 @@ adds. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the complete set CI runs.
 
 ## Execution tracing
 
-Not yet implemented. There is no tracing facility for a run's internal phases
-beyond the progress events described above.
+`goatest verify --trace[=DIR]` and `goatest replay ID --trace[=DIR]` record
+what a run did while it did it. Each run records into a directory of its own,
+`<UTC timestamp>-<pid>/`, under the trace root the flag names; without a
+directory that root is `.goatest/trace/`, which the source snapshot never
+reads, and naming one collects its recordings there instead; `GOATEST_TRACE=1` asks for the same location and `GOATEST_TRACE=DIR`
+for a named one, so a job that cannot change a command line can still ask.
+The environment variable is read in `cmd/goatest` alone, where it becomes the
+flag the command layer parses: no layer below the command line reads the
+environment.
+
+A trace directory holds `trace.jsonl`, one JSON object per line in sequence
+order, and `output/<seq>.txt`, the captured output of the commands that
+produced any. The stream, its nine event types, and the fields of each are
+specified in [trace v1](trace-v1.md); the rules behind them are recorded in
+[ADR 0002](adr/0002-trace-is-not-evidence.md). In short: a trace is never
+evidence, it never costs the run, and it is honest about what it dropped.
+
+### Recording from a new call site
+
+The recorder is a `*trace.Recorder` reached through the options of the package
+that owns the work — `assure.Options`, `MutationOptions`,
+`RepositoryValidatorOptions`, `mutationbridge.Options` — and constructed once,
+in `internal/app`, from the request. There is no package-level recorder and no
+global seam: a test that wants a recording builds the options with one.
+
+Record unconditionally. Every method is safe on a nil receiver, which is the
+disabled trace, so `options.Trace.Route(...)` costs a nil check when nobody
+asked to trace and no call site branches on whether tracing is on. That is what
+keeps the traced and the untraced path one path.
+
+Two constraints hold below the command layer. `internal/assure` and
+`internal/trace` read no environment variables — `GOATEST_TRACE` becomes a flag
+in `cmd/goatest` and nothing under it learns the environment exists — and no
+trace option may enter `modeIdentity`, the assurance inputs, or the evidence
+digest, because a run must decide the same thing traced and untraced.
+
+### Testing a recording
+
+- `trace.NewMemorySink(capacity)` keeps events in a ring buffer and returns
+  them from `Events()`, which is how a unit test asserts on a stream without
+  writing a directory. A capacity of zero or less is unbounded; a full ring
+  drops its oldest event and counts it, which is the loss a `run-end` reports.
+  A bounded ring fills `capacity-1` slots while a run is under way and keeps
+  the last for the `run-end`, so the event carrying the accounting never
+  displaces one the accounting had already counted. Events are cloned on the
+  way in and on the way out, so a test may amend the record it emitted or the
+  snapshot it read without touching the ring.
+- `trace.NewDirSink(root, run, hooks)` opens the recording of one run in its
+  own directory under a trace root, and reports it through `Directory()`. The
+  run directory is created exclusively: a name another recording owns is an
+  error, never an append.
+- `trace.Filesystem` is the filesystem a `DirSink` writes through, passed to
+  `NewDirSink` as an ordinary argument. Fill in only the operation a test wants
+  to drive — `MkdirAll`, `Mkdir`, `OpenAppend`, or `WriteFile` — and the rest
+  comes from the `os` package.
+- `trace.JSONSchema()` returns the embedded schema.
+  `internal/trace/schema_test.go` validates recorded events against it with the
+  same compiler the report schema uses, and `internal/app/trace_e2e_test.go`
+  validates every line of a real `verify --trace`, decoding with
+  `DisallowUnknownFields` so a field outside the contract fails too.
+
+A new event or a new call site is proven end to end there: the test drives
+`cli.Run` over a real `go` on a `testkit` fixture and asserts on the recording
+against the report the same run produced — that every phase is closed before
+the next one opens, that a mutant's `route` precedes every `mutant-exec` that
+names it, and that the accounting in `run-end` matches the lines in the file.
 
 ## Failure diagnostics and keep-temp
 

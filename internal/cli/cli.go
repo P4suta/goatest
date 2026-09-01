@@ -56,6 +56,8 @@ type Request struct {
 	UI               UI
 	Packages         []string
 	TestArgs         []string
+	Trace            bool
+	TraceDirectory   string
 	ReportLatestFull bool
 	ReportRunID      string
 	IDs              []string
@@ -73,17 +75,18 @@ type Service interface {
 }
 
 const help = `Usage:
-	goatest verify [packages...] [--changed[=REF]] [--contract=standard-v1|deep-v1] [--ui=auto|plain|jsonl] [-- test-binary-args...]
+	goatest verify [packages...] [--changed[=REF]] [--contract=standard-v1|deep-v1] [--ui=auto|plain|jsonl] [--trace[=DIR]] [-- test-binary-args...]
 	goatest plan [packages...]
 	goatest doctor
 	goatest init
 	goatest explain ID
-	goatest replay ID
+	goatest replay ID [--trace[=DIR]]
 	goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 	goatest fix [ID...] [--apply]
 	goatest report [--latest-full|--run=ID]
 	goatest cache status|gc
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
+Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
 `
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
@@ -153,6 +156,11 @@ func parse(args []string) (Command, Request, string, error) {
 			request.JSON = true
 		case strings.HasPrefix(argument, "--ui="):
 			request.UI = UI(strings.TrimPrefix(argument, "--ui="))
+		case argument == "--trace":
+			request.Trace = true
+		case strings.HasPrefix(argument, "--trace="):
+			request.Trace = true
+			request.TraceDirectory = strings.TrimPrefix(argument, "--trace=")
 		case argument == "--latest-full":
 			request.ReportLatestFull = true
 		case strings.HasPrefix(argument, "--run="):
@@ -237,6 +245,9 @@ func parsedCommand(command Command, request Request, id string) (Command, Reques
 	}
 	if request.Contract != "" && command != CommandVerify && command != CommandPlan {
 		return "", Request{}, "", errors.New("--contract is only valid with verify or plan")
+	}
+	if request.Trace && command != CommandVerify && command != CommandReplay {
+		return "", Request{}, "", errors.New("--trace is only valid with verify or replay")
 	}
 	if (request.ReportLatestFull || request.ReportRunID != "") && command != CommandReport {
 		return "", Request{}, "", errors.New("--latest-full and --run are only valid with report")

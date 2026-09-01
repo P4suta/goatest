@@ -29,6 +29,21 @@ self-dogfood is not external compatibility evidence.
   JSONL emits the final report event.
 - The HTML report supports local search/filtering but does not yet compute a
   dedicated slow-target ranking beyond searchable evidence details.
+- A trace records the commands the mutation workspace runs and the mutants it
+  executes. Subprocesses started outside it are not recorded: resource and
+  generation providers, and the `git` invocations of changeset selection and
+  report metadata. `--trace` is accepted by `verify` and `replay` alone, so a
+  `fix --apply` validation runs untraced.
+- The `artifact` trace event is part of `goatest-trace-v1`, but no run emits
+  one yet. Nothing else in the schema is unimplemented.
+- Trace directories are never pruned. `.goatest/trace/` keeps one directory per
+  traced run until something outside goatest removes them, and a preserved
+  command output is capped at 1 MiB per file, so a long capture is truncated
+  with a marker even though its event digests the whole of it.
+- Only the directory sink is reachable from the command line; the in-memory and
+  fan-out sinks are in-process. There is no reader tooling for a trace either:
+  it is JSON Lines for `jq` and the embedded schema, with no subcommand that
+  summarizes or diffs one. See [trace v1](trace-v1.md).
 - There is no benchmark/performance contract, signed release, SBOM, provenance
   bundle, GitHub Action, or tagged binary distribution yet.
 
