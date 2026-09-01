@@ -54,7 +54,10 @@ type Service struct {
 	// failures a recording must survive are not failures a disk produces on
 	// demand.
 	TraceFilesystem trace.Filesystem
-	absolute        func(string) (string, error)
+	// DiagnosticsFilesystem is the filesystem a failure bundle is written
+	// through, filled in the same way and for the same reason.
+	DiagnosticsFilesystem DiagnosticsFilesystem
+	absolute              func(string) (string, error)
 }
 
 var (
@@ -195,6 +198,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		}
 		result = infrastructureErrorReport(result, request, err)
 		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+		service.writeDiagnostics(root, result, recording, err)
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
