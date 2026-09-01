@@ -119,6 +119,8 @@ func inspect(root string, ttl time.Duration, now time.Time) (Status, []entry, er
 func metadata(root string) (int64, time.Time, error) {
 	var size int64
 	var modified time.Time
+	var directoryModified time.Time
+	hasRegularFile := false
 	err := filepath.WalkDir(root, func(path string, item fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -127,6 +129,13 @@ func metadata(root string) (int64, time.Time, error) {
 			return fmt.Errorf("goatest: retained artifact crosses symbolic link %s", path)
 		}
 		if item.IsDir() {
+			if path == root {
+				info, err := item.Info()
+				if err != nil {
+					return err
+				}
+				directoryModified = info.ModTime()
+			}
 			return nil
 		}
 		info, err := item.Info()
@@ -136,12 +145,16 @@ func metadata(root string) (int64, time.Time, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("goatest: retained artifact contains irregular file %s", path)
 		}
+		hasRegularFile = true
 		size += info.Size()
 		if info.ModTime().After(modified) {
 			modified = info.ModTime()
 		}
 		return nil
 	})
+	if err == nil && !hasRegularFile {
+		modified = directoryModified
+	}
 	return size, modified, err
 }
 

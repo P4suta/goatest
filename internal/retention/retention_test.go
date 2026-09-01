@@ -36,6 +36,25 @@ func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testi
 	}
 }
 
+func TestCollectExpiresEmptyArtifactDirectoryByDirectoryTimestamp(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "empty")
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(directory, old, old); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Collect(root, 0, time.Hour, old.Add(2*time.Hour))
+	if err != nil || result.Before.Entries != 1 || result.Before.Bytes != 0 || result.RemovedEntries != 1 || result.After.Entries != 0 {
+		t.Fatalf("empty retention collect = (%+v, %v)", result, err)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("expired empty directory remained: %v", err)
+	}
+}
+
 func TestRetentionRefusesSymlinkedEntries(t *testing.T) {
 	root := t.TempDir()
 	target := t.TempDir()

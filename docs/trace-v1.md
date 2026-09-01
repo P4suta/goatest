@@ -351,8 +351,8 @@ replaying a run:
 
 ```console
 goatest trace summary
-goatest trace summary 20260901T120000.000000000Z-1234
-goatest trace diff 20260901T120000.000000000Z-1234 20260901T123000.000000000Z-5678
+goatest trace summary 20260901T120000Z-1234
+goatest trace diff 20260901T120000Z-1234 20260901T123000Z-5678
 ```
 
 With no run name, `summary` selects the lexically latest confined run

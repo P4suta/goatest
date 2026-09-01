@@ -18,13 +18,19 @@ func checkpointFixture() checkpoint.State {
 	digest := strings.Repeat("a", 64)
 	return checkpoint.State{
 		Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 2,
-		Baseline: checkpoint.Baseline{BuildVetComplete: true, Complete: true, Evidence: []report.Evidence{{Kind: "baseline", ID: "go vet", Status: "passed"}}, Targets: []checkpoint.BaselineTarget{{
+		Baseline: checkpoint.Baseline{BuildVetComplete: true, Complete: true, Evidence: []report.Evidence{{Kind: "baseline", ID: "go vet", Status: "passed"}}, Findings: []report.Finding{{
+			ID: "finding-baseline", Kind: "coverage", Path: "value.go", Line: 4, Summary: "baseline finding", Replay: "goatest replay finding-baseline", Mutant: "comparison", MutantID: "mutant-a",
+		}}, Targets: []checkpoint.BaselineTarget{{
 			ID: "target-a", Executed: true, Inventory: report.TargetDisposition{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/project", Path: "value_test.go", Line: 10, Status: "passed", DurationMS: 12},
 			Target: &checkpoint.TargetEvidence{Target: checkpoint.Target{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/project", Path: "value_test.go", Line: 10}, CoveredFiles: []string{"value.go"}, DurationNS: 12_000_000},
 		}}},
 		Race: &checkpoint.Race{Complete: true, Packages: []string{"example.test/project"}, Evidence: []report.Evidence{{Kind: "race", ID: "example.test/project", Status: "passed"}}},
 		Mutation: &checkpoint.Mutation{CatalogFingerprint: strings.Repeat("b", 64), Results: []checkpoint.MutationResult{{
-			ID: "mutant-a", Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}},
+			ID: "mutant-a", Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}}, Findings: []report.Finding{{
+				ID: "finding-mutant", Kind: "surviving-mutant", Path: "value.go", Line: 8, Summary: "mutation finding", Replay: "goatest replay finding-mutant", Mutant: "comparison", MutantID: "mutant-a",
+			}}, Repairs: []report.Repair{{
+				ID: "repair-a", Finding: "finding-mutant", Path: "value_test.go", Status: "applied", Diff: "+test", Validation: "passed", Reason: "cover mutant", Provenance: "goatest",
+			}},
 		}}},
 	}
 }
@@ -81,6 +87,7 @@ func TestCheckpointDecoderRejectsCorruptionUnknownFieldsAndPendingUnits(t *testi
 		{name: "pending mutant", data: checkpoint.JSON(func() checkpoint.State {
 			state := checkpointFixture()
 			state.Mutation.Results[0].Evidence = nil
+			state.Mutation.Results[0].Findings = nil
 			return state
 		}())},
 	} {

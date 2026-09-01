@@ -199,6 +199,25 @@ func TestTargetInventoryRanksSlowestFirstAndResumeIsOptionalAuditMetadata(t *tes
 	}
 }
 
+func TestTargetInventoryMustAccountForEverySelectedTarget(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		targets []report.TargetDisposition
+	}{
+		{name: "empty"},
+		{name: "partial", targets: []report.TargetDisposition{{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/fixture", Status: "passed"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := persistedFixture()
+			input.Accounting.Targets = report.CountAccounting{Discovered: 2, Selected: 2, Executed: 2}
+			input.Targets = test.targets
+			if err := report.ValidateForPersistence(input); err == nil || !strings.Contains(err.Error(), "target inventory") {
+				t.Fatalf("incomplete target inventory error = %v", err)
+			}
+		})
+	}
+}
+
 func TestFindingIDIsStableAndInputSensitive(t *testing.T) {
 	one := report.FindingID("survivor", "a.go", "mutant-a")
 	two := report.FindingID("survivor", "a.go", "mutant-a")

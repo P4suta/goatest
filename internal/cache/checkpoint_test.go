@@ -83,3 +83,15 @@ func TestCheckpointSharesCacheRetentionEntry(t *testing.T) {
 		t.Fatalf("checkpoint GC = (%+v, %v)", result, err)
 	}
 }
+
+func TestCheckpointWriteDefersPolicyCollection(t *testing.T) {
+	root := t.TempDir()
+	digest := strings.Repeat("d", 64)
+	store := NewWithPolicy(root, 1, time.Hour)
+	if err := store.PutCheckpoint(digest, checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.GetCheckpoint(digest); err != nil || !found {
+		t.Fatalf("checkpoint was collected during publication: found=%t err=%v", found, err)
+	}
+}

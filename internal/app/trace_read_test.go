@@ -39,6 +39,56 @@ func TestTraceSummaryAndDiffAreReadOnlyAndExposeCompleteness(t *testing.T) {
 	}
 }
 
+func TestTraceSummarySkipsUnrelatedEntriesAndValidatesLatestFallback(t *testing.T) {
+	root := t.TempDir()
+	service := app.Service{Root: root}
+	traceRoot := filepath.Join(root, ".goatest", "trace")
+	writeCompletedTrace(t, traceRoot, "run-a", "ASSURED", 0)
+	if err := os.WriteFile(filepath.Join(traceRoot, "unrelated.txt"), []byte("not a trace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{}, "summary")
+	if err != nil || !hasEvidenceStatus(summary, "trace-summary", "complete") {
+		t.Fatalf("summary with unrelated entry = (%+v, %v)", summary, err)
+	}
+
+	fallbackRoot := t.TempDir()
+	fallbackService := app.Service{Root: fallbackRoot}
+	fallbackTraceRoot := filepath.Join(fallbackRoot, ".goatest", "trace")
+	if err := os.MkdirAll(fallbackTraceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fallbackTraceRoot, "latest"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fallbackService.Execute(t.Context(), cli.CommandTrace, cli.Request{}, "summary"); err == nil || !strings.Contains(err.Error(), "latest trace is not a confined directory") {
+		t.Fatalf("unsafe latest fallback error = %v", err)
+	}
+}
+
+func TestTraceSummaryRejectsExtraRunNames(t *testing.T) {
+	service := app.Service{Root: t.TempDir()}
+	_, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{IDs: []string{"run-a", "run-b"}}, "summary")
+	if err == nil || !strings.Contains(err.Error(), "at most one run") {
+		t.Fatalf("extra summary run error = %v", err)
+	}
+}
+
+func TestTraceSummaryRejectsSymlinkedLatestFallback(t *testing.T) {
+	root := t.TempDir()
+	traceRoot := filepath.Join(root, ".goatest", "trace")
+	if err := os.MkdirAll(traceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(traceRoot, "latest")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	service := app.Service{Root: root}
+	if _, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{}, "summary"); err == nil || !strings.Contains(err.Error(), "latest trace is a symbolic link") {
+		t.Fatalf("symlinked latest fallback error = %v", err)
+	}
+}
+
 func writeCompletedTrace(t *testing.T, root, run, verdict string, dropped int64) {
 	t.Helper()
 	sink, err := trace.NewDirSink(root, run, trace.Filesystem{})

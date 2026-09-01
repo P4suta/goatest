@@ -26,7 +26,7 @@ func Validate(input Report) error {
 	if err := validateCount("race", input.Accounting.Race); err != nil {
 		return err
 	}
-	if err := validateTargets(input.Targets); err != nil {
+	if err := validateTargets(input.Accounting.Targets, input.Targets); err != nil {
 		return err
 	}
 	if input.Resume != nil {
@@ -51,7 +51,10 @@ func Validate(input Report) error {
 	return validateVerdictScope(input)
 }
 
-func validateTargets(targets []TargetDisposition) error {
+func validateTargets(accounting CountAccounting, targets []TargetDisposition) error {
+	if len(targets) != accounting.Selected {
+		return fmt.Errorf("goatest: target inventory contains %d entries for %d selected targets", len(targets), accounting.Selected)
+	}
 	seen := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		if strings.TrimSpace(target.ID) == "" || strings.TrimSpace(target.Name) == "" || strings.TrimSpace(target.Kind) == "" || strings.TrimSpace(target.Package) == "" || strings.TrimSpace(target.Status) == "" {

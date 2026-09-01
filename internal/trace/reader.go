@@ -168,6 +168,8 @@ func validateReadEvent(event Event) error {
 	return nil
 }
 
+// Diff compares two Summary values and returns signed deltas across the union
+// of both summaries' count and phase key sets.
 func Diff(before, after Summary) SummaryDiff {
 	result := SummaryDiff{
 		EventsDelta:           after.Events - before.Events,

@@ -72,18 +72,20 @@ type TargetEvidence struct {
 }
 
 type MutationOptions struct {
-	Root            string
-	Snapshot        string
-	Contract        string
-	NoApply         bool
-	ReplayMutantID  string
-	TestArgs        []string
-	FuzzExecutions  int
-	Timeout         time.Duration
-	Jobs            int
-	Accepted        map[string]bool
-	Progress        func(completed, total int)
-	Resume          map[string]MutationEvaluation
+	Root           string
+	Snapshot       string
+	Contract       string
+	NoApply        bool
+	ReplayMutantID string
+	TestArgs       []string
+	FuzzExecutions int
+	Timeout        time.Duration
+	Jobs           int
+	Accepted       map[string]bool
+	Progress       func(completed, total int)
+	Resume         map[string]MutationEvaluation
+	// Checkpoint records one terminal mutant evaluation. Worker goroutines may
+	// call it concurrently, so callers must provide a concurrency-safe callback.
 	Checkpoint      func(string, MutationEvaluation)
 	OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
 	// Trace records how each mutant was routed. A nil recorder is an
@@ -118,12 +120,12 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	var evaluation MutationEvaluation
 	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
 	resumed := make(map[string]bool, len(options.Resume))
-	selectedExecutable := 0
+	replayPresent := options.ReplayMutantID == ""
 	for _, mutant := range catalog.Mutants {
 		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
 			continue
 		}
-		selectedExecutable++
+		replayPresent = true
 		if saved, ok := options.Resume[mutant.ID]; ok {
 			evaluation.append(saved)
 			resumed[mutant.ID] = true
@@ -131,13 +133,11 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		}
 		mutants = append(mutants, mutant)
 	}
-	if options.ReplayMutantID != "" && selectedExecutable == 0 {
-		return MutationEvaluation{}, fmt.Errorf("goatest: replay mutant %s is absent from prepared catalog", options.ReplayMutantID)
-	}
 	for _, rejection := range catalog.Rejections {
 		if options.ReplayMutantID != "" && rejection.ID != options.ReplayMutantID {
 			continue
 		}
+		replayPresent = true
 		if saved, ok := options.Resume[rejection.ID]; ok {
 			if !resumed[rejection.ID] {
 				evaluation.append(saved)
@@ -150,6 +150,9 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		}}}
 		evaluation.append(unit)
 		checkpointMutation(options, rejection.ID, unit)
+	}
+	if !replayPresent {
+		return MutationEvaluation{}, fmt.Errorf("goatest: replay mutant %s is absent from prepared catalog", options.ReplayMutantID)
 	}
 	seeds := evaluateMutationSeeds(ctx, session, mutants, targets, options)
 	for _, seed := range seeds {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/P4suta/goatest/internal/checkpoint"
 )
@@ -78,13 +77,6 @@ func (store *Store) PutCheckpoint(digest string, state checkpoint.State) error {
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("goatest: atomically publish checkpoint: %w", err)
-	}
-	if store.maxBytes > 0 || store.ttl > 0 {
-		now := time.Now
-		if store.now != nil {
-			now = store.now
-		}
-		_, _ = collectUnlocked(store.root, store.maxBytes, store.ttl, now())
 	}
 	return nil
 }

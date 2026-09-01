@@ -20,6 +20,9 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 	result := report.Report{Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted}
 	switch action {
 	case "summary":
+		if len(runs) > 1 {
+			return report.Report{}, errors.New("goatest: trace summary accepts at most one run")
+		}
 		name := ""
 		if len(runs) != 0 {
 			name = runs[0]
@@ -47,7 +50,7 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 		difference := trace.Diff(before, after)
 		status := "changed"
 		if difference.EventsDelta == 0 && difference.MissingSequencesDelta == 0 && difference.EventsDroppedDelta == 0 &&
-			difference.BeforeVerdict == difference.AfterVerdict && difference.BeforeRunEnd == difference.AfterRunEnd && allZeroCounts(difference.CountDelta) && allZeroDurations(difference.PhaseDurationDeltaMS) {
+			difference.BeforeVerdict == difference.AfterVerdict && difference.BeforeRunEnd == difference.AfterRunEnd && allZero(difference.CountDelta) && allZero(difference.PhaseDurationDeltaMS) {
 			status = "unchanged"
 		}
 		result.Evidence = append(result.Evidence, report.Evidence{
@@ -82,25 +85,26 @@ func readNamedTrace(root, name string) (trace.Summary, string, error) {
 	if name == "" {
 		entries, err := os.ReadDir(root)
 		if errors.Is(err, os.ErrNotExist) {
-			summary, readErr := trace.ReadSummary(filepath.Join(root, "latest", trace.FileName))
-			return summary, "latest", readErr
+			return readLatestTrace(root)
 		}
 		if err != nil {
 			return trace.Summary{}, "", fmt.Errorf("goatest: read trace root: %w", err)
 		}
 		var names []string
 		for _, entry := range entries {
-			if !safeTraceName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
-				return trace.Summary{}, "", fmt.Errorf("goatest: trace entry %q is not a confined directory", entry.Name())
+			if entry.Name() == "latest" || !safeTraceName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+				continue
 			}
 			names = append(names, entry.Name())
 		}
 		slices.Sort(names)
 		if len(names) == 0 {
-			summary, readErr := trace.ReadSummary(filepath.Join(root, "latest", trace.FileName))
-			return summary, "latest", readErr
+			return readLatestTrace(root)
 		}
 		name = names[len(names)-1]
+	}
+	if name == "latest" {
+		return readLatestTrace(root)
 	}
 	if !safeTraceName(name) {
 		return trace.Summary{}, "", fmt.Errorf("goatest: invalid trace run %q", name)
@@ -113,6 +117,26 @@ func readNamedTrace(root, name string) (trace.Summary, string, error) {
 	}
 	summary, err := trace.ReadSummary(path)
 	return summary, name, err
+}
+
+func readLatestTrace(root string) (trace.Summary, string, error) {
+	path := filepath.Join(root, "latest")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		summary, readErr := trace.ReadSummary(filepath.Join(path, trace.FileName))
+		return summary, "latest", readErr
+	}
+	if err != nil {
+		return trace.Summary{}, "", fmt.Errorf("goatest: inspect latest trace: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return trace.Summary{}, "", errors.New("goatest: latest trace is a symbolic link")
+	}
+	if !info.IsDir() {
+		return trace.Summary{}, "", errors.New("goatest: latest trace is not a confined directory")
+	}
+	summary, err := trace.ReadSummary(filepath.Join(path, trace.FileName))
+	return summary, "latest", err
 }
 
 func traceSummaryEvidence(id string, summary trace.Summary) []report.Evidence {
@@ -154,18 +178,10 @@ func safeTraceName(name string) bool {
 	return name != "" && name != "." && name != ".." && filepath.Base(name) == name && !strings.ContainsAny(name, `/\\`)
 }
 
-func allZeroCounts(values map[string]int) bool {
+func allZero[T comparable](values map[string]T) bool {
+	var zero T
 	for _, value := range values {
-		if value != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func allZeroDurations(values map[string]int64) bool {
-	for _, value := range values {
-		if value != 0 {
+		if value != zero {
 			return false
 		}
 	}
