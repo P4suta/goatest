@@ -48,12 +48,6 @@ internal/assure statRepositoryPath
 internal/assure walkCandidateFiles
 internal/assure writeCandidateFile
 internal/assure writeCandidateRepositoryFile
-internal/cache collectCache
-internal/cache createCacheTemp
-internal/cache mkdirCacheAll
-internal/cache readCacheFile
-internal/cache removeCacheFile
-internal/cache renameCacheFile
 internal/config createConfigTemp
 internal/config marshalConfig
 internal/config openConfigFile

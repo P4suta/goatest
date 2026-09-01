@@ -35,17 +35,6 @@ type cacheWritableFile interface {
 	Close() error
 }
 
-var (
-	readCacheFile   = os.ReadFile
-	mkdirCacheAll   = os.MkdirAll
-	createCacheTemp = func(directory, pattern string) (cacheWritableFile, error) {
-		return os.CreateTemp(directory, pattern)
-	}
-	removeCacheFile = os.Remove
-	renameCacheFile = os.Rename
-	collectCache    = collectUnlocked
-)
-
 func New(root string) *Store { return &Store{root: root} }
 
 // NewWithPolicy enables bounded automatic collection after successful writes.
@@ -54,13 +43,19 @@ func NewWithPolicy(root string, maxBytes int64, ttl time.Duration) *Store {
 }
 
 func (store *Store) Get(digest string) (report.Report, bool, error) {
+	return store.getWithHooks(digest, storeHooks{})
+}
+
+// getWithHooks is Get against a filesystem the caller supplies.
+func (store *Store) getWithHooks(digest string, hooks storeHooks) (report.Report, bool, error) {
+	hooks = hooks.resolved()
 	cacheOperationMutex.RLock()
 	defer cacheOperationMutex.RUnlock()
 	path, err := store.path(digest)
 	if err != nil {
 		return report.Report{}, false, err
 	}
-	data, err := readCacheFile(path)
+	data, err := hooks.read(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return report.Report{}, false, nil
 	}
@@ -86,6 +81,12 @@ func (store *Store) Get(digest string) (report.Report, bool, error) {
 }
 
 func (store *Store) Put(digest string, result report.Report) error {
+	return store.putWithHooks(digest, result, storeHooks{})
+}
+
+// putWithHooks is Put against a filesystem and a collector the caller supplies.
+func (store *Store) putWithHooks(digest string, result report.Report, hooks storeHooks) error {
+	hooks = hooks.resolved()
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()
 	if result.Snapshot != digest {
@@ -99,15 +100,15 @@ func (store *Store) Put(digest string, result report.Report) error {
 		return err
 	}
 	data := report.JSON(result)
-	if err := mkdirCacheAll(filepath.Dir(path), 0o755); err != nil {
+	if err := hooks.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary, err := createCacheTemp(filepath.Dir(path), ".report-*.tmp")
+	temporary, err := hooks.createTemporary(filepath.Dir(path), ".report-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = removeCacheFile(temporaryPath) }()
+	defer func() { _ = hooks.remove(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -119,11 +120,11 @@ func (store *Store) Put(digest string, result report.Report) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := renameCacheFile(temporaryPath, path); err != nil {
-		if removeErr := removeCacheFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if err := hooks.rename(temporaryPath, path); err != nil {
+		if removeErr := hooks.remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return errors.Join(err, removeErr)
 		}
-		if retryErr := renameCacheFile(temporaryPath, path); retryErr != nil {
+		if retryErr := hooks.rename(temporaryPath, path); retryErr != nil {
 			return retryErr
 		}
 	}
@@ -132,7 +133,7 @@ func (store *Store) Put(digest string, result report.Report) error {
 		if store.now != nil {
 			now = store.now
 		}
-		_, _ = collectCache(store.root, store.maxBytes, store.ttl, now())
+		_, _ = hooks.collect(store.root, store.maxBytes, store.ttl, now())
 	}
 	return nil
 }
