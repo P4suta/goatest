@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The package-level seams goatest still has, one per line as
+# "package-path name", sorted by package and then by name.
+#
+# A seam is a package-level variable a test replaces to change what production
+# code does. It makes the package impossible to test in parallel, because a
+# test that overwrites one owns the package while it runs. New code injects
+# behaviour as an argument instead: production calls an internal
+# xxxWithHooks(args, hooks) with an immutable default, and a test passes its
+# own hooks.
+#
+# This file is a ratchet, and internal/devgates/seams_test.go holds it to that.
+# It may shrink and never grow: a seam it does not name fails the gate, and so
+# does an entry the tree no longer has. When a package moves to hooks, delete
+# its lines in the same commit that removed them.
+internal/app operatingSystemAtomicWrites
+internal/app readConfigurationFile
+internal/app startDoctorProcess
+internal/assure absoluteRepositoryPath
+internal/assure acquireProductionResource
+internal/assure changedImpactFiles
+internal/assure closeProductionResources
+internal/assure closeProductionWorkspace
+internal/assure collectValidationRace
+internal/assure concurrencyValidationPackages
+internal/assure copyCandidateContent
+internal/assure copyCandidateRepository
+internal/assure decodeValidationPackages
+internal/assure generationFromCommand
+internal/assure gitNamesOutput
+internal/assure loadImpactGraph
+internal/assure makeCandidateDirectory
+internal/assure makeCandidateTemp
+internal/assure newGenerationValidator
+internal/assure newRunResourceManager
+internal/assure openCandidateInput
+internal/assure openCandidateOutput
+internal/assure openValidationWorkspace
+internal/assure prepareValidationSession
+internal/assure readCandidateFile
+internal/assure relativeCandidatePath
+internal/assure removeCandidateTemp
+internal/assure resolveCandidatePath
+internal/assure runImpactGitNames
+internal/assure statRepositoryPath
+internal/assure walkCandidateFiles
+internal/assure writeCandidateFile
+internal/assure writeCandidateRepositoryFile
+internal/cache collectCache
+internal/cache createCacheTemp
+internal/cache mkdirCacheAll
+internal/cache readCacheFile
+internal/cache removeCacheFile
+internal/cache renameCacheFile
+internal/config createConfigTemp
+internal/config marshalConfig
+internal/config openConfigFile
+internal/config removeConfigFile
+internal/config renameConfigFile
+internal/evidence createGraphTemp
+internal/evidence digestEvidenceFile
+internal/evidence marshalGraphJSON
+internal/evidence marshalGraphRecord
+internal/evidence mkdirGraphAll
+internal/evidence openEvidenceFile
+internal/evidence readGraphFile
+internal/evidence relativeEvidencePath
+internal/evidence removeGraphFile
+internal/evidence renameGraphFile
+internal/evidence unmarshalGraphJSON
+internal/evidence walkEvidenceRoot
+internal/golang relativePackagePath
+internal/mutationbridge absoluteCorpusPath
+internal/mutationbridge createCorpusTemp
+internal/mutationbridge evaluateCorpusSymlinks
+internal/mutationbridge linkCorpusFile
+internal/mutationbridge lstatCorpusPath
+internal/mutationbridge mkdirCorpusAll
+internal/mutationbridge openMutationWorkspace
+internal/mutationbridge readCorpusFile
+internal/mutationbridge removeCorpusFile
+internal/mutationbridge statCorpusPath
+internal/processtree assignWindowsProcessToJob
+internal/processtree attachTreeCommand
+internal/processtree closeTreeCommand
+internal/processtree closeWindowsHandle
+internal/processtree createWindowsJobObject
+internal/processtree killStartedCommand
+internal/processtree killTreeCommand
+internal/processtree killUnixGroup
+internal/processtree killUnixProcess
+internal/processtree killWindowsProcess
+internal/processtree openWindowsProcess
+internal/processtree prepareTreeCommand
+internal/processtree setWindowsJobInformation
+internal/processtree startTreeCommand
+internal/processtree terminateWindowsJob
+internal/processtree waitStartedCommand
+internal/provider marshalGenerationRequest
+internal/provider startGenerationProcess
+internal/repair absoluteRepairPath
+internal/repair createRepairTemp
+internal/repair evaluateRepairSymlinks
+internal/repair lstatRepairPath
+internal/repair marshalRepairArtifact
+internal/repair mkdirRepairAll
+internal/repair readRepairFile
+internal/repair removeRepairFile
+internal/repair renameRepairFile
+internal/repair statRepairPath
+internal/resource encodeResourceRequest
+internal/resource resourceStdinPipe
+internal/resource resourceStdoutPipe
+internal/resource startResource
+internal/resource startResourceProcess
+internal/resource stopResource
+internal/resource waitResourceProcess
