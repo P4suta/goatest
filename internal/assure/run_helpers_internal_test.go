@@ -453,7 +453,7 @@ func TestMutationJobLimitAndProgressCoverEveryBoundary(t *testing.T) {
 	if got := mutationJobLimit(Options{MutationJobs: 4}, config.Config{Resources: map[string]config.Resource{"db": {Exclusive: true}}}); got != 1 {
 		t.Fatalf("exclusive jobs = %d", got)
 	}
-	for _, test := range []struct{ requested, want int }{{-1, 2}, {0, 2}, {1, 1}, {4, 4}, {5, 4}} {
+	for _, test := range []struct{ requested, want int }{{-1, 2}, {0, 2}, {1, 1}, {4, 4}, {5, 5}} {
 		if got := mutationJobLimit(Options{MutationJobs: test.requested}, config.Config{}); got != test.want {
 			t.Errorf("mutationJobLimit(%d) = %d, want %d", test.requested, got, test.want)
 		}

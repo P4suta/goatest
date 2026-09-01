@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -498,13 +499,15 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			include = scopedMutationInclude(metadata.model)
 		}
 		verifyArgv := plannedVerifyArgv(options)
+		mutationJobs := mutationJobLimit(options, loaded)
+		emit(options, "mutation-jobs", strconv.Itoa(mutationJobs))
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract:  contract,
 			Operators: slices.Clone(options.MutationOperators),
 			Include:   include,
 			Exclude:   slices.Clone(loaded.Project.Exclude),
 			Packages:  packages,
-			Jobs:      mutationJobLimit(options, loaded), BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
+			Jobs:      mutationJobs, BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
 			VerifyArgv: verifyArgv, VerifyEnv: resourceEnv, VerifyTimeout: options.CommandTimeout,
 		})
 		if err != nil {
@@ -524,7 +527,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			ReplayMutantID: options.ReplayMutantID,
 			TestArgs:       slices.Clone(options.TestArgs),
 			FuzzExecutions: options.FuzzExecutions, Timeout: options.CommandTimeout,
-			Jobs: mutationJobLimit(options, loaded), Accepted: accepted,
+			Jobs: mutationJobs, Accepted: accepted,
 			Progress:        mutationProgress(options),
 			OriginalControl: originalControl,
 			Trace:           options.Trace,
@@ -1110,17 +1113,20 @@ func targetResourceCapabilities(target goanalysis.Target) []string {
 	return nil
 }
 
+// mutationJobLimit decides the mutation parallelism. An exclusive resource
+// serializes everything it touches, an explicit choice is respected as made,
+// and only the default derived from the machine is capped, so that a wide host
+// does not silently thrash the test suites it runs four of at a time.
 func mutationJobLimit(options Options, loaded config.Config) int {
 	for _, spec := range loaded.Resources {
 		if spec.Exclusive {
 			return 1
 		}
 	}
-	jobs := options.MutationJobs
-	if jobs <= 0 {
-		jobs = runtime.GOMAXPROCS(0)
+	if options.MutationJobs > 0 {
+		return options.MutationJobs
 	}
-	return max(1, min(jobs, 4))
+	return max(1, min(runtime.GOMAXPROCS(0), 4))
 }
 
 func mutationProgress(options Options) func(completed, total int) {
