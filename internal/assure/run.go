@@ -464,6 +464,11 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		include, packages := mutationScope(selection)
 		if !defaultPackagePatterns(options.Packages) && !options.Changed {
 			packages = slices.Clone(options.Packages)
+			// The catalog must not reach beyond the resolved package scope:
+			// Include selects mutation candidates while Packages only selects
+			// test binaries, and a mutant outside every prepared binary would
+			// fail its package-suite confirmation instead of being scoped out.
+			include = scopedMutationInclude(metadata.model)
 		}
 		verifyArgv := plannedVerifyArgv(options)
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{

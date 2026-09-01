@@ -395,3 +395,18 @@ func preserveImpactHooks(t *testing.T) {
 		runImpactGitNames, gitNamesOutput = runHook, outputHook
 	})
 }
+
+func TestScopedMutationIncludeIsOneNonRecursiveGlobPerResolvedPackage(t *testing.T) {
+	model := goanalysis.Model{Packages: []goanalysis.Package{
+		{ImportPath: "fixture.example/module", RelativeDir: "."},
+		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
+		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
+		// RelativeDir carries the platform separator; the glob must not.
+		{ImportPath: "fixture.example/module/windows", RelativeDir: filepath.FromSlash("windows/sub")},
+	}}
+	got := scopedMutationInclude(model)
+	want := []string{"*.go", "internal/report/*.go", "windows/sub/*.go"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("include = %q, want %q", got, want)
+	}
+}
