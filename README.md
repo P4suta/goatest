@@ -42,6 +42,7 @@ From a checkout:
 
 ```console
 go build -o goatest ./cmd/goatest
+./goatest init
 ./goatest doctor
 ./goatest plan ./...
 ./goatest verify ./...
@@ -49,7 +50,11 @@ go build -o goatest ./cmd/goatest
 ./goatest verify --contract=deep-v1 ./...
 ```
 
-On Windows, run `goatest.exe` instead of `./goatest`.
+On Windows, run `goatest.exe` instead of `./goatest`. `goatest init` writes an
+annotated `.goatest.toml` and suggests the next steps, including adding
+`.goatest/` and `reports/` - the directories every verification writes - to
+`.gitignore`. A bare `goatest` prints the help text; `goatest help COMMAND` or
+`goatest COMMAND --help` explains one command.
 
 The command surface is:
 
@@ -64,9 +69,16 @@ goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 goatest fix [ID...] [--apply]
 goatest report [--latest-full|--run=ID]
 goatest cache status|gc
+goatest help [command]
 ```
 
-Use `--ui=auto|plain|jsonl`; `--json` emits the report object. Exit codes are
+Every command accepts `--ui=auto|plain|jsonl` and `--json`. `auto` renders a
+compact in-place dashboard - current phase, elapsed time, mutant progress, and
+an estimated remainder - on an interactive terminal and deterministic plain
+lines everywhere else; `plain` always renders the deterministic lines; `jsonl`
+streams one JSON progress event per note to stdout and ends with the final
+`{"type":"report",...}` event, which is the stream's one stable contract.
+`--json` emits the report object. Exit codes are
 `0` for an assured/resolved/completed operation, `1` for `DEFECT` or
 `REPRODUCED`, `2` for `INSUFFICIENT`, `3` for configuration/tool errors, and
 `130`/`143` for interruption/termination.
@@ -195,9 +207,7 @@ The implementation deliberately fails closed where support is incomplete:
 - cache coordination is process-local, and interrupted runs do not yet resume
   from target-level checkpoints;
 - the resource protocol currently supports start/ready/stop and shared or
-  exclusive instances, but not health/reset/log-artifact operations;
-- `--ui=auto` currently renders deterministic plain output rather than a TTY
-  dashboard; and
+  exclusive instances, but not health/reset/log-artifact operations; and
 - external-repository compatibility and performance gates have not yet been
   demonstrated, so this project does not claim proof or production readiness.
 

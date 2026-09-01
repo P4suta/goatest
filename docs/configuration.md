@@ -5,6 +5,10 @@
 5 GiB and 30 days. Unknown keys, malformed values, and any `version` other than
 `1` are errors.
 
+`goatest init` writes an annotated skeleton: the two active defaults, and every
+section below as commented guidance, so turning a setting on is uncommenting a
+line. Loading the untouched skeleton yields exactly the defaults.
+
 ## Sections
 
 - `[project]`: `packages` and explicit `exclude` patterns. Excludes are project
