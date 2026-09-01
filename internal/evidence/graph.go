@@ -4,12 +4,9 @@
 package evidence
 
 import (
-	"encoding/json"
 	"slices"
 	"strings"
 )
-
-var marshalGraphJSON = json.MarshalIndent
 
 type Target struct {
 	ID           string   `json:"id"`
@@ -74,7 +71,12 @@ func (graph Graph) canonical() Graph {
 }
 
 func (graph Graph) JSON() ([]byte, error) {
-	data, err := marshalGraphJSON(graph.canonical(), "", "  ")
+	return graph.jsonWithHooks(graphHooks{})
+}
+
+// jsonWithHooks is Graph.JSON against an encoder the caller supplies.
+func (graph Graph) jsonWithHooks(hooks graphHooks) ([]byte, error) {
+	data, err := hooks.resolved().marshalGraph(graph.canonical(), "", "  ")
 	if err != nil {
 		return nil, err
 	}
