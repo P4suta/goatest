@@ -41,6 +41,7 @@ func TestRealMainHandlesOnlyTheExactVersionFlagAndDelegatesHelp(t *testing.T) {
 	}{
 		{name: "version", arguments: []string{"--version"}, wantExit: 0, wantOutput: "goatest "},
 		{name: "help", arguments: []string{"--help"}, wantExit: 0, wantOutput: "Usage:"},
+		{name: "bare", arguments: nil, wantExit: 0, wantOutput: "Usage:"},
 		{name: "version-extra", arguments: []string{"--version", "extra"}, wantExit: cli.ExitError, wantError: "unknown flag"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -60,7 +61,7 @@ func TestOperatingSystemWriterWrappersReturnDelegatedExitCodes(t *testing.T) {
 	service := mainServiceFunc(func(context.Context, cli.Command, cli.Request, string) (report.Report, error) {
 		return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictDefect}, nil
 	})
-	if got := runWithService(nil, service); got != cli.ExitDefect {
+	if got := runWithService([]string{"verify"}, service); got != cli.ExitDefect {
 		t.Fatalf("runWithService exit = %d, want %d", got, cli.ExitDefect)
 	}
 }
@@ -84,7 +85,7 @@ func TestRunWithSignalsMapsTerminationAndNonSyscallInterrupt(t *testing.T) {
 			signals := make(chan os.Signal, 1)
 			result := make(chan int, 1)
 			go func() {
-				result <- runWithSignals(nil, service, signals, &bytes.Buffer{}, &bytes.Buffer{})
+				result <- runWithSignals([]string{"verify"}, service, signals, &bytes.Buffer{}, &bytes.Buffer{})
 			}()
 			select {
 			case <-started:
@@ -115,7 +116,10 @@ func TestEnvironmentTraceBecomesTheFlagTheCommandLayerParses(t *testing.T) {
 		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--trace"}},
-		{name: "true", value: "true", arguments: nil, want: []string{"--trace"}},
+		// An empty argument list asks for the help text, and a variable in the
+		// environment must not turn it into a run.
+		{name: "true-bare", value: "true", arguments: nil, want: nil},
+		{name: "true", value: "true", arguments: []string{"verify"}, want: []string{"verify", "--trace"}},
 		{name: "directory", value: "/tmp/goatest-trace", arguments: []string{"verify"}, want: []string{"verify", "--trace=/tmp/goatest-trace"}},
 		{name: "explicit-flag-wins", value: "/tmp/env", arguments: []string{"verify", "--trace=/tmp/flag"}, want: []string{"verify", "--trace=/tmp/flag"}},
 		{name: "explicit-default-wins", value: "/tmp/env", arguments: []string{"verify", "--trace"}, want: []string{"verify", "--trace"}},
@@ -171,7 +175,10 @@ func TestEnvironmentKeepTempBecomesTheFlagTheCommandLayerParses(t *testing.T) {
 		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp"}},
-		{name: "true", value: "true", arguments: nil, want: []string{"--keep-temp"}},
+		// An empty argument list asks for the help text, and a variable in the
+		// environment must not turn it into a run.
+		{name: "true-bare", value: "true", arguments: nil, want: nil},
+		{name: "true", value: "true", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp"}},
 		// An unrecognized value becomes a flag the command layer refuses,
 		// because a setting nobody understood is a mistake to report rather
 		// than a default to fall back on.

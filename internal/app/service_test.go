@@ -6,11 +6,14 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -547,4 +550,161 @@ func TestInitCreatesStrictConfigWithoutRunningAssurance(t *testing.T) {
 	if _, err := config.Load(root); err != nil {
 		t.Fatal(err)
 	}
+	// The report guides a fresh project onward: the directories runs will
+	// create, and the commands that come next.
+	steps := make(map[string]string)
+	for _, evidence := range result.Evidence {
+		if evidence.Kind == "next-step" {
+			steps[evidence.ID] = evidence.Detail
+		}
+	}
+	if len(steps) != 3 || !strings.Contains(steps["gitignore"], ".goatest/") || !strings.Contains(steps["gitignore"], "reports/") ||
+		!strings.Contains(steps["doctor"], "goatest doctor") || !strings.Contains(steps["verify"], "goatest verify ./...") {
+		t.Fatalf("next steps = %+v", steps)
+	}
+}
+
+// A jsonl UI streams one progress event per note to the output stream the
+// final report event will follow on, and leaves the plain progress stream
+// silent: one pipe carries the whole stream.
+func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
+	var output, progress bytes.Buffer
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress, Output: &output,
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
+			options.Progress(assure.Event{Kind: "mutation-progress", Detail: "3/9"})
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIJSONL}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Len() != 0 {
+		t.Fatalf("jsonl leaked plain progress: %q", progress.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stream = %q", output.String())
+	}
+	for index, want := range []struct{ kind, detail string }{{"snapshot", "captured"}, {"mutation-progress", "3/9"}} {
+		var event struct {
+			Type      string `json:"type"`
+			Kind      string `json:"kind"`
+			Detail    string `json:"detail"`
+			ElapsedMS int64  `json:"elapsed_ms"`
+		}
+		if err := json.Unmarshal([]byte(lines[index]), &event); err != nil {
+			t.Fatalf("line %d = %q: %v", index, lines[index], err)
+		}
+		if event.Type != "progress" || event.Kind != want.kind || event.Detail != want.detail || event.ElapsedMS < 0 {
+			t.Fatalf("line %d = %+v, want %+v", index, event, want)
+		}
+	}
+}
+
+// A note the trace layer reports before the run - here a trace directory the
+// snapshot would read as source - reaches the renderer the request selected.
+func TestTraceUnavailableReachesTheSelectedUI(t *testing.T) {
+	var output bytes.Buffer
+	service := app.Service{
+		Root: t.TempDir(), Output: &output,
+		Run: func(context.Context, assure.Options) (report.Report, error) {
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	request := cli.Request{UI: cli.UIJSONL, Trace: true, TraceDirectory: "traces-inside-repository"}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, request, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"kind":"trace-unavailable"`) {
+		t.Fatalf("trace note missed the jsonl stream: %q", output.String())
+	}
+}
+
+// Without an output stream a jsonl request falls back to deterministic plain
+// lines rather than guessing where the stream went.
+func TestJSONLWithoutAnOutputWriterFallsBackToPlain(t *testing.T) {
+	var progress bytes.Buffer
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress,
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIJSONL}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := progress.String(), "goatest: snapshot           captured\n"; got != want {
+		t.Fatalf("progress = %q, want %q", got, want)
+	}
+}
+
+// The auto UI renders plain lines wherever no composition root probed an
+// interactive terminal: the zero value of Interactive can never start a
+// dashboard, and neither can a probe that answered no.
+func TestAutoUIWithoutATerminalRendersPlainLines(t *testing.T) {
+	for name, interactive := range map[string]func(io.Writer) bool{
+		"zero-value": nil,
+		"probed-no":  func(io.Writer) bool { return false },
+	} {
+		var progress bytes.Buffer
+		service := app.Service{
+			Root: t.TempDir(), Progress: &progress, Interactive: interactive,
+			Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+				options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
+				return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+			},
+		}
+		if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIAuto}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := progress.String(), "goatest: snapshot           captured\n"; got != want {
+			t.Fatalf("%s: progress = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// On an interactive terminal the auto UI renders the in-place dashboard, and
+// closing the run erases the status line.
+func TestAutoUIRendersTheDashboardOnAnInteractiveTerminal(t *testing.T) {
+	var progress lockedProgressBuffer
+	service := app.Service{
+		Root: t.TempDir(), Progress: &progress,
+		Interactive: func(io.Writer) bool { return true },
+		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
+			options.Progress(assure.Event{Kind: "baseline-target", Detail: "internal/report:TestLines"})
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{UI: cli.UIAuto}, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := progress.String()
+	if !strings.Contains(got, "\r\x1b[K") || !strings.Contains(got, "baseline") || !strings.Contains(got, "internal/report:TestLines") {
+		t.Fatalf("dashboard frame missing: %q", got)
+	}
+	if !strings.HasSuffix(got, "\r\x1b[K") {
+		t.Fatalf("dashboard was not erased on close: %q", got)
+	}
+}
+
+// lockedProgressBuffer synchronizes writes, because a dashboard redraws from
+// its own tick goroutine.
+type lockedProgressBuffer struct {
+	mutex  sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *lockedProgressBuffer) Write(data []byte) (int, error) {
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *lockedProgressBuffer) String() string {
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+	return buffer.buffer.String()
 }

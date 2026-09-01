@@ -34,6 +34,7 @@ func TestHelpListsPublicSurfaceWithoutRunningService(t *testing.T) {
 		for _, expected := range []string{
 			"--changed[=REF]", "--contract=standard-v1|deep-v1", "--trace[=DIR]", "GOATEST_TRACE",
 			"--keep-temp", "GOATEST_KEEP_TEMP", "init", "explain ID", "replay ID", "accept ID", "report",
+			"--ui=auto|plain|jsonl", "--json", "--version", "help [command]",
 		} {
 			if !strings.Contains(stdout.String(), expected) {
 				t.Errorf("%s help omitted %q:\n%s", flag, expected, stdout.String())
@@ -89,7 +90,7 @@ func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
 	cancelled := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictError}, err: context.Canceled}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if exit := cli.Run(t.Context(), nil, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" || stdout.Len() != 0 {
+	if exit := cli.Run(t.Context(), []string{"verify"}, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" || stdout.Len() != 0 {
 		t.Fatalf("cancellation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
@@ -223,7 +224,7 @@ func TestVerdictsMapToStableExitCodes(t *testing.T) {
 		report.VerdictError:         cli.ExitError,
 	} {
 		fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: verdict}}
-		if got := cli.Run(t.Context(), nil, &bytes.Buffer{}, &bytes.Buffer{}, fake); got != want {
+		if got := cli.Run(t.Context(), []string{"verify"}, &bytes.Buffer{}, &bytes.Buffer{}, fake); got != want {
 			t.Errorf("%s => %d, want %d", verdict, got, want)
 		}
 	}
@@ -232,11 +233,105 @@ func TestVerdictsMapToStableExitCodes(t *testing.T) {
 func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 	fake := &service{err: errors.New("failed\nFINDING forged\x1b[31m")}
 	var stderr bytes.Buffer
-	if exit := cli.Run(t.Context(), nil, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
+	if exit := cli.Run(t.Context(), []string{"verify"}, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
 		t.Fatalf("exit = %d", exit)
 	}
 	if got, want := stderr.String(), "goatest: failed\\nFINDING forged\\u001b[31m\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+// A diagnostic carries exactly one "goatest: " prefix, however the layer below
+// labeled its error: the service layer wraps most of its errors under the same
+// prefix this layer writes.
+func TestErrorPrefixIsNeverDoubled(t *testing.T) {
+	for _, wrapped := range []string{
+		"goatest: read latest report: file is absent",
+		"goatest: goatest: read latest report: file is absent",
+	} {
+		fake := &service{err: errors.New(wrapped)}
+		var stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), []string{"report"}, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
+			t.Fatalf("exit = %d", exit)
+		}
+		if got, want := stderr.String(), "goatest: read latest report: file is absent\n"; got != want {
+			t.Fatalf("stderr = %q, want %q", got, want)
+		}
+	}
+}
+
+// A bare invocation prints the help text instead of starting a full
+// verification nobody asked for.
+func TestBareInvocationShowsHelpWithoutRunningService(t *testing.T) {
+	for _, args := range [][]string{nil, {}} {
+		fake := &service{}
+		var stdout, stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), args, &stdout, &stderr, fake); exit != cli.ExitAssured {
+			t.Fatalf("%v exit = %d stderr = %q", args, exit, stderr.String())
+		}
+		if !strings.HasPrefix(stdout.String(), "Usage:") || fake.command != "" || stderr.Len() != 0 {
+			t.Fatalf("%v stdout = %q command = %q stderr = %q", args, stdout.String(), fake.command, stderr.String())
+		}
+	}
+}
+
+func TestCommandHelpIsAvailablePerSubcommand(t *testing.T) {
+	for _, args := range [][]string{
+		{"verify", "--help"}, {"help", "verify"}, {"--help", "verify"}, {"verify", "-h"},
+	} {
+		fake := &service{}
+		var stdout, stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), args, &stdout, &stderr, fake); exit != cli.ExitAssured || fake.command != "" {
+			t.Fatalf("%v exit = %d command = %q stderr = %q", args, exit, fake.command, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "goatest verify [packages...]") || !strings.Contains(stdout.String(), "--changed[=REF]") {
+			t.Fatalf("%v stdout = %q", args, stdout.String())
+		}
+	}
+	for _, command := range []string{"plan", "doctor", "init", "explain", "replay", "accept", "fix", "report", "cache"} {
+		fake := &service{}
+		var stdout, stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), []string{"help", command}, &stdout, &stderr, fake); exit != cli.ExitAssured || fake.command != "" {
+			t.Fatalf("help %s exit = %d command = %q stderr = %q", command, exit, fake.command, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "goatest "+command) {
+			t.Fatalf("help %s stdout = %q", command, stdout.String())
+		}
+	}
+	unknown := &service{}
+	var stdout, stderr bytes.Buffer
+	if exit := cli.Run(t.Context(), []string{"help", "nope"}, &stdout, &stderr, unknown); exit != cli.ExitError || unknown.command != "" {
+		t.Fatalf("help nope exit = %d command = %q", exit, unknown.command)
+	}
+	if !strings.Contains(stderr.String(), `unknown command "nope"`) || !strings.Contains(stderr.String(), "goatest --help") {
+		t.Fatalf("help nope stderr = %q", stderr.String())
+	}
+	// --help behind the test-binary separator belongs to a test binary.
+	separated := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
+	if exit := cli.Run(t.Context(), []string{"verify", "--", "--help"}, &bytes.Buffer{}, &bytes.Buffer{}, separated); exit != cli.ExitAssured || separated.command != cli.CommandVerify {
+		t.Fatalf("separated --help exit = %d command = %q", exit, separated.command)
+	}
+}
+
+func TestParseErrorsPointAtHelp(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		hint string
+	}{
+		{args: []string{"--unknown"}, hint: "run 'goatest --help' for usage"},
+		{args: []string{"--ui=fancy"}, hint: "run 'goatest --help' for usage"},
+		{args: []string{"accept", "finding-a"}, hint: "run 'goatest help accept' for usage"},
+		{args: []string{"cache", "flush"}, hint: "run 'goatest help cache' for usage"},
+		{args: []string{"doctor", "--changed"}, hint: "run 'goatest help doctor' for usage"},
+		{args: []string{"report", "--apply"}, hint: "run 'goatest help report' for usage"},
+	} {
+		var stderr bytes.Buffer
+		if exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &stderr, &service{}); exit != cli.ExitError {
+			t.Fatalf("%v exit = %d", test.args, exit)
+		}
+		if !strings.HasPrefix(stderr.String(), "goatest: ") || !strings.Contains(stderr.String(), test.hint) {
+			t.Fatalf("%v stderr = %q, want hint %q", test.args, stderr.String(), test.hint)
+		}
 	}
 }
 
@@ -249,9 +344,9 @@ func TestInfrastructureErrorsRenderTheirErrorReportBeforeTheDiagnostic(t *testin
 			}
 			fake := &service{report: result, err: errors.New("workspace failed")}
 			var stdout, stderr bytes.Buffer
-			var arguments []string
+			arguments := []string{"verify"}
 			if jsonOutput {
-				arguments = []string{"--json"}
+				arguments = []string{"verify", "--json"}
 			}
 			if exit := cli.Run(t.Context(), arguments, &stdout, &stderr, fake); exit != cli.ExitError {
 				t.Fatalf("exit = %d", exit)

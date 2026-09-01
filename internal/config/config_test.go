@@ -245,7 +245,7 @@ func TestInitAndAddAcceptanceRoundTripWithoutWeakeningStrictness(t *testing.T) {
 	}
 }
 
-func TestInitWritesExactConfigAndReportsCreateFailure(t *testing.T) {
+func TestInitWritesAnnotatedDefaultsAndReportsCreateFailure(t *testing.T) {
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -254,8 +254,34 @@ func TestInitWritesExactConfigAndReportsCreateFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "version = 1\ncontract = \"standard-v1\"\n"; got != want {
-		t.Fatalf("config bytes = %q, want %q", got, want)
+	// The template documents every section, but only version and contract are
+	// active: loading the file yields exactly the strict defaults.
+	var active []string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			active = append(active, trimmed)
+		}
+	}
+	if want := []string{"version = 1", `contract = "standard-v1"`}; !slices.Equal(active, want) {
+		t.Fatalf("active lines = %q, want %q", active, want)
+	}
+	for _, section := range []string{
+		"[project]", "[execution]", "[cache]", "[resources.postgres]", "[generation]", "[[acceptance]]",
+		"packages", "exclude", "build_tags", "test_binary_args", "environment", "timeout", "jobs",
+		"max_bytes", "ttl", "command", "shared", "allowed_paths", "id", "reason", "expires",
+	} {
+		if !strings.Contains(string(data), section) {
+			t.Errorf("template omitted %q", section)
+		}
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Contract != "standard-v1" || !slices.Equal(loaded.Project.Packages, []string{"./..."}) ||
+		loaded.Execution.Timeout != 10*time.Minute || loaded.Cache.MaxBytes != 5<<30 || len(loaded.Resources) != 0 {
+		t.Fatalf("template drifted from the strict defaults: %+v", loaded)
 	}
 	missingRoot := filepath.Join(t.TempDir(), "missing", "child")
 	if err := config.Init(missingRoot); err == nil || !strings.Contains(err.Error(), "create "+config.FileName) {

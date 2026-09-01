@@ -18,6 +18,7 @@ import (
 
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/processtree"
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -46,6 +47,11 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "config", "configuration-metadata", digestErr), nil
 	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "config", Status: "ready", Detail: "strict config v1"})
+	profile, profileErr := mutationbridge.Profile(loaded.Contract)
+	if profileErr != nil {
+		return doctorFailure(result, "mutation", "mutation-profile", profileErr), nil
+	}
+	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "mutation-profile", Status: "ready", Detail: profile})
 	goBinary := service.GoBinary
 	if goBinary == "" {
 		goBinary = "go"
@@ -126,6 +132,15 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		}
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "generation-provider", Status: "ready", Detail: command})
 	}
+	// A verification writes its cache under .goatest/ and its artifacts under
+	// reports/; a doctor that cannot write there reports it before a long run
+	// finds out the hard way.
+	for _, directory := range []string{".goatest", "reports"} {
+		if err := probeWritableDirectory(service.doctorFilesystem, filepath.Join(root, directory)); err != nil {
+			return doctorFailure(result, "filesystem", "writable-"+directory, err), nil
+		}
+		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "writable-" + directory, Status: "ready", Detail: directory})
+	}
 	free, err := diskFreeBytes(root)
 	if err != nil {
 		return doctorFailure(result, "filesystem", "disk", err), nil
@@ -135,6 +150,68 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "filesystem", "disk-capacity", fmt.Errorf("only %d bytes are free", free)), nil
 	}
 	return result, nil
+}
+
+// doctorProbeFilesystem is the filesystem the writability probe runs through.
+// Its zero value is the os package; a test fills in only the operation it
+// wants to answer for, because the failures a probe must report are not
+// failures a disk produces on demand.
+type doctorProbeFilesystem struct {
+	Stat      func(string) (os.FileInfo, error)
+	MkdirAll  func(string, os.FileMode) error
+	WriteFile func(string, []byte, os.FileMode) error
+	Remove    func(string) error
+}
+
+// resolved returns the hooks with every unset operation filled in from the os
+// package.
+func (hooks doctorProbeFilesystem) resolved() doctorProbeFilesystem {
+	if hooks.Stat == nil {
+		hooks.Stat = os.Stat
+	}
+	if hooks.MkdirAll == nil {
+		hooks.MkdirAll = os.MkdirAll
+	}
+	if hooks.WriteFile == nil {
+		hooks.WriteFile = os.WriteFile
+	}
+	if hooks.Remove == nil {
+		hooks.Remove = os.Remove
+	}
+	return hooks
+}
+
+// probeWritableDirectory proves a directory can be written by writing into it,
+// and leaves the tree exactly as it found it: the probe file is removed, and a
+// directory the probe itself created is removed with it.
+func probeWritableDirectory(hooks doctorProbeFilesystem, directory string) error {
+	hooks = hooks.resolved()
+	created := false
+	if _, err := hooks.Stat(directory); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := hooks.MkdirAll(directory, 0o755); err != nil {
+			return err
+		}
+		created = true
+	}
+	probe := filepath.Join(directory, fmt.Sprintf(".goatest-doctor-probe-%d", os.Getpid()))
+	if err := hooks.WriteFile(probe, []byte("goatest doctor writability probe"), 0o644); err != nil {
+		if created {
+			_ = hooks.Remove(directory)
+		}
+		return err
+	}
+	if err := hooks.Remove(probe); err != nil {
+		return err
+	}
+	if created {
+		if err := hooks.Remove(directory); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func doctorProviderCommand(root, name string) error {
