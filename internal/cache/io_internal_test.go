@@ -47,6 +47,7 @@ func (file *stubCacheFile) Close() error {
 }
 
 func TestGetReturnsTheReadFailureWithoutDecodingFallbackBytes(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("read failure")
 	hooks := storeHooks{
 		read: func(string) ([]byte, error) { return []byte(`{"schema":"assurance-report-v1"}`), failure },
@@ -58,8 +59,10 @@ func TestGetReturnsTheReadFailureWithoutDecodingFallbackBytes(t *testing.T) {
 }
 
 func TestPutPropagatesEveryAtomicWriteStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"mkdir", "create", "write", "sync", "close"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			failure := errors.New(stage + " failure")
 			file := &stubCacheFile{name: filepath.Join(root, "temporary")}
@@ -86,6 +89,7 @@ func TestPutPropagatesEveryAtomicWriteStage(t *testing.T) {
 }
 
 func TestPutRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
+	t.Parallel()
 	firstRename := errors.New("first rename")
 	secondRename := errors.New("second rename")
 	removeFailure := errors.New("remove destination")
@@ -102,6 +106,7 @@ func TestPutRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
 		{name: "remove-failure", removeErr: removeFailure, want: firstRename, wantJoined: removeFailure, wantCalls: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			temporary := filepath.Join(root, "temporary")
 			destination := filepath.Join(root, "v1", "digest-a", "report.json")
@@ -142,6 +147,7 @@ func TestPutRenameFallbackDistinguishesMissingAndRemovalFailures(t *testing.T) {
 }
 
 func TestPutSuccessWritesSyncsClosesAndRenames(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	temporary := filepath.Join(root, "temporary")
 	file := &stubCacheFile{name: temporary}
@@ -168,6 +174,7 @@ func TestPutSuccessWritesSyncsClosesAndRenames(t *testing.T) {
 }
 
 func TestPutTreatsPostCommitCollectionAsBestEffort(t *testing.T) {
+	t.Parallel()
 	hooks := storeHooks{
 		collect: func(string, int64, time.Duration, time.Time) (GCResult, error) {
 			return GCResult{}, errors.New("collection failed after commit")
@@ -189,6 +196,7 @@ func TestPutTreatsPostCommitCollectionAsBestEffort(t *testing.T) {
 // collector, so without this one nothing exercises the default: a store wired
 // to the locking Collect, or to no collector at all, would still pass them.
 func TestPutTrimsTheBoundedCacheAfterCommittingAnEntry(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	store := NewWithPolicy(root, 1, time.Hour)
 	if err := store.Put("digest-a", cachedReport()); err != nil {

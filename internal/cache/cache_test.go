@@ -15,6 +15,7 @@ import (
 )
 
 func TestStoreAndLoadReuseOnlyTheExactDigest(t *testing.T) {
+	t.Parallel()
 	store := cache.New(t.TempDir())
 	want := report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1", Snapshot: "digest-a"}
 	if err := store.Put("digest-a", want); err != nil {
@@ -30,6 +31,7 @@ func TestStoreAndLoadReuseOnlyTheExactDigest(t *testing.T) {
 }
 
 func TestCorruptOrMismatchedEntriesFailClosed(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	store := cache.New(root)
 	if err := store.Put("digest-a", report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Snapshot: "different"}); err == nil {
@@ -48,6 +50,7 @@ func TestCorruptOrMismatchedEntriesFailClosed(t *testing.T) {
 }
 
 func TestGetRejectsInvalidDigestWithoutTouchingTheFilesystem(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	store := cache.New(root)
 	for _, digest := range []string{"", ".", "..", "parent/child", `parent\child`} {
@@ -70,6 +73,7 @@ func TestGetRejectsInvalidDigestWithoutTouchingTheFilesystem(t *testing.T) {
 }
 
 func TestGetRejectsReadStrictnessAndIdentityFailures(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name      string
 		data      []byte
@@ -84,6 +88,7 @@ func TestGetRejectsReadStrictnessAndIdentityFailures(t *testing.T) {
 		{name: "wrong-snapshot", data: report.JSON(report.Report{Schema: report.SchemaV1, Snapshot: "digest-b"}), want: "identity mismatch"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			path := filepath.Join(root, "v1", "digest-a", "report.json")
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -106,6 +111,7 @@ func TestGetRejectsReadStrictnessAndIdentityFailures(t *testing.T) {
 }
 
 func TestPutRejectsMismatchedSnapshotBeforeCreatingDirectories(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	err := cache.New(root).Put("digest-a", report.Report{Schema: report.SchemaV1, Snapshot: "digest-b"})
 	if err == nil || !strings.Contains(err.Error(), "snapshot does not match") {
@@ -121,6 +127,7 @@ func TestPutRejectsMismatchedSnapshotBeforeCreatingDirectories(t *testing.T) {
 }
 
 func TestPutReportsDirectoryFailureAndLeavesNoTemporaryFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	blocking := filepath.Join(root, "v1")
 	if err := os.WriteFile(blocking, []byte("not a directory"), 0o644); err != nil {
@@ -140,6 +147,7 @@ func TestPutReportsDirectoryFailureAndLeavesNoTemporaryFile(t *testing.T) {
 }
 
 func TestPutWritesTheDeterministicFinalPathWithoutTemporaryArtifacts(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	want := report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1", Snapshot: "digest-a"}
 	if err := cache.New(root).Put("digest-a", want); err != nil {
