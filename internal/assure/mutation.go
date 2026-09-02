@@ -64,9 +64,15 @@ type MutationSession interface {
 
 // TargetEvidence is one top-level Go test/fuzz target and the source files it
 // demonstrably reached during its baseline execution.
+//
+// Covered narrows the same evidence to the coverage blocks the target ran. It
+// lives in memory only: blocks are far too large to rewrite on every
+// checkpoint, so a target restored from a checkpoint carries nil there and
+// routing treats it as reaching everything in CoveredFiles.
 type TargetEvidence struct {
 	Target       goanalysis.Target
 	CoveredFiles []string
+	Covered      []goanalysis.FileCoverage
 	Environment  []string
 	Duration     time.Duration
 }
