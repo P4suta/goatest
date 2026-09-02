@@ -205,6 +205,99 @@ func TestRunExitsOneOnAViolation(t *testing.T) {
 	}
 }
 
+// soundCatalog writes a catalog for the sound recording: its one mutant, with
+// a proof over a body no profile of the run instrumented. The layer refuses to
+// discharge anything from a body the toolchain never measured, so the sound
+// recording stays sound with the layer in the audit.
+func soundCatalog(t *testing.T) string {
+	t.Helper()
+	return writeCatalog(t, `{"document_type": "go-mutants/catalog", "schema_version": 1, "mutants": [
+	  {"id": "`+firstMutant+`", "path": "`+subjectPath+`", "line": 11, "column": 4,
+	   "branch": {"direction": "decreasing", "body_start_line": 30, "body_start_column": 2,
+	              "body_end_line": 32, "body_end_column": 3}}]}`)
+}
+
+func TestRunAuditsTheBranchLayerWhenACatalogIsGiven(t *testing.T) {
+	t.Parallel()
+	tracePath, profiles := soundRecording(t)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-module", fixtureModule, "-catalog", soundCatalog(t), tracePath, profiles}, &stdout, &stderr)
+	if code != exitSuccess {
+		t.Fatalf("run exited %d, want %d; stderr: %s", code, exitSuccess, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{branchLayerName, branchDischargeHeading, "routes with a branch proof"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the audit does not say %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, whyBranchNotAudited) {
+		t.Errorf("a run given a catalog says the layer was not audited:\n%s", got)
+	}
+}
+
+func TestRunSaysTheBranchLayerWasNotAuditedWithoutACatalog(t *testing.T) {
+	t.Parallel()
+	// A missing row and a row of zeroes read the same to anyone skimming, so
+	// the report says which of the two it is and the exit code stays what the
+	// audited layers decided.
+	tracePath, profiles := soundRecording(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-module", fixtureModule, tracePath, profiles}, &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("run exited %d, want %d; stderr: %s", code, exitSuccess, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, whyBranchNotAudited) {
+		t.Errorf("the audit does not say the branch layer went unaudited:\n%s", got)
+	}
+	if strings.Contains(got, branchDischargeHeading) {
+		t.Errorf("an unaudited layer reports what it would have saved:\n%s", got)
+	}
+}
+
+func TestRunReportsACatalogItCannotRead(t *testing.T) {
+	t.Parallel()
+	tracePath, profiles := soundRecording(t)
+	missing := filepath.Join(t.TempDir(), "absent.json")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-module", fixtureModule, "-catalog", missing, tracePath, profiles}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("run exited %d, want %d", code, exitFailure)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("run wrote %q to stdout, want nothing", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), missing) {
+		t.Errorf("run wrote %q to stderr, want the catalog it could not read", stderr.String())
+	}
+}
+
+func TestRunRefusesACatalogItCannotBeSureOf(t *testing.T) {
+	t.Parallel()
+	// A document of another kind or another schema may name the same fields
+	// and mean something else by them, and an audit that read one anyway would
+	// print a soundness result it has no evidence for.
+	tracePath, profiles := soundRecording(t)
+	catalog := writeCatalog(t, `{"document_type": "go-mutants/inventory", "schema_version": 7, "mutants": []}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-module", fixtureModule, "-catalog", catalog, tracePath, profiles}, &stdout, &stderr)
+	if code != exitFailure {
+		t.Fatalf("run exited %d, want %d", code, exitFailure)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("run wrote %q to stdout, want nothing", stdout.String())
+	}
+	for _, want := range []string{catalog, "go-mutants/inventory", "7", catalogDocumentType} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("run wrote %q to stderr, want it to name %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestModuleFromGoModReadsTheDirectiveAlone(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,6 +39,10 @@ const (
 	secondTarget = "b1c2d3e4f5061728"
 	thirdTarget  = "d1e2f30415162738"
 	absentTarget = "c1d2e3f405162738"
+	// fuzzTarget is the fixture target whose test is a fuzz target. Go names
+	// one by its Fuzz prefix and nothing else, so the fixture says it in the
+	// name and the rule reads it from there.
+	fuzzTarget = "e1f203142536475a"
 
 	firstMutant   = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 	firstDisplay  = "a1b2c3d4e5f60718293a"
@@ -49,6 +54,8 @@ const (
 	fourthDisplay = "d1e2f30415162738495a"
 	fifthMutant   = "e1f203142536475869708a9bacbdcedfe1f203142536475869708a9bacbdcedf"
 	fifthDisplay  = "e1f20314253647586970"
+	sixthMutant   = "f1a2b3c4d5e60718293a4b5c6d7e8f90f1a2b3c4d5e60718293a4b5c6d7e8f90"
+	sixthDisplay  = "f1a2b3c4d5e60718293a"
 )
 
 // ran renders one profile line for a block of the subject file the profiled
@@ -121,7 +128,28 @@ func blockRoute(seq int64, mutant string, line, column int, targets ...string) t
 // testNameOf is the test a fixture target runs. The audit maps a killer test
 // back to its target through the plan alone, so the name only has to be the
 // same on both sides of a fixture.
-func testNameOf(target string) string { return "TestTarget" + strings.ToUpper(target[:2]) }
+func testNameOf(target string) string {
+	if target == fuzzTarget {
+		return "FuzzTarget" + strings.ToUpper(target[:2])
+	}
+	return "TestTarget" + strings.ToUpper(target[:2])
+}
+
+// measured is the baseline measurement of one target: the command a run
+// executes to record what that target covers. Its arguments are the only place
+// in a recording where a target's identity, the test it runs and the package it
+// runs in meet, which is what the savings measurement reads them for.
+func measured(seq int64, target string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{
+			"go", "tool", "test2json", "-t", "-p", fixtureModule + "/pkg",
+			"/tmp/goatest-baseline/" + target + ".test", "-test.v=test2json",
+			"-test.run=^" + testNameOf(target) + "$",
+			"-test.coverprofile=/tmp/goatest-baseline/" + target + profileSuffix,
+			"-test.count=1",
+		},
+	}}
+}
 
 // killedBy is one execution of a mutant that its target killed.
 func killedBy(seq int64, mutant, display, target string) trace.Event {
@@ -129,6 +157,40 @@ func killedBy(seq int64, mutant, display, target string) trace.Event {
 		ID: mutant, DisplayID: display, Package: fixtureModule + "/pkg",
 		Args: []string{"-test.run=^" + testNameOf(target) + "$"}, Outcome: outcomeKilled, DurationMS: 5,
 	})
+}
+
+// executedBy is one execution of a mutant against a single target's test,
+// whatever became of it. The executions a proof would remove are the ones no
+// kill has to be preserved from, so the savings measurement counts these and
+// not only the kills.
+func executedBy(seq int64, mutant, display, target, outcome string) trace.Event {
+	return mutantEvent(seq, trace.MutantRecord{
+		ID: mutant, DisplayID: display, Package: fixtureModule + "/pkg",
+		Args: []string{"-test.run=^" + testNameOf(target) + "$"}, Outcome: outcome, DurationMS: 7,
+	})
+}
+
+// gatedBody is the span of a branch body a proof names.
+func gatedBody(startLine, startColumn, endLine, endColumn int) *branchProof {
+	return &branchProof{
+		BodyStartLine: startLine, BodyStartColumn: startColumn,
+		BodyEndLine: endLine, BodyEndColumn: endColumn,
+	}
+}
+
+// cataloguedMutant is one entry of a fixture catalog: where the engine placed
+// the mutant, and the body its condition gates when it proved one.
+func cataloguedMutant(id string, line, column int, proof *branchProof) catalogMutant {
+	return catalogMutant{ID: id, Path: subjectPath, Line: line, Column: column, Branch: proof}
+}
+
+// fixtureCatalog is a catalog listing exactly the given mutants.
+func fixtureCatalog(mutants ...catalogMutant) *mutantCatalog {
+	catalog := &mutantCatalog{mutants: make(map[string]catalogMutant, len(mutants))}
+	for _, mutant := range mutants {
+		catalog.mutants[mutant.ID] = mutant
+	}
+	return catalog
 }
 
 // recordedTrace renders events as the JSONL a recording is made of.
@@ -146,10 +208,17 @@ func recordedTrace(t *testing.T, events ...trace.Event) string {
 	return builder.String()
 }
 
-// auditFixture runs the reach layer over a fixture recording.
+// auditFixture runs the layers of a run audited without a catalog — the reach
+// layer alone — over a fixture recording.
 func auditFixture(t *testing.T, stream string, recorded evidence) auditResult {
 	t.Helper()
-	result, err := auditTrace(strings.NewReader(stream), recorded, auditLayers())
+	return auditWithCatalog(t, stream, recorded, nil)
+}
+
+// auditWithCatalog runs every layer a catalog enables over a fixture recording.
+func auditWithCatalog(t *testing.T, stream string, recorded evidence, catalog *mutantCatalog) auditResult {
+	t.Helper()
+	result, err := auditTrace(strings.NewReader(stream), recorded, catalog, auditLayers(catalog))
 	if err != nil {
 		t.Fatalf("audit the recording: %v", err)
 	}
@@ -476,7 +545,7 @@ func TestAuditReportsAStreamItCannotRead(t *testing.T) {
 	// over the part that arrived.
 	broken := errors.New("the stream broke")
 
-	_, err := auditTrace(failingReader{err: broken}, evidence{}, auditLayers())
+	_, err := auditTrace(failingReader{err: broken}, evidence{}, nil, auditLayers(nil))
 	if !errors.Is(err, broken) {
 		t.Fatalf("auditing a broken stream returned %v, want the read failure", err)
 	}
@@ -562,7 +631,7 @@ func TestAuditRejectsAMalformedLineBeforeTheEnd(t *testing.T) {
 	})
 	stream := "{\"seq\":1,\"type\":\"route\"\n" + recordedTrace(t, killedBy(2, firstMutant, firstDisplay, killerTarget))
 
-	if _, err := auditTrace(strings.NewReader(stream), recorded, auditLayers()); err == nil {
+	if _, err := auditTrace(strings.NewReader(stream), recorded, nil, auditLayers(nil)); err == nil {
 		t.Fatal("a malformed line in the middle of a recording was accepted")
 	} else if !strings.Contains(err.Error(), "line 1") {
 		t.Errorf("the error is %q, want it to name the line it refused", err)
@@ -653,5 +722,345 @@ func TestReadEvidenceReadsTheProfilesAndNothingElse(t *testing.T) {
 			t.Errorf("the instrumented union does not contain %d.%d, which a profile named",
 				position.line, position.column)
 		}
+	}
+}
+
+// layerNames is the audit's layer list, which is what a catalog changes.
+func layerNames(layers []layer) []string {
+	names := make([]string, 0, len(layers))
+	for _, audited := range layers {
+		names = append(names, audited.name)
+	}
+	return names
+}
+
+func TestAuditLayersAddsTheBranchLayerOnlyWithACatalog(t *testing.T) {
+	t.Parallel()
+	// The branch layer decides by a proof only a catalog carries, so a run
+	// audited without one is a run the layer was not held to. Adding it
+	// silently would be worse than not adding it: a reader would take the
+	// missing row for a clean one.
+	if got := layerNames(auditLayers(nil)); !slices.Equal(got, []string{reachLayerName}) {
+		t.Errorf("without a catalog the audit runs %v, want only %q", got, reachLayerName)
+	}
+	got := layerNames(auditLayers(fixtureCatalog()))
+	if !slices.Equal(got, []string{reachLayerName, branchLayerName}) {
+		t.Errorf("with a catalog the audit runs %v, want %q after %q", got, branchLayerName, reachLayerName)
+	}
+}
+
+func TestDecideBranchKeepsEveryKillerItCannotProveInert(t *testing.T) {
+	t.Parallel()
+	// The subject of every case below: a condition at 20:4 gating a body that
+	// runs from its opening brace at 20:15 to its closing one at 22:3. The
+	// mutated condition implies the original, so a test during which no
+	// statement of that body ran cannot observe the mutation — and every other
+	// state of the evidence keeps the killer.
+	cases := []struct {
+		name     string
+		catalog  *mutantCatalog
+		profiles map[string][]string
+		target   string
+		want     conclusion
+		why      string
+	}{
+		{
+			name:     "a mutant the catalog does not list",
+			catalog:  fixtureCatalog(),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     unverifiable,
+			why:      whyNotInCatalog,
+		},
+		{
+			name:     "a mutant the catalog lists without a proof",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, nil)),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     inapplicable,
+		},
+		{
+			name:     "a body that ends before it starts",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(22, 3, 20, 15))),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a body coordinate below one",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 0))),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a mutation at the start of the body it gates",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 15, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a mutation inside the body it gates",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 21, 3, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a body no profile instrumented",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(10, 2, 12, 16)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a body whose first block starts at its brace",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(10, 2, 12, 16), ran(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a body whose first block starts at its first statement",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(10, 2, 12, 16), ran(21, 3, 22, 3)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:    "a block that starts before the body and ends inside it",
+			catalog: fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{
+				killerTarget: {ran(18, 2, 21, 10)},
+				secondTarget: {linked(20, 15, 22, 3)},
+			},
+			target: killerTarget,
+			want:   discharged,
+			why:    whyBodyNeverTaken,
+		},
+		{
+			name:     "a block that starts where the body ends",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {linked(20, 15, 22, 3), ran(22, 3, 24, 2)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a block that starts one column past the body",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {linked(20, 15, 22, 3), ran(22, 4, 24, 2)}},
+			target:   killerTarget,
+			want:     discharged,
+			why:      whyBodyNeverTaken,
+		},
+		{
+			name:     "a body and its mutation on one line",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 20, 40))),
+			profiles: map[string][]string{killerTarget: {ran(20, 20, 20, 39)}},
+			target:   killerTarget,
+			want:     kept,
+		},
+		{
+			name:     "a block past a body that shares the mutation's line",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 20, 40))),
+			profiles: map[string][]string{killerTarget: {linked(20, 20, 20, 39), ran(20, 41, 20, 60)}},
+			target:   killerTarget,
+			want:     discharged,
+			why:      whyBodyNeverTaken,
+		},
+		{
+			name:     "a killer that left no profile",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {ran(20, 15, 22, 3)}},
+			target:   absentTarget,
+			want:     unverifiable,
+			why:      whyNoProfile,
+		},
+		{
+			name:     "a killer that covers no block of the file",
+			catalog:  fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3))),
+			profiles: map[string][]string{killerTarget: {linked(20, 15, 22, 3)}},
+			target:   killerTarget,
+			want:     discharged,
+			why:      whyBodyNeverTaken,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			recorded := recordedEvidence(t, testCase.profiles)
+			pair := killPair{mutant: firstMutant, path: subjectPath, target: testCase.target}
+
+			got := decideBranch(testCase.catalog, pair, recorded)
+			if got.conclusion != testCase.want {
+				t.Errorf("decideBranch concluded %v, want %v", got.conclusion, testCase.want)
+			}
+			if got.why != testCase.why {
+				t.Errorf("decideBranch explained itself as %q, want %q", got.why, testCase.why)
+			}
+		})
+	}
+}
+
+func TestAuditCountsWhatTheBranchLayerHasNoProofFor(t *testing.T) {
+	t.Parallel()
+	// A mutant the layer has no proof for is not a mutant it keeps: it is one
+	// the layer changes nothing about. Counting it as kept would let a layer
+	// that proves almost nothing report almost every pair as its own.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16), ran(20, 15, 22, 3)},
+	})
+	catalog := fixtureCatalog(
+		cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3)),
+		cataloguedMutant(secondMutant, 11, 4, nil),
+	)
+	stream := recordedTrace(t,
+		blockRoute(1, firstMutant, 20, 4, killerTarget),
+		killedBy(2, firstMutant, firstDisplay, killerTarget),
+		blockRoute(3, secondMutant, 11, 4, killerTarget),
+		killedBy(4, secondMutant, secondDisplay, killerTarget),
+	)
+
+	result := auditWithCatalog(t, stream, recorded, catalog)
+	if len(result.layers) != 2 {
+		t.Fatalf("audited %d layers, want the reach layer and the branch layer", len(result.layers))
+	}
+	branch := result.layers[1]
+	if branch.name != branchLayerName {
+		t.Fatalf("the second layer is %q, want %q", branch.name, branchLayerName)
+	}
+	if branch.audited != 2 || branch.kept != 1 || branch.inapplicable != 1 {
+		t.Errorf("the branch layer audited %+v, want one pair it keeps and one it has no proof for", branch)
+	}
+	if result.layers[0].inapplicable != 0 {
+		t.Errorf("the reach layer reported %d pairs it does not apply to, want none", result.layers[0].inapplicable)
+	}
+	if len(result.violations) != 0 || len(result.unverifiable) != 0 {
+		t.Errorf("a sound recording reported %d violations and %d unverifiable pairs, want none",
+			len(result.violations), len(result.unverifiable))
+	}
+}
+
+func TestAuditFailsWhenAKillerNeverTookTheBodyItsMutationGates(t *testing.T) {
+	t.Parallel()
+	// The killer ran the condition and never a statement of the body behind
+	// it. The proof says such a target cannot observe the mutation, and the
+	// recording says it killed the mutant, so one of the two is wrong and the
+	// audit prints which pair to look at.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(18, 2, 20, 15), linked(20, 15, 22, 3)},
+	})
+	catalog := fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3)))
+	stream := recordedTrace(t,
+		blockRoute(1, firstMutant, 20, 4, killerTarget),
+		killedBy(2, firstMutant, firstDisplay, killerTarget),
+	)
+
+	result := auditWithCatalog(t, stream, recorded, catalog)
+	if len(result.violations) != 1 {
+		t.Fatalf("reported %d violations, want exactly 1: %+v", len(result.violations), result.violations)
+	}
+	violation := result.violations[0]
+	if violation.layer != branchLayerName {
+		t.Errorf("the violation names layer %q, want %q", violation.layer, branchLayerName)
+	}
+	if violation.why != whyBodyNeverTaken {
+		t.Errorf("the violation explains itself as %q, want %q", violation.why, whyBodyNeverTaken)
+	}
+	if result.layers[1].violations != 1 {
+		t.Errorf("the branch layer counted %d violations, want 1", result.layers[1].violations)
+	}
+}
+
+func TestAuditMeasuresWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
+	t.Parallel()
+	// Soundness is the invariant; this is the value. The recording was made by
+	// a run that discharged nothing, so what the layer would have bought is
+	// read off the routes and the profiles rather than off a field the trace
+	// does not carry.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16), ran(20, 15, 22, 3), linked(30, 15, 32, 3)},
+		secondTarget: {ran(10, 2, 12, 16), linked(20, 15, 22, 3), linked(30, 15, 32, 3)},
+		thirdTarget:  {ran(10, 2, 12, 16)},
+		fuzzTarget:   {ran(10, 2, 12, 16)},
+	})
+	catalog := fixtureCatalog(
+		cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3)),
+		cataloguedMutant(secondMutant, 30, 4, gatedBody(30, 15, 32, 3)),
+		cataloguedMutant(thirdMutant, 11, 4, nil),
+	)
+	stream := recordedTrace(t,
+		measured(1, killerTarget), measured(2, secondTarget), measured(3, thirdTarget), measured(4, fuzzTarget),
+		blockRoute(5, firstMutant, 20, 4, secondTarget, thirdTarget, fuzzTarget),
+		executedBy(6, firstMutant, firstDisplay, secondTarget, "survived"),
+		executedBy(7, firstMutant, firstDisplay, fuzzTarget, "survived"),
+		mutantEvent(8, trace.MutantRecord{
+			ID: firstMutant, DisplayID: firstDisplay, Package: fixtureModule + "/pkg",
+			Args:    []string{"-test.run=^(" + testNameOf(secondTarget) + "|" + testNameOf(thirdTarget) + ")$"},
+			Outcome: "survived",
+		}),
+		mutantEvent(9, trace.MutantRecord{
+			ID: firstMutant, DisplayID: firstDisplay, Package: fixtureModule + "/other",
+			Args:    []string{"-test.run=^" + testNameOf(thirdTarget) + "$"},
+			Outcome: "survived",
+		}),
+		blockRoute(10, secondMutant, 30, 4, secondTarget),
+		executedBy(11, secondMutant, secondDisplay, secondTarget, "survived"),
+		blockRoute(12, thirdMutant, 11, 4, killerTarget),
+		executedBy(13, thirdMutant, thirdDisplay, killerTarget, "survived"),
+	)
+
+	result := auditWithCatalog(t, stream, recorded, catalog)
+	want := branchSavings{routes: 2, reaching: 4, discharged: 3, emptied: 1, executions: 2}
+	if result.savings != want {
+		t.Errorf("the audit measured %+v, want %+v", result.savings, want)
+	}
+}
+
+func TestAuditMeasuresNoSavingWithoutACatalog(t *testing.T) {
+	t.Parallel()
+	// Without a catalog the layer is not audited at all, and a savings block
+	// of zeroes would read as a layer that buys nothing rather than as one
+	// nobody measured.
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(20, 15, 22, 3)}})
+	stream := recordedTrace(t,
+		measured(1, killerTarget),
+		blockRoute(2, firstMutant, 20, 4, killerTarget),
+		killedBy(3, firstMutant, firstDisplay, killerTarget),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if result.branchAudited {
+		t.Error("a run audited without a catalog reports the branch layer as audited")
+	}
+	if (result.savings != branchSavings{}) {
+		t.Errorf("a run audited without a catalog measured %+v, want nothing", result.savings)
+	}
+}
+
+func TestAuditRefusesToDischargeAnUninstrumentedBody(t *testing.T) {
+	t.Parallel()
+	// A body no profile instrumented is a gap in the measurement, not proof
+	// that nothing ran it: cmd/cover may simply not have cut a block there.
+	// Nothing is discharged, so nothing is saved either.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16)},
+		secondTarget: {ran(10, 2, 12, 16)},
+	})
+	catalog := fixtureCatalog(cataloguedMutant(firstMutant, 20, 4, gatedBody(20, 15, 22, 3)))
+	stream := recordedTrace(t,
+		measured(1, killerTarget), measured(2, secondTarget),
+		blockRoute(3, firstMutant, 20, 4, killerTarget, secondTarget),
+		killedBy(4, firstMutant, firstDisplay, killerTarget),
+	)
+
+	result := auditWithCatalog(t, stream, recorded, catalog)
+	if len(result.violations) != 0 {
+		t.Fatalf("reported %d violations over an uninstrumented body, want none: %+v",
+			len(result.violations), result.violations)
+	}
+	if (result.savings != branchSavings{}) {
+		t.Errorf("an uninstrumented body measured %+v, want nothing", result.savings)
 	}
 }
