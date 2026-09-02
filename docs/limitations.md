@@ -33,9 +33,14 @@ self-dogfood is not external compatibility evidence.
   test still runs; a mutant that other targets also cover is run by those
   targets alone and, if only the blind test kills it, is reported as surviving.
 - Discharging a test a branch proof rules out inherits that same blind spot,
-  and is fail-closed everywhere else. A test that enters the gated body only
-  through a subprocess leaves no block behind and is discharged, exactly as
-  block routing would already route the mutant away from it. go-mutants states
+  and is fail-closed everywhere else. A test that evaluates the condition
+  in-process but enters the gated body only through a subprocess leaves no
+  block of the body behind: it is discharged, and if it alone kills the mutant,
+  the mutant is reported as surviving — the outcome block routing already gives
+  a mutant that only a blind test covers. A test that reaches the file only
+  through a subprocess is not in the reaching set at all, so there is nothing to
+  discharge from it, and a mutant no measured target reaches is still confirmed
+  by its package suite, where the test runs. go-mutants states
   no proof over a `//line` directive, because the coverage toolchain would then
   measure the span in one file's numbering and the profile in another's. The
   span is the body's braces and is closed at both ends, which is safe under
