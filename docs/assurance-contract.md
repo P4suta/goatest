@@ -88,6 +88,12 @@ tests the proof has already ruled out. That no test takes the branch the
 mutation narrows is the finding — a real gap in the suite, stated for the cost
 of reading a coverage profile.
 
+Both narrowings are proof layers in the sense of
+[ADR 0004](adr/0004-proof-layers-not-budgets.md): an execution is removed only
+where evidence the run already holds proves it could not observe the mutant,
+never by a time budget, a sample, or an exclusion of slow targets, and a layer
+that cannot establish its premise keeps the execution.
+
 ## Mutation confirmation
 
 A mutant is `killed` only after:
