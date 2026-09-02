@@ -4,6 +4,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/report"
@@ -95,5 +96,36 @@ func TestRenderComparisonDependsOnTheReportsAlone(t *testing.T) {
 	first, second := renderSample(), renderSample()
 	if first != second {
 		t.Error("two renderings of one pair of reports differ; the comparison is not deterministic")
+	}
+}
+
+func TestFormatDurationRendersMillisecondsNoDurationHoldsLosslessly(t *testing.T) {
+	t.Parallel()
+	// A duration counts nanoseconds, so the milliseconds of a report only
+	// convert while a thousand of them still fit: past the boundary the
+	// multiplication wraps and prints a duration of the opposite sign. The
+	// count a report carried is printed instead, which is lossless whatever
+	// wrote it.
+	cases := []struct {
+		name         string
+		milliseconds int64
+		want         string
+	}{
+		{name: "nothing", milliseconds: 0, want: "0s"},
+		{name: "the ten minutes of a real run", milliseconds: 600000, want: "10m0s"},
+		{name: "the longest duration a report converts", milliseconds: 9223372036854, want: "2562047h47m16.854s"},
+		{name: "one millisecond past it", milliseconds: 9223372036855, want: "9223372036855ms"},
+		{name: "the shortest duration a report converts", milliseconds: -9223372036854, want: "-2562047h47m16.854s"},
+		{name: "one millisecond below it", milliseconds: -9223372036855, want: "-9223372036855ms"},
+		{name: "the largest count there is", milliseconds: math.MaxInt64, want: "9223372036854775807ms"},
+		{name: "the smallest count there is", milliseconds: math.MinInt64, want: "-9223372036854775808ms"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatDuration(testCase.milliseconds); got != testCase.want {
+				t.Errorf("formatDuration(%d) = %q, want %q", testCase.milliseconds, got, testCase.want)
+			}
+		})
 	}
 }

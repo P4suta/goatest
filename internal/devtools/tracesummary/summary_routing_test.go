@@ -143,6 +143,42 @@ func TestRoutingBlockReportsUnrecordedGranularityAndReduction(t *testing.T) {
 	}
 }
 
+func TestRoutingBlockReadsGranularityAsTheMarkerOfRecordedRoutingMetadata(t *testing.T) {
+	t.Parallel()
+	// A route that names no granularity recorded no routing metadata, so
+	// whatever its other fields decode to is not a measurement of anything.
+	older := strings.Join(routingBlock([]trace.Event{
+		routeEvent("mutant-a", 2, trace.ReasonCoverageReaching, "", "", 6),
+		routeEvent("mutant-b", 0, trace.ReasonUnreached, "", "", 3),
+	}), "\n")
+	if want := "reduction: not recorded"; !strings.Contains(older, want) {
+		t.Errorf("the block of a recording without granularity does not carry %q:\n%s", want, older)
+	}
+	// A recording holding both kinds of route reduces the routes that
+	// recorded their routing over the candidates those same routes recorded,
+	// so a route that recorded nothing cannot move the totals.
+	mixed := strings.Join(routingBlock([]trace.Event{
+		routeEvent("mutant-a", 1, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 4),
+		routeEvent("mutant-b", 3, trace.ReasonCoverageReaching, "", "", 7),
+	}), "\n")
+	if want := "reduction: file candidates 4 -> reaching 1 (75.0% fewer)"; !strings.Contains(mixed, want) {
+		t.Errorf("the block of a mixed recording does not carry %q:\n%s", want, mixed)
+	}
+}
+
+func TestRoutingBlockReportsAZeroCandidateCountAsAMeasuredReduction(t *testing.T) {
+	t.Parallel()
+	// A file no test binary was ever linked against has no candidate at all.
+	// The route recorded its granularity, so the zero is a count the routing
+	// took rather than a field the recording never carried.
+	lines := strings.Join(routingBlock([]trace.Event{
+		routeEvent("mutant-a", 0, trace.ReasonUnreached, trace.GranularityFile, trace.FallbackOutsideBlocks, 0),
+	}), "\n")
+	if want := "reduction: file candidates 0 -> reaching 0 (nothing to reduce)"; !strings.Contains(lines, want) {
+		t.Errorf("the block of a route without candidates does not carry %q:\n%s", want, lines)
+	}
+}
+
 func TestRoutingBlockNamesARecordingWithoutRoutes(t *testing.T) {
 	t.Parallel()
 	lines := routingBlock([]trace.Event{{Type: trace.TypeRunStart}, {Type: trace.TypeRoute, Route: nil}})

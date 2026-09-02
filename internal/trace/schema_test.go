@@ -249,6 +249,61 @@ func TestSchemaRejectsARouteWithAnUnknownGranularityOrFallback(t *testing.T) {
 	}
 }
 
+func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// A fallback names why a block decision dropped back to the file, so a
+	// route that records one and is not decided by file contradicts itself.
+	cases := []struct {
+		name        string
+		granularity string
+		fallback    string
+		accepted    bool
+	}{
+		{name: "a fallback on a decision the blocks carried", granularity: trace.GranularityBlock, fallback: trace.FallbackOutsideBlocks},
+		{name: "a fallback on a route that recorded no granularity", fallback: trace.FallbackPositionUnknown},
+		{name: "a fallback on the route it dropped to the file", granularity: trace.GranularityFile, fallback: trace.FallbackOutsideBlocks, accepted: true},
+		{name: "a file route that did not fall back", granularity: trace.GranularityFile, accepted: true},
+		{name: "a block route", granularity: trace.GranularityBlock, accepted: true},
+		{name: "a route from a recording made before the labels existed", accepted: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "granularity")
+			delete(record, "fallback")
+			if testCase.granularity != "" {
+				record["granularity"] = testCase.granularity
+			}
+			if testCase.fallback != "" {
+				record["fallback"] = testCase.fallback
+			}
+			// The amendment is round-tripped through JSON so that the value
+			// the schema sees is the one a recording would carry.
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route with granularity %q and fallback %q was rejected: %v",
+					testCase.granularity, testCase.fallback, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route with granularity %q and fallback %q passed the schema",
+					testCase.granularity, testCase.fallback)
+			}
+		})
+	}
+}
+
 // cloneDocument returns an independent copy of a decoded event.
 func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	t.Helper()
