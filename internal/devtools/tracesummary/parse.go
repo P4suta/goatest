@@ -399,9 +399,10 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 
 // checkDischarges holds the proofs that removed a target from a reaching set to
 // the vocabulary the contract names, and to the accounting behind it: a
-// discharge names one target and the proof that removed it, and a discharged
+// discharge names one target and the proof that removed it, a discharged
 // target is one the route no longer reaches, so a route naming the same target
-// on both sides contradicts itself.
+// on both sides contradicts itself, and a proof removes a target once, so a
+// route naming the same target twice would be counted twice.
 func checkDischarges(record trace.RouteRecord) error {
 	if len(record.Discharged) == 0 {
 		return nil
@@ -410,6 +411,7 @@ func checkDischarges(record trace.RouteRecord) error {
 	for _, target := range record.ReachingTargets {
 		reaching[target] = struct{}{}
 	}
+	discharged := make(map[string]struct{}, len(record.Discharged))
 	for _, discharge := range record.Discharged {
 		if err := checkNotEmpty("route.discharged.target", discharge.Target); err != nil {
 			return err
@@ -422,6 +424,11 @@ func checkDischarges(record trace.RouteRecord) error {
 			return fmt.Errorf("route discharged %q and reaches it: a discharged target is one the route no longer reaches",
 				discharge.Target)
 		}
+		if _, seen := discharged[discharge.Target]; seen {
+			return fmt.Errorf("route discharged %q twice: a proof removes a target once",
+				discharge.Target)
+		}
+		discharged[discharge.Target] = struct{}{}
 	}
 	return nil
 }

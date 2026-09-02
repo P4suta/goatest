@@ -242,7 +242,10 @@ some, and both the schema and the trace reader reject it.
 a proof removed the discharged ones, so a discharged target never appears in
 `reaching_targets` as well, and a route naming the same target on both sides is
 rejected. Each entry names the target and the proof that removed it, which is
-`branch-never-taken` alone until another proof produces one.
+`branch-never-taken` alone until another proof produces one. A proof removes a
+target once, so each target appears in `discharged` at most once; a route
+naming the same target twice is rejected as well, since a reader counting the
+entries would otherwise count that target twice.
 
 The fallback ladder is three steps. A mutant whose position the engine did not
 report cannot be placed in any block, so it is routed by file with fallback
