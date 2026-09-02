@@ -327,18 +327,28 @@ A probe pass runs every baseline target once against a probe-instrumented tree
 no mutant is active in, and records per mutant whether the value at its site
 ever differed from the constant the mutant would put there.
 
+An execution ended in exactly one way: it reached an `outcome`, or an `error`
+stopped it before one. A record carries one of the two fields and never both
+or neither — a record saying neither describes no execution, and one saying
+both would be an error to one reader and a measurement to another — and the
+schema and the summary reader reject the other shapes.
+
 Facts come from a `measured` execution alone. The other three outcomes, and an
 execution carrying an `error` instead of an outcome, say nothing about any
 mutant: a reader treats every mutant as infected by such a target rather than
 as one the pass proved anything about. `infected` therefore appears beside
-`measured` and nowhere else, and both the schema and the trace reader reject it
-elsewhere.
+`measured` and nowhere else — an empty list included, since even an empty list
+is the claim that the execution measured and found nothing — and both the
+schema and the summary reader reject it elsewhere.
 
 `infected` names each mutant once, by the same full identity `mutant_id`
-carries, in ascending catalogue order, so two recordings of one pass list them
-in one order. A measured execution with no `infected` at all is the strongest
-thing the pass says about a target: that target infected nothing, so no mutant
-of the pass can be observed by it.
+carries, and a producer lists them in ascending catalogue order so that two
+recordings of one pass list them in one order. The order is the producer's
+determinism rule and not a fact a reader checks: the catalogue position is not
+in the trace, so a reader without the catalogue verifies the identities and
+their uniqueness alone. A measured execution with no `infected` at all is the
+strongest thing the pass says about a target: that target infected nothing, so
+no mutant of the pass can be observed by it.
 
 The record describes the execution and never the tree it ran in: no path to a
 probe log, no environment names, and no environment values. `args` are the test
