@@ -166,35 +166,40 @@ func FindFileCoverage(files []FileCoverage, path string) (FileCoverage, bool) {
 }
 
 // parseCoverageSpan reads the "startLine.startColumn,endLine.endColumn" span
-// of a coverage profile line.
+// of a coverage profile line. A span is only accepted when it names a block
+// the rest of the package can rely on: 1-based coordinates, and an end that
+// follows the start, so that the half-open block is not empty or reversed.
 func parseCoverageSpan(span string) (CoverageBlock, bool) {
 	start, end, ok := strings.Cut(span, ",")
 	if !ok {
 		return CoverageBlock{}, false
 	}
-	startLine, startColumn, ok := parseCoveragePosition(start)
-	if !ok {
+	block := CoverageBlock{}
+	if block.StartLine, block.StartColumn, ok = parseCoveragePosition(start); !ok {
 		return CoverageBlock{}, false
 	}
-	endLine, endColumn, ok := parseCoveragePosition(end)
-	if !ok {
+	if block.EndLine, block.EndColumn, ok = parseCoveragePosition(end); !ok {
 		return CoverageBlock{}, false
 	}
-	return CoverageBlock{StartLine: startLine, StartColumn: startColumn, EndLine: endLine, EndColumn: endColumn}, true
+	if block.EndLine < block.StartLine || block.EndLine == block.StartLine && block.EndColumn <= block.StartColumn {
+		return CoverageBlock{}, false
+	}
+	return block, true
 }
 
-// parseCoveragePosition reads one "line.column" half of a coverage span.
+// parseCoveragePosition reads one "line.column" half of a coverage span, and
+// accepts only the positive line and column a source position has.
 func parseCoveragePosition(position string) (int, int, bool) {
 	line, column, ok := strings.Cut(position, ".")
 	if !ok {
 		return 0, 0, false
 	}
 	lineNumber, err := strconv.Atoi(line)
-	if err != nil {
+	if err != nil || lineNumber < 1 {
 		return 0, 0, false
 	}
 	columnNumber, err := strconv.Atoi(column)
-	if err != nil {
+	if err != nil || columnNumber < 1 {
 		return 0, 0, false
 	}
 	return lineNumber, columnNumber, true
