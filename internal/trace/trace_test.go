@@ -82,9 +82,12 @@ func recordScript(clock *fakeClock, sink trace.Sink) {
 		Rule:            "cond-negate",
 		Path:            "internal/assure/run.go",
 		Line:            42,
+		Column:          9,
 		ReachingTargets: []string{"TestRun"},
 		Plan:            []string{"TestRun"},
 		Reason:          trace.ReasonCoverageReaching,
+		Granularity:     trace.GranularityBlock,
+		FileCandidates:  3,
 	})
 	clock.Advance(time.Second)
 	recorder.Progress("mutation-progress", "3/10")
@@ -116,7 +119,7 @@ var scriptedJSONL = []string{
 	`{"seq":2,"type":"phase-start","timestamp":"2026-01-02T03:04:06Z","elapsed_ms":1000,"phase":{"name":"mutation"}}`,
 	`{"seq":3,"type":"exec","timestamp":"2026-01-02T03:04:07Z","elapsed_ms":2000,"exec":{"argv":["go","test","./..."],"dir":"internal/assure","env_names":["GOCACHE","GOFLAGS"],"timeout_ms":60000,"exit_code":1,"duration_ms":1200}}`,
 	`{"seq":4,"type":"mutant-exec","timestamp":"2026-01-02T03:04:08Z","elapsed_ms":3000,"mutant":{"id":"m-0001","display_id":"cond-negate internal/assure/run.go:42","package":"example.com/app/internal/assure","args":["-run","TestRun"],"timeout_ms":30000,"outcome":"killed","killed_by":"TestRun","duration_ms":900}}`,
-	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching"}}`,
+	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3}}`,
 	`{"seq":6,"type":"progress","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
 	`{"seq":7,"type":"artifact","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,
 	`{"seq":8,"type":"phase-end","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"phase":{"name":"mutation","duration_ms":6000}}`,
@@ -332,7 +335,10 @@ func TestRouteRecordsUnreachedMutantsWithoutTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"reaching_targets", "plan"} {
+	// The routing fields are additive: a route that carries none of them must
+	// serialise none of them, or a recording made by a run that never decided
+	// a granularity would claim one the schema does not allow.
+	for _, field := range []string{"reaching_targets", "plan", "column", "granularity", "fallback", "file_candidates"} {
 		if strings.Contains(string(encoded), field) {
 			t.Errorf("unreached route carries %s: %s", field, encoded)
 		}

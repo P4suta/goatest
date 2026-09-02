@@ -213,6 +213,42 @@ func TestSchemaRejectsARouteWithoutAKnownReason(t *testing.T) {
 	}
 }
 
+func TestSchemaRejectsARouteWithAnUnknownGranularityOrFallback(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	cases := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "a granularity the contract does not name", field: "granularity", value: "line"},
+		{name: "a fallback the contract does not name", field: "fallback", value: "guess"},
+		{name: "a column below zero", field: "column", value: -1},
+		{name: "a file candidate count below zero", field: "file_candidates", value: -1},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			amended["route"].(map[string]any)[testCase.field] = testCase.value
+			// The amendment is round-tripped through JSON so that the value
+			// the schema sees is the one a recording would carry.
+			if err := compiled.Validate(cloneDocument(t, amended)); err == nil {
+				t.Fatalf("a route with %s %v passed the schema", testCase.field, testCase.value)
+			}
+		})
+	}
+}
+
 // cloneDocument returns an independent copy of a decoded event.
 func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	t.Helper()

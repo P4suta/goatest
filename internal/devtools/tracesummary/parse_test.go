@@ -370,6 +370,26 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "route.line"},
 		},
 		{
+			name:   "route with an unknown granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"line"}}`),
+			want:   []string{"line 2", `route granularity "line"`},
+		},
+		{
+			name:   "route with an unknown fallback",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","fallback":"guess"}}`),
+			want:   []string{"line 2", `route fallback "guess"`},
+		},
+		{
+			name:   "route with a negative column",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
+			want:   []string{"line 2", "route.column"},
+		},
+		{
+			name:   "route with a negative file candidate count",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":-1}}`),
+			want:   []string{"line 2", "route.file_candidates"},
+		},
+		{
 			name:   "progress without its kind field",
 			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{}}`),
 			want:   []string{"line 2", "kind"},
