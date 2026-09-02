@@ -17,6 +17,7 @@ func TestDashboardPhaseVocabularyIsExhaustive(t *testing.T) {
 		{"baseline-target", "baseline"}, {"resume-baseline", "baseline"},
 		{"race", "race"}, {"resume-race", "race"},
 		{"mutation-prepare", "mutation"}, {"mutation-target", "mutation"}, {"mutation-progress", "mutation"},
+		{"probe-target", "probe"}, {"probe-progress", "probe"}, {"probe-summary", "probe"},
 		{"repair-applied", "repair"},
 	} {
 		if phase, known := dashboardPhase(test.kind); !known || phase != test.phase {

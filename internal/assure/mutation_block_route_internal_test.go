@@ -164,9 +164,12 @@ func TestRouteMutantNeverReachesBeyondTheFileCandidates(t *testing.T) {
 
 func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 	t.Parallel()
+	// The engine compiled a probe of this mutant, so the route says so: an
+	// offline audit reads the flag to tell a mutant a measurement can speak for
+	// from one no measurement will ever name.
 	mutant := gomutants.Mutant{
 		ID: "mutant-a", DisplayID: "arithmetic#1", Accepted: true, Rule: "arithmetic",
-		Path: "value.go", Line: 8, Column: 5, Package: "fixture.example/module",
+		Path: "value.go", Line: 8, Column: 5, Package: "fixture.example/module", Probed: true,
 	}
 	sink, recorder := newTraceRecording()
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
@@ -187,6 +190,7 @@ func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 		MutantID: "mutant-a", Rule: "arithmetic", Path: "value.go", Line: 8, Column: 5,
 		ReachingTargets: []string{"target-TestEarly"}, Plan: []string{"individual:TestEarly"},
 		Reason: trace.ReasonCoverageReaching, Granularity: trace.GranularityBlock, FileCandidates: 2,
+		Probed: true,
 	}
 	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
 		t.Fatalf("routes = %+v, want [%+v]", routes, want)
@@ -202,6 +206,8 @@ func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 
 func TestEvaluateMutationsRunsThePackageSuiteForAMutantInAnUncoveredBlock(t *testing.T) {
 	t.Parallel()
+	// This mutant has no probe form, so the route omits the flag: no measurement
+	// can ever name it, and its absence from one says nothing about any target.
 	mutant := gomutants.Mutant{
 		ID: "mutant-b", DisplayID: "arithmetic#2", Accepted: true, Rule: "arithmetic",
 		Path: "value.go", Line: 13, Column: 3, Package: "fixture.example/module",

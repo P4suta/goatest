@@ -27,6 +27,8 @@ type mutationUnitSession struct {
 	mu       sync.Mutex
 	requests []gomutants.ExecRequest
 	exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
+	probes   []gomutants.ProbeRequest
+	probe    func(gomutants.ProbeRequest) (gomutants.ProbeResult, error)
 }
 
 func (session *mutationUnitSession) Catalog() gomutants.Catalog { return session.catalog }
@@ -39,6 +41,27 @@ func (session *mutationUnitSession) Exec(_ context.Context, request gomutants.Ex
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
 	}
 	return session.exec(request)
+}
+
+// Probe records the request and answers it from the scripted handler. A session
+// nothing scripted reports that no probe runtime answered, which is the outcome
+// that carries no facts.
+func (session *mutationUnitSession) Probe(_ context.Context, request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	session.mu.Lock()
+	session.probes = append(session.probes, request)
+	session.mu.Unlock()
+	if session.probe == nil {
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+	}
+	return session.probe(request)
+}
+
+// probeRequests returns every recorded probe request, detached from the session
+// so that an assertion cannot corrupt the record.
+func (session *mutationUnitSession) probeRequests() []gomutants.ProbeRequest {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return slices.Clone(session.probes)
 }
 
 func TestEvaluateMutationsValidatesInputsFiltersCatalogAndRecordsRejections(t *testing.T) {
