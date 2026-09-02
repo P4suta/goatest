@@ -334,6 +334,12 @@ func cloneEvent(event Event) Event {
 		record.Discharged = slices.Clone(record.Discharged)
 		event.Route = &record
 	}
+	if event.Probe != nil {
+		record := *event.Probe
+		record.Args = slices.Clone(record.Args)
+		record.Infected = slices.Clone(record.Infected)
+		event.Probe = &record
+	}
 	if event.Progress != nil {
 		record := *event.Progress
 		event.Progress = &record

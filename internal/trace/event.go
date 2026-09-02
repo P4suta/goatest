@@ -17,6 +17,7 @@ const (
 	TypeExec       = "exec"
 	TypeMutantExec = "mutant-exec"
 	TypeRoute      = "route"
+	TypeProbeExec  = "probe-exec"
 	TypeProgress   = "progress"
 	TypeArtifact   = "artifact"
 	TypeRunEnd     = "run-end"
@@ -58,6 +59,16 @@ const (
 	DischargeBranchNeverTaken = "branch-never-taken"
 )
 
+// Outcomes of a probe execution. Only a measured one carries facts: the other
+// three, and an execution that errored, say nothing about any mutant, and the
+// consumer treats every mutant as infected by that target.
+const (
+	ProbeOutcomeMeasured    = "measured"
+	ProbeOutcomeTestFailed  = "test-failed"
+	ProbeOutcomeTimedOut    = "timed-out"
+	ProbeOutcomeUnavailable = "unavailable"
+)
+
 // Event is one line of a trace. Its JSON field order is part of the contract
 // consumers read, so the declaration order below is the wire order: the
 // identity of the event first, then the single payload it carries.
@@ -75,6 +86,7 @@ type Event struct {
 	Exec     *ExecRecord     `json:"exec,omitempty"`
 	Mutant   *MutantRecord   `json:"mutant,omitempty"`
 	Route    *RouteRecord    `json:"route,omitempty"`
+	Probe    *ProbeRecord    `json:"probe,omitempty"`
 	Progress *ProgressRecord `json:"progress,omitempty"`
 	Artifact *ArtifactRecord `json:"artifact,omitempty"`
 	Run      *RunRecord      `json:"run,omitempty"`
@@ -130,9 +142,10 @@ type MutantRecord struct {
 // RouteRecord explains how a mutant was routed: the targets coverage says reach
 // it, the plan derived from them, and the reason that plan was chosen.
 //
-// Granularity, Fallback, FileCandidates and Column describe how the reaching
-// set was narrowed. They are additive: a recording made before they existed
-// carries none of them, so every one of them is omitted when it is empty.
+// Granularity, Fallback, FileCandidates, Column and Probed describe how the
+// reaching set was narrowed. They are additive: a recording made before they
+// existed carries none of them, so every one of them is omitted when it is
+// empty.
 //
 // Granularity is what marks a route as carrying that metadata at all. On a
 // route that names one, an absent FileCandidates is a count of zero — a file
@@ -146,6 +159,12 @@ type MutantRecord struct {
 // are the targets whose covered blocks contain the mutated position. A proof
 // removed the discharged ones, so a discharged target never appears in
 // ReachingTargets as well.
+//
+// Probed says that the engine compiled a probe of this mutant into the probe
+// tree, so a measured target that does not name the mutant among its
+// infections never made its site differ. It is absent on a recording made
+// before the probe pass existed and on a mutant the engine has no probe form
+// for.
 type RouteRecord struct {
 	MutantID        string      `json:"mutant_id,omitempty"`
 	Rule            string      `json:"rule,omitempty"`
@@ -159,6 +178,7 @@ type RouteRecord struct {
 	Fallback        string      `json:"fallback,omitempty"`
 	FileCandidates  int         `json:"file_candidates,omitempty"`
 	Discharged      []Discharge `json:"discharged,omitempty"`
+	Probed          bool        `json:"probed,omitempty"`
 }
 
 // Discharge is one target a proof removed from a reaching set, and the proof
@@ -168,6 +188,35 @@ type RouteRecord struct {
 type Discharge struct {
 	Target string `json:"target"`
 	Reason string `json:"reason"`
+}
+
+// ProbeRecord describes one probe execution: which target ran against the
+// probe tree, how it ran, and which mutants it infected.
+//
+// Target is the target ID, the same string a Discharge and the KilledBy of a
+// MutantRecord name. Outcome is one of the ProbeOutcome constants, and is
+// empty only on an execution carrying the Error that stopped it instead.
+//
+// Infected names the mutants whose site the target made differ from the
+// constant the mutant would put there, by their full mutant ID, each once and
+// in ascending catalogue order. It is the whole measurement: a mutant a
+// measured target left out is one that target can never observe. Only a
+// measured execution carries it, so a consumer reading any other outcome, or
+// an execution that errored, treats every mutant as infected by that target.
+//
+// Args are the test flags the execution ran with. The record carries no
+// environment and no path into the probe tree: a probe execution is described
+// by the target that ran and the mutants it infected.
+type ProbeRecord struct {
+	Target     string   `json:"target"`
+	Package    string   `json:"package,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	TimeoutMS  int64    `json:"timeout_ms,omitempty"`
+	Outcome    string   `json:"outcome,omitempty"`
+	ExitCode   int      `json:"exit_code"`
+	DurationMS int64    `json:"duration_ms,omitempty"`
+	Infected   []string `json:"infected,omitempty"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // ProgressRecord carries a human readable progress note forwarded from the run.

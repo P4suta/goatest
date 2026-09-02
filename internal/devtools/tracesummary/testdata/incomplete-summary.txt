@@ -14,6 +14,8 @@ no command was executed in this recording
 routing
 no mutant was routed in this recording
 
+probe: not recorded
+
 mutant executions
 no mutant was executed in this recording
 

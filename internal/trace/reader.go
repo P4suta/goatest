@@ -119,7 +119,7 @@ func validateReadEvent(event Event) error {
 		return fmt.Errorf("goatest: trace event %d has an invalid envelope", event.Seq)
 	}
 	payloads := 0
-	for _, present := range []bool{event.Phase != nil, event.Exec != nil, event.Mutant != nil, event.Route != nil, event.Progress != nil, event.Artifact != nil, event.Run != nil} {
+	for _, present := range []bool{event.Phase != nil, event.Exec != nil, event.Mutant != nil, event.Route != nil, event.Probe != nil, event.Progress != nil, event.Artifact != nil, event.Run != nil} {
 		if present {
 			payloads++
 		}
@@ -146,6 +146,10 @@ func validateReadEvent(event Event) error {
 	case TypeRoute:
 		if event.Route == nil {
 			return fmt.Errorf("goatest: trace event %d is missing route payload", event.Seq)
+		}
+	case TypeProbeExec:
+		if event.Probe == nil {
+			return fmt.Errorf("goatest: trace event %d is missing probe payload", event.Seq)
 		}
 	case TypeProgress:
 		if event.Progress == nil {

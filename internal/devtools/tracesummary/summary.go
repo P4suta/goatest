@@ -53,6 +53,7 @@ func renderSummary(source string, events []trace.Event) string {
 		phaseBlock(events),
 		execBlock(events),
 		routingBlock(events),
+		probeBlock(events),
 		mutantBlock(events),
 		runBlock(events),
 	}
@@ -89,8 +90,8 @@ func headerBlock(source string, events []trace.Event) []string {
 func census(events []trace.Event) string {
 	order := []string{
 		trace.TypeRunStart, trace.TypePhaseStart, trace.TypePhaseEnd, trace.TypeExec,
-		trace.TypeMutantExec, trace.TypeRoute, trace.TypeProgress, trace.TypeArtifact,
-		trace.TypeRunEnd,
+		trace.TypeMutantExec, trace.TypeRoute, trace.TypeProbeExec, trace.TypeProgress,
+		trace.TypeArtifact, trace.TypeRunEnd,
 	}
 	counts := make(map[string]int, len(order))
 	for _, event := range events {
@@ -339,6 +340,10 @@ type routeTotal struct {
 	// targets while the count beside it counts routes.
 	discharges       []labelCount
 	dischargedRoutes int
+	// probed counts the routes whose mutant the engine compiled a probe of. A
+	// recording made before the probe pass carries none, which is the absence
+	// the block reports rather than a count of zero.
+	probed int
 	// fanOut counts the routes by how many targets they reached, one entry
 	// per bucket of fanOutBucketLabels.
 	fanOut []int
@@ -400,16 +405,24 @@ func routingBlock(events []trace.Event) []string {
 		lines = append(lines, "fallbacks: "+formatLabelCounts(total.fallbacks))
 	}
 	// A recording no proof discharged a target in renders as it did before the
-	// proofs existed, so the line is absent rather than a tally of zeroes.
-	if discharged := countedLabels(total.discharges); discharged > 0 {
+	// proofs existed, so the line is absent rather than a tally of zeroes, and
+	// so does one whose routes name no probe.
+	discharged := countedLabels(total.discharges)
+	if discharged > 0 {
 		lines = append(lines, fmt.Sprintf("discharged: %s across %s (%s)",
 			plural(discharged, "target", "targets"),
 			plural(total.dischargedRoutes, "route", "routes"),
 			formatLabelCounts(total.discharges)))
+		// The probed routes are the reaching measurement the probe pass will
+		// narrow, so they are reported beside the targets a proof already
+		// removed; a recording with no discharge closes the labels with them.
+		lines = append(lines, probedLines(total.probed)...)
 	}
-	lines = append(lines,
-		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
-		"", "reaching targets per route")
+	lines = append(lines, "reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching))
+	if discharged == 0 {
+		lines = append(lines, probedLines(total.probed)...)
+	}
+	lines = append(lines, "", "reaching targets per route")
 	labels := fanOutBucketLabels()
 	rows := make([][]string, 0, len(labels))
 	for index, count := range total.fanOut {
@@ -453,6 +466,9 @@ func routeTotals(events []trace.Event) routeTotal {
 		}
 		for _, discharge := range record.Discharged {
 			discharges[discharge.Reason]++
+		}
+		if record.Probed {
+			total.probed++
 		}
 		if record.Granularity == "" {
 			continue
@@ -518,6 +534,103 @@ func formatReduction(recorded, candidates, reaching int) string {
 	}
 	return fmt.Sprintf("file candidates %d -> reaching %d (%s fewer)",
 		candidates, reaching, formatShare(int64(candidates-reaching), int64(candidates)))
+}
+
+// probedLines is the routing line naming the routes whose mutant the engine
+// compiled a probe of, and nothing at all for a recording that carries none.
+func probedLines(routes int) []string {
+	if routes <= 0 {
+		return nil
+	}
+	return []string{"probed: " + plural(routes, "route", "routes")}
+}
+
+// probeError is the label a probe execution that failed before it reached an
+// outcome is tallied under. It is no outcome of the contract — the record
+// carries the error that stopped it instead — and the tally names it so that
+// an execution nothing became of is counted rather than dropped.
+const probeError = "error"
+
+// probeTotal is what the probe executions of a recording add up to: how many
+// there were, over how many targets, what became of them, and how much of the
+// (target, mutant) space they measured.
+type probeTotal struct {
+	executions int
+	targets    int
+	outcomes   []labelCount
+	// pairs counts every recorded infection, mutants the distinct mutants
+	// among them, and barren the measured targets that infected none: the
+	// targets the pass answered for outright.
+	pairs   int
+	mutants int
+	barren  int
+}
+
+// probeBlock breaks the probe pass down: how many targets were probed, what
+// became of the executions, and which mutants they infected. Only a measured
+// execution says anything about a mutant, so the outcomes are printed beside
+// the infections rather than under them. A recording made before the pass
+// existed carries no probe execution at all, and the block says so rather than
+// reading the absence as a pass that infected nothing.
+func probeBlock(events []trace.Event) []string {
+	total := probeTotals(events)
+	if total.executions == 0 {
+		return []string{"probe: not recorded"}
+	}
+	return []string{
+		fmt.Sprintf("probe: %s across %s",
+			plural(total.executions, "execution", "executions"), plural(total.targets, "target", "targets")),
+		"outcomes: " + formatLabelCounts(total.outcomes),
+		fmt.Sprintf("infections: %s across %s; %s infected nothing",
+			plural(total.pairs, "(target, mutant) pair", "(target, mutant) pairs"),
+			plural(total.mutants, "mutant", "mutants"),
+			plural(total.barren, "measured target", "measured targets")),
+	}
+}
+
+// probeTotals sums the probe executions of a recording.
+func probeTotals(events []trace.Event) probeTotal {
+	outcomes := make(map[string]int)
+	targets := make(map[string]struct{})
+	mutants := make(map[string]struct{})
+	// measured says, of every target a measured execution ran, whether any of
+	// them infected a mutant, so that a target the pass answered for is
+	// counted once however often it was probed.
+	measured := make(map[string]bool)
+	total := probeTotal{}
+	for _, event := range events {
+		if event.Type != trace.TypeProbeExec || event.Probe == nil {
+			continue
+		}
+		record := event.Probe
+		total.executions++
+		targets[record.Target] = struct{}{}
+		switch {
+		case record.Outcome != "":
+			outcomes[record.Outcome]++
+		case record.Error != "":
+			outcomes[probeError]++
+		}
+		if record.Outcome == trace.ProbeOutcomeMeasured {
+			measured[record.Target] = measured[record.Target] || len(record.Infected) > 0
+		}
+		total.pairs += len(record.Infected)
+		for _, mutant := range record.Infected {
+			mutants[mutant] = struct{}{}
+		}
+	}
+	total.targets = len(targets)
+	total.mutants = len(mutants)
+	// The map is counted rather than iterated into the output, so no iteration
+	// order reaches a line.
+	for _, infected := range measured {
+		if !infected {
+			total.barren++
+		}
+	}
+	total.outcomes = tally(outcomes, trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
+		trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)
+	return total
 }
 
 // mutantTotal is what one mutant cost across every execution of it.
