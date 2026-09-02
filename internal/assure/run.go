@@ -554,6 +554,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Resume:   mutationResume, Checkpoint: checkpointController.saveMutant,
 			OriginalControl: originalControl,
 			Trace:           options.Trace,
+			Instrumented:    baseline.Instrumented,
 		})
 		if err != nil {
 			_ = closeRound()

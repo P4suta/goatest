@@ -19,6 +19,7 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type mutationUnitSession struct {
@@ -342,14 +343,17 @@ func TestReachingTargetsSortsMeasuredShortestFirstAndKeepsUnmeasuredStable(t *te
 		internalTarget("Fast", goanalysis.KindTest, time.Nanosecond),
 		{Target: goanalysis.Target{Name: "Unrelated"}, CoveredFiles: []string{"other.go"}, Duration: time.Nanosecond},
 	}
-	got := reachingTargets(filepath.FromSlash("pkg/value.go"), targets)
+	route := routeMutant(gomutants.Mutant{Path: filepath.FromSlash("pkg/value.go")}, targets, nil)
 	want := []string{"Fast", "Slow", "UnknownA", "UnknownB"}
-	gotNames := make([]string, 0, len(got))
-	for _, target := range got {
+	gotNames := make([]string, 0, len(route.reaching))
+	for _, target := range route.reaching {
 		gotNames = append(gotNames, target.Target.Name)
 	}
 	if !slices.Equal(gotNames, want) {
 		t.Fatalf("reaching target order = %v, want %v", gotNames, want)
+	}
+	if route.granularity != trace.GranularityFile || route.fallback != trace.FallbackPositionUnknown || route.fileCandidates != 4 {
+		t.Fatalf("route = %+v, want the whole file for a mutant with no position", route)
 	}
 }
 

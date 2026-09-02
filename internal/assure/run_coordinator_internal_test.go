@@ -345,6 +345,19 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	}
 }
 
+func TestRunCoordinatorHandsTheBaselineInstrumentationToMutationRouting(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.baseline.Instrumented = []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+		{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+	}}}
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(harness.mutationOptions.Instrumented, harness.baseline.Instrumented) {
+		t.Fatalf("routed instrumentation = %+v, want %+v", harness.mutationOptions.Instrumented, harness.baseline.Instrumented)
+	}
+}
+
 func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
 	t.Parallel()
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{

@@ -46,13 +46,18 @@ type BaselineOptions struct {
 	Checkpoint           func(checkpoint.Baseline)
 }
 
+// BaselineResult is everything one baseline round established. Instrumented is
+// the union of every coverage block the round compiled instrumentation for,
+// whether or not a target ran it, which is what tells routing the difference
+// between a position no test reached and a position no profile knows about.
 type BaselineResult struct {
-	Evidence  []report.Evidence
-	Findings  []report.Finding
-	Targets   []TargetEvidence
-	Inventory []report.TargetDisposition
-	Executed  int
-	Skipped   int
+	Evidence     []report.Evidence
+	Findings     []report.Finding
+	Targets      []TargetEvidence
+	Instrumented []goanalysis.FileCoverage
+	Inventory    []report.TargetDisposition
+	Executed     int
+	Skipped      int
 }
 
 const (
@@ -90,7 +95,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 		result.Findings = append(result.Findings, options.Resume.Findings...)
 		for _, unit := range options.Resume.Targets {
 			completed[unit.ID] = unit
-			appendBaselineUnit(&result, unit)
+			appendBaselineUnit(&result, unit, nil)
 		}
 	}
 	checkpointNow := func(complete bool) {
@@ -143,7 +148,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				}
 				unit := baselineClassifiedUnit(target, "not-run", check.name+" failed", 0, false, true, nil, nil, nil)
 				completed[unit.ID] = unit
-				appendBaselineUnit(&result, unit)
+				appendBaselineUnit(&result, unit, nil)
 			}
 			return result, nil
 		}
@@ -198,7 +203,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			for _, target := range packageTargets[importPath] {
 				unit := baselineClassifiedUnit(target, "not-run", "test binary did not compile", 0, false, true, nil, nil, nil)
 				completed[unit.ID] = unit
-				appendBaselineUnit(&result, unit)
+				appendBaselineUnit(&result, unit, nil)
 				checkpointNow(false)
 			}
 			continue
@@ -225,7 +230,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				finding := targetFinding(target.Target, skipKind, skipSummary)
 				unit := baselineClassifiedUnit(target, "skipped", skipSummary, first.Duration, false, true, nil, []report.Evidence{evidenceItem}, []report.Finding{finding})
 				completed[unit.ID] = unit
-				appendBaselineUnit(&result, unit)
+				appendBaselineUnit(&result, unit, nil)
 				checkpointNow(false)
 				continue
 			}
@@ -242,7 +247,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 				finding := targetFinding(target.Target, kind, summary)
 				unit := baselineClassifiedUnit(target, "failed", summary, first.Duration, true, false, nil, nil, []report.Finding{finding})
 				completed[unit.ID] = unit
-				appendBaselineUnit(&result, unit)
+				appendBaselineUnit(&result, unit, nil)
 				checkpointNow(false)
 				continue
 			}
@@ -250,19 +255,21 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			if err != nil {
 				return BaselineResult{}, fmt.Errorf("goatest: read coverage for %s: %w", target.Target.Name, err)
 			}
-			covered, err := goanalysis.CoverageFiles(profileData, model.ModulePath)
+			coverage, err := goanalysis.ParseCoverage(profileData, model.ModulePath)
 			if err != nil {
 				return BaselineResult{}, fmt.Errorf("goatest: coverage for %s: %w", target.Target.Name, err)
 			}
 			targetEvidence := TargetEvidence{
-				Target: target.Target, CoveredFiles: covered, Environment: slices.Clone(target.Environment), Duration: first.Duration,
+				Target: target.Target, CoveredFiles: goanalysis.CoveredPaths(coverage.Covered), Covered: coverage.Covered,
+				Environment: slices.Clone(target.Environment), Duration: first.Duration,
 			}
+			result.Instrumented = goanalysis.MergeFileCoverage(result.Instrumented, coverage.Instrumented)
 			evidenceItem := report.Evidence{
 				Kind: "target", ID: target.Target.ID, Status: "passed", Detail: target.Target.Name,
 			}
 			unit := baselineClassifiedUnit(target, "passed", "", first.Duration, true, false, &targetEvidence, []report.Evidence{evidenceItem}, nil)
 			completed[unit.ID] = unit
-			appendBaselineUnit(&result, unit)
+			appendBaselineUnit(&result, unit, &targetEvidence)
 			checkpointNow(false)
 		}
 	}
@@ -299,7 +306,11 @@ func baselineClassifiedUnit(target BaselineTarget, status, detail string, durati
 	return unit
 }
 
-func appendBaselineUnit(result *BaselineResult, unit checkpoint.BaselineTarget) {
+// appendBaselineUnit adds one completed target to the round. A unit measured
+// in this round hands over the evidence it measured, blocks included; a unit
+// that comes back from a checkpoint has only the checkpoint form, which
+// carries the files a target reached but not the blocks inside them.
+func appendBaselineUnit(result *BaselineResult, unit checkpoint.BaselineTarget, measured *TargetEvidence) {
 	result.Evidence = append(result.Evidence, unit.Evidence...)
 	result.Findings = append(result.Findings, unit.Findings...)
 	result.Inventory = append(result.Inventory, unit.Inventory)
@@ -309,7 +320,10 @@ func appendBaselineUnit(result *BaselineResult, unit checkpoint.BaselineTarget) 
 	if unit.Skipped {
 		result.Skipped++
 	}
-	if unit.Target != nil {
+	switch {
+	case measured != nil:
+		result.Targets = append(result.Targets, *measured)
+	case unit.Target != nil:
 		result.Targets = append(result.Targets, restoreTargetEvidence(*unit.Target))
 	}
 }
