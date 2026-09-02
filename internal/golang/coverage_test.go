@@ -190,7 +190,7 @@ func TestParseCoverageRejectsASpanThatIsNotAHalfOpenBlock(t *testing.T) {
 	t.Parallel()
 	for _, span := range []string{
 		"0.1,2.2", "1.0,2.2", "1.1,0.2", "1.1,2.0", "-1.1,2.2", "1.-1,2.2", // coordinates are 1-based
-		"3.4,3.4", "3.4,3.3", "3.4,2.9", // the end must follow the start, or the block is empty
+		"3.4,3.3", "3.4,2.9", "4.1,3.9", // the end cannot precede the start
 	} {
 		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
 		coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
@@ -214,6 +214,25 @@ func TestParseCoverageAcceptsABlockThatEndsOnALaterLineAtAnEarlierColumn(t *test
 	want := []gotest.CoverageBlock{{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 2}}
 	if len(coverage.Covered) != 1 || !reflect.DeepEqual(coverage.Covered[0].Blocks, want) {
 		t.Fatalf("ParseCoverage().Covered = %+v, want one file with blocks %+v", coverage.Covered, want)
+	}
+}
+
+func TestParseCoverageAcceptsTheEmptyBlockCmdCoverEmitsForAnEmptyClause(t *testing.T) {
+	t.Parallel()
+	// cmd/cover records a case clause with no statements as a block that ends
+	// where it starts: "main.go:161.15,161.15 0 1" in this repository's own
+	// profiles. Such a block contains no position; it is not malformed.
+	profile := []byte("mode: set\nexample.com/sample/a.go:161.15,161.15 0 1\n")
+	coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
+	if err != nil {
+		t.Fatalf("ParseCoverage() error = %v", err)
+	}
+	want := []gotest.CoverageBlock{{StartLine: 161, StartColumn: 15, EndLine: 161, EndColumn: 15}}
+	if len(coverage.Covered) != 1 || !reflect.DeepEqual(coverage.Covered[0].Blocks, want) {
+		t.Fatalf("ParseCoverage().Covered = %+v, want one file with blocks %+v", coverage.Covered, want)
+	}
+	if coverage.Covered[0].Contains(161, 15) {
+		t.Fatalf("an empty block contains its own start position")
 	}
 }
 
