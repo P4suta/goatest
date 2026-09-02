@@ -6,6 +6,8 @@ package assure_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +25,11 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 		for _, argument := range command.Argv {
 			if strings.HasPrefix(argument, "-test.coverprofile=") {
 				path := strings.TrimPrefix(argument, "-test.coverprofile=")
-				profile := "mode: set\nfixture.example/module/boundary.go:1.1,3.1 1 1\nfixture.example/module/unused.go:1.1,2.1 1 0\n"
+				profile := "mode: set\n" +
+					"fixture.example/module/boundary.go:5.29,6.16 1 1\n" +
+					"fixture.example/module/boundary.go:6.16,8.3 1 1\n" +
+					"fixture.example/module/boundary.go:9.2,9.10 1 1\n" +
+					"fixture.example/module/unused.go:3.14,5.2 1 0\n"
 				if err := os.WriteFile(path, []byte(profile), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -46,13 +52,24 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 	if len(result.Findings) != 0 || len(result.Targets) != 2 {
 		t.Fatalf("result = %+v", result)
 	}
+	wantBlocks := []goanalysis.FileCoverage{{Path: "boundary.go", Blocks: []goanalysis.CoverageBlock{
+		{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+		{StartLine: 6, StartColumn: 16, EndLine: 8, EndColumn: 3},
+		{StartLine: 9, StartColumn: 2, EndLine: 9, EndColumn: 10},
+	}}}
 	for _, target := range result.Targets {
 		if strings.Join(target.CoveredFiles, ",") != "boundary.go" {
 			t.Errorf("coverage for %s = %v", target.Target.Name, target.CoveredFiles)
 		}
+		if !reflect.DeepEqual(target.Covered, wantBlocks) {
+			t.Errorf("covered blocks for %s = %+v, want %+v", target.Target.Name, target.Covered, wantBlocks)
+		}
 		if target.Duration != 1375*time.Millisecond {
 			t.Errorf("baseline duration for %s = %s", target.Target.Name, target.Duration)
 		}
+	}
+	if paths := goanalysis.CoveredPaths(result.Instrumented); !slices.Equal(paths, []string{"boundary.go", "unused.go"}) {
+		t.Errorf("instrumented files = %v", paths)
 	}
 	compileCount := 0
 	invocationCount := 0

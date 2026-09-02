@@ -172,6 +172,52 @@ func TestCollectBaselinePropagatesEveryInfrastructureAndCoverageFailure(t *testi
 	}
 }
 
+func TestCollectBaselineMergesInstrumentationAcrossTargetsInTargetOrder(t *testing.T) {
+	profiles := map[string]string{
+		"TestOne": "mode: set\n" +
+			"fixture.example/module/shared.go:1.1,2.1 1 1\n" +
+			"fixture.example/module/one.go:3.1,4.1 1 0\n",
+		"TestTwo": "mode: set\n" +
+			"fixture.example/module/shared.go:1.1,2.1 1 0\n" +
+			"fixture.example/module/two.go:5.1,6.1 1 1\n",
+	}
+	collect := func(names ...string) []goanalysis.FileCoverage {
+		t.Helper()
+		workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+			for name, contents := range profiles {
+				if !slices.Contains(command.Argv, "-test.run=^"+name+"$") {
+					continue
+				}
+				if err := os.WriteFile(coverageProfileArgument(command), []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		}}
+		targets := make([]BaselineTarget, 0, len(names))
+		for _, name := range names {
+			targets = append(targets, BaselineTarget{Target: baselineTestTarget(name)})
+		}
+		result, err := CollectBaseline(t.Context(), workspace, baselineModel(), targets, BaselineOptions{ArtifactDirectory: t.TempDir()})
+		if err != nil || len(result.Targets) != len(names) {
+			t.Fatalf("CollectBaseline(%v) = (%+v, %v)", names, result, err)
+		}
+		return result.Instrumented
+	}
+	want := []goanalysis.FileCoverage{
+		{Path: "one.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 3, StartColumn: 1, EndLine: 4, EndColumn: 1}}},
+		{Path: "shared.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1}}},
+		{Path: "two.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 5, StartColumn: 1, EndLine: 6, EndColumn: 1}}},
+	}
+	forward := collect("TestOne", "TestTwo")
+	if !reflect.DeepEqual(forward, want) {
+		t.Fatalf("instrumented = %+v, want %+v", forward, want)
+	}
+	if reversed := collect("TestTwo", "TestOne"); !reflect.DeepEqual(reversed, forward) {
+		t.Fatalf("reversed instrumented = %+v, want %+v", reversed, forward)
+	}
+}
+
 func TestClassifyTargetFailureDistinguishesFlakeTimeoutAndStableFailure(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

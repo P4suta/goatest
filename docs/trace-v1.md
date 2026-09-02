@@ -214,8 +214,8 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `mutant_id` | the mutant this plan belongs to |
 | `rule` | the mutation operator that produced it |
 | `path` | the mutated file |
-| `line` | the mutated line |
-| `column` | the mutated byte column on that line, 1-based |
+| `line` | the line the mutation starts on |
+| `column` | the byte column it starts at on that line, 1-based |
 | `reaching_targets` | the target IDs coverage says reach the mutation |
 | `plan` | the executions the mutant will be given |
 | `reason` | `coverage-reaching` or `unreached` |
@@ -246,6 +246,9 @@ rejected. Each entry names the target and the proof that removed it, which is
 target once, so each target appears in `discharged` at most once; a route
 naming the same target twice is rejected as well, since a reader counting the
 entries would otherwise count that target twice.
+
+A mutation spanning several lines is placed by the position it starts at, which
+is the position these two fields carry.
 
 The fallback ladder is three steps. A mutant whose position the engine did not
 report cannot be placed in any block, so it is routed by file with fallback

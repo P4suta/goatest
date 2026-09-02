@@ -72,6 +72,12 @@ func TestEvaluateMutationsRecordsHowCoverageRoutedAMutant(t *testing.T) {
 		route.Line != 42 || route.Reason != trace.ReasonCoverageReaching {
 		t.Fatalf("recorded route = %+v", route)
 	}
+	// The catalog gave this mutant no column, so the file is all the evidence
+	// routing has and every target that reaches the file reaches the mutant.
+	if route.Column != 0 || route.Granularity != trace.GranularityFile ||
+		route.Fallback != trace.FallbackPositionUnknown || route.FileCandidates != 10 {
+		t.Fatalf("recorded route narrowing = %+v", route)
+	}
 	wantTargets := []string{
 		"target-TestValue0", "target-TestValue1", "target-TestValue2", "target-TestValue3", "target-TestValue4",
 		"target-TestValue5", "target-TestValue6", "target-TestValue7", "target-TestValue8", "target-FuzzValue",
@@ -128,6 +134,7 @@ func TestEvaluateMutationsRecordsTheRouteOfAnUnreachedMutant(t *testing.T) {
 	want := trace.RouteRecord{
 		MutantID: "mutant-b", Rule: "conditional", Path: "other/value.go", Line: 7,
 		Plan: []string{"package-suite"}, Reason: trace.ReasonUnreached,
+		Granularity: trace.GranularityFile, Fallback: trace.FallbackPositionUnknown,
 	}
 	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
 		t.Fatalf("routes = %+v, want [%+v]", routes, want)

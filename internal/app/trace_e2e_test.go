@@ -145,6 +145,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	// One route explains every mutant that ran, recorded before the executions
 	// it explains.
 	routed := map[string]int{}
+	blockRouted := 0
 	for _, event := range traceOfType(events, trace.TypeRoute) {
 		if event.Route.Reason != trace.ReasonCoverageReaching && event.Route.Reason != trace.ReasonUnreached {
 			t.Errorf("route %+v has no reason", event.Route)
@@ -152,7 +153,18 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		if len(event.Route.Plan) == 0 {
 			t.Errorf("route %+v has no plan", event.Route)
 		}
+		if event.Route.Granularity != trace.GranularityBlock && event.Route.Granularity != trace.GranularityFile {
+			t.Errorf("route %+v has no granularity", event.Route)
+		}
+		if event.Route.Granularity == trace.GranularityBlock && event.Route.Fallback == "" {
+			blockRouted++
+		}
 		routed[event.Route.MutantID] = int(event.Seq)
+	}
+	// The fixture's test runs every block of the file it guards, so the
+	// mutants inside those blocks are routed by block and not by fallback.
+	if blockRouted == 0 {
+		t.Error("no mutant was routed by the coverage blocks that contain it")
 	}
 	if selected := result.Accounting.Mutants.Selected; len(routed) != selected || selected == 0 {
 		t.Fatalf("routed %d mutants, report selected %d", len(routed), selected)
