@@ -21,6 +21,9 @@ const (
 	// BoundaryModule is the module path BoundaryFixture declares unless Module
 	// already selected one.
 	BoundaryModule = "fixture.example/assured"
+	// NarrowedBranchModule is the module path NarrowedBranchFixture declares
+	// unless Module already selected one.
+	NarrowedBranchModule = "fixture.example/narrowed"
 	// GitBranch is the branch Git commits on, independent of the operator's
 	// init.defaultBranch.
 	GitBranch = "main"
@@ -64,6 +67,63 @@ func TestBoundary(t *testing.T) {
 		if got := Boundary(value); got != want {
 			t.Fatalf("Boundary(%d) = %d, want %d", value, got, want)
 		}
+	}
+}
+`
+
+// narrowedBranchSource is the module NarrowedBranchFixture writes. Both
+// functions guard a body with a condition go-mutants can prove a mutation only
+// narrows, and each is exercised by tests that differ in whether they enter
+// that body: the clamp's equal case enters it and its above case does not, and
+// the loader's only test never produces the error the guard catches.
+const narrowedBranchSource = `package narrowed
+
+import "strconv"
+
+// Clamp returns value when it is within limit, and limit itself otherwise,
+// reporting whether it had to clamp.
+func Clamp(value, limit int) (int, bool) {
+	if value <= limit {
+		return value, false
+	}
+	return limit, true
+}
+
+// Load parses a decimal and reports what stopped it.
+func Load(text string) (int, error) {
+	value, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+`
+
+const narrowedBranchTestSource = `package narrowed
+
+import "testing"
+
+func TestClampBelow(t *testing.T) {
+	if got, clamped := Clamp(1, 10); got != 1 || clamped {
+		t.Fatalf("Clamp(1, 10) = (%d, %t)", got, clamped)
+	}
+}
+
+func TestClampAtLimit(t *testing.T) {
+	if got, clamped := Clamp(10, 10); got != 10 || clamped {
+		t.Fatalf("Clamp(10, 10) = (%d, %t)", got, clamped)
+	}
+}
+
+func TestClampAbove(t *testing.T) {
+	if got, clamped := Clamp(20, 10); got != 10 || !clamped {
+		t.Fatalf("Clamp(20, 10) = (%d, %t)", got, clamped)
+	}
+}
+
+func TestLoad(t *testing.T) {
+	if got, err := Load("42"); err != nil || got != 42 {
+		t.Fatalf("Load(\"42\") = (%d, %v)", got, err)
 	}
 }
 `
@@ -117,6 +177,21 @@ func (repository *Repo) BoundaryFixture() *Repo {
 	return repository.
 		File("boundary.go", boundarySource).
 		File("boundary_test.go", boundaryTestSource)
+}
+
+// NarrowedBranchFixture writes the smallest module whose branch proofs decide
+// something: two guarded bodies, and tests that enter one of them and leave the
+// other alone, so that an assurance run has both a mutant a proof discharges
+// part of the reaching set for and one it discharges all of. The module path
+// stays whatever Module already selected.
+func (repository *Repo) NarrowedBranchFixture() *Repo {
+	repository.t.Helper()
+	if repository.module == "" {
+		repository.Module(NarrowedBranchModule)
+	}
+	return repository.
+		File("narrowed.go", narrowedBranchSource).
+		File("narrowed_test.go", narrowedBranchTestSource)
 }
 
 // Git turns the fixture into a repository with exactly one commit of the whole
