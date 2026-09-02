@@ -53,6 +53,17 @@ self-dogfood is not external compatibility evidence.
   not the blocks inside them, so it is routed at file granularity for the rest
   of the run. A resumed run therefore executes at least the work a cold run
   would, never less. See [checkpoint v1](checkpoint-v1.md).
+- Infection facts are taken from one execution of each target. A target whose
+  behaviour differs between runs — a clock, a map iteration order, an unseeded
+  random source — may make a mutant's site differ in the run that would kill it
+  and not in the one the probe measured; the probe pass is as blind to that as
+  reach is to a flaky target. Nothing is discharged by these facts in this
+  version, so the cost of the blind spot today is a recorded number that may be
+  optimistic and never an execution that was skipped. The pass also sees only
+  what its probe tree records: a mutant the engine has no probe form for is
+  absent from every measurement there will ever be, and is read as infected by
+  every target rather than as one nothing infected. Fuzz targets are not probed
+  at all, and carry no facts for the same reason.
 - `replay` currently accepts only mutation-backed findings with a recorded
   mutant identity. Other finding kinds are rejected instead of executing an
   unrelated mutation set.

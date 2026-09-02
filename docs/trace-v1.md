@@ -151,13 +151,15 @@ so a reader may switch on `type` and reach for that payload alone.
 | `duration_ms` | how long it lasted; absent from `phase-start` |
 
 The phases are `snapshot`, `cache-check`, `discover`, `impact`, `resources`,
-`baseline`, `graph`, `race`, `mutation-prepare`, `mutation`, `repair`, and
-`finalize`. A run uses them as a sequence rather than a nesting: entering one
-ends the one before it, and the last open phase ends when the run does, so
+`baseline`, `graph`, `race`, `mutation-prepare`, `probe`, `mutation`, `repair`,
+and `finalize`. A run uses them as a sequence rather than a nesting: entering
+one ends the one before it, and the last open phase ends when the run does, so
 every `phase-start` has a `phase-end` even on the cache-hit and error paths. A
 run that reaches its verdict early stops partway through the list, and a round
 that repeats after a promoted repair passes through it again. What a phase says
-is where the run was, never what it was obliged to do.
+is where the run was, never what it was obliged to do. A run replaying one
+mutant passes through no `probe` phase at all, because it measures nothing it
+would use.
 
 ### `exec`
 
@@ -326,6 +328,35 @@ that the execution and what it measured are one line.
 A probe pass runs every baseline target once against a probe-instrumented tree
 no mutant is active in, and records per mutant whether the value at its site
 ever differed from the constant the mutant would put there.
+
+Which targets. goatest probes the test and example targets, the ones the
+mutation phase runs under `-test.run=^Name$`, and sends each of them the
+request that phase would send for that single target: the same package, the
+same `-test.run` selection followed by the run's extra test flags, the same
+environment, and the same calibrated timeout — everything but the mutant, which
+a probe tree never activates. That is what makes the answer a statement about
+the execution the mutation phase will run rather than about some other one.
+Fuzz targets are never probed and produce no `probe-exec` event: the mutation
+phase fuzzes them beyond the seed corpus the probe would measure, so a
+measurement of the corpus would speak for inputs it never saw, and a fuzz run on
+the probe tree would write corpus files into that tree.
+
+A target the pass could not measure keeps no facts at all. A `test-failed`, a
+`timed-out`, an `unavailable`, and an execution stopped by an `error` each leave
+their target exactly as it was before the pass: infecting every mutant it
+reaches. Only two failures stop the pass rather than costing one target its
+facts — a cancelled run, and a session prepared without a probe tree, which is a
+programming error rather than a measurement. Everything else is recorded and the
+pass continues.
+
+A run replaying one mutant runs no pass and records no `probe-exec` event: it
+would pay for a probe tree to measure against once, and its routing without the
+measurement is the conservative one.
+
+The `probed` field of a `route` is produced from the same pass: it says the
+engine compiled a probe of that mutant, which is what lets a reader tell a
+mutant a measured target proved it cannot observe from one no measurement could
+ever have named.
 
 An execution ended in exactly one way: it reached an `outcome`, or an `error`
 stopped it before one. A record carries one of the two fields and never both
