@@ -142,15 +142,19 @@ func TestEvaluateMutationSeedCoversEveryOutcomeAndExecutionError(t *testing.T) {
 	mutant := internalMutation("mutant-a")
 	target := internalTarget("TestValue", goanalysis.KindTest, time.Second)
 	for _, test := range []struct {
-		name     string
-		outcome  gomutants.Outcome
-		execErr  error
-		resolved bool
-		kind     string
-		wantErr  bool
+		name string
+		// fuzzReached adds a fuzz target to the reaching set. A survivor it
+		// reaches is the one seed left unresolved, for the serial fuzz pass.
+		fuzzReached bool
+		outcome     gomutants.Outcome
+		execErr     error
+		resolved    bool
+		kind        string
+		wantErr     bool
 	}{
 		{name: "killed", outcome: gomutants.OutcomeKilled, resolved: true},
-		{name: "survived", outcome: gomutants.OutcomeSurvived},
+		{name: "survived", outcome: gomutants.OutcomeSurvived, resolved: true, kind: "surviving-mutant"},
+		{name: "survived under fuzz", outcome: gomutants.OutcomeSurvived, fuzzReached: true},
 		{name: "timed out", outcome: gomutants.OutcomeTimedOut, resolved: true, kind: "mutation-timeout"},
 		{name: "inconclusive", outcome: gomutants.OutcomeInconclusive, resolved: true, kind: "mutation-inconclusive"},
 		{name: "errored", outcome: gomutants.OutcomeErrored, resolved: true, kind: "mutation-inconclusive"},
@@ -168,8 +172,12 @@ func TestEvaluateMutationSeedCoversEveryOutcomeAndExecutionError(t *testing.T) {
 				}
 				return gomutants.MutantResult{ID: mutant.ID, Outcome: test.outcome}, nil
 			}}
-			seed := evaluateMutationSeed(t.Context(), session, mutant, []TargetEvidence{target}, MutationOptions{Contract: "standard-v1"})
-			if seed.mutant.ID != mutant.ID || len(seed.reaching) != 1 || seed.resolved != test.resolved || (seed.err != nil) != test.wantErr {
+			reaching := []TargetEvidence{target}
+			if test.fuzzReached {
+				reaching = append(reaching, internalTarget("FuzzValue", goanalysis.KindFuzz, 2*time.Second))
+			}
+			seed := evaluateMutationSeed(t.Context(), session, mutant, reaching, MutationOptions{Contract: "standard-v1"})
+			if seed.mutant.ID != mutant.ID || len(seed.reaching) != len(reaching) || seed.resolved != test.resolved || (seed.err != nil) != test.wantErr {
 				t.Fatalf("seed = %+v", seed)
 			}
 			if test.execErr != nil && !errors.Is(seed.err, test.execErr) {
@@ -184,9 +192,9 @@ func TestEvaluateMutationSeedCoversEveryOutcomeAndExecutionError(t *testing.T) {
 				if len(seed.evaluation.Findings) != 1 || seed.evaluation.Findings[0].Kind != test.kind {
 					t.Fatalf("finding evaluation = %+v", seed.evaluation)
 				}
-			case test.name == "survived":
+			case test.fuzzReached:
 				if !reflect.DeepEqual(seed.evaluation, MutationEvaluation{}) {
-					t.Fatalf("survived evaluation = %+v", seed.evaluation)
+					t.Fatalf("fuzz-reached survivor evaluation = %+v, want it left to the fuzz pass", seed.evaluation)
 				}
 			}
 		})

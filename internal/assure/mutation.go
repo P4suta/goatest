@@ -442,6 +442,9 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 			for index := range indexes {
 				results[index] = evaluateMutationSeed(ctx, session, mutants[index], targets, options)
 				if results[index].err == nil && results[index].resolved {
+					// A finished mutant is saved here, not once every seed has
+					// finished: a checkpoint written only at the end of the
+					// phase is a checkpoint a dying run never writes.
 					checkpointMutation(options, mutants[index].ID, results[index].evaluation)
 				}
 				progress.Lock()
@@ -540,7 +543,24 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			return seed
 		}
 	}
+	// Every reaching test passed. Unless a fuzz target can still kill this
+	// mutant, nothing is left to learn about it, so it is finalised here and
+	// the worker checkpoints it like any other terminal mutant. Waiting for
+	// the serial pass would mean the survivors — the mutants that cost the
+	// most to execute again — are exactly the results a dying run loses.
+	if !reachedByFuzz(seed.reaching) {
+		seed.evaluation.addFinding(mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		seed.resolved = true
+	}
 	return seed
+}
+
+// reachedByFuzz reports whether any target that reaches a mutant can fuzz it,
+// which is the work a surviving mutant may still have ahead of it.
+func reachedByFuzz(targets []TargetEvidence) bool {
+	return slices.ContainsFunc(targets, func(target TargetEvidence) bool {
+		return target.Target.Kind == goanalysis.KindFuzz
+	})
 }
 
 type confirmationFinding struct {
