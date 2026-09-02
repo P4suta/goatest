@@ -115,10 +115,35 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	if open != "" {
 		t.Fatalf("phase %q was never ended", open)
 	}
-	for _, name := range []string{"snapshot", "discover", "baseline", "mutation-prepare", "mutation", "finalize"} {
+	for _, name := range []string{"snapshot", "discover", "baseline", "mutation-prepare", "probe", "mutation", "finalize"} {
 		if !slices.Contains(phases, name) {
 			t.Errorf("phase %q is absent from %v", name, phases)
 		}
+	}
+	// The round runs one probe pass, between preparing the catalogue and
+	// executing it.
+	if probes := slices.Index(phases, "probe"); probes < 1 || probes+1 >= len(phases) ||
+		phases[probes-1] != "mutation-prepare" || phases[probes+1] != "mutation" {
+		t.Errorf("probe phase sits at %d of %v", probes, phases)
+	}
+
+	// The fixture's boundary returns a value at every return site, so the probe
+	// pass has something to measure and the test that runs both branches
+	// measures it.
+	var measured int
+	for _, event := range traceOfType(events, trace.TypeProbeExec) {
+		if event.Probe.Target == "" {
+			t.Errorf("probe %+v names no target", event.Probe)
+		}
+		if (event.Probe.Outcome == "") == (event.Probe.Error == "") {
+			t.Errorf("probe %+v reached neither an outcome nor an error, or both", event.Probe)
+		}
+		if event.Probe.Outcome == trace.ProbeOutcomeMeasured {
+			measured++
+		}
+	}
+	if measured == 0 {
+		t.Error("no target was measured against the probe tree")
 	}
 
 	// The commands that establish the toolchain and the package model are the

@@ -36,6 +36,12 @@ type parallelSession struct {
 
 func (session *parallelSession) Catalog() gomutants.Catalog { return session.catalog }
 
+// Probe reports no facts. This session choreographs mutant executions, and the
+// probe pass runs before the first of them.
+func (session *parallelSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
 func (session *parallelSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.mu.Lock()
 	session.active++

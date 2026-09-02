@@ -38,6 +38,12 @@ type PrepareOptions struct {
 	VerifyArgv    []string
 	VerifyEnv     []string
 	VerifyTimeout time.Duration
+	// Probe also builds the probe tree the infection pass measures against: the
+	// same source with no mutant ever active, in which each site the engine has
+	// a probe form for records whether the mutated value would have differed. It
+	// costs a second instrumentation and a second set of test binaries, so a
+	// caller that never asks the infection question does not pay for it.
+	Probe bool
 }
 
 type mutationWorkspace interface {
@@ -154,6 +160,7 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 			Env:     append([]string(nil), options.VerifyEnv...),
 			Timeout: options.VerifyTimeout,
 		},
+		Probe: options.Probe,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("goatest: prepare mutation session: %w", err)

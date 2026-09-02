@@ -17,7 +17,7 @@ import (
 // everyRunPhase is the phase sequence of a round that runs to its end.
 var everyRunPhase = []string{
 	"snapshot", "cache-check", "discover", "impact", "resources", "baseline",
-	"graph", "race", "mutation-prepare", "mutation", "repair", "finalize",
+	"graph", "race", "mutation-prepare", "probe", "mutation", "repair", "finalize",
 }
 
 // recordedPhases returns the phases of a recording in order, failing the test

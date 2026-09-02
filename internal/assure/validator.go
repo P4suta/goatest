@@ -127,6 +127,9 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 			return err
 		}
 		defer func() { _ = workspace.Close() }()
+		// No probe tree: this session re-executes one named mutant against a
+		// candidate repair, so the second instrumentation a probe costs would
+		// buy a measurement nothing here reads.
 		session, err := prepareValidationSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract: validator.options.Contract, Operators: slices.Clone(validator.options.MutationOperators),
 			Packages: slices.Clone(validator.options.Packages), VerifyArgv: validator.testArgv(true),

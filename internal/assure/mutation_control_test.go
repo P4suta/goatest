@@ -49,6 +49,12 @@ type killingSession struct{ catalog gomutants.Catalog }
 
 func (session *killingSession) Catalog() gomutants.Catalog { return session.catalog }
 
+// Probe reports no facts: these tests are about confirming kills, which happens
+// long after the probe pass has ended.
+func (session *killingSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
 func (session *killingSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 }

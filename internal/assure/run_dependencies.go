@@ -68,6 +68,7 @@ func productionRunDependencies() runDependencies {
 		relevantRacePackages:   RelevantRacePackages,
 		collectRaceWithOptions: CollectRaceWithOptions,
 		prepareSession:         prepareTracedSession,
+		probeTargets:           ProbeTargets,
 		evaluateMutations:      EvaluateMutations,
 		attemptRepairs:         AttemptGeneratedRepairs,
 		buildGraph:             buildGraph,

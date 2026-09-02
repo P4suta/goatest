@@ -30,6 +30,7 @@ type coordinatorCache struct {
 	putErr            error
 	gets              []string
 	puts              []report.Report
+	putDigests        []string
 	checkpoint        checkpoint.State
 	checkpointFound   bool
 	checkpointGetErr  error
@@ -42,8 +43,9 @@ func (cache *coordinatorCache) Get(digest string) (report.Report, bool, error) {
 	return cache.getReport, cache.found, cache.getErr
 }
 
-func (cache *coordinatorCache) Put(_ string, value report.Report) error {
+func (cache *coordinatorCache) Put(digest string, value report.Report) error {
 	cache.puts = append(cache.puts, value)
+	cache.putDigests = append(cache.putDigests, digest)
 	return cache.putErr
 }
 
@@ -102,6 +104,7 @@ type runCoordinatorHarness struct {
 	baselineCalls   int
 	raceCalls       int
 	prepareCalls    int
+	probeCalls      int
 	mutationCalls   int
 	generationCalls int
 	buildGraphCalls int
@@ -111,6 +114,9 @@ type runCoordinatorHarness struct {
 
 	workspaceOptions  mutationbridge.Options
 	preparedOptions   mutationbridge.PrepareOptions
+	probeOptions      ProbeOptions
+	probedTargets     []TargetEvidence
+	mutationTargets   []TargetEvidence
 	mutationOptions   MutationOptions
 	generationOptions GenerationOptions
 	racePackages      []string
@@ -257,9 +263,16 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			harness.preparedOptions = options
 			return &mutationUnitSession{catalog: harness.catalog}, nil
 		},
-		evaluateMutations: func(_ context.Context, _ MutationSession, _ []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
+		probeTargets: func(_ context.Context, _ MutationSession, targets []TargetEvidence, options ProbeOptions) (ProbeEvaluation, error) {
+			harness.probeCalls++
+			harness.probeOptions = options
+			harness.probedTargets = slices.Clone(targets)
+			return ProbeEvaluation{Targets: slices.Clone(targets), Measured: len(targets)}, nil
+		},
+		evaluateMutations: func(_ context.Context, _ MutationSession, targets []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
 			harness.mutationCalls++
 			harness.mutationOptions = options
+			harness.mutationTargets = slices.Clone(targets)
 			return harness.mutation, nil
 		},
 		attemptRepairs: func(_ context.Context, _ string, _ []report.Finding, options GenerationOptions) (GenerationEvaluation, error) {
@@ -355,6 +368,101 @@ func TestRunCoordinatorHandsTheBaselineInstrumentationToMutationRouting(t *testi
 	}
 	if !reflect.DeepEqual(harness.mutationOptions.Instrumented, harness.baseline.Instrumented) {
 		t.Fatalf("routed instrumentation = %+v, want %+v", harness.mutationOptions.Instrumented, harness.baseline.Instrumented)
+	}
+}
+
+// TestRunCoordinatorHandsTheProbedTargetsToMutationRouting pins that the
+// mutation phase routes by the evidence the probe pass measured rather than by
+// the baseline evidence the pass was handed.
+func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.dependencies.probeTargets = func(_ context.Context, _ MutationSession, targets []TargetEvidence, options ProbeOptions) (ProbeEvaluation, error) {
+		harness.probeCalls++
+		harness.probeOptions = options
+		probed := slices.Clone(targets)
+		probed[0].Probed, probed[0].Infected = true, []uint32{7}
+		return ProbeEvaluation{Targets: probed, Measured: 1}, nil
+	}
+	if _, err := harness.run(Options{MutationJobs: 3, CommandTimeout: 5 * time.Minute, TestArgs: []string{"-test.short=true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if harness.probeCalls != 1 || harness.mutationCalls != 1 {
+		t.Fatalf("probe calls = %d, mutation calls = %d", harness.probeCalls, harness.mutationCalls)
+	}
+	if len(harness.mutationTargets) != 1 || !harness.mutationTargets[0].Probed || !slices.Equal(harness.mutationTargets[0].Infected, []uint32{7}) {
+		t.Fatalf("routed targets = %+v, want the probed evidence", harness.mutationTargets)
+	}
+	if harness.probeOptions.Contract != "standard-v1" || harness.probeOptions.Jobs != 3 ||
+		harness.probeOptions.Timeout != 5*time.Minute || !slices.Equal(harness.probeOptions.TestArgs, []string{"-test.short=true"}) ||
+		harness.probeOptions.Progress == nil {
+		t.Fatalf("probe options = %+v", harness.probeOptions)
+	}
+	kinds := make([]string, 0, len(harness.events))
+	details := make(map[string]string, len(harness.events))
+	for _, event := range harness.events {
+		kinds = append(kinds, event.Kind)
+		details[event.Kind] = event.Detail
+	}
+	for _, kind := range []string{"probe-target", "probe-summary"} {
+		if !slices.Contains(kinds, kind) {
+			t.Fatalf("events = %v, want a %s note", kinds, kind)
+		}
+	}
+	if details["probe-target"] != "1 target" || details["probe-summary"] != "1 measured, 0 without facts" {
+		t.Fatalf("probe notes = %q and %q", details["probe-target"], details["probe-summary"])
+	}
+}
+
+// TestRunCoordinatorSkipsTheProbePassOnReplay pins that replaying one mutant
+// does not pay for a probe pass. Its routing is then the pre-probe one, which
+// only executes more.
+func TestRunCoordinatorSkipsTheProbePassOnReplay(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	sink := harness.record()
+	if _, err := harness.run(Options{ReplayMutantID: "mutant-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if harness.probeCalls != 0 {
+		t.Fatalf("probe calls = %d, want none on a replay", harness.probeCalls)
+	}
+	if harness.preparedOptions.Probe {
+		t.Fatal("a replay prepared a probe tree it never measures against")
+	}
+	if slices.Contains(recordedPhases(t, sink), phaseProbe) {
+		t.Fatalf("phases = %v, want no probe phase on a replay", recordedPhases(t, sink))
+	}
+}
+
+// TestProbePassDoesNotEnterTheCacheIdentity pins that measuring infection
+// changes nothing a cached result is keyed on: the pass adds no option, and a
+// run that probed answers from the same entry as one that did not.
+func TestProbePassDoesNotEnterTheCacheIdentity(t *testing.T) {
+	probed := newRunCoordinatorHarness(t)
+	if _, err := probed.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	replayed := newRunCoordinatorHarness(t)
+	if _, err := replayed.run(Options{ReplayMutantID: "mutant-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if probed.probeCalls != 1 || replayed.probeCalls != 0 {
+		t.Fatalf("probe calls = %d probed and %d replayed", probed.probeCalls, replayed.probeCalls)
+	}
+	if len(probed.cache.puts) != 1 || len(replayed.cache.puts) != 1 {
+		t.Fatalf("cache puts = %d and %d", len(probed.cache.puts), len(replayed.cache.puts))
+	}
+	if probed.cache.puts[0].Snapshot != probed.digest || replayed.cache.puts[0].Snapshot != probed.digest {
+		t.Fatalf("cached under %q and %q, want the digest %q the inputs decided",
+			probed.cache.puts[0].Snapshot, replayed.cache.puts[0].Snapshot, probed.digest)
+	}
+	if !slices.Equal(probed.cache.putDigests, []string{probed.digest}) || !slices.Equal(replayed.cache.putDigests, []string{probed.digest}) {
+		t.Fatalf("cache writes keyed %v probed and %v replayed, want %q", probed.cache.putDigests, replayed.cache.putDigests, probed.digest)
+	}
+	if !slices.Equal(probed.cache.gets, replayed.cache.gets) {
+		t.Fatalf("cache lookups = %v probed and %v replayed", probed.cache.gets, replayed.cache.gets)
+	}
+	if prepared := probed.preparedOptions; !prepared.Probe {
+		t.Fatalf("prepare options = %+v, want a probe tree for a full run", prepared)
 	}
 }
 
