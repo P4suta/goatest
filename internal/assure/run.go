@@ -553,9 +553,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 
 		if options.ReplayMutantID == "" {
 			// The probe pass measures which mutants each target could observe
-			// at all. It changes no routing decision in this version; what it
-			// establishes is recorded so the layer can be audited against a
-			// full run's kills before anything is discharged by it.
+			// at all, and routing discharges a measured target that never made
+			// a probed mutant's site differ. What the pass establishes is
+			// recorded, so the layer is held to the proofaudit infection layer
+			// on every dogfood recording rather than trusted.
 			phases.enter(phaseProbe)
 			probeCount := probeTargetCount(baseline.Targets)
 			probeDetail := fmt.Sprintf("%d targets", probeCount)

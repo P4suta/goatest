@@ -803,6 +803,13 @@ func (audit *auditor) measureBranchSavings() dischargeSavings {
 //
 // The mutants are walked in identity order so the totals are read off the
 // recording rather than off the order a map happened to be built in.
+//
+// A run that already applied the layer measures nothing here, by construction:
+// the targets it discharged left reaching_targets, so what is counted is what
+// the rule would still drop, which on such a route is nothing. That is the
+// measurement working, not failing — the number to read on those recordings is
+// the discharged targets of the trace, and the number this reports is what a
+// recording made without the layer would have bought.
 func (audit *auditor) measureInfectionSavings() dischargeSavings {
 	if !audit.result.infectionAudited {
 		return dischargeSavings{}

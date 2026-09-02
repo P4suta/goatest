@@ -407,8 +407,9 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 // the vocabulary the contract names, and to the accounting behind it: a
 // discharge names one target and the proof that removed it, a discharged
 // target is one the route no longer reaches, so a route naming the same target
-// on both sides contradicts itself, and a proof removes a target once, so a
-// route naming the same target twice would be counted twice.
+// on both sides contradicts itself, and a target is removed by one proof, so a
+// route naming the same target twice would be counted twice. One route may
+// carry both proofs, because the reason is read per entry.
 func checkDischarges(record trace.RouteRecord) error {
 	if len(record.Discharged) == 0 {
 		return nil
@@ -422,9 +423,9 @@ func checkDischarges(record trace.RouteRecord) error {
 		if err := checkNotEmpty("route.discharged.target", discharge.Target); err != nil {
 			return err
 		}
-		if discharge.Reason != trace.DischargeBranchNeverTaken {
-			return fmt.Errorf("unknown route discharge reason %q, want %q",
-				discharge.Reason, trace.DischargeBranchNeverTaken)
+		if discharge.Reason != trace.DischargeBranchNeverTaken && discharge.Reason != trace.DischargeNeverInfected {
+			return fmt.Errorf("unknown route discharge reason %q, want %q or %q",
+				discharge.Reason, trace.DischargeBranchNeverTaken, trace.DischargeNeverInfected)
 		}
 		if _, reached := reaching[discharge.Target]; reached {
 			return fmt.Errorf("route discharged %q and reaches it: a discharged target is one the route no longer reaches",
