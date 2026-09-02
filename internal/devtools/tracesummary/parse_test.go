@@ -390,6 +390,16 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", `route fallback "position-unknown"`, "granularity"},
 		},
 		{
+			name:   "route with a column and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":9}}`),
+			want:   []string{"line 2", "route column", "granularity"},
+		},
+		{
+			name:   "route with a file candidate count and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":0}}`),
+			want:   []string{"line 2", "route file_candidates", "granularity"},
+		},
+		{
 			name:   "route with a negative column",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
 			want:   []string{"line 2", "route.column"},
@@ -471,6 +481,14 @@ func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
 		{
 			name:  "a block route",
 			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"block"}`,
+		},
+		{
+			name:  "a block route carrying its column and candidate count",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"block","column":9,"file_candidates":3}`,
+		},
+		{
+			name:  "a file route that found no candidate",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"file","fallback":"outside-blocks","column":9}`,
 		},
 		{
 			name:  "a route from a recording made before the labels existed",

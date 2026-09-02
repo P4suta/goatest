@@ -283,6 +283,11 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			record := amended["route"].(map[string]any)
 			delete(record, "granularity")
 			delete(record, "fallback")
+			// The column and candidate count are routing metadata too, and a
+			// route that carries any of it must name its granularity; they go
+			// so that the pair under test is the only thing the schema sees.
+			delete(record, "column")
+			delete(record, "file_candidates")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -299,6 +304,64 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			if !testCase.accepted && err == nil {
 				t.Fatalf("a route with granularity %q and fallback %q passed the schema",
 					testCase.granularity, testCase.fallback)
+			}
+		})
+	}
+}
+
+func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// The granularity is what marks a route as carrying its routing metadata,
+	// so a column or a candidate count without one is a route the summary
+	// would read as metadata-free while it carries some.
+	cases := []struct {
+		name        string
+		granularity string
+		metadata    map[string]any
+		accepted    bool
+	}{
+		{name: "a column without a granularity", metadata: map[string]any{"column": 9}},
+		{name: "a candidate count without a granularity", metadata: map[string]any{"file_candidates": 3}},
+		{name: "a zero candidate count without a granularity", metadata: map[string]any{"file_candidates": 0}},
+		{name: "a column beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9}, accepted: true},
+		{name: "a candidate count beside a file granularity", granularity: trace.GranularityFile, metadata: map[string]any{"file_candidates": 3}, accepted: true},
+		{name: "both beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9, "file_candidates": 3}, accepted: true},
+		{name: "a granularity alone", granularity: trace.GranularityFile, accepted: true},
+		{name: "a route from a recording made before the metadata existed", accepted: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "granularity")
+			delete(record, "fallback")
+			delete(record, "column")
+			delete(record, "file_candidates")
+			if testCase.granularity != "" {
+				record["granularity"] = testCase.granularity
+			}
+			for key, value := range testCase.metadata {
+				record[key] = value
+			}
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route with granularity %q and metadata %v was rejected: %v",
+					testCase.granularity, testCase.metadata, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route with granularity %q and metadata %v passed the schema",
+					testCase.granularity, testCase.metadata)
 			}
 		})
 	}
