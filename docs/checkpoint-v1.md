@@ -58,6 +58,13 @@ A checkpoint is replaced after each complete scheduling boundary:
 - after catalog validation, each mutant has one terminal result; and
 - the mutation phase has completed.
 
+A mutant is terminal the moment nothing more can be learned about it, not when
+the phase around it ends. A mutation every reaching test passed is saved as a
+surviving mutant right there; only one a fuzz target reaches waits, for the
+fuzzing that may still kill it. Survivors are the mutants a resumed run pays
+the most to execute again, so a checkpoint written only at the end of the phase
+would lose exactly them.
+
 An unfinished target or mutant is absent and therefore implicitly pending. It
 is never converted to report-v1 `unknown`. At completion, mutant accounting and
 the disposition inventory are rebuilt from the current catalog plus all saved

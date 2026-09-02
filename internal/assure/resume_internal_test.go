@@ -64,19 +64,148 @@ func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *test
 }
 
 type resumeMutationSession struct {
-	catalog gomutants.Catalog
-	calls   []string
-	fail    map[string]error
+	catalog  gomutants.Catalog
+	calls    []string
+	requests []gomutants.ExecRequest
+	fail     map[string]error
+	// survive names the mutants no execution kills, which is the evidence a
+	// dying run is most expensive to lose.
+	survive map[string]bool
 }
 
 func (session *resumeMutationSession) Catalog() gomutants.Catalog { return session.catalog }
 
 func (session *resumeMutationSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.calls = append(session.calls, request.Mutant)
+	session.requests = append(session.requests, request)
 	if err := session.fail[request.Mutant]; err != nil {
 		return gomutants.MutantResult{}, err
 	}
+	if session.survive[request.Mutant] {
+		return gomutants.MutantResult{Outcome: gomutants.OutcomeSurvived}, nil
+	}
 	return gomutants.MutantResult{Outcome: gomutants.OutcomeKilled}, nil
+}
+
+// findingKinds names the findings of one evaluation in order.
+func findingKinds(evaluation MutationEvaluation) []string {
+	kinds := make([]string, 0, len(evaluation.Findings))
+	for _, finding := range evaluation.Findings {
+		kinds = append(kinds, finding.Kind)
+	}
+	return kinds
+}
+
+// survivingMutant is a mutant every target of reachedMutationTargets reaches,
+// since the catalog reports no column for it and routing then keeps every
+// target that ran the file.
+func survivingMutant(id string, line int) gomutants.Mutant {
+	return gomutants.Mutant{
+		ID: id, DisplayID: id, Path: "value.go", Package: "fixture.example/module", Line: line, Accepted: true,
+	}
+}
+
+// TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails pins that a mutant
+// every reaching test passed is durable the moment those tests pass. A
+// checkpoint written only once every seed has finished is a checkpoint a dying
+// run never writes, and survivors are the mutants a resumed run pays the most
+// to execute a second time.
+func TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails(t *testing.T) {
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4), survivingMutant("mutant-b", 8)}}
+	session := &resumeMutationSession{
+		catalog: catalog,
+		survive: map[string]bool{"mutant-a": true},
+		fail:    map[string]error{"mutant-b": context.Canceled},
+	}
+	var saved, executedWhenSaved []string
+	checkpointed := make(map[string]MutationEvaluation)
+	_, err := EvaluateMutations(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+		Checkpoint: func(id string, unit MutationEvaluation) {
+			saved = append(saved, id)
+			checkpointed[id] = unit
+			if id == "mutant-a" {
+				executedWhenSaved = slices.Clone(session.calls)
+			}
+		},
+	})
+	if !errors.Is(err, context.Canceled) || !slices.Equal(saved, []string{"mutant-a"}) {
+		t.Fatalf("interrupted mutation = %v, saved=%v", err, saved)
+	}
+	if kinds := findingKinds(checkpointed["mutant-a"]); !slices.Equal(kinds, []string{"surviving-mutant"}) {
+		t.Fatalf("checkpointed survivor = %+v, want one surviving-mutant finding", checkpointed["mutant-a"])
+	}
+	if slices.Contains(executedWhenSaved, "mutant-b") {
+		t.Fatalf("survivor checkpointed only after a later mutant ran: executions %v", executedWhenSaved)
+	}
+}
+
+// TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation pins that
+// finalising a survivor early neither saves it twice nor lets the serial pass
+// find the same mutation a second time.
+func TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation(t *testing.T) {
+	session := &resumeMutationSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4)}},
+		survive: map[string]bool{"mutant-a": true},
+	}
+	var saved []string
+	checkpointed := make(map[string]MutationEvaluation)
+	evaluation, err := EvaluateMutations(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+		Checkpoint: func(id string, unit MutationEvaluation) {
+			saved = append(saved, id)
+			checkpointed[id] = unit
+		},
+	})
+	if err != nil || !slices.Equal(saved, []string{"mutant-a"}) || evaluation.Accounting.Survived != 1 {
+		t.Fatalf("surviving mutation = (%+v, %v), saved=%v", evaluation, err, saved)
+	}
+	unit := checkpointed["mutant-a"]
+	if kinds := findingKinds(unit); !slices.Equal(kinds, []string{"surviving-mutant"}) {
+		t.Fatalf("checkpointed survivor = %+v, want one surviving-mutant finding", unit)
+	}
+	// What a resumed run reads back is exactly what this run reported.
+	if !reflect.DeepEqual(unit.Findings, evaluation.Findings) || !reflect.DeepEqual(unit.Evidence, evaluation.Evidence) {
+		t.Fatalf("checkpointed evaluation = %+v, want the reported %+v", unit, evaluation)
+	}
+}
+
+// TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterFuzzing pins the
+// one survivor that is not finished when its tests pass: fuzzing may still
+// kill it, so it is finalised only once the fuzzing has run.
+func TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterFuzzing(t *testing.T) {
+	session := &resumeMutationSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4)}},
+		survive: map[string]bool{"mutant-a": true},
+	}
+	var saved []string
+	checkpointed := make(map[string]MutationEvaluation)
+	evaluation, err := EvaluateMutations(t.Context(), session, reachedMutationTargets(), MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+		Checkpoint: func(id string, unit MutationEvaluation) {
+			saved = append(saved, id)
+			checkpointed[id] = unit
+		},
+	})
+	if err != nil || !slices.Equal(saved, []string{"mutant-a"}) || evaluation.Accounting.Survived != 1 {
+		t.Fatalf("fuzz-reached surviving mutation = (%+v, %v), saved=%v", evaluation, err, saved)
+	}
+	if kinds := findingKinds(checkpointed["mutant-a"]); !slices.Equal(kinds, []string{"surviving-mutant"}) {
+		t.Fatalf("checkpointed survivor = %+v, want one surviving-mutant finding", checkpointed["mutant-a"])
+	}
+	fuzzed := 0
+	for index, request := range session.requests {
+		if !slices.ContainsFunc(request.Args, func(arg string) bool { return strings.HasPrefix(arg, "-test.fuzz=") }) {
+			continue
+		}
+		fuzzed++
+		if index != len(session.requests)-1 {
+			t.Fatalf("fuzz request %d of %d ran before the unit executions finished", index+1, len(session.requests))
+		}
+	}
+	if fuzzed != 1 {
+		t.Fatalf("fuzz requests = %d, want the one that follows the unit executions: %+v", fuzzed, session.requests)
+	}
 }
 
 func TestMutationResumeReusesOnlyTerminalCatalogMatches(t *testing.T) {
