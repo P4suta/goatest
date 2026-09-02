@@ -105,6 +105,27 @@ func TestRoutingBlockCountsProbedRoutesOnlyWhenRecorded(t *testing.T) {
 	if strings.Contains(before, "probed") {
 		t.Errorf("the block counts probes no route recorded:\n%s", before)
 	}
+	// The line has one slot, whether or not a proof discharged anything: after
+	// the discharged line when there is one, and before the reduction either
+	// way, so that two recordings read in the same order.
+	discharging := routeEvent("mutant-c", 3, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 5)
+	discharging.Route.Probed = true
+	discharging.Route.Discharged = []trace.Discharge{{Target: "target-z", Reason: trace.DischargeBranchNeverTaken}}
+	for name, events := range map[string][]trace.Event{
+		"without a discharge": {probed, unprobed},
+		"with a discharge":    {probed, unprobed, discharging},
+	} {
+		block := routingBlock(events)
+		probedAt := slices.IndexFunc(block, func(line string) bool { return strings.HasPrefix(line, "probed: ") })
+		reductionAt := slices.IndexFunc(block, func(line string) bool { return strings.HasPrefix(line, "reduction: ") })
+		dischargedAt := slices.IndexFunc(block, func(line string) bool { return strings.HasPrefix(line, "discharged: ") })
+		if probedAt < 0 || reductionAt < 0 || probedAt != reductionAt-1 {
+			t.Errorf("%s: the probed line is not the line before the reduction:\n%s", name, strings.Join(block, "\n"))
+		}
+		if dischargedAt >= 0 && dischargedAt != probedAt-1 {
+			t.Errorf("%s: the probed line does not follow the discharged line:\n%s", name, strings.Join(block, "\n"))
+		}
+	}
 }
 
 func TestProbeBlockIsDeterministic(t *testing.T) {

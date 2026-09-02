@@ -406,23 +406,20 @@ func routingBlock(events []trace.Event) []string {
 	}
 	// A recording no proof discharged a target in renders as it did before the
 	// proofs existed, so the line is absent rather than a tally of zeroes, and
-	// so does one whose routes name no probe.
-	discharged := countedLabels(total.discharges)
-	if discharged > 0 {
+	// so does one whose routes name no probe. The two lines have one slot each,
+	// discharged then probed, so that a block reads in the same order whichever
+	// of them a recording carries: the targets a proof already removed, then
+	// the routes the probe pass is yet to narrow, then the reduction so far.
+	if discharged := countedLabels(total.discharges); discharged > 0 {
 		lines = append(lines, fmt.Sprintf("discharged: %s across %s (%s)",
 			plural(discharged, "target", "targets"),
 			plural(total.dischargedRoutes, "route", "routes"),
 			formatLabelCounts(total.discharges)))
-		// The probed routes are the reaching measurement the probe pass will
-		// narrow, so they are reported beside the targets a proof already
-		// removed; a recording with no discharge closes the labels with them.
-		lines = append(lines, probedLines(total.probed)...)
 	}
-	lines = append(lines, "reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching))
-	if discharged == 0 {
-		lines = append(lines, probedLines(total.probed)...)
-	}
-	lines = append(lines, "", "reaching targets per route")
+	lines = append(lines, probedLines(total.probed)...)
+	lines = append(lines,
+		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
+		"", "reaching targets per route")
 	labels := fanOutBucketLabels()
 	rows := make([][]string, 0, len(labels))
 	for index, count := range total.fanOut {
