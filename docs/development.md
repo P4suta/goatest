@@ -229,8 +229,11 @@ kill in the comparison, and a smaller bill in the summary. A regression is
 reported rather than failed on, so the exit code says whether the two reports
 could be read rather than what they said.
 
-`mise run proof-audit -- <trace.jsonl> <profiles-dir>` audits the proof layers
-of one recorded run against the kills that run proved. A layer is any rule that
+`mise run proof-audit -- [-module PATH] <trace.jsonl> <profiles-dir>` audits
+the proof layers of one recorded run against the kills that run proved. The
+profiles name their files under a module path, which defaults to the `module`
+directive of `./go.mod` — the repository the tool is run from — and `-module`
+names another when the recording came from a different one. A layer is any rule that
 narrows what a mutant is executed against — today the block routing that keeps
 a mutant to the coverage blocks containing its position — and the invariant
 every layer has to satisfy is that it drops no killer: for each mutant a target
