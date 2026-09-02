@@ -15,7 +15,7 @@ import (
 // every outcome the audit distinguishes. One killer that block routing keeps,
 // one it would drop, one whose target left no profile, a mutant its package
 // suite settled, a batch execution that names no single killer, and a last
-// line the run was interrupted in the middle of.
+// line the run was interrupted in the middle of, behind a blank one.
 func sampleAudit(t *testing.T) auditResult {
 	t.Helper()
 	recorded := recordedEvidence(t, map[string][]string{
@@ -46,7 +46,7 @@ func sampleAudit(t *testing.T) auditResult {
 			Args:    []string{"-test.run=^(" + testNameOf(killerTarget) + "|" + testNameOf(secondTarget) + ")$"},
 			Outcome: outcomeKilled, DurationMS: 20,
 		}),
-	) + `{"seq":13,"type":"mutant-exec","timestamp":"2026-01-0`
+	) + "\n" + `{"seq":13,"type":"mutant-exec","timestamp":"2026-01-0`
 
 	return auditFixture(t, stream, recorded)
 }
@@ -88,9 +88,9 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 		"trace: trace.jsonl",
 		"profiles: profiles",
 		"module: " + fixtureModule,
-		"kill pairs audited       1",
-		"reach          1     1             0           0",
-		"every killer of a recorded kill left a coverage profile",
+		"kill pairs audited            1",
+		"reach        1     1             0           0",
+		"every layer could decide every kill pair",
 		"no layer drops a killer a recorded run proved",
 	} {
 		if !strings.Contains(got, want) {
@@ -99,6 +99,29 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 	}
 	if strings.HasSuffix(got, "\n\n") {
 		t.Errorf("the audit ends with a blank line:\n%q", got)
+	}
+}
+
+func TestRenderAuditSaysWhenNoLayerWasAudited(t *testing.T) {
+	t.Parallel()
+	// An audit of no layers is not a clean audit, and a table with no rows
+	// under a "layers" heading would read as one.
+	got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditResult{})
+	if !strings.Contains(got, "no layer was audited") {
+		t.Errorf("an audit of no layers does not say so:\n%s", got)
+	}
+}
+
+func TestOrNoValueMarksAFieldTheRecordingLacked(t *testing.T) {
+	t.Parallel()
+	// A recording from before a field existed carries none of it, and an
+	// empty cell in a table reads as a rendering bug rather than as an
+	// absence.
+	if got := orNoValue(""); got != noValue {
+		t.Errorf("orNoValue rendered an absent value as %q, want %q", got, noValue)
+	}
+	if got := orNoValue("eq-to-neq"); got != "eq-to-neq" {
+		t.Errorf("orNoValue rewrote a recorded value as %q", got)
 	}
 }
 

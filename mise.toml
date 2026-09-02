@@ -69,3 +69,7 @@ run = "go run ./internal/devtools/tracesummary"
 [tasks.report-diff]
 description = "Compare two assurance reports: verdict, accounting, mutant transitions, and lost kills"
 run = "go run ./internal/devtools/reportdiff"
+
+[tasks.proof-audit]
+description = "Audit the proof layers of a recorded run: does a layer drop a target that killed a mutant?"
+run = "go run ./internal/devtools/proofaudit"

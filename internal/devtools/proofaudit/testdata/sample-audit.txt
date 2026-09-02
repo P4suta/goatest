@@ -1,0 +1,28 @@
+trace: testdata/sample-trace.jsonl
+profiles: testdata/sample-profiles
+module: example.com/audited
+
+audit
+counter                   count
+routes                        5
+targets with profiles         3
+killed executions             6
+kill pairs audited            3
+package-suite kills           1
+batch kills                   1
+unattributed kills            0
+truncated trailing lines      1
+
+layers
+layer  audited  kept  unverifiable  violations
+reach        3     1             1           1
+
+unverifiable
+kill pairs a layer could not decide: 1
+mutant                rule       position             killer target     layer  why
+c1d2e3f405162738495a  eq-to-neq  pkg/subject.go:31:5  c1d2e3f405162738  reach  the killer target left no coverage profile
+
+violations
+killers a layer would drop: 1
+mutant                rule       position             killer target     layer  why
+b1c2d3e4f5061728394a  eq-to-neq  pkg/subject.go:21:4  b1c2d3e4f5061728  reach  position outside every covered block of the killer

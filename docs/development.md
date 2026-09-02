@@ -229,6 +229,19 @@ kill in the comparison, and a smaller bill in the summary. A regression is
 reported rather than failed on, so the exit code says whether the two reports
 could be read rather than what they said.
 
+`mise run proof-audit -- <trace.jsonl> <profiles-dir>` audits the proof layers
+of one recorded run against the kills that run proved. A layer is any rule that
+narrows what a mutant is executed against — today the block routing that keeps
+a mutant to the coverage blocks containing its position — and the invariant
+every layer has to satisfy is that it drops no killer: for each mutant a target
+actually killed, the narrowed rule must still route that mutant to that target.
+The rule is reimplemented from the recording and the coverage profiles of the
+run's temporary directory rather than called out of `internal/assure`, because
+an audit that asked the code under audit whether it was right would only prove
+that it agrees with itself. The two halves come from one
+`goatest verify --trace --keep-temp` run; the exit code is a gate, zero when
+every layer kept every killer.
+
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
 produced any. The stream, its nine event types, and the fields of each are

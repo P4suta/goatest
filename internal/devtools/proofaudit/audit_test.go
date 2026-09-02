@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -408,27 +409,76 @@ func TestAuditCountsABatchKillWithoutAttributingIt(t *testing.T) {
 	}
 }
 
-func TestAuditCountsAKillItsRouteCannotAttribute(t *testing.T) {
+func TestAuditCountsAKillItCannotAttributeToATarget(t *testing.T) {
 	t.Parallel()
-	// A killer the route does not name is a recording the audit cannot read as
-	// a pair: there is no target to check the rule against. It is counted so
-	// that a trace whose routes and executions disagree is visible rather than
-	// silently narrowing what was audited.
+	// A killer no route names, a kill with no route at all, and an execution
+	// that selected no test — the fuzzing of a target asks for "^$" — are
+	// recordings the audit cannot read as a pair: there is no target to check
+	// the rule against. They are counted so that a trace whose routes and
+	// executions disagree is visible rather than silently narrowing what was
+	// audited.
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
-	unnamed := mutantEvent(2, trace.MutantRecord{
-		ID: firstMutant, DisplayID: firstDisplay, Args: []string{"-test.run=^TestNobodyPlanned$"},
-		Outcome: outcomeKilled,
-	})
-	stream := recordedTrace(t, blockRoute(1, firstMutant, 11, 4, killerTarget), unnamed)
-
-	result := auditFixture(t, stream, recorded)
-	if result.unattributedKills != 1 {
-		t.Errorf("counted %d unattributed kills, want 1", result.unattributedKills)
+	cases := []struct {
+		name   string
+		events []trace.Event
+	}{
+		{
+			name: "a killer the route does not name",
+			events: []trace.Event{
+				blockRoute(1, firstMutant, 11, 4, killerTarget),
+				mutantEvent(2, trace.MutantRecord{
+					ID: firstMutant, DisplayID: firstDisplay,
+					Args: []string{"-test.run=^TestNobodyPlanned$"}, Outcome: outcomeKilled,
+				}),
+			},
+		},
+		{
+			name:   "a kill with no route recorded before it",
+			events: []trace.Event{killedBy(1, firstMutant, firstDisplay, killerTarget)},
+		},
+		{
+			name: "an execution that selected no test",
+			events: []trace.Event{
+				blockRoute(1, firstMutant, 11, 4, killerTarget),
+				mutantEvent(2, trace.MutantRecord{
+					ID: firstMutant, DisplayID: firstDisplay,
+					Args: []string{"-test.run=^$", "-test.fuzz=^FuzzTarget$"}, Outcome: outcomeKilled,
+				}),
+			},
+		},
 	}
-	if result.pairs != 0 {
-		t.Errorf("audited %d kill pairs, want none", result.pairs)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			result := auditFixture(t, recordedTrace(t, testCase.events...), recorded)
+			if result.unattributedKills != 1 {
+				t.Errorf("counted %d unattributed kills, want 1", result.unattributedKills)
+			}
+			if result.pairs != 0 {
+				t.Errorf("audited %d kill pairs, want none", result.pairs)
+			}
+		})
+	}
+}
+
+// failingReader is a stream that breaks partway, which is what a trace on a
+// failing disk or an interrupted pipe reads like.
+type failingReader struct{ err error }
+
+func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
+
+func TestAuditReportsAStreamItCannotRead(t *testing.T) {
+	t.Parallel()
+	// A stream that breaks is not an interrupted recording: nothing says how
+	// much of it was read, so the audit refuses rather than reporting a total
+	// over the part that arrived.
+	broken := errors.New("the stream broke")
+
+	_, err := auditTrace(failingReader{err: broken}, evidence{}, auditLayers())
+	if !errors.Is(err, broken) {
+		t.Fatalf("auditing a broken stream returned %v, want the read failure", err)
 	}
 }
 
