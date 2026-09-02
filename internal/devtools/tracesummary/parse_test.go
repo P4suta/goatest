@@ -420,6 +420,11 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", `discharged "TestRun"`, "reaches"},
 		},
 		{
+			name:   "route that discharged the same target twice",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", `discharged "TestSkipped" twice`},
+		},
+		{
 			name:   "route with a negative column",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
 			want:   []string{"line 2", "route.column"},

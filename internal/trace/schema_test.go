@@ -455,6 +455,54 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 	}
 }
 
+func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// A proof removes a target from the reaching set once, and a reader counts
+	// every entry, so the same target discharged twice would be counted twice.
+	once := map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}
+	cases := []struct {
+		name       string
+		discharged []any
+		accepted   bool
+	}{
+		{
+			name:       "the same target discharged twice",
+			discharged: []any{once, map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}},
+		},
+		{
+			name:       "two targets discharged by the same proof",
+			discharged: []any{once, map[string]any{"target": "TestAlsoSkipped", "reason": trace.DischargeBranchNeverTaken}},
+			accepted:   true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			record["granularity"] = trace.GranularityBlock
+			record["discharged"] = testCase.discharged
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route discharging %v was rejected: %v", testCase.discharged, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route discharging %v passed the schema", testCase.discharged)
+			}
+		})
+	}
+}
+
 // cloneDocument returns an independent copy of a decoded event.
 func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	t.Helper()
