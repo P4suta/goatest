@@ -378,7 +378,7 @@ func TestEvaluateMutationsStillFuzzesASurvivorItsFuzzTargetReaches(t *testing.T)
 	header, body, tail := bracedBodyBlocks()
 	mutant := narrowedBranchMutant()
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	_, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
 		narrowedBranchTarget("FuzzSkipsIt", goanalysis.KindFuzz, 2*time.Millisecond, header, tail),
 		narrowedBranchTarget("TestSkipsIt", goanalysis.KindTest, time.Millisecond, header, tail),
 	}, MutationOptions{
@@ -395,5 +395,13 @@ func TestEvaluateMutationsStillFuzzesASurvivorItsFuzzTargetReaches(t *testing.T)
 	want := []string{"-test.run=^FuzzSkipsIt$", `-test.run=^$ -test.fuzz=^FuzzSkipsIt$ -test.fuzztime=10000x`}
 	if !slices.Equal(ran, want) {
 		t.Fatalf("executions = %v, want %v", ran, want)
+	}
+	// The survivor is settled by the serial fuzz pass, and its finding still
+	// counts the test the proof discharged: which pass reports a survivor must
+	// not change what the report says about the tests that never ran.
+	wantSummary := "all reaching tests passed with this mutation active; 1 more discharged without running because none takes the branch this mutation narrows"
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "surviving-mutant" ||
+		evaluation.Findings[0].Summary != wantSummary {
+		t.Fatalf("evaluation = %+v, want one surviving-mutant finding summarised %q", evaluation, wantSummary)
 	}
 }
