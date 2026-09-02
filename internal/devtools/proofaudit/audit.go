@@ -32,17 +32,12 @@ const (
 	// runArgument is the flag a mutant execution selects its tests with. An
 	// execution without one is the package suite.
 	runArgument = "-test.run="
-	// individualPlan and packageSuitePlan are the plan entries this audit
-	// reads. A plan entry sits parallel to the reaching target it was derived
-	// from, which is what maps a killer test back to the target that ran it;
-	// the package suite names no target at all.
-	individualPlan   = "individual:"
-	packageSuitePlan = "package-suite"
 	// coverageArgument is the flag a baseline measurement writes its target's
 	// coverage profile with, and packageArgument the flag that names the
 	// package the measured binary belongs to. A measurement's arguments are the
 	// only place in a recording where a target's identity, the test it runs and
-	// its package meet, which is what the savings measurement needs.
+	// its package meet, which is what a kill is attributed through and what the
+	// savings measurement reads.
 	coverageArgument = "-test.coverprofile="
 	packageArgument  = "-p"
 	// fuzzPrefix is how Go names a fuzz target, and the whole of the rule that
@@ -390,15 +385,17 @@ func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, lay
 // holds the recording to, what it has read of the recording so far, and the
 // pairs it has already decided.
 //
-// The identities and the executions are collected for the savings measurement
-// alone, and only when a catalog was given, so a run audited without one is
-// read exactly as it was before the layer existed.
+// The targets are read from the baseline measurements two ways round, because
+// the audit asks both questions: which test a target ran, and which target ran
+// a test. The executions are collected for the savings measurement alone, and
+// only when a catalog was given.
 type auditor struct {
 	recorded   evidence
 	catalog    *mutantCatalog
 	layers     []layer
 	routes     map[string]trace.RouteRecord
 	targets    map[string]targetIdentity
+	measuredBy map[targetIdentity]string
 	executions map[string][]targetIdentity
 	decided    map[pairKey]struct{}
 	result     auditResult
@@ -413,7 +410,8 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 	return &auditor{
 		recorded: recorded, catalog: catalog, layers: layers,
 		routes: make(map[string]trace.RouteRecord), targets: make(map[string]targetIdentity),
-		executions: make(map[string][]targetIdentity), decided: make(map[pairKey]struct{}), result: result,
+		measuredBy: make(map[targetIdentity]string), executions: make(map[string][]targetIdentity),
+		decided: make(map[pairKey]struct{}), result: result,
 	}
 }
 
@@ -437,10 +435,12 @@ func (audit *auditor) read(event trace.Event) {
 // identity while selecting the target's single test in the target's package,
 // which is the only place a recording puts the three together. Every other
 // command a run executes names no profile and is passed over.
+//
+// Two targets claiming one identity would identify neither, so a name a second
+// target claims is unclaimed rather than given to whichever measurement came
+// first: a kill the audit cannot place is worth more than a kill it places
+// wrongly.
 func (audit *auditor) measurement(argv []string) {
-	if audit.catalog == nil {
-		return
-	}
 	target, identity := "", targetIdentity{}
 	for index, argument := range argv {
 		switch {
@@ -457,6 +457,21 @@ func (audit *auditor) measurement(argv []string) {
 		return
 	}
 	audit.targets[target] = identity
+	if identity.test == "" {
+		return
+	}
+	if claimed, measured := audit.measuredBy[identity]; measured && claimed != target {
+		audit.measuredBy[identity] = ""
+		return
+	}
+	audit.measuredBy[identity] = target
+}
+
+// measuredTarget is the target whose baseline measurement ran one test in one
+// package, and whether the recording named exactly one.
+func (audit *auditor) measuredTarget(packagePath, test string) (string, bool) {
+	target, measured := audit.measuredBy[targetIdentity{test: test, packagePath: packagePath}]
+	return target, measured && target != ""
 }
 
 // execution takes one recorded mutant execution: it is collected when a catalog
@@ -492,6 +507,18 @@ func profileTarget(path string) string {
 // kill attributes one recorded kill to the target that ran it and holds every
 // layer to the pair. A kill no single target can be attributed to is counted
 // and left alone.
+//
+// The target is the one whose baseline measurement ran the killer test in the
+// package the execution ran in, and not the target sitting at the position of
+// the matching plan entry. A plan holds one entry per execution rather than one
+// per reaching target: the targets a run executes one at a time come first, the
+// rest are batched, and a batch of a single target is rendered exactly like an
+// individual run. Past the individual prefix the two lists no longer line up,
+// so a plan position is a coincidence and never an identity. A measurement is,
+// because it is the run saying which target ran which test where.
+//
+// The route is still what says where the mutant is and which rule made it,
+// which is why a kill recorded before any route is one the audit cannot place.
 func (audit *auditor) kill(record trace.MutantRecord) {
 	killers, selective := killerTests(record.Args)
 	switch {
@@ -510,8 +537,8 @@ func (audit *auditor) kill(record trace.MutantRecord) {
 		audit.result.unattributedKills++
 		return
 	}
-	target, named := routeTarget(route, killers[0])
-	if !named {
+	target, measured := audit.measuredTarget(record.Package, killers[0])
+	if !measured {
 		audit.result.unattributedKills++
 		return
 	}
@@ -641,18 +668,6 @@ func killerTests(arguments []string) ([]string, bool) {
 		return []string{pattern}, true
 	}
 	return nil, false
-}
-
-// routeTarget maps a killer test back to the target that ran it. The plan of a
-// route sits parallel to its reaching targets, so the entry that names the
-// test names the target's position too.
-func routeTarget(route trace.RouteRecord, test string) (string, bool) {
-	for index, entry := range route.Plan {
-		if entry == individualPlan+test && index < len(route.ReachingTargets) {
-			return route.ReachingTargets[index], true
-		}
-	}
-	return "", false
 }
 
 // compareRows orders the reported pairs by where their mutants are, so a

@@ -145,6 +145,15 @@ func testNameOf(target string) string {
 	return "TestTarget" + strings.ToUpper(target[:2])
 }
 
+// The plan entries a run records. A plan holds one entry per execution rather
+// than one per reaching target, and a batch of a single target is rendered
+// exactly like an individual run, so it is a recording shape the fixtures
+// reproduce and never an identity the audit reads.
+const (
+	individualPlan   = "individual:"
+	packageSuitePlan = "package-suite"
+)
+
 // measured is the baseline measurement of one target, in the package and under
 // the test name the fixtures use by default.
 func measured(seq int64, target string) trace.Event {
