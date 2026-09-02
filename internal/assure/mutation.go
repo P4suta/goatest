@@ -97,6 +97,11 @@ type MutationOptions struct {
 	// Trace records how each mutant was routed. A nil recorder is an
 	// evaluation that records nothing and reaches the same result.
 	Trace *trace.Recorder
+	// Instrumented is every coverage block the baseline compiled
+	// instrumentation for. Routing reads it to tell a position no test ran
+	// from a position no profile describes, and never writes to it, so the
+	// same slice is shared by every worker.
+	Instrumented []goanalysis.FileCoverage
 }
 
 type MutationEvaluation struct {
@@ -457,9 +462,10 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 }
 
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
-	seed := mutationSeed{mutant: mutant, reaching: reachingTargets(mutant.Path, targets)}
+	route := routeMutant(mutant, targets, options.Instrumented)
+	seed := mutationSeed{mutant: mutant, reaching: route.reaching}
 	if len(seed.reaching) == 0 {
-		options.Trace.Route(mutationSeedRoute(mutant, nil, nil))
+		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
 		request := gomutants.ExecRequest{
 			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(options.TestArgs),
 			Timeout: calibratedMutationTimeout(options.Contract, 0, options.Timeout),
@@ -494,7 +500,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		return seed
 	}
 	executions := mutationSeedExecutions(mutant, seed.reaching, options)
-	options.Trace.Route(mutationSeedRoute(mutant, seed.reaching, executions))
+	options.Trace.Route(mutationSeedRoute(mutant, route, executions))
 	for _, execution := range executions {
 		result, err := session.Exec(ctx, execution.request)
 		if err != nil {
@@ -677,33 +683,36 @@ func batchMutationPlan(targets []TargetEvidence) string {
 }
 
 // mutationSeedRoute describes how a mutant was routed: the targets baseline
-// coverage proves reach it, the executions that routing planned for them, and
-// the reason the plan is what it is. A mutant no target reaches has no
-// coverage to route by and is left to its package suite.
+// coverage proves reach it, the evidence that decided them, the executions
+// that routing planned for them, and the reason the plan is what it is. A
+// mutant no target reaches has no coverage to route by and is left to its
+// package suite.
 //
 // The reaching targets are named in the order they will be executed, which is
 // cheapest first, and the plan follows the same order: the individual runs,
 // the batches of related targets behind them, and the fuzzing that a
-// surviving mutant falls through to last. The line is clamped because a trace
-// records a position or nothing, never a negative one.
-func mutationSeedRoute(mutant gomutants.Mutant, reaching []TargetEvidence, executions []mutationSeedExecution) trace.RouteRecord {
+// surviving mutant falls through to last. The position is clamped because a
+// trace records a position or nothing, never a negative one.
+func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions []mutationSeedExecution) trace.RouteRecord {
 	record := trace.RouteRecord{
-		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: max(mutant.Line, 0),
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path,
+		Line: max(mutant.Line, 0), Column: max(mutant.Column, 0),
 		Plan: []string{mutationPlanPackageSuite}, Reason: trace.ReasonUnreached,
+		Granularity: route.granularity, Fallback: route.fallback, FileCandidates: route.fileCandidates,
 	}
-	if len(reaching) == 0 {
+	if len(route.reaching) == 0 {
 		return record
 	}
 	record.Reason = trace.ReasonCoverageReaching
-	record.ReachingTargets = make([]string, len(reaching))
-	for index, target := range reaching {
+	record.ReachingTargets = make([]string, len(route.reaching))
+	for index, target := range route.reaching {
 		record.ReachingTargets[index] = target.Target.ID
 	}
-	record.Plan = make([]string, 0, len(executions)+len(reaching))
+	record.Plan = make([]string, 0, len(executions)+len(route.reaching))
 	for _, execution := range executions {
 		record.Plan = append(record.Plan, execution.plan)
 	}
-	for _, target := range reaching {
+	for _, target := range route.reaching {
 		if target.Target.Kind == goanalysis.KindFuzz {
 			record.Plan = append(record.Plan, mutationPlanFuzz+target.Target.Name)
 		}
@@ -718,14 +727,76 @@ func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
 	evaluation.Applied = evaluation.Applied || other.Applied
 }
 
-func reachingTargets(path string, targets []TargetEvidence) []TargetEvidence {
-	normalized := filepath.ToSlash(path)
-	measured := make([]TargetEvidence, 0)
+// mutationRoute is the decision routing reached for one mutant: the targets
+// that will run it, the evidence granularity that decided them, the fallback
+// that widened the decision if one did, and how many targets the file alone
+// would have named. The last three are diagnostics; only the reaching set
+// decides what runs.
+type mutationRoute struct {
+	reaching       []TargetEvidence
+	granularity    string
+	fallback       string
+	fileCandidates int
+}
+
+// routeMutant chooses the targets that must run one mutant.
+//
+// Coverage blocks narrow the file the mutant lives in to the positions each
+// target actually ran, so a target that ran another part of the same file is
+// left out. The narrowing is abandoned, fail-closed, whenever the evidence
+// cannot support it: a mutant whose position the catalog could not report is
+// routed by file, and so is a position no instrumented block contains, which
+// is a gap between the blocks cmd/cover cut rather than proof that nothing
+// runs it. A target restored from a checkpoint carries no blocks and is kept
+// for the whole file for the same reason.
+//
+// A position that instrumentation does describe and no target ran reaches
+// nobody. That is not a fallback but the answer: the mutation lives in code
+// the measured targets never execute, and the package suite settles it.
+func routeMutant(mutant gomutants.Mutant, targets []TargetEvidence, instrumented []goanalysis.FileCoverage) mutationRoute {
+	path := filepath.ToSlash(mutant.Path)
+	candidates := make([]TargetEvidence, 0, len(targets))
+	for _, target := range targets {
+		if slices.Contains(target.CoveredFiles, path) {
+			candidates = append(candidates, target)
+		}
+	}
+	if mutant.Line <= 0 || mutant.Column <= 0 {
+		return fileMutationRoute(candidates, trace.FallbackPositionUnknown)
+	}
+	blocks, _ := goanalysis.FindFileCoverage(instrumented, path)
+	if !blocks.Contains(mutant.Line, mutant.Column) {
+		return fileMutationRoute(candidates, trace.FallbackOutsideBlocks)
+	}
+	reaching := make([]TargetEvidence, 0, len(candidates))
+	for _, target := range candidates {
+		covered, _ := goanalysis.FindFileCoverage(target.Covered, path)
+		if target.Covered == nil || covered.Contains(mutant.Line, mutant.Column) {
+			reaching = append(reaching, target)
+		}
+	}
+	return mutationRoute{
+		reaching: orderReachingTargets(reaching), granularity: trace.GranularityBlock, fileCandidates: len(candidates),
+	}
+}
+
+// fileMutationRoute is the route taken when the blocks cannot decide: every
+// target that ran the file runs the mutant, exactly as routing did before
+// blocks were read at all.
+func fileMutationRoute(candidates []TargetEvidence, fallback string) mutationRoute {
+	return mutationRoute{
+		reaching: orderReachingTargets(candidates), granularity: trace.GranularityFile,
+		fallback: fallback, fileCandidates: len(candidates),
+	}
+}
+
+// orderReachingTargets puts the reaching targets in the order they will run:
+// the measured ones cheapest first, so that a kill is found for the least
+// time, and the unmeasured ones behind them in the order they were given.
+func orderReachingTargets(targets []TargetEvidence) []TargetEvidence {
+	measured := make([]TargetEvidence, 0, len(targets))
 	unmeasured := make([]TargetEvidence, 0)
 	for _, target := range targets {
-		if !slices.Contains(target.CoveredFiles, normalized) {
-			continue
-		}
 		if target.Duration > 0 {
 			measured = append(measured, target)
 		} else {
