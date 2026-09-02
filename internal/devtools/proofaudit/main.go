@@ -4,9 +4,10 @@
 // Command proofaudit holds the proof layers of a mutation run to the kills a
 // recorded run proved. A layer is any rule that narrows what a mutant is run
 // against — the block routing that keeps a mutant to the coverage blocks
-// containing its position, and the branch-never-taken proof behind it, which
-// drops a target whose coverage reaches a mutated condition through a body it
-// never entered.
+// containing its position, the branch-never-taken proof behind it, which drops
+// a target whose coverage reaches a mutated condition through a body it never
+// entered, and the infection facts of the probe pass, which drop a target whose
+// measured probe run never saw the mutant's site differ.
 //
 // The invariant every such layer has to satisfy is that it drops no killer:
 // for every mutant a target actually killed, the narrowed rule must still
@@ -33,6 +34,14 @@
 // report says which of the two it is. A catalog also lets the audit say what
 // the layer would have bought — the targets it would stop reaching, the mutants
 // it would stop executing — measured from the recording of a run that
+// discharged nothing.
+//
+// The infection layer needs no catalog: it reads the probe-exec events, which
+// say which mutants each probe run saw the target infect, against the probed
+// flag of a route, which says the mutant carried a probe site at all. It is
+// left out on the same terms as the branch layer, of a recording that holds no
+// probe pass — no probe-exec event was recorded, whatever the routes claim —
+// and it says what it would have bought from the same recording of a run that
 // discharged nothing.
 //
 // The rules are reimplemented here from the recording rather than called out
