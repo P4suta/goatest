@@ -21,13 +21,17 @@ self-dogfood is not external compatibility evidence.
   mutation spanning several lines is routed by the block that contains its
   first byte. Where the coverage toolchain and the mutation catalog disagree
   about a position — a `//line` directive is honoured by one and ignored by the
-  other — the position lands in no block and the mutant is routed by its whole
-  file, which is the same work routing did before blocks were read.
+  other — the position lands either in no block, and the mutant is routed by
+  its whole file as it was before blocks were read, or in a neighbouring block,
+  and the mutant may be run without the test that would kill it. The second
+  case is reported as a surviving mutant, never as a kill: routing errs toward
+  a finding.
 - Only execution the baseline coverage profiles record can narrow routing. A
   test that reaches code another way — re-executing the test binary as a
-  subprocess, for instance — leaves no block behind, so a mutant only that test
-  covers is treated as unreached and confirmed by its package suite rather than
-  by the test itself.
+  subprocess, for instance — leaves no block behind. A mutant only that test
+  covers is treated as unreached and confirmed by its package suite, where the
+  test still runs; a mutant that other targets also cover is run by those
+  targets alone and, if only the blind test kills it, is reported as surviving.
 - A baseline target restored from a checkpoint carries the files it reached but
   not the blocks inside them, so it is routed at file granularity for the rest
   of the run. A resumed run therefore executes at least the work a cold run

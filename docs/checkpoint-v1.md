@@ -38,9 +38,10 @@ before the next round.
 
 A saved baseline target carries the files it reached and not the coverage
 blocks inside them. The whole checkpoint is rewritten and synced at every
-scheduling boundary, and this repository alone measures tens of thousands of
-blocks per target, so storing them would multiply the bytes each run writes by
-several orders of magnitude for state that is only a scheduling hint. A target
+scheduling boundary, and this repository alone measures some four thousand
+blocks for each of several hundred targets, so storing them would multiply the
+bytes each run writes by orders of magnitude for state that is only a
+scheduling hint. A target
 restored from a checkpoint is therefore routed by file for the rest of the run:
 it reaches every mutant in a file it covered. That is the conservative
 direction — a resumed run executes at least the work a cold run would, and the
