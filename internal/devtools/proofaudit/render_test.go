@@ -108,6 +108,59 @@ func branchSampleAudit(t *testing.T) auditResult {
 	return auditWithCatalog(t, stream, recorded, catalog)
 }
 
+// infectionSampleAudit is the recording the infection golden is rendered from:
+// a run whose probe pass reaches every conclusion the layer has. One killer the
+// pass saw the mutant infect, one it measured and never saw infect, one mutant
+// it carried no site for, and one killer it recorded twice. Every count around
+// them is non-zero as well, so a rendering regression cannot hide behind a
+// column of zeroes.
+//
+// The subject is one file whose head at 10-12 every target ran, so block
+// routing keeps every pair and the only violation the report names is the
+// infection layer's.
+func infectionSampleAudit(t *testing.T) auditResult {
+	t.Helper()
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16)},
+		secondTarget: {ran(10, 2, 12, 16)},
+		thirdTarget:  {ran(10, 2, 12, 16)},
+	})
+	stream := recordedTrace(t,
+		trace.Event{Seq: 1, Type: trace.TypeRunStart, Schema: trace.SchemaV1, Timestamp: fixtureTime},
+		measured(2, killerTarget), measured(3, secondTarget), measured(4, thirdTarget),
+		probeMeasured(5, killerTarget, firstMutant),
+		probeMeasured(6, secondTarget),
+		probeMeasured(7, thirdTarget, fourthMutant),
+		probeOutcome(8, thirdTarget, trace.ProbeOutcomeTimedOut),
+		probedRoute(9, firstMutant, 11, 4, killerTarget, secondTarget),
+		killedBy(10, firstMutant, firstDisplay, killerTarget),
+		executedBy(11, firstMutant, firstDisplay, secondTarget, "survived"),
+		probedRoute(12, secondMutant, 11, 6, secondTarget, thirdTarget),
+		killedBy(13, secondMutant, secondDisplay, secondTarget),
+		blockRoute(14, thirdMutant, 11, 8, killerTarget),
+		killedBy(15, thirdMutant, thirdDisplay, killerTarget),
+		killedIn(16, thirdMutant, thirdDisplay, fixtureModule+"/other", testNameOf(killerTarget)),
+		probedRoute(17, fourthMutant, 11, 10, thirdTarget, secondTarget),
+		killedBy(18, fourthMutant, fourthDisplay, thirdTarget),
+		routeEvent(19, trace.RouteRecord{
+			MutantID: fifthMutant, Rule: "cond-true", Path: subjectPath, Line: 11, Column: 12,
+			Plan: []string{packageSuitePlan}, Reason: trace.ReasonUnreached, Granularity: trace.GranularityBlock,
+		}),
+		mutantEvent(20, trace.MutantRecord{
+			ID: fifthMutant, DisplayID: fifthDisplay, Package: fixtureModule + "/pkg",
+			Outcome: outcomeKilled, DurationMS: 12,
+		}),
+		probedRoute(21, sixthMutant, 11, 14, secondTarget),
+		mutantEvent(22, trace.MutantRecord{
+			ID: sixthMutant, DisplayID: sixthDisplay, Package: fixtureModule + "/pkg",
+			Args:    []string{"-test.run=^(" + testNameOf(killerTarget) + "|" + testNameOf(secondTarget) + ")$"},
+			Outcome: outcomeKilled, DurationMS: 20,
+		}),
+	) + "\n" + `{"seq":23,"type":"mutant-exec","timestamp":"2026-01-0`
+
+	return auditFixture(t, stream, recorded)
+}
+
 // renderSample renders the sample audit under fixed paths, so the golden
 // records the report rather than the temporary directory it was read from.
 func renderSample(t *testing.T) string {
@@ -121,6 +174,12 @@ func renderBranchSample(t *testing.T) string {
 	return renderAudit("testdata/sample-trace.jsonl", "testdata/sample-profiles", fixtureModule, branchSampleAudit(t))
 }
 
+// renderInfectionSample renders the infection sample under the same fixed paths.
+func renderInfectionSample(t *testing.T) string {
+	t.Helper()
+	return renderAudit("testdata/sample-trace.jsonl", "testdata/sample-profiles", fixtureModule, infectionSampleAudit(t))
+}
+
 func TestRenderAuditBreaksDownOneRecording(t *testing.T) {
 	t.Parallel()
 	testkit.Golden(t, "sample-audit.txt", []byte(renderSample(t)))
@@ -131,11 +190,17 @@ func TestRenderAuditBreaksDownOneRecordingAgainstACatalog(t *testing.T) {
 	testkit.Golden(t, "sample-branch-audit.txt", []byte(renderBranchSample(t)))
 }
 
+func TestRenderAuditSaysWhatTheInfectionLayerWouldHaveSaved(t *testing.T) {
+	t.Parallel()
+	testkit.Golden(t, "sample-infection-audit.txt", []byte(renderInfectionSample(t)))
+}
+
 func TestRenderAuditDependsOnTheRecordingAlone(t *testing.T) {
 	t.Parallel()
 	for name, render := range map[string]func(*testing.T) string{
 		"without a catalog": renderSample,
 		"with a catalog":    renderBranchSample,
+		"with a probe pass": renderInfectionSample,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -163,9 +228,12 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 		"trace: trace.jsonl",
 		"profiles: profiles",
 		"module: " + fixtureModule,
-		"kill pairs audited            1",
+		"kill pairs audited              1",
+		"probe executions                0",
+		"targets the probe measured      0",
 		"reach        1     1             0             0           0",
 		whyBranchNotAudited,
+		whyInfectionNotAudited,
 		"every layer could decide every kill pair",
 		"no layer drops a killer a recorded run proved",
 	} {
@@ -173,8 +241,10 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 			t.Errorf("the audit does not say %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, branchDischargeHeading) {
-		t.Errorf("a run audited without a catalog reports what the layer would have saved:\n%s", got)
+	for _, heading := range []string{branchDischargeHeading, infectionDischargeHeading} {
+		if strings.Contains(got, heading) {
+			t.Errorf("an unaudited layer reports what it would have saved under %q:\n%s", heading, got)
+		}
 	}
 	if strings.HasSuffix(got, "\n\n") {
 		t.Errorf("the audit ends with a blank line:\n%q", got)
@@ -188,7 +258,7 @@ func TestRenderAuditSaysWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	// what would not have happened rather than what did.
 	got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditResult{
 		branchAudited: true,
-		savings:       branchSavings{routes: 635, reaching: 8535, discharged: 7318, emptied: 182, executions: 3102},
+		branch:        dischargeSavings{routes: 635, reaching: 8535, discharged: 7318, emptied: 182, executions: 3102},
 	})
 
 	for _, want := range []string{
@@ -206,6 +276,56 @@ func TestRenderAuditSaysWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	}
 	if strings.Contains(got, whyBranchNotAudited) {
 		t.Errorf("an audited branch layer is reported as not audited:\n%s", got)
+	}
+}
+
+func TestRenderAuditSaysWhenTheInfectionLayerWasNotAudited(t *testing.T) {
+	t.Parallel()
+	// A recording that holds no probe pass is a recording the layer was never
+	// held to, and a missing row reads exactly like a clean one to anyone
+	// skimming, so the report says which of the two it is — and says it only
+	// then, because a report that always said it would say nothing.
+	saved := dischargeSavings{routes: 412, reaching: 5104, discharged: 3990, emptied: 96, executions: 1877}
+	cases := []struct {
+		name    string
+		audited bool
+	}{
+		{name: "a recording that holds a probe pass", audited: true},
+		{name: "a recording that holds none", audited: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditResult{
+				layers:           []layerResult{{name: reachLayerName}},
+				infectionAudited: testCase.audited,
+				infection:        saved,
+			})
+
+			if said := strings.Contains(got, whyInfectionNotAudited); said == testCase.audited {
+				t.Errorf("the report says %q for an audited=%t recording:\n%s",
+					whyInfectionNotAudited, testCase.audited, got)
+			}
+			if !testCase.audited {
+				if strings.Contains(got, infectionDischargeHeading) {
+					t.Errorf("an unaudited infection layer reports what it would have saved:\n%s", got)
+				}
+				return
+			}
+			for _, want := range []string{
+				infectionDischargeHeading,
+				"routes of a probed mutant",
+				"reaching targets the probe discharges",
+				"3990 of 5104",
+				"routes left with no reaching target",
+				"recorded executions it would have saved",
+				"1877",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("the audit does not say %q:\n%s", want, got)
+				}
+			}
+		})
 	}
 }
 

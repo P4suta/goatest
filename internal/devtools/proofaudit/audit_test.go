@@ -775,11 +775,11 @@ func TestAuditLayersAddsTheBranchLayerOnlyWithACatalog(t *testing.T) {
 	// audited without one is a run the layer was not held to. Adding it
 	// silently would be worse than not adding it: a reader would take the
 	// missing row for a clean one.
-	if got := layerNames(auditLayers(nil)); !slices.Equal(got, []string{reachLayerName}) {
-		t.Errorf("without a catalog the audit runs %v, want only %q", got, reachLayerName)
+	if got := layerNames(auditLayers(nil)); slices.Contains(got, branchLayerName) {
+		t.Errorf("without a catalog the audit runs %v, want no %q layer", got, branchLayerName)
 	}
 	got := layerNames(auditLayers(fixtureCatalog()))
-	if !slices.Equal(got, []string{reachLayerName, branchLayerName}) {
+	if !slices.Equal(got, []string{reachLayerName, branchLayerName, infectionLayerName}) {
 		t.Errorf("with a catalog the audit runs %v, want %q after %q", got, branchLayerName, reachLayerName)
 	}
 }
@@ -1047,9 +1047,9 @@ func TestAuditMeasuresWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	)
 
 	result := auditWithCatalog(t, stream, recorded, catalog)
-	want := branchSavings{routes: 2, reaching: 4, discharged: 3, emptied: 1, executions: 2}
-	if result.savings != want {
-		t.Errorf("the audit measured %+v, want %+v", result.savings, want)
+	want := dischargeSavings{routes: 2, reaching: 4, discharged: 3, emptied: 1, executions: 2}
+	if result.branch != want {
+		t.Errorf("the audit measured %+v, want %+v", result.branch, want)
 	}
 }
 
@@ -1069,8 +1069,8 @@ func TestAuditMeasuresNoSavingWithoutACatalog(t *testing.T) {
 	if result.branchAudited {
 		t.Error("a run audited without a catalog reports the branch layer as audited")
 	}
-	if (result.savings != branchSavings{}) {
-		t.Errorf("a run audited without a catalog measured %+v, want nothing", result.savings)
+	if (result.branch != dischargeSavings{}) {
+		t.Errorf("a run audited without a catalog measured %+v, want nothing", result.branch)
 	}
 }
 
@@ -1095,8 +1095,8 @@ func TestAuditRefusesToDischargeAnUninstrumentedBody(t *testing.T) {
 		t.Fatalf("reported %d violations over an uninstrumented body, want none: %+v",
 			len(result.violations), result.violations)
 	}
-	if (result.savings != branchSavings{}) {
-		t.Errorf("an uninstrumented body measured %+v, want nothing", result.savings)
+	if (result.branch != dischargeSavings{}) {
+		t.Errorf("an uninstrumented body measured %+v, want nothing", result.branch)
 	}
 }
 
