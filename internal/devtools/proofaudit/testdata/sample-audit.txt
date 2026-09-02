@@ -3,20 +3,23 @@ profiles: testdata/sample-profiles
 module: example.com/audited
 
 audit
-counter                   count
-routes                        5
-targets with profiles         3
-killed executions             6
-kill pairs audited            3
-package-suite kills           1
-batch kills                   1
-unattributed kills            0
-truncated trailing lines      1
+counter                     count
+routes                          5
+targets with profiles           3
+probe executions                0
+targets the probe measured      0
+killed executions               6
+kill pairs audited              3
+package-suite kills             1
+batch kills                     1
+unattributed kills              0
+truncated trailing lines        1
 
 layers
 layer  audited  kept  inapplicable  unverifiable  violations
 reach        3     1             0             1           1
 branch: not audited (no -catalog given)
+infection: not audited (the recording holds no probe pass)
 
 unverifiable
 kill pairs a layer could not decide: 1

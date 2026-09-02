@@ -58,7 +58,30 @@ const (
 	branchLayerName   = "branch"
 	whyNotInCatalog   = "the catalog does not list the mutant"
 	whyBodyNeverTaken = "no covered block of the killer starts in the body the mutation gates"
+
+	infectionLayerName    = "infection"
+	whyNeverInfected      = "the killer target measured no infection by the mutant"
+	whyProbeRecordedTwice = "the killer target has more than one probe record"
 )
+
+// probeFacts is what the probe pass measured of one target: the outcome it
+// recorded, and, when it measured, the mutants it saw infect. A record that
+// measured nothing carries no set at all rather than an empty one, so that
+// "measured and infected nothing" and "never measured" cannot be confused.
+//
+// A target the recording holds two records for is marked conflicting instead:
+// the two runs say different things about one target, and believing whichever
+// arrived first would decide a pair on the order a run happened to write.
+type probeFacts struct {
+	outcome     string
+	infected    map[string]struct{}
+	conflicting bool
+}
+
+// measured reports whether the probe run of this target produced facts. Only a
+// measured run does; every other outcome, and a run that errored before
+// reaching one, says nothing about any mutant.
+func (facts *probeFacts) measured() bool { return facts.outcome == trace.ProbeOutcomeMeasured }
 
 // killPair is one kill a run recorded: the mutant, where the catalog placed
 // it, and the target whose test killed it. It is the unit this tool preserves.
@@ -73,6 +96,13 @@ type killPair struct {
 	column  int
 	target  string
 	killer  string
+	// probed is what the route in force said: the mutant carries a probe site,
+	// so the probe pass could have measured it. probe is what that pass
+	// recorded of the killer target, and is nil when it recorded nothing for
+	// it. The two carry the whole of the infection facts, so that layer stays a
+	// pure function of the pair like every other one.
+	probed bool
+	probe  *probeFacts
 }
 
 // pairKey identifies a kill pair. A run confirms a kill by repeating it, so
@@ -122,19 +152,25 @@ type layer struct {
 	decide func(pair killPair, recorded evidence) finding
 }
 
-// auditLayers are the layers this tool audits, in the order it reports them.
+// auditLayers are the layers this tool audits, in the order the engine applies
+// them and therefore the order it reports them.
 //
 // The branch layer decides by a proof only a catalog carries, so a run audited
 // without one is a run that layer was never held to and it is left out of the
 // audit entirely. Adding a row of zeroes instead would be worse than adding
 // nothing: a reader skimming the table would take "not checked" for "checked
 // and clean", which is the one misreading a soundness report may not invite.
+//
+// The infection layer decides by facts the recording itself carries, so there
+// is no third input to gate it on and it is always appended. Whether the
+// recording holds a probe pass to hold it to is only known once the whole
+// recording was read, so that half of the same rule is applied in finish.
 func auditLayers(catalog *mutantCatalog) []layer {
 	layers := []layer{reachLayer()}
 	if catalog != nil {
 		layers = append(layers, branchLayer(catalog))
 	}
-	return layers
+	return append(layers, infectionLayer())
 }
 
 // reachLayer is the block routing of a mutation run: a mutant is run against
@@ -254,6 +290,56 @@ func startsInBody(file goanalysis.FileCoverage, body branchProof) bool {
 	return false
 }
 
+// infectionLayer is the infection discharge: a probe pass runs every target
+// once against a tree in which each eligible mutant site records whether the
+// value the original computed ever differed from the constant the mutant would
+// put there. A target whose probe run was measured and never saw a mutant's
+// site differ cannot observe that mutation by running the same test, so routing
+// may drop that target for that mutant.
+//
+// The rule is reimplemented here from the recording for the reason the other
+// two layers are: an audit that asked the code under audit whether it was right
+// would prove only that the code agrees with itself.
+func infectionLayer() layer { return layer{name: infectionLayerName, decide: decideInfection} }
+
+// decideInfection answers whether the infection facts keep one recorded killer.
+//
+// The ladder is the rule, and every rung of it but the last keeps the killer. A
+// mutant no probe site was compiled for is one this layer has nothing to say
+// about; a killer the pass recorded nothing for, and a record that measured
+// nothing — its test failed, it timed out, the tree was unavailable, or it
+// errored before any outcome — are all recordings with no facts in them; a
+// killer with two records is a recording whose meaning the audit does not know.
+// What is left is a probed mutant whose killer was measured and whose measured
+// killer did not name it, which is the target the layer would drop.
+//
+// There is no fuzz exemption here, unlike the branch layer. The probe pass
+// records nothing for a fuzz target, because fuzzing explores past the seed
+// corpus the coverage was measured from, so a fuzz killer lands on the rung
+// that keeps every killer with no record at all. A record that does exist is
+// held to whatever it says.
+//
+// The coverage evidence is not read: the pair carries every fact this rule
+// decides by.
+func decideInfection(pair killPair, _ evidence) finding {
+	if !pair.probed {
+		return finding{conclusion: inapplicable}
+	}
+	if pair.probe == nil {
+		return finding{conclusion: kept}
+	}
+	if pair.probe.conflicting {
+		return finding{conclusion: unverifiable, why: whyProbeRecordedTwice}
+	}
+	if !pair.probe.measured() {
+		return finding{conclusion: kept}
+	}
+	if _, infected := pair.probe.infected[pair.mutant]; infected {
+		return finding{conclusion: kept}
+	}
+	return finding{conclusion: discharged, why: whyNeverInfected}
+}
+
 // layerResult is what one layer concluded across the whole recording.
 type layerResult struct {
 	name         string
@@ -264,16 +350,16 @@ type layerResult struct {
 	violations   int
 }
 
-// branchSavings is what the branch layer would have bought on the recording,
-// which is the other half of the question this tool answers: soundness says
-// the layer may be used, and this says whether it is worth using.
+// dischargeSavings is what a layer would have bought on the recording, which is
+// the other half of the question this tool answers: soundness says the layer
+// may be used, and this says whether it is worth using.
 //
-// It is measured from the routes and the profiles rather than read off the
-// discharged targets of the trace, because the recordings worth auditing are
-// the ones made by runs that discharged nothing — a run that already applied
-// the layer cannot say what applying it would have saved.
-type branchSavings struct {
-	// routes is how many routed mutants carry a proof the rule may act on.
+// It is measured from the routes and the recorded evidence rather than read off
+// the discharged targets of the trace, because the recordings worth auditing
+// are the ones made by runs that discharged nothing — a run that already
+// applied the layer cannot say what applying it would have saved.
+type dischargeSavings struct {
+	// routes is how many routed mutants carry evidence the rule may act on.
 	routes int
 	// reaching and discharged are the targets those routes reach, and the ones
 	// the rule would have dropped.
@@ -313,14 +399,23 @@ type auditResult struct {
 	batchKills        int
 	unattributedKills int
 	truncatedLines    int
-	layers            []layerResult
-	unverifiable      []auditRow
-	violations        []auditRow
-	// branchAudited says whether a catalog was given, and savings what the
-	// branch layer would have bought when one was. A run audited without a
-	// catalog measures nothing, and says so rather than printing zeroes.
-	branchAudited bool
-	savings       branchSavings
+	// probeExecutions is how many targets the probe pass executed, and
+	// probeMeasured how many distinct targets it got facts out of. The two say
+	// how much of the run the infection facts cover, which is what the layer's
+	// numbers have to be read against.
+	probeExecutions int
+	probeMeasured   int
+	layers          []layerResult
+	unverifiable    []auditRow
+	violations      []auditRow
+	// branchAudited says whether a catalog was given, and infectionAudited
+	// whether the recording held a probe pass, with branch and infection what
+	// each layer would have bought when it was audited. A layer nobody held the
+	// run to measures nothing, and says so rather than printing zeroes.
+	branchAudited    bool
+	infectionAudited bool
+	branch           dischargeSavings
+	infection        dischargeSavings
 }
 
 // targetIdentity is a test and the package it runs in. It is what a baseline
@@ -338,7 +433,12 @@ type targetIdentity struct {
 //
 // The stream is read in order, so the route in force for an execution is the
 // last one recorded for its mutant: a run emits a mutant's route before it
-// executes the mutant, and nothing else about the ordering is assumed.
+// executes the mutant, and nothing else about the ordering is assumed. The
+// probe facts in force are read the same way: a run records its whole probe
+// pass, which is one phase of its own, before it routes or executes any mutant,
+// so every probe record is in hand by the time a kill is decided. A record that
+// arrived after a kill of its target is simply not seen by that pair, which is
+// the rung of the ladder that keeps the killer and never a false violation.
 //
 // A last line the recording was cut in the middle of is tolerated and counted:
 // that is what an interrupted run leaves, and refusing to audit the run that
@@ -395,8 +495,9 @@ func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, lay
 //
 // The targets are read from the baseline measurements two ways round, because
 // the audit asks both questions: which test a target ran, and which target ran
-// a test. The executions are collected for the savings measurement alone, and
-// only when a catalog was given.
+// a test. The probes are what the probe pass recorded of each target. The
+// executions are collected for the savings measurements alone, and both of them
+// read them, so they are collected whatever inputs the audit was given.
 type auditor struct {
 	recorded   evidence
 	catalog    *mutantCatalog
@@ -404,6 +505,7 @@ type auditor struct {
 	routes     map[string]trace.RouteRecord
 	targets    map[string]targetIdentity
 	measuredBy map[targetIdentity]string
+	probes     map[string]*probeFacts
 	executions map[string][]targetIdentity
 	decided    map[pairKey]struct{}
 	result     auditResult
@@ -414,18 +516,21 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 	for index, applied := range layers {
 		result.layers[index].name = applied.name
 		result.branchAudited = result.branchAudited || applied.name == branchLayerName
+		result.infectionAudited = result.infectionAudited || applied.name == infectionLayerName
 	}
 	return &auditor{
 		recorded: recorded, catalog: catalog, layers: layers,
 		routes: make(map[string]trace.RouteRecord), targets: make(map[string]targetIdentity),
-		measuredBy: make(map[targetIdentity]string), executions: make(map[string][]targetIdentity),
-		decided: make(map[pairKey]struct{}), result: result,
+		measuredBy: make(map[targetIdentity]string), probes: make(map[string]*probeFacts),
+		executions: make(map[string][]targetIdentity),
+		decided:    make(map[pairKey]struct{}), result: result,
 	}
 }
 
 // read takes one event of the recording: a route is remembered, a baseline
-// measurement names a target, an execution is collected and a kill among them
-// audited, and everything else is a part of the run this tool does not read.
+// measurement names a target, a probe execution says what the pass measured of
+// one, an execution is collected and a kill among them audited, and everything
+// else is a part of the run this tool does not read.
 func (audit *auditor) read(event trace.Event) {
 	switch {
 	case event.Type == trace.TypeExec && event.Exec != nil:
@@ -433,9 +538,36 @@ func (audit *auditor) read(event trace.Event) {
 	case event.Type == trace.TypeRoute && event.Route != nil:
 		audit.result.routes++
 		audit.routes[event.Route.MutantID] = *event.Route
+	case event.Type == trace.TypeProbeExec && event.Probe != nil:
+		audit.probe(*event.Probe)
 	case event.Type == trace.TypeMutantExec && event.Mutant != nil:
 		audit.execution(*event.Mutant)
 	}
+}
+
+// probe takes one probe execution: what the pass measured of one target. The
+// infections are read into a set because the recorded list is in catalogue
+// order, which is not the order the identities sort in, so it can only be
+// searched by looking at all of it.
+//
+// A target the recording names twice is a target the audit does not know the
+// facts of: two runs of one target say different things, and believing
+// whichever came first would decide every pair of that killer on the order a
+// run happened to write. Both records are dropped for a mark that says so.
+func (audit *auditor) probe(record trace.ProbeRecord) {
+	audit.result.probeExecutions++
+	if _, recorded := audit.probes[record.Target]; recorded {
+		audit.probes[record.Target] = &probeFacts{conflicting: true}
+		return
+	}
+	facts := &probeFacts{outcome: record.Outcome}
+	if facts.measured() {
+		facts.infected = make(map[string]struct{}, len(record.Infected))
+		for _, mutant := range record.Infected {
+			facts.infected[mutant] = struct{}{}
+		}
+	}
+	audit.probes[record.Target] = facts
 }
 
 // measurement reads a target's identity out of one recorded command. A baseline
@@ -482,14 +614,13 @@ func (audit *auditor) measuredTarget(packagePath, test string) (string, bool) {
 	return target, measured && target != ""
 }
 
-// execution takes one recorded mutant execution: it is collected when a catalog
-// asked what the layer would have saved, and audited when it killed.
+// execution takes one recorded mutant execution: it is collected for the
+// savings measurements, which both read the executions a layer would have
+// removed, and audited when it killed.
 func (audit *auditor) execution(record trace.MutantRecord) {
-	if audit.catalog != nil {
-		if selected, selective := killerTests(record.Args); selective && len(selected) == 1 {
-			audit.executions[record.ID] = append(audit.executions[record.ID],
-				targetIdentity{test: selected[0], packagePath: record.Package})
-		}
+	if selected, selective := killerTests(record.Args); selective && len(selected) == 1 {
+		audit.executions[record.ID] = append(audit.executions[record.ID],
+			targetIdentity{test: selected[0], packagePath: record.Package})
 	}
 	if record.Outcome != outcomeKilled {
 		return
@@ -553,6 +684,7 @@ func (audit *auditor) kill(record trace.MutantRecord) {
 	audit.decide(killPair{
 		mutant: record.ID, display: record.DisplayID, rule: route.Rule, path: route.Path,
 		line: route.Line, column: route.Column, target: target, killer: killers[0],
+		probed: route.Probed, probe: audit.probes[target],
 	})
 }
 
@@ -584,11 +716,29 @@ func (audit *auditor) decide(pair killPair) {
 	}
 }
 
-// finish measures what the branch layer would have saved and orders what the
-// audit found, so that one recording reports the same bytes however the run
-// that made it was scheduled.
+// finish measures what each layer would have saved and orders what the audit
+// found, so that one recording reports the same bytes however the run that made
+// it was scheduled.
+//
+// A recording holding no probe pass is a recording the infection layer was
+// never held to, and only the whole of it says so, so the row that would have
+// read as a clean one is removed here rather than never added. Nothing is lost
+// with it: without a single probe record every pair reached a rung of the
+// ladder that keeps the killer or does not apply to it, so neither list of
+// named pairs carries a row of that layer's.
 func (audit *auditor) finish() auditResult {
-	audit.result.savings = audit.measureBranchSavings()
+	for _, facts := range audit.probes {
+		if facts.measured() {
+			audit.result.probeMeasured++
+		}
+	}
+	audit.result.infectionAudited = audit.result.infectionAudited && audit.result.probeExecutions > 0
+	if !audit.result.infectionAudited {
+		audit.result.layers = slices.DeleteFunc(audit.result.layers,
+			func(audited layerResult) bool { return audited.name == infectionLayerName })
+	}
+	audit.result.branch = audit.measureBranchSavings()
+	audit.result.infection = audit.measureInfectionSavings()
 	slices.SortFunc(audit.result.unverifiable, compareRows)
 	slices.SortFunc(audit.result.violations, compareRows)
 	return audit.result
@@ -602,11 +752,11 @@ func (audit *auditor) finish() auditResult {
 // decided by the file is one whose reaching set the proof was never asked
 // about. The mutants are walked in identity order so the totals are read off
 // the recording rather than off the order a map happened to be built in.
-func (audit *auditor) measureBranchSavings() branchSavings {
+func (audit *auditor) measureBranchSavings() dischargeSavings {
 	if audit.catalog == nil {
-		return branchSavings{}
+		return dischargeSavings{}
 	}
-	var measured branchSavings
+	var measured dischargeSavings
 	for _, mutant := range slices.Sorted(maps.Keys(audit.routes)) {
 		route := audit.routes[mutant]
 		listed, known := audit.catalog.lookup(mutant)
@@ -639,6 +789,66 @@ func (audit *auditor) measureBranchSavings() branchSavings {
 		}
 	}
 	return measured
+}
+
+// measureInfectionSavings counts what the infection layer would have removed
+// from the run that was recorded.
+//
+// Every route of a probed mutant is counted, whatever decided it: a route
+// fallen back to the file, or one of file granularity, reaches its targets by a
+// rule the probe facts are independent of, and the layer narrows the reaching
+// set of all three the same way. That is the difference from the branch
+// measurement, which counts block routes alone because the proof it applies is
+// about the block the mutation sits in.
+//
+// The mutants are walked in identity order so the totals are read off the
+// recording rather than off the order a map happened to be built in.
+func (audit *auditor) measureInfectionSavings() dischargeSavings {
+	if !audit.result.infectionAudited {
+		return dischargeSavings{}
+	}
+	var measured dischargeSavings
+	for _, mutant := range slices.Sorted(maps.Keys(audit.routes)) {
+		route := audit.routes[mutant]
+		if !route.Probed {
+			continue
+		}
+		measured.routes++
+		measured.reaching += len(route.ReachingTargets)
+		discharged := 0
+		dropped := make(map[targetIdentity]struct{}, len(route.ReachingTargets))
+		for _, target := range route.ReachingTargets {
+			if !audit.neverInfected(mutant, target) {
+				continue
+			}
+			discharged++
+			dropped[audit.targets[target]] = struct{}{}
+		}
+		measured.discharged += discharged
+		if discharged > 0 && discharged == len(route.ReachingTargets) {
+			measured.emptied++
+		}
+		for _, executed := range audit.executions[mutant] {
+			if _, saved := dropped[executed]; saved {
+				measured.executions++
+			}
+		}
+	}
+	return measured
+}
+
+// neverInfected reports whether the rule would drop one reaching target of a
+// probed mutant. A target the pass recorded nothing for, one it recorded twice,
+// and one whose run measured nothing are all targets with no facts against
+// them, so what is left is dropped exactly when the measured run did not name
+// the mutant.
+func (audit *auditor) neverInfected(mutant, target string) bool {
+	facts, recorded := audit.probes[target]
+	if !recorded || facts.conflicting || !facts.measured() {
+		return false
+	}
+	_, infected := facts.infected[mutant]
+	return !infected
 }
 
 // discharges reports whether the rule would drop one reaching target of a

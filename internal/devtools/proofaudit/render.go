@@ -26,8 +26,15 @@ const (
 	// zeroes read the same to anyone skimming, so the report says which of the
 	// two this is.
 	whyBranchNotAudited = "branch: not audited (no -catalog given)"
-	// branchDischargeHeading opens what the branch layer would have bought.
-	branchDischargeHeading = "branch discharge"
+	// whyInfectionNotAudited is what the report says about the layer a run
+	// recorded without a probe pass was never held to. It reads the same way
+	// and for the same reason as the branch line: a row of zeroes for a layer
+	// nobody checked would read exactly like a layer that came out clean.
+	whyInfectionNotAudited = "infection: not audited (the recording holds no probe pass)"
+	// branchDischargeHeading opens what the branch layer would have bought, and
+	// infectionDischargeHeading what the infection layer would have.
+	branchDischargeHeading    = "branch discharge"
+	infectionDischargeHeading = "infection discharge"
 )
 
 // renderAudit renders the whole audit of one recording, ending in a newline.
@@ -39,6 +46,7 @@ func renderAudit(tracePath, profilesPath, modulePath string, result auditResult)
 		countBlock(result),
 		layerBlock(result),
 		branchBlock(result),
+		infectionBlock(result),
 		unverifiableBlock(result),
 		violationBlock(result),
 	}
@@ -72,6 +80,8 @@ func countBlock(result auditResult) []string {
 	rows := [][]string{
 		{"routes", strconv.Itoa(result.routes)},
 		{"targets with profiles", strconv.Itoa(result.targets)},
+		{"probe executions", strconv.Itoa(result.probeExecutions)},
+		{"targets the probe measured", strconv.Itoa(result.probeMeasured)},
 		{"killed executions", strconv.Itoa(result.killedExecutions)},
 		{"kill pairs audited", strconv.Itoa(result.pairs)},
 		{"package-suite kills", strconv.Itoa(result.packageSuiteKills)},
@@ -110,6 +120,9 @@ func layerBlock(result auditResult) []string {
 	if !result.branchAudited {
 		lines = append(lines, whyBranchNotAudited)
 	}
+	if !result.infectionAudited {
+		lines = append(lines, whyInfectionNotAudited)
+	}
 	return lines
 }
 
@@ -121,7 +134,7 @@ func branchBlock(result auditResult) []string {
 	if !result.branchAudited {
 		return nil
 	}
-	saved := result.savings
+	saved := result.branch
 	rows := [][]string{
 		{"routes with a branch proof", strconv.Itoa(saved.routes)},
 		{"reaching targets the proof discharges", fmt.Sprintf("%d of %d", saved.discharged, saved.reaching)},
@@ -130,6 +143,24 @@ func branchBlock(result auditResult) []string {
 	}
 	columns := []column{{"counter", false}, {"count", true}}
 	return append([]string{branchDischargeHeading}, renderTable(columns, rows)...)
+}
+
+// infectionBlock says what the infection layer would have bought on this
+// recording. It is the same question the branch block answers of its own layer:
+// a rule that kept every killer and removed nothing is a rule nobody needs.
+func infectionBlock(result auditResult) []string {
+	if !result.infectionAudited {
+		return nil
+	}
+	saved := result.infection
+	rows := [][]string{
+		{"routes of a probed mutant", strconv.Itoa(saved.routes)},
+		{"reaching targets the probe discharges", fmt.Sprintf("%d of %d", saved.discharged, saved.reaching)},
+		{"routes left with no reaching target", strconv.Itoa(saved.emptied)},
+		{"recorded executions it would have saved", strconv.Itoa(saved.executions)},
+	}
+	columns := []column{{"counter", false}, {"count", true}}
+	return append([]string{infectionDischargeHeading}, renderTable(columns, rows)...)
 }
 
 // unverifiableBlock names the pairs a layer could not decide from the

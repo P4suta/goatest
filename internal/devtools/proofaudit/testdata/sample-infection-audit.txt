@@ -1,0 +1,39 @@
+trace: testdata/sample-trace.jsonl
+profiles: testdata/sample-profiles
+module: example.com/audited
+
+audit
+counter                     count
+routes                          6
+targets with profiles           3
+probe executions                4
+targets the probe measured      2
+killed executions               7
+kill pairs audited              4
+package-suite kills             1
+batch kills                     1
+unattributed kills              1
+truncated trailing lines        1
+
+layers
+layer      audited  kept  inapplicable  unverifiable  violations
+reach            4     4             0             0           0
+infection        4     1             1             1           1
+branch: not audited (no -catalog given)
+
+infection discharge
+counter                                   count
+routes of a probed mutant                     4
+reaching targets the probe discharges    4 of 7
+routes left with no reaching target           1
+recorded executions it would have saved       2
+
+unverifiable
+kill pairs a layer could not decide: 1
+mutant                rule       position              killer target     layer      why
+d1e2f30415162738495a  eq-to-neq  pkg/subject.go:11:10  d1e2f30415162738  infection  the killer target has more than one probe record
+
+violations
+killers a layer would drop: 1
+mutant                rule       position             killer target     layer      why
+b1c2d3e4f5061728394a  eq-to-neq  pkg/subject.go:11:6  b1c2d3e4f5061728  infection  the killer target measured no infection by the mutant
