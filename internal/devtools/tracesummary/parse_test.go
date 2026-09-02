@@ -400,6 +400,26 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "route file_candidates", "granularity"},
 		},
 		{
+			name:   "route with an unknown discharge reason",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestSkipped","reason":"a-hunch"}]}}`),
+			want:   []string{"line 2", `route discharge reason "a-hunch"`},
+		},
+		{
+			name:   "route with a discharge that names no target",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", "route.discharged.target"},
+		},
+		{
+			name:   "route with a discharge and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", "route discharged", "granularity"},
+		},
+		{
+			name:   "route that discharged a target it also reaches",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"coverage-reaching","granularity":"block","reaching_targets":["TestRun"],"discharged":[{"target":"TestRun","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", `discharged "TestRun"`, "reaches"},
+		},
+		{
 			name:   "route with a negative column",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
 			want:   []string{"line 2", "route.column"},

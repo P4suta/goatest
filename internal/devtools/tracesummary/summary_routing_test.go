@@ -31,6 +31,20 @@ func routeEvent(mutantID string, reaching int, reason, granularity, fallback str
 	}}
 }
 
+// dischargedRouteEvent is one route a proof removed targets from. The
+// discharged targets are named rather than generated, because a discharged
+// target is one the route no longer reaches and must not collide with the
+// reaching ones.
+func dischargedRouteEvent(mutantID string, reaching int, targets ...string) trace.Event {
+	event := routeEvent(mutantID, reaching, trace.ReasonCoverageReaching, trace.GranularityBlock, "", reaching+len(targets))
+	discharged := make([]trace.Discharge, 0, len(targets))
+	for _, target := range targets {
+		discharged = append(discharged, trace.Discharge{Target: target, Reason: trace.DischargeBranchNeverTaken})
+	}
+	event.Route.Discharged = discharged
+	return event
+}
+
 // countOf is what one label of a fixed-order tally counted, and -1 when the
 // tally does not carry the label at all.
 func countOf(counts []labelCount, label string) int {
@@ -176,6 +190,50 @@ func TestRoutingBlockReportsAZeroCandidateCountAsAMeasuredReduction(t *testing.T
 	}), "\n")
 	if want := "reduction: file candidates 0 -> reaching 0 (nothing to reduce)"; !strings.Contains(lines, want) {
 		t.Errorf("the block of a route without candidates does not carry %q:\n%s", want, lines)
+	}
+}
+
+func TestRouteTotalsCountDischargesByReason(t *testing.T) {
+	t.Parallel()
+	totals := routeTotals([]trace.Event{
+		dischargedRouteEvent("mutant-a", 2, "TestSkipped", "TestOther"),
+		dischargedRouteEvent("mutant-b", 1, "TestSkipped"),
+		routeEvent("mutant-c", 3, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 3),
+	})
+	if got := countOf(totals.discharges, trace.DischargeBranchNeverTaken); got != 3 {
+		t.Errorf("branch-never-taken discharges = %d, want the 3 targets the proofs removed", got)
+	}
+	if totals.dischargedRoutes != 2 {
+		t.Errorf("routes carrying a discharge = %d, want 2", totals.dischargedRoutes)
+	}
+	// A discharged target is one the route no longer reaches, so it is counted
+	// beside the reaching set rather than inside it.
+	if totals.reaching != 6 {
+		t.Errorf("reaching targets = %d, want the 6 the routes still reach", totals.reaching)
+	}
+}
+
+func TestRoutingBlockReportsDischargedTargetsAndRoutes(t *testing.T) {
+	t.Parallel()
+	lines := strings.Join(routingBlock([]trace.Event{
+		dischargedRouteEvent("mutant-a", 2, "TestSkipped", "TestOther"),
+		dischargedRouteEvent("mutant-b", 1, "TestSkipped"),
+	}), "\n")
+	if want := "discharged: 3 targets across 2 routes (branch-never-taken 3)"; !strings.Contains(lines, want) {
+		t.Errorf("the block does not carry %q:\n%s", want, lines)
+	}
+}
+
+func TestRoutingBlockOmitsTheDischargeLineWhenNoneWereRecorded(t *testing.T) {
+	t.Parallel()
+	// A recording made before any proof discharged a target renders as it did
+	// then, so the line is absent rather than a tally of zeroes.
+	lines := strings.Join(routingBlock([]trace.Event{
+		routeEvent("mutant-a", 2, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 4),
+		routeEvent("mutant-b", 0, trace.ReasonUnreached, "", "", 0),
+	}), "\n")
+	if strings.Contains(lines, "discharged") {
+		t.Errorf("the block names discharges no route recorded:\n%s", lines)
 	}
 }
 

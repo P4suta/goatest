@@ -283,11 +283,13 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			record := amended["route"].(map[string]any)
 			delete(record, "granularity")
 			delete(record, "fallback")
-			// The column and candidate count are routing metadata too, and a
-			// route that carries any of it must name its granularity; they go
-			// so that the pair under test is the only thing the schema sees.
+			// The column, the candidate count and the discharges are routing
+			// metadata too, and a route that carries any of it must name its
+			// granularity; they go so that the pair under test is the only
+			// thing the schema sees.
 			delete(record, "column")
 			delete(record, "file_candidates")
+			delete(record, "discharged")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -333,6 +335,8 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 		{name: "a column without a granularity", metadata: map[string]any{"column": 9}},
 		{name: "a candidate count without a granularity", metadata: map[string]any{"file_candidates": 3}},
 		{name: "a zero candidate count without a granularity", metadata: map[string]any{"file_candidates": 0}},
+		{name: "a discharge without a granularity", metadata: map[string]any{
+			"discharged": []any{map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}}}},
 		{name: "a column beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9}, accepted: true},
 		{name: "a candidate count beside a file granularity", granularity: trace.GranularityFile, metadata: map[string]any{"file_candidates": 3}, accepted: true},
 		{name: "both beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9, "file_candidates": 3}, accepted: true},
@@ -348,6 +352,7 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 			delete(record, "fallback")
 			delete(record, "column")
 			delete(record, "file_candidates")
+			delete(record, "discharged")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -362,6 +367,89 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 			if !testCase.accepted && err == nil {
 				t.Fatalf("a route with granularity %q and metadata %v passed the schema",
 					testCase.granularity, testCase.metadata)
+			}
+		})
+	}
+}
+
+func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// A discharge is one target a proof removed from the reaching set and the
+	// proof that removed it, so a discharge missing either half, naming a proof
+	// the contract does not know, or carrying anything beside them is not one.
+	cases := []struct {
+		name        string
+		granularity string
+		discharge   map[string]any
+		accepted    bool
+	}{
+		{
+			name:        "a proof the contract does not name",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestSkipped", "reason": "a-hunch"},
+		},
+		{
+			name:        "a discharge that names no target",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "", "reason": trace.DischargeBranchNeverTaken},
+		},
+		{
+			name:        "a discharge without the target it removed",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"reason": trace.DischargeBranchNeverTaken},
+		},
+		{
+			name:        "a discharge without the proof that removed it",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestSkipped"},
+		},
+		{
+			name:        "a discharge carrying a field beside the two",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken, "extra": true},
+		},
+		{
+			name:      "a discharge on a route that recorded no granularity",
+			discharge: map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
+		},
+		{
+			name:        "a discharge beside the granularity the route was decided on",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
+			accepted:    true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "granularity")
+			delete(record, "fallback")
+			delete(record, "column")
+			delete(record, "file_candidates")
+			if testCase.granularity != "" {
+				record["granularity"] = testCase.granularity
+			}
+			record["discharged"] = []any{testCase.discharge}
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route with granularity %q discharging %v was rejected: %v",
+					testCase.granularity, testCase.discharge, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route with granularity %q discharging %v passed the schema",
+					testCase.granularity, testCase.discharge)
 			}
 		})
 	}
