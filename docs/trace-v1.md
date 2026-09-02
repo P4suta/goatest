@@ -225,7 +225,7 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `granularity` | `block` or `file`: what the reaching set was decided on |
 | `fallback` | `position-unknown` or `outside-blocks`, when a block decision dropped back to the file |
 | `file_candidates` | how many targets cover the mutated file at all |
-| `discharged` | the reaching targets a proof removed, each with the proof that removed it |
+| `discharged` | the reaching targets a proof removed, each with the proof that removed it: `branch-never-taken` or `never-infected` |
 | `probed` | whether the engine compiled a probe of this mutant into the probe tree |
 
 `column`, `granularity`, `fallback`, `file_candidates`, `discharged` and
@@ -246,30 +246,39 @@ while carrying some, and both the schema and the trace reader reject it.
 a proof removed the discharged ones, so a discharged target never appears in
 `reaching_targets` as well, and a route naming the same target on both sides is
 rejected. Each entry names the target and the proof that removed it, which is
-`branch-never-taken` alone until another proof produces one. A proof removes a
-target once, so each target appears in `discharged` at most once; a route
-naming the same target twice is rejected as well, since a reader counting the
-entries would otherwise count that target twice.
+`branch-never-taken` or `never-infected`. `branch-never-taken` proves that the
+target never entered the body the mutated condition gates, so it took the same
+branch on both programs; `never-infected` proves that the probe pass measured
+the target and never saw the mutated site's value differ from the constant the
+mutant puts there, so both programs ran it through identical states. A target is
+removed by one proof, so each target appears in `discharged` at most once; a
+route naming the same target twice is rejected as well, since a reader counting
+the entries would otherwise count that target twice. One route may carry both
+reasons, because the reason is read per entry rather than per route.
 
-goatest fills `discharged` from the one proof it reads today: a mutation the
-engine proved can only narrow the condition of an `if` or a `for`, discharging
-each reaching target during which no statement of the gated body ran. The
+goatest fills `discharged` from both proofs, applied in that order on a route
+decided by block: the branch proof first, then the infection facts on what it
+left. A target both would remove is therefore recorded under
+`branch-never-taken`, which keeps a recording made before the second proof
+existed comparable with one made after. Whichever proof removed each of them, the
 entries are in run order — the order the discharged targets would have been
 executed in, cheapest first — so `reaching_targets` and `discharged` are two
 orderings cut from the same one. A route of `reason: coverage-reaching` with an
 empty `reaching_targets` and a non-empty `discharged` is a mutant resolved
-without any execution at all: coverage reached it, the proof answered for every
+without any execution at all: coverage reached it, the proofs answered for every
 target that did, and the run recorded a surviving mutant without running
 anything. Such a route carries no `plan`, because the package suite behind an
-empty plan would run the very tests the proof ruled out.
+empty plan would run the very tests the proofs ruled out.
 
 `probed` says the engine compiled a probe of this mutant into the probe tree,
 so the probe pass measured it. A measured target that does not name the mutant
 among the `infected` of its `probe-exec` event never made the mutant's site
-differ, and therefore can never observe it. A mutant the engine has no probe
+differ, and therefore can never observe it: routing discharges it from this
+mutant's reaching set with reason `never-infected`, so a route carrying such a
+discharge always carries `probed` as well. A mutant the engine has no probe
 form for carries no `probed`, and neither does a recording made before the pass
 existed: an absent marker is an absent measurement rather than a mutant nothing
-infected.
+infected, and nothing is discharged by it.
 
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.
@@ -356,7 +365,8 @@ measurement is the conservative one.
 The `probed` field of a `route` is produced from the same pass: it says the
 engine compiled a probe of that mutant, which is what lets a reader tell a
 mutant a measured target proved it cannot observe from one no measurement could
-ever have named.
+ever have named. Routing acts on it, discharging each measured reaching target
+whose `infected` omits the mutant.
 
 An execution ended in exactly one way: it reached an `outcome`, or an `error`
 stopped it before one. A record carries one of the two fields and never both
