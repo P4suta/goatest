@@ -173,7 +173,9 @@ func TestParseCoverageReturnsEmptyNonNilSlicesForAProfileWithOnlyAHeader(t *test
 
 func TestParseCoverageReportsAMalformedSpan(t *testing.T) {
 	t.Parallel()
-	for _, span := range []string{"1.1,2", "a.b,2.2", "1.1;2.2", "1.1,2.2,3.3", "1.1,2.x"} {
+	// Either half of the span may be the malformed one: an end that lacks its
+	// column is caught by the block check as well, a start that lacks it is not.
+	for _, span := range []string{"1.1,2", "1,2.2", "a.b,2.2", "1.1;2.2", "1.1,2.2,3.3", "1.1,2.x"} {
 		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
 		coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
 		const want = "goatest: malformed coverage span on line 2"
@@ -188,8 +190,13 @@ func TestParseCoverageReportsAMalformedSpan(t *testing.T) {
 
 func TestParseCoverageRejectsASpanThatIsNotAHalfOpenBlock(t *testing.T) {
 	t.Parallel()
+	// An overflowing coordinate is placed at the end of the span: strconv
+	// reports the overflow but also returns the largest int, which an end
+	// accepts as a block the start check cannot catch.
+	const overflow = "99999999999999999999"
 	for _, span := range []string{
 		"0.1,2.2", "1.0,2.2", "1.1,0.2", "1.1,2.0", "-1.1,2.2", "1.-1,2.2", // coordinates are 1-based
+		"1.1," + overflow + ".2", "1.1,2." + overflow, // and fit an int
 		"3.4,3.3", "3.4,2.9", "4.1,3.9", // the end cannot precede the start
 	} {
 		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
