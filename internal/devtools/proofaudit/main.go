@@ -28,7 +28,12 @@
 // The rules are reimplemented here from the recording rather than called out
 // of internal/assure. An audit that asked the code under audit whether it was
 // right would prove only that the code agrees with itself; two independent
-// implementations disagreeing is the signal this tool exists to raise.
+// implementations disagreeing is the signal this tool exists to raise. The
+// independence stops at the rules: the coverage profiles are read and a
+// block's containment decided by internal/golang, the same parser routing
+// uses, so a profile misread the same way on both sides is not something this
+// audit notices. That half rests on the parser's own tests against real
+// cmd/cover output.
 //
 // The exit code is a gate: zero when every layer kept every killer, one when a
 // layer would drop one or when an input could not be read. The report reaches
