@@ -1,0 +1,36 @@
+trace: testdata/sample-trace.jsonl
+profiles: testdata/sample-profiles
+module: example.com/audited
+
+audit
+counter                   count
+routes                        6
+targets with profiles         3
+killed executions             6
+kill pairs audited            6
+package-suite kills           0
+batch kills                   0
+unattributed kills            0
+truncated trailing lines      0
+
+layers
+layer   audited  kept  inapplicable  unverifiable  violations
+reach         6     6             0             0           0
+branch        6     3             1             1           1
+
+branch discharge
+counter                                   count
+routes with a branch proof                    2
+reaching targets the proof discharges    3 of 4
+routes left with no reaching target           1
+recorded executions it would have saved       3
+
+unverifiable
+kill pairs a layer could not decide: 1
+mutant                rule       position             killer target     layer   why
+d1e2f30415162738495a  eq-to-neq  pkg/subject.go:11:6  a1b2c3d4e5f60718  branch  the catalog does not list the mutant
+
+violations
+killers a layer would drop: 1
+mutant                rule       position             killer target     layer   why
+b1c2d3e4f5061728394a  eq-to-neq  pkg/subject.go:30:4  b1c2d3e4f5061728  branch  no covered block of the killer starts in the body the mutation gates

@@ -21,6 +21,13 @@ const (
 	// noValue marks a field the recording did not carry, printed rather than
 	// left blank so that a missing value reads as missing.
 	noValue = "-"
+	// whyBranchNotAudited is what the report says about the layer a run
+	// audited without a catalog was never held to. A missing row and a row of
+	// zeroes read the same to anyone skimming, so the report says which of the
+	// two this is.
+	whyBranchNotAudited = "branch: not audited (no -catalog given)"
+	// branchDischargeHeading opens what the branch layer would have bought.
+	branchDischargeHeading = "branch discharge"
 )
 
 // renderAudit renders the whole audit of one recording, ending in a newline.
@@ -31,6 +38,7 @@ func renderAudit(tracePath, profilesPath, modulePath string, result auditResult)
 		headerBlock(tracePath, profilesPath, modulePath),
 		countBlock(result),
 		layerBlock(result),
+		branchBlock(result),
 		unverifiableBlock(result),
 		violationBlock(result),
 	}
@@ -89,14 +97,39 @@ func layerBlock(result auditResult) []string {
 			audited.name,
 			strconv.Itoa(audited.audited),
 			strconv.Itoa(audited.kept),
+			strconv.Itoa(audited.inapplicable),
 			strconv.Itoa(audited.unverifiable),
 			strconv.Itoa(audited.violations),
 		})
 	}
 	columns := []column{
-		{"layer", false}, {"audited", true}, {"kept", true}, {"unverifiable", true}, {"violations", true},
+		{"layer", false}, {"audited", true}, {"kept", true},
+		{"inapplicable", true}, {"unverifiable", true}, {"violations", true},
 	}
-	return append(lines, renderTable(columns, rows)...)
+	lines = append(lines, renderTable(columns, rows)...)
+	if !result.branchAudited {
+		lines = append(lines, whyBranchNotAudited)
+	}
+	return lines
+}
+
+// branchBlock says what the branch layer would have bought on this recording.
+// Soundness is what makes the layer usable and this is what makes it worth
+// using, so the two are printed together: a layer that kept every killer and
+// removed nothing is a rule nobody needs.
+func branchBlock(result auditResult) []string {
+	if !result.branchAudited {
+		return nil
+	}
+	saved := result.savings
+	rows := [][]string{
+		{"routes with a branch proof", strconv.Itoa(saved.routes)},
+		{"reaching targets the proof discharges", fmt.Sprintf("%d of %d", saved.discharged, saved.reaching)},
+		{"routes left with no reaching target", strconv.Itoa(saved.emptied)},
+		{"recorded executions it would have saved", strconv.Itoa(saved.executions)},
+	}
+	columns := []column{{"counter", false}, {"count", true}}
+	return append([]string{branchDischargeHeading}, renderTable(columns, rows)...)
 }
 
 // unverifiableBlock names the pairs a layer could not decide from the

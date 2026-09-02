@@ -85,6 +85,13 @@ func (recorded evidence) measured(target string) bool {
 // instrumentedAt reports whether any profile instrumented a block containing
 // the position, whether or not a test executed it.
 func (recorded evidence) instrumentedAt(path string, line, column int) bool {
+	return recorded.instrumentedIn(path).Contains(line, column)
+}
+
+// instrumentedIn returns every block any profile of the run instrumented in one
+// file, whether a test executed it or not. It is what tells a body no test
+// entered from a body cmd/cover never cut a block for.
+func (recorded evidence) instrumentedIn(path string) goanalysis.FileCoverage {
 	blocks, _ := goanalysis.FindFileCoverage(recorded.instrumented, path)
-	return blocks.Contains(line, column)
+	return blocks
 }

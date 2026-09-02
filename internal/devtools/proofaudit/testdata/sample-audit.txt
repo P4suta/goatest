@@ -14,8 +14,9 @@ unattributed kills            0
 truncated trailing lines      1
 
 layers
-layer  audited  kept  unverifiable  violations
-reach        3     1             1           1
+layer  audited  kept  inapplicable  unverifiable  violations
+reach        3     1             0             1           1
+branch: not audited (no -catalog given)
 
 unverifiable
 kill pairs a layer could not decide: 1

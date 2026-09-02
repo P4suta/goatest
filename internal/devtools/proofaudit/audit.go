@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
+	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
@@ -36,9 +38,20 @@ const (
 	// the package suite names no target at all.
 	individualPlan   = "individual:"
 	packageSuitePlan = "package-suite"
+	// coverageArgument is the flag a baseline measurement writes its target's
+	// coverage profile with, and packageArgument the flag that names the
+	// package the measured binary belongs to. A measurement's arguments are the
+	// only place in a recording where a target's identity, the test it runs and
+	// its package meet, which is what the savings measurement needs.
+	coverageArgument = "-test.coverprofile="
+	packageArgument  = "-p"
+	// fuzzPrefix is how Go names a fuzz target, and the whole of the rule that
+	// says one is never discharged: fuzzing explores past the coverage its seed
+	// corpus measured, so a body its profile never entered may still be entered.
+	fuzzPrefix = "Fuzz"
 )
 
-// The reach layer and the reasons it gives. A why is written from the point of
+// The layers and the reasons they give. A why is written from the point of
 // view of the evidence, because that is what a developer has to go and look at
 // when the audit refuses a change.
 const (
@@ -46,6 +59,10 @@ const (
 	whyNoProfile            = "the killer target left no coverage profile"
 	whyCoversNoneOfTheFile  = "the killer target covers no block of the file"
 	whyOutsideCoveredBlocks = "position outside every covered block of the killer"
+
+	branchLayerName   = "branch"
+	whyNotInCatalog   = "the catalog does not list the mutant"
+	whyBodyNeverTaken = "no covered block of the killer starts in the body the mutation gates"
 )
 
 // killPair is one kill a run recorded: the mutant, where the catalog placed
@@ -88,6 +105,11 @@ const (
 	// an audit that guessed would be worth less than one that says it cannot
 	// tell.
 	unverifiable
+	// inapplicable: the layer has no proof about this mutant at all, so it
+	// changes nothing about the pair. It is counted apart from kept because a
+	// layer that proves almost nothing would otherwise report almost every
+	// pair as one it keeps.
+	inapplicable
 )
 
 // finding is what a layer concluded about one kill pair, and why.
@@ -99,15 +121,26 @@ type finding struct {
 // layer is one proof layer under audit: a name, and the rule it decides kill
 // pairs by. Every layer that narrows what a mutant is run against has to keep
 // every recorded killer, so every layer is audited the same way and reported
-// in the same table. The next one — a branch-never-taken proof, which will
-// need a mutant catalog beside the recording — is another value here.
+// in the same table.
 type layer struct {
 	name   string
 	decide func(pair killPair, recorded evidence) finding
 }
 
 // auditLayers are the layers this tool audits, in the order it reports them.
-func auditLayers() []layer { return []layer{reachLayer()} }
+//
+// The branch layer decides by a proof only a catalog carries, so a run audited
+// without one is a run that layer was never held to and it is left out of the
+// audit entirely. Adding a row of zeroes instead would be worse than adding
+// nothing: a reader skimming the table would take "not checked" for "checked
+// and clean", which is the one misreading a soundness report may not invite.
+func auditLayers(catalog *mutantCatalog) []layer {
+	layers := []layer{reachLayer()}
+	if catalog != nil {
+		layers = append(layers, branchLayer(catalog))
+	}
+	return layers
+}
 
 // reachLayer is the block routing of a mutation run: a mutant is run against
 // the targets whose covered blocks contain its position, with the file as the
@@ -150,13 +183,106 @@ func decideReach(pair killPair, recorded evidence) finding {
 	return finding{conclusion: discharged, why: whyOutsideCoveredBlocks}
 }
 
+// branchLayer is the branch-never-taken discharge: go-mutants proves of some
+// mutants that the mutated condition implies the original one, which makes the
+// condition inert, so a test during which no statement of the body that
+// condition gates ran cannot observe the mutation and never has to run it.
+//
+// The rule is reimplemented here from the catalog and the profiles for the
+// reason the reach layer is: an audit that asked the code under audit whether
+// it was right would prove only that the code agrees with itself.
+func branchLayer(catalog *mutantCatalog) layer {
+	return layer{
+		name:   branchLayerName,
+		decide: func(pair killPair, recorded evidence) finding { return decideBranch(catalog, pair, recorded) },
+	}
+}
+
+// decideBranch answers whether the branch proof keeps one recorded killer.
+//
+// The ladder is the rule, and every rung of it that is not the last one keeps
+// the killer. A mutant the catalog does not list is one the audit has no proof
+// to apply; a mutant listed without a proof is one this layer changes nothing
+// about; a proof whose span is not a body, or a body no profile instrumented,
+// is a state the audit does not know the meaning of, and nothing is discharged
+// from any of them. What is left is a killer whose profile says it ran the file
+// and started no block inside the body the mutation gates, which is the target
+// the layer would drop.
+//
+// The body is found by where a block starts and never by what it contains:
+// cmd/cover records the body's first block starting at the opening brace on one
+// toolchain and at the first statement on another, and only the start is inside
+// the span under both.
+func decideBranch(catalog *mutantCatalog, pair killPair, recorded evidence) finding {
+	listed, known := catalog.lookup(pair.mutant)
+	if !known {
+		return finding{conclusion: unverifiable, why: whyNotInCatalog}
+	}
+	if listed.Branch == nil {
+		return finding{conclusion: inapplicable}
+	}
+	body, proved := listed.proves()
+	if !proved {
+		return finding{conclusion: kept}
+	}
+	if !startsInBody(recorded.instrumentedIn(listed.Path), body) {
+		return finding{conclusion: kept}
+	}
+	if !recorded.measured(pair.target) {
+		return finding{conclusion: unverifiable, why: whyNoProfile}
+	}
+	covered, _ := recorded.coveredBy(pair.target, listed.Path)
+	if startsInBody(covered, body) {
+		return finding{conclusion: kept}
+	}
+	return finding{conclusion: discharged, why: whyBodyNeverTaken}
+}
+
+// startsInBody reports whether any block of one file starts inside the body.
+// The blocks are walked here rather than asked of internal/golang, because
+// containment is the question the reach layer asks and this layer asks a
+// different one of the same evidence.
+func startsInBody(file goanalysis.FileCoverage, body branchProof) bool {
+	for _, block := range file.Blocks {
+		if body.holds(block.StartLine, block.StartColumn) {
+			return true
+		}
+	}
+	return false
+}
+
 // layerResult is what one layer concluded across the whole recording.
 type layerResult struct {
 	name         string
 	audited      int
 	kept         int
+	inapplicable int
 	unverifiable int
 	violations   int
+}
+
+// branchSavings is what the branch layer would have bought on the recording,
+// which is the other half of the question this tool answers: soundness says
+// the layer may be used, and this says whether it is worth using.
+//
+// It is measured from the routes and the profiles rather than read off the
+// discharged targets of the trace, because the recordings worth auditing are
+// the ones made by runs that discharged nothing — a run that already applied
+// the layer cannot say what applying it would have saved.
+type branchSavings struct {
+	// routes is how many routed mutants carry a proof the rule may act on.
+	routes int
+	// reaching and discharged are the targets those routes reach, and the ones
+	// the rule would have dropped.
+	reaching   int
+	discharged int
+	// emptied is the routes the rule would leave with no reaching target at
+	// all, which is a mutant that would stop being executed rather than one
+	// executed less.
+	emptied int
+	// executions is the recorded mutant executions that would not have
+	// happened.
+	executions int
 }
 
 // auditRow is one kill pair a layer had something to say about.
@@ -187,6 +313,21 @@ type auditResult struct {
 	layers            []layerResult
 	unverifiable      []auditRow
 	violations        []auditRow
+	// branchAudited says whether a catalog was given, and savings what the
+	// branch layer would have bought when one was. A run audited without a
+	// catalog measures nothing, and says so rather than printing zeroes.
+	branchAudited bool
+	savings       branchSavings
+}
+
+// targetIdentity is a test and the package it runs in. It is what a baseline
+// measurement says about a target, and equally what a recorded mutant execution
+// that selected a single test says about itself — which is exactly why the two
+// can be matched: an execution would not have happened when the target it names
+// is one the rule discharges, and a test name is only unique within a package.
+type targetIdentity struct {
+	test        string
+	packagePath string
 }
 
 // auditTrace replays one recording against the coverage a run left beside it
@@ -209,8 +350,12 @@ type auditResult struct {
 // itself — that is what makes it an audit rather than a self-check — and a
 // field a later version added is not a reason to refuse the kills the
 // recording proves.
-func auditTrace(source io.Reader, recorded evidence, layers []layer) (auditResult, error) {
-	audit := newAuditor(recorded, layers)
+// The catalog is given beside the layers because the audit reads it twice
+// over: once per kill pair, through the layer that decides by it, and once over
+// the whole recording, to measure what that layer would have saved. The layers
+// alone would answer the first question and not the second.
+func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, layers []layer) (auditResult, error) {
+	audit := newAuditor(recorded, catalog, layers)
 	buffered := bufio.NewReaderSize(source, readBufferSize)
 	for number := 1; ; number++ {
 		line, readErr := buffered.ReadBytes('\n')
@@ -241,39 +386,107 @@ func auditTrace(source io.Reader, recorded evidence, layers []layer) (auditResul
 	return audit.finish(), nil
 }
 
-// auditor is one audit in progress: the evidence and the layers it holds the
-// recording to, the routes it has read so far, and the pairs it has already
-// decided.
+// auditor is one audit in progress: the evidence, the catalog and the layers it
+// holds the recording to, what it has read of the recording so far, and the
+// pairs it has already decided.
+//
+// The identities and the executions are collected for the savings measurement
+// alone, and only when a catalog was given, so a run audited without one is
+// read exactly as it was before the layer existed.
 type auditor struct {
-	recorded evidence
-	layers   []layer
-	routes   map[string]trace.RouteRecord
-	decided  map[pairKey]struct{}
-	result   auditResult
+	recorded   evidence
+	catalog    *mutantCatalog
+	layers     []layer
+	routes     map[string]trace.RouteRecord
+	targets    map[string]targetIdentity
+	executions map[string][]targetIdentity
+	decided    map[pairKey]struct{}
+	result     auditResult
 }
 
-func newAuditor(recorded evidence, layers []layer) *auditor {
+func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *auditor {
 	result := auditResult{targets: len(recorded.targets), layers: make([]layerResult, len(layers))}
 	for index, applied := range layers {
 		result.layers[index].name = applied.name
+		result.branchAudited = result.branchAudited || applied.name == branchLayerName
 	}
 	return &auditor{
-		recorded: recorded, layers: layers,
-		routes: make(map[string]trace.RouteRecord), decided: make(map[pairKey]struct{}), result: result,
+		recorded: recorded, catalog: catalog, layers: layers,
+		routes: make(map[string]trace.RouteRecord), targets: make(map[string]targetIdentity),
+		executions: make(map[string][]targetIdentity), decided: make(map[pairKey]struct{}), result: result,
 	}
 }
 
-// read takes one event of the recording: a route is remembered, a kill is
+// read takes one event of the recording: a route is remembered, a baseline
+// measurement names a target, an execution is collected and a kill among them
 // audited, and everything else is a part of the run this tool does not read.
 func (audit *auditor) read(event trace.Event) {
 	switch {
+	case event.Type == trace.TypeExec && event.Exec != nil:
+		audit.measurement(event.Exec.Argv)
 	case event.Type == trace.TypeRoute && event.Route != nil:
 		audit.result.routes++
 		audit.routes[event.Route.MutantID] = *event.Route
-	case event.Type == trace.TypeMutantExec && event.Mutant != nil && event.Mutant.Outcome == outcomeKilled:
-		audit.result.killedExecutions++
-		audit.kill(*event.Mutant)
+	case event.Type == trace.TypeMutantExec && event.Mutant != nil:
+		audit.execution(*event.Mutant)
 	}
+}
+
+// measurement reads a target's identity out of one recorded command. A baseline
+// measurement writes a target's coverage profile under the target's own
+// identity while selecting the target's single test in the target's package,
+// which is the only place a recording puts the three together. Every other
+// command a run executes names no profile and is passed over.
+func (audit *auditor) measurement(argv []string) {
+	if audit.catalog == nil {
+		return
+	}
+	target, identity := "", targetIdentity{}
+	for index, argument := range argv {
+		switch {
+		case strings.HasPrefix(argument, coverageArgument):
+			target = profileTarget(strings.TrimPrefix(argument, coverageArgument))
+		case argument == packageArgument && index+1 < len(argv):
+			identity.packagePath = argv[index+1]
+		}
+	}
+	if selected, selective := killerTests(argv); selective && len(selected) == 1 {
+		identity.test = selected[0]
+	}
+	if target == "" {
+		return
+	}
+	audit.targets[target] = identity
+}
+
+// execution takes one recorded mutant execution: it is collected when a catalog
+// asked what the layer would have saved, and audited when it killed.
+func (audit *auditor) execution(record trace.MutantRecord) {
+	if audit.catalog != nil {
+		if selected, selective := killerTests(record.Args); selective && len(selected) == 1 {
+			audit.executions[record.ID] = append(audit.executions[record.ID],
+				targetIdentity{test: selected[0], packagePath: record.Package})
+		}
+	}
+	if record.Outcome != outcomeKilled {
+		return
+	}
+	audit.result.killedExecutions++
+	audit.kill(record)
+}
+
+// profileTarget is the target a coverage profile path names. A run writes one
+// profile per target under the target's identity, and a recording made on
+// another operating system names it with that system's separator.
+func profileTarget(path string) string {
+	if cut := strings.LastIndexAny(path, `/\`); cut >= 0 {
+		path = path[cut+1:]
+	}
+	target, named := strings.CutSuffix(path, profileSuffix)
+	if !named {
+		return ""
+	}
+	return target
 }
 
 // kill attributes one recorded kill to the target that ran it and holds every
@@ -324,6 +537,8 @@ func (audit *auditor) decide(pair killPair) {
 		switch concluded.conclusion {
 		case kept:
 			audit.result.layers[index].kept++
+		case inapplicable:
+			audit.result.layers[index].inapplicable++
 		case unverifiable:
 			audit.result.layers[index].unverifiable++
 			audit.result.unverifiable = append(audit.result.unverifiable, row)
@@ -334,12 +549,76 @@ func (audit *auditor) decide(pair killPair) {
 	}
 }
 
-// finish orders what the audit found, so that one recording reports the same
-// bytes however the run that made it was scheduled.
+// finish measures what the branch layer would have saved and orders what the
+// audit found, so that one recording reports the same bytes however the run
+// that made it was scheduled.
 func (audit *auditor) finish() auditResult {
+	audit.result.savings = audit.measureBranchSavings()
 	slices.SortFunc(audit.result.unverifiable, compareRows)
 	slices.SortFunc(audit.result.violations, compareRows)
 	return audit.result
+}
+
+// measureBranchSavings counts what the branch layer would have removed from the
+// run that was recorded.
+//
+// Only a route decided by block and not fallen back to the file is counted:
+// those are the routes the layer would have narrowed, and a route the engine
+// decided by the file is one whose reaching set the proof was never asked
+// about. The mutants are walked in identity order so the totals are read off
+// the recording rather than off the order a map happened to be built in.
+func (audit *auditor) measureBranchSavings() branchSavings {
+	if audit.catalog == nil {
+		return branchSavings{}
+	}
+	var measured branchSavings
+	for _, mutant := range slices.Sorted(maps.Keys(audit.routes)) {
+		route := audit.routes[mutant]
+		listed, known := audit.catalog.lookup(mutant)
+		if !known || route.Granularity != trace.GranularityBlock || route.Fallback != "" {
+			continue
+		}
+		body, proved := listed.proves()
+		if !proved || !startsInBody(audit.recorded.instrumentedIn(listed.Path), body) {
+			continue
+		}
+		measured.routes++
+		measured.reaching += len(route.ReachingTargets)
+		discharged := 0
+		dropped := make(map[targetIdentity]struct{}, len(route.ReachingTargets))
+		for _, target := range route.ReachingTargets {
+			if !audit.discharges(listed.Path, body, target) {
+				continue
+			}
+			discharged++
+			dropped[audit.targets[target]] = struct{}{}
+		}
+		measured.discharged += discharged
+		if discharged > 0 && discharged == len(route.ReachingTargets) {
+			measured.emptied++
+		}
+		for _, executed := range audit.executions[mutant] {
+			if _, saved := dropped[executed]; saved {
+				measured.executions++
+			}
+		}
+	}
+	return measured
+}
+
+// discharges reports whether the rule would drop one reaching target of a
+// proved mutant. A fuzz target is never dropped, a target the run left no
+// profile for is never dropped, and what is left is dropped exactly when it
+// started no block inside the body the mutation gates.
+func (audit *auditor) discharges(path string, body branchProof, target string) bool {
+	if strings.HasPrefix(audit.targets[target].test, fuzzPrefix) {
+		return false
+	}
+	if !audit.recorded.measured(target) {
+		return false
+	}
+	covered, _ := audit.recorded.coveredBy(target, path)
+	return !startsInBody(covered, body)
 }
 
 // killerTests reads the tests one mutant execution ran, and reports whether it

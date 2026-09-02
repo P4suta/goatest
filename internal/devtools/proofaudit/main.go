@@ -3,8 +3,10 @@
 
 // Command proofaudit holds the proof layers of a mutation run to the kills a
 // recorded run proved. A layer is any rule that narrows what a mutant is run
-// against — today the block routing that keeps a mutant to the coverage blocks
-// containing its position, tomorrow the proofs behind it.
+// against — the block routing that keeps a mutant to the coverage blocks
+// containing its position, and the branch-never-taken proof behind it, which
+// drops a target whose coverage reaches a mutated condition through a body it
+// never entered.
 //
 // The invariant every such layer has to satisfy is that it drops no killer:
 // for every mutant a target actually killed, the narrowed rule must still
@@ -16,7 +18,7 @@
 // It is a developer tool rather than part of the shipped binary, and it reads
 // what a run left behind and nothing else:
 //
-//	go run ./internal/devtools/proofaudit [-module PATH] trace.jsonl <profiles-dir>
+//	go run ./internal/devtools/proofaudit [-module PATH] [-catalog PATH] trace.jsonl <profiles-dir>
 //
 // The two halves come from one `goatest verify --trace --keep-temp` run: the
 // goatest-trace-v1 recording, whose route events say how each mutant was
@@ -24,6 +26,14 @@
 // directory of that run, which holds one Go coverage profile per measured
 // target. Every number printed comes from a recorded value, so auditing one
 // recording twice prints the same bytes on any machine at any moment.
+//
+// The branch layer needs a third input, the mutant catalog that carries the
+// proofs, and is left out of the audit without one: a row of zeroes for a layer
+// nobody checked would read exactly like a layer that came out clean, so the
+// report says which of the two it is. A catalog also lets the audit say what
+// the layer would have bought — the targets it would stop reaching, the mutants
+// it would stop executing — measured from the recording of a run that
+// discharged nothing.
 //
 // The rules are reimplemented here from the recording rather than called out
 // of internal/assure. An audit that asked the code under audit whether it was
@@ -60,7 +70,7 @@ const (
 
 const (
 	// usage is the one command line the tool accepts.
-	usage = "usage: proofaudit [-module PATH] <trace.jsonl> <profiles-dir>"
+	usage = "usage: proofaudit [-module PATH] [-catalog PATH] <trace.jsonl> <profiles-dir>"
 	// goModFile is where the module path comes from when the flag does not
 	// give one: the module of the repository the tool is run from, which is
 	// the module the profiles of its own run name their files under.
@@ -85,6 +95,9 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	}
 	module := flags.String("module", "",
 		"the module path the coverage profiles name their files under (default: the module directive of ./go.mod)")
+	catalogPath := flags.String("catalog", "",
+		"the go-mutants catalog of the recorded tree, carrying the proofs the branch layer decides by "+
+			"(default: the branch layer is not audited)")
 	if err := flags.Parse(arguments); err != nil {
 		return exitUsage
 	}
@@ -102,6 +115,17 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		}
 		modulePath = read
 	}
+	// A catalog is read before anything else it could be audited against, so a
+	// mistyped path costs nothing but the message that names it.
+	var catalog *mutantCatalog
+	if *catalogPath != "" {
+		read, err := readCatalog(*catalogPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "proofaudit: %v\n", err)
+			return exitFailure
+		}
+		catalog = read
+	}
 	recorded, err := readEvidence(profilesPath, modulePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "proofaudit: %v\n", err)
@@ -113,7 +137,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	defer func() { _ = stream.Close() }()
-	result, err := auditTrace(stream, recorded, auditLayers())
+	result, err := auditTrace(stream, recorded, catalog, auditLayers(catalog))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "proofaudit: %s: %v\n", tracePath, err)
 		return exitFailure
