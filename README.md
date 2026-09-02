@@ -21,7 +21,8 @@ For `standard-v1`, goatest:
    toolchain, platform, declared environment, configuration, and tool versions;
 2. classifies native `TestX`, `FuzzX`, and `ExampleX` results through
    `test2json`, including skips and setup failures;
-3. routes tests by coverage blocks and mutant spans;
+3. routes tests by coverage blocks and mutant spans, and discharges the
+   reaching tests a branch proof shows cannot observe a mutant;
 4. runs relevant race checks (reported as a static estimate in
    `standard-v1`; `deep-v1` races every package);
 5. evaluates every selected `go-mutants` mutant, with a passing original

@@ -26,7 +26,10 @@ Mutation routing reads the baseline coverage at block granularity: a mutant is
 run by the targets whose executed blocks contain its start position, cheapest
 target first. A position that cannot be placed in a block widens back to every
 target that executed the file, and a position no target executed is left to its
-package suite. See [the assurance contract](assurance-contract.md) for the rule
+package suite. Where go-mutants proves a mutation can only narrow the condition
+of a branch, the targets that never entered the body that branch gates are
+discharged from the reaching set instead of executed. See
+[the assurance contract](assurance-contract.md) for the rule
 and [trace v1](trace-v1.md) for how each decision is recorded.
 
 Changeset routing reads two things about each top-level target: the files its

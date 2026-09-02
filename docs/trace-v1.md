@@ -247,6 +247,18 @@ target once, so each target appears in `discharged` at most once; a route
 naming the same target twice is rejected as well, since a reader counting the
 entries would otherwise count that target twice.
 
+goatest fills `discharged` from the one proof it reads today: a mutation the
+engine proved can only narrow the condition of an `if` or a `for`, discharging
+each reaching target during which no statement of the gated body ran. The
+entries are in run order — the order the discharged targets would have been
+executed in, cheapest first — so `reaching_targets` and `discharged` are two
+orderings cut from the same one. A route of `reason: coverage-reaching` with an
+empty `reaching_targets` and a non-empty `discharged` is a mutant resolved
+without any execution at all: coverage reached it, the proof answered for every
+target that did, and the run recorded a surviving mutant without running
+anything. Such a route carries no `plan`, because the package suite behind an
+empty plan would run the very tests the proof ruled out.
+
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.
 
@@ -277,8 +289,8 @@ A plan entry is `individual:<target>` for a target run on its own,
 `fuzz:<target>` for the fuzzing of one target, and `package-suite` for the
 whole package suite. A mutant
 no measured target reaches has reason `unreached`, no `reaching_targets`, and
-the package suite as its plan; every other plan is derived from the targets
-that reach it.
+the package suite as its plan; a mutant whose whole reaching set was discharged
+has no plan at all; every other plan is derived from the targets that reach it.
 
 Reading `route` beside the `mutant-exec` events that follow it is how a trace
 answers "why did this mutant run *that*" — the question a report can only

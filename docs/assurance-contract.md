@@ -55,6 +55,39 @@ for a mutant in a file no target covers. Such a mutant is `unreached`, not
 `surviving`; both are `survived` in the mutant inventory, so the accounting
 equations below are unaffected by how a mutant was routed.
 
+### Discharging a test a branch proof rules out
+
+A reaching set decided by block is narrowed once more where the mutation itself
+carries a proof. go-mutants publishes one for an edit that can only make the
+condition of an `if` or a `for` less often true, and it names the span of the
+body that condition gates, from its opening brace to its closing brace.
+
+Write C for the original condition and C′ for the mutated one. C′ implies C,
+and the whole condition is inert — no effects, no possible panic, guaranteed to
+terminate. So a target during which no statement of the gated body ran
+evaluated C to false every time it was evaluated, evaluated C′ to false there
+too, took the same branch on every evaluation, and ran identically on the two
+programs. It cannot have observed the mutation. Such a target is *discharged*:
+removed from the reaching set without being executed, and named in the route's
+`discharged` beside the proof that removed it. A discharge changes what a run
+pays, never what it concludes.
+
+The narrowing applies only where the evidence carries it. It is attempted on a
+route decided by block with no fallback, and never on one decided by file. It
+requires that the body was instrumented at all — some instrumented block must
+begin inside the span — because otherwise no target's silence about the body
+means anything. A fuzz target is never discharged: it explores inputs beyond
+the corpus its coverage was measured on, so its blocks do not bound what it
+will execute. Neither is a target restored from a checkpoint, which carries no
+blocks to argue with.
+
+A mutant every reaching target was discharged for is resolved without a single
+execution, and reported as a `surviving-mutant`. It is not `unreached`: the
+coverage blocks reach it, and running the package suite would only run the
+tests the proof has already ruled out. That no test takes the branch the
+mutation narrows is the finding — a real gap in the suite, stated for the cost
+of reading a coverage profile.
+
 ## Mutation confirmation
 
 A mutant is `killed` only after:

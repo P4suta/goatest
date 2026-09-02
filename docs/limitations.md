@@ -32,6 +32,18 @@ self-dogfood is not external compatibility evidence.
   covers is treated as unreached and confirmed by its package suite, where the
   test still runs; a mutant that other targets also cover is run by those
   targets alone and, if only the blind test kills it, is reported as surviving.
+- Discharging a test a branch proof rules out inherits that same blind spot,
+  and is fail-closed everywhere else. A test that enters the gated body only
+  through a subprocess leaves no block behind and is discharged, exactly as
+  block routing would already route the mutant away from it. go-mutants states
+  no proof over a `//line` directive, because the coverage toolchain would then
+  measure the span in one file's numbering and the profile in another's. The
+  span is the body's braces and is closed at both ends, which is safe under
+  both cmd/cover conventions in play: Go 1.26 begins the body's block at the
+  opening brace and Go 1.27 at the body's first statement, and neither begins a
+  block of the surrounding code inside the braces — the block after the body
+  begins one column past the closing brace or later. A proof whose coordinates
+  do not describe a span the edit precedes discharges nothing.
 - A baseline target restored from a checkpoint carries the files it reached but
   not the blocks inside them, so it is routed at file granularity for the rest
   of the run. A resumed run therefore executes at least the work a cold run
