@@ -26,9 +26,9 @@ func writeTrace(t *testing.T, stream string) string {
 // mutant sits in: the shape every routing layer must keep passing.
 func soundRecording(t *testing.T) (string, string) {
 	t.Helper()
-	stream := recordedTrace(t,
-		blockRoute(1, firstMutant, 11, 4, killerTarget),
-		killedBy(2, firstMutant, firstDisplay, killerTarget),
+	stream := recordedRun(t, []string{killerTarget},
+		blockRoute(2, firstMutant, 11, 4, killerTarget),
+		killedBy(3, firstMutant, firstDisplay, killerTarget),
 	)
 	return writeTrace(t, stream), writeProfiles(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
@@ -182,9 +182,9 @@ func TestRunExitsOneOnAViolation(t *testing.T) {
 	t.Parallel()
 	// A violation is the finding this tool exists for, so it is reported on
 	// stdout and refused with an exit code a gate can read.
-	stream := recordedTrace(t,
-		blockRoute(1, firstMutant, 21, 4, killerTarget),
-		killedBy(2, firstMutant, firstDisplay, killerTarget),
+	stream := recordedRun(t, []string{killerTarget},
+		blockRoute(2, firstMutant, 21, 4, killerTarget),
+		killedBy(3, firstMutant, firstDisplay, killerTarget),
 	)
 	tracePath := writeTrace(t, stream)
 	profiles := writeProfiles(t, map[string][]string{

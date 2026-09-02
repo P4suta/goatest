@@ -25,28 +25,30 @@ func sampleAudit(t *testing.T) auditResult {
 	})
 	stream := recordedTrace(t,
 		trace.Event{Seq: 1, Type: trace.TypeRunStart, Schema: trace.SchemaV1, Timestamp: fixtureTime},
-		blockRoute(2, firstMutant, 11, 4, killerTarget),
-		killedBy(3, firstMutant, firstDisplay, killerTarget),
-		killedBy(4, firstMutant, firstDisplay, killerTarget),
-		blockRoute(5, secondMutant, 21, 4, secondTarget),
-		killedBy(6, secondMutant, secondDisplay, secondTarget),
-		blockRoute(7, thirdMutant, 31, 5, absentTarget),
-		killedBy(8, thirdMutant, thirdDisplay, absentTarget),
-		routeEvent(9, trace.RouteRecord{
+		measured(2, killerTarget), measured(3, secondTarget),
+		measured(4, thirdTarget), measured(5, absentTarget),
+		blockRoute(6, firstMutant, 11, 4, killerTarget),
+		killedBy(7, firstMutant, firstDisplay, killerTarget),
+		killedBy(8, firstMutant, firstDisplay, killerTarget),
+		blockRoute(9, secondMutant, 21, 4, secondTarget),
+		killedBy(10, secondMutant, secondDisplay, secondTarget),
+		blockRoute(11, thirdMutant, 31, 5, absentTarget),
+		killedBy(12, thirdMutant, thirdDisplay, absentTarget),
+		routeEvent(13, trace.RouteRecord{
 			MutantID: fourthMutant, Rule: "cond-true", Path: subjectPath, Line: 41, Column: 2,
 			Plan: []string{packageSuitePlan}, Reason: trace.ReasonUnreached, Granularity: trace.GranularityBlock,
 		}),
-		mutantEvent(10, trace.MutantRecord{
+		mutantEvent(14, trace.MutantRecord{
 			ID: fourthMutant, DisplayID: fourthDisplay, Package: fixtureModule + "/pkg",
 			Outcome: outcomeKilled, DurationMS: 12,
 		}),
-		blockRoute(11, fifthMutant, 11, 6, killerTarget, secondTarget),
-		mutantEvent(12, trace.MutantRecord{
+		blockRoute(15, fifthMutant, 11, 6, killerTarget, secondTarget),
+		mutantEvent(16, trace.MutantRecord{
 			ID: fifthMutant, DisplayID: fifthDisplay, Package: fixtureModule + "/pkg",
 			Args:    []string{"-test.run=^(" + testNameOf(killerTarget) + "|" + testNameOf(secondTarget) + ")$"},
 			Outcome: outcomeKilled, DurationMS: 20,
 		}),
-	) + "\n" + `{"seq":13,"type":"mutant-exec","timestamp":"2026-01-0`
+	) + "\n" + `{"seq":17,"type":"mutant-exec","timestamp":"2026-01-0`
 
 	return auditFixture(t, stream, recorded)
 }
@@ -151,9 +153,9 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
-	stream := recordedTrace(t,
-		blockRoute(1, firstMutant, 11, 4, killerTarget),
-		killedBy(2, firstMutant, firstDisplay, killerTarget),
+	stream := recordedRun(t, []string{killerTarget},
+		blockRoute(2, firstMutant, 11, 4, killerTarget),
+		killedBy(3, firstMutant, firstDisplay, killerTarget),
 	)
 	got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditFixture(t, stream, recorded))
 
