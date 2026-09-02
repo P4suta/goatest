@@ -60,6 +60,36 @@ func (file FileCoverage) Contains(line, column int) bool {
 	return false
 }
 
+// CoverageSpan is a closed region of one file: unlike a coverage block, both
+// the start and the end position belong to it. It is the form a source
+// construct has to be described in to be compared against coverage, because
+// cmd/cover does not cut a construct into blocks the same way in every release
+// — a body block begins at its opening brace in Go 1.26 and at the body's
+// first statement in Go 1.27 — while the braces bound the construct under
+// both.
+type CoverageSpan struct {
+	StartLine   int
+	StartColumn int
+	EndLine     int
+	EndColumn   int
+}
+
+// StartsWithin reports whether any block of the file begins inside the span.
+// Where a block begins is the whole question: a block that begins before the
+// span and reaches into it belongs to the code around the span rather than to
+// the span, and would answer for execution the span never saw. A file with no
+// blocks begins none, and a span whose end precedes its start holds none, so
+// both answer every question with false.
+func (file FileCoverage) StartsWithin(span CoverageSpan) bool {
+	for _, block := range file.Blocks {
+		if comparePositions(span.StartLine, span.StartColumn, block.StartLine, block.StartColumn) <= 0 &&
+			comparePositions(block.StartLine, block.StartColumn, span.EndLine, span.EndColumn) <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Coverage is one parsed coverage profile: the blocks the profiled execution
 // actually ran, and every block the profile instrumented whether it ran or
 // not. Both are sorted by path and free of duplicates, and both are non-nil
@@ -235,16 +265,19 @@ func sortedFileCoverage(blocks map[string]map[CoverageBlock]struct{}) []FileCove
 }
 
 func compareCoverageBlocks(first, second CoverageBlock) int {
-	if compared := cmp.Compare(first.StartLine, second.StartLine); compared != 0 {
+	if compared := comparePositions(first.StartLine, first.StartColumn, second.StartLine, second.StartColumn); compared != 0 {
 		return compared
 	}
-	if compared := cmp.Compare(first.StartColumn, second.StartColumn); compared != 0 {
+	return comparePositions(first.EndLine, first.EndColumn, second.EndLine, second.EndColumn)
+}
+
+// comparePositions orders two source positions the way a reader reads them:
+// by line, and within a line by column.
+func comparePositions(firstLine, firstColumn, secondLine, secondColumn int) int {
+	if compared := cmp.Compare(firstLine, secondLine); compared != 0 {
 		return compared
 	}
-	if compared := cmp.Compare(first.EndLine, second.EndLine); compared != 0 {
-		return compared
-	}
-	return cmp.Compare(first.EndColumn, second.EndColumn)
+	return cmp.Compare(firstColumn, secondColumn)
 }
 
 func filepathSlash(path string) string { return strings.ReplaceAll(path, `\`, "/") }
