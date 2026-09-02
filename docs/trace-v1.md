@@ -222,18 +222,30 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `granularity` | `block` or `file`: what the reaching set was decided on |
 | `fallback` | `position-unknown` or `outside-blocks`, when a block decision dropped back to the file |
 | `file_candidates` | how many targets cover the mutated file at all |
+| `discharged` | the reaching targets a proof removed, each with the proof that removed it |
 
-`column`, `granularity`, `fallback` and `file_candidates` are additive: a
-recording made before they existed carries none of them, and each is omitted
-when it is empty.
+`column`, `granularity`, `fallback`, `file_candidates` and `discharged` are
+additive: a recording made before they existed carries none of them, and each
+is omitted when it is empty.
 
 `granularity` is what marks a route as carrying that metadata at all. On a
 route that names one, an absent `file_candidates` means zero candidates; on a
 route that names none, the metadata was never recorded, and a reader reports
 the absence rather than a reduction of nothing. The marker is therefore
-required beside the rest: a route carrying a `column` or a `file_candidates`
-without a `granularity` would read as metadata-free while carrying some, and
-both the schema and the trace reader reject it.
+required beside the rest: a route carrying a `column`, a `file_candidates` or a
+`discharged` without a `granularity` would read as metadata-free while carrying
+some, and both the schema and the trace reader reject it.
+
+`discharged` is the other half of the reaching measurement. On a route of
+`granularity: block`, `reaching_targets` together with the targets of
+`discharged` are the targets whose covered blocks contain the mutated position:
+a proof removed the discharged ones, so a discharged target never appears in
+`reaching_targets` as well, and a route naming the same target on both sides is
+rejected. Each entry names the target and the proof that removed it, which is
+`branch-never-taken` alone until another proof produces one. A proof removes a
+target once, so each target appears in `discharged` at most once; a route
+naming the same target twice is rejected as well, since a reader counting the
+entries would otherwise count that target twice.
 
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.

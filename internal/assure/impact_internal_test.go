@@ -5,6 +5,7 @@ package assure
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -288,6 +289,83 @@ func TestSelectImpactFallsBackBroadAndSelectsCoveredPackageDependents(t *testing
 			}
 		})
 	}
+}
+
+// TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage
+// walks the pipeline a run walks - go list output becomes packages, packages
+// become targets, targets become the persisted graph - for the one shape only
+// the dependency closure can connect: example.com/m/app imports
+// example.com/m/testutil from its test file and nowhere else, and testutil
+// declares a constant, so no executed statement of it ever reaches coverage.
+func TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage(t *testing.T) {
+	preserveImpactHooks(t)
+	root := t.TempDir()
+	for path, contents := range map[string]string{
+		"app/app.go":           "package app\n\nfunc Greet() string { return \"hi\" }\n",
+		"app/app_test.go":      "package app\n\nimport (\n\t\"testing\"\n\n\t\"example.com/m/testutil\"\n)\n\nfunc TestGreet(t *testing.T) {\n\tif Greet() != testutil.Greeting {\n\t\tt.Fatal(\"greeting changed\")\n\t}\n}\n",
+		"testutil/fixtures.go": "package testutil\n\nconst Greeting = \"hi\"\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	module := map[string]any{"Path": "example.com/m", "Dir": root}
+	listing := goListStream(t,
+		map[string]any{
+			"ImportPath": "example.com/m/app", "Dir": filepath.Join(root, "app"), "Module": module,
+			"Deps": []string{"fmt"}, "TestImports": []string{"example.com/m/testutil", "testing"},
+		},
+		map[string]any{
+			"ImportPath": "example.com/m/testutil", "Dir": filepath.Join(root, "testutil"), "Module": module,
+		},
+	)
+	model, err := goanalysis.DecodePackages(strings.NewReader(listing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := goanalysis.DiscoverTargets(root, model.Packages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	graph, err := buildGraph(root, model, []TargetEvidence{{Target: targets[0], CoveredFiles: []string{"app/app.go"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadImpactGraph = func(string) (evidence.GraphRecord, bool, error) {
+		return evidence.GraphRecord{Schema: evidence.GraphSchemaV1, ModulePath: model.ModulePath, Graph: graph}, true, nil
+	}
+	changedImpactFiles = func(context.Context, string, string) ([]string, bool) {
+		return []string{"testutil/fixtures.go"}, true
+	}
+
+	selection := selectImpact(context.Background(), root, model, targets, Options{Changed: true})
+	gotIDs := make([]string, 0, len(selection.targets))
+	for _, target := range selection.targets {
+		gotIDs = append(gotIDs, target.ID)
+	}
+	if selection.broad || !slices.Equal(gotIDs, []string{targets[0].ID}) {
+		t.Fatalf("selection = {broad:%t targets:%v}, want the app target alone", selection.broad, gotIDs)
+	}
+}
+
+// goListStream renders package objects the way `go list -json` streams them.
+func goListStream(t *testing.T, packages ...map[string]any) string {
+	t.Helper()
+	var stream strings.Builder
+	encoder := json.NewEncoder(&stream)
+	for _, item := range packages {
+		if err := encoder.Encode(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stream.String()
 }
 
 func TestDependsOnChangedChecksEveryDependency(t *testing.T) {

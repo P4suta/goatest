@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -106,6 +107,81 @@ func TestDecodePackagesRejectsDirectoriesOutsideModule(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Fatalf("DecodePackages(%q) error = %v, want %q", directory, err, want)
 		}
+	}
+}
+
+func TestDecodePackagesIncludesTestOnlyImportsInTheDependencyClosure(t *testing.T) {
+	t.Parallel()
+	moduleDir := filepath.Join(t.TempDir(), "module")
+	model, err := gotest.DecodePackages(packageStream(t, testImportListing(moduleDir)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.Packages) != 3 {
+		t.Fatalf("Packages = %+v", model.Packages)
+	}
+	// The in-module test import is expanded through its own Deps, the external
+	// one is recorded alone, the package itself is never its own dependency,
+	// and a package whose tests import nothing keeps exactly its Deps.
+	for index, want := range [][]string{
+		{"example.com/m/internal/shared", "example.com/m/testutil", "fmt", "github.com/x/assert", "strings"},
+		{"strings"},
+		{"example.com/m/internal/shared", "strings"},
+	} {
+		if got := model.Packages[index].Dependencies; !slices.Equal(got, want) {
+			t.Errorf("%s dependencies = %v, want %v", model.Packages[index].ImportPath, got, want)
+		}
+	}
+}
+
+func TestDecodePackagesDependencyClosureDoesNotDependOnListingOrder(t *testing.T) {
+	t.Parallel()
+	moduleDir := filepath.Join(t.TempDir(), "module")
+	forward, err := gotest.DecodePackages(packageStream(t, testImportListing(moduleDir)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backwardListing := testImportListing(moduleDir)
+	slices.Reverse(backwardListing)
+	backward, err := gotest.DecodePackages(packageStream(t, backwardListing...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(backward, forward) {
+		t.Fatalf("reversed listing = %+v, want %+v", backward, forward)
+	}
+}
+
+func TestDecodePackagesLeavesAPackageWithoutTestImportsAsItsDeps(t *testing.T) {
+	t.Parallel()
+	moduleDir := filepath.Join(t.TempDir(), "module")
+	absent := listedPackage("example.com/m/absent", filepath.Join(moduleDir, "absent"), "example.com/m", moduleDir, "strings", "fmt")
+	empty := listedPackage("example.com/m/empty", filepath.Join(moduleDir, "empty"), "example.com/m", moduleDir, "fmt")
+	empty["TestImports"] = []string{}
+	empty["XTestImports"] = []string{}
+
+	model, err := gotest.DecodePackages(packageStream(t, absent, empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.Packages) != 2 || !slices.Equal(model.Packages[0].Dependencies, []string{"fmt", "strings"}) ||
+		!slices.Equal(model.Packages[1].Dependencies, []string{"fmt"}) {
+		t.Fatalf("Packages = %+v", model.Packages)
+	}
+}
+
+// testImportListing is one module whose app package reaches
+// example.com/m/testutil from its test files alone, and whose testutil package
+// reaches example.com/m/internal/shared. The external test import and the
+// self-import an external test package always carries are listed too.
+func testImportListing(moduleDir string) []map[string]any {
+	app := listedPackage("example.com/m/app", filepath.Join(moduleDir, "app"), "example.com/m", moduleDir, "fmt")
+	app["TestImports"] = []string{"example.com/m/testutil"}
+	app["XTestImports"] = []string{"example.com/m/app", "github.com/x/assert"}
+	return []map[string]any{
+		app,
+		listedPackage("example.com/m/testutil", filepath.Join(moduleDir, "testutil"), "example.com/m", moduleDir, "example.com/m/internal/shared", "strings"),
+		listedPackage("example.com/m/internal/shared", filepath.Join(moduleDir, "internal", "shared"), "example.com/m", moduleDir, "strings"),
 	}
 }
 
