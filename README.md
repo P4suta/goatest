@@ -260,7 +260,7 @@ under [`docs/`](docs/).
 Development is test-driven. The suite includes the full weak-test → survivor →
 targeted fuzz → corpus promotion → fresh-session kill flow, exact-cache and
 impact-graph cases, provider/resource failures and cleanup, deterministic
-renderers, and the external `go-mutants v0.1.2` bridge contract.
+renderers, and the external `go-mutants` bridge contract at the commit `go.mod` pins.
 
 Licensed under either [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.
