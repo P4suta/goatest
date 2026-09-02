@@ -1,0 +1,56 @@
+before: testdata/before.json
+after: testdata/after.json
+verdict: INSUFFICIENT -> INSUFFICIENT
+run: 20260101T000000Z-1000 -> 20260102T000000Z-2000
+duration: 10m0s -> 7m0s
+
+accounting
+counter                   before  after  delta
+targets.discovered            12     12      0
+targets.selected              10     10      0
+targets.executed              10     10      0
+targets.skipped                0      0      0
+targets.excluded               2      2      0
+mutants.discovered             8      8      0
+mutants.selected               8      8      0
+mutants.executed               7      7      0
+mutants.killed                 4      3     -1
+mutants.survived               3      3      0
+mutants.inconclusive           0      1     +1
+mutants.compile_rejected       1      1      0
+mutants.accepted               0      0      0
+mutants.out_of_scope           0      0      0
+mutants.unknown                0      0      0
+race.discovered                3      3      0
+race.selected                  3      3      0
+race.executed                  3      3      0
+race.skipped                   0      0      0
+race.excluded                  0      0      0
+changed: 2 of 20 counters
+
+mutants
+common: 6, only in the before report: 1, only in the after report: 1
+
+status transitions
+before            after             mutants
+survived          survived                3
+compile-rejected  compile-rejected        1
+killed            inconclusive            1
+killed            killed                  1
+
+finding kinds per mutant
+before            after             mutants
+(none)            (none)                  3
+surviving-mutant  unreached-mutant        2
+surviving-mutant  surviving-mutant        1
+
+finding kinds by count
+kind              before  after  delta
+surviving-mutant       3      1     -2
+unreached-mutant       0      2     +2
+findings: 3 -> 3
+
+regressions
+mutants that stopped being killed: 1
+path                     line  status        rule         mutant
+internal/assure/plan.go    40  inconclusive  conditional  m-02

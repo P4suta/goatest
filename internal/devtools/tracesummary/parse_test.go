@@ -370,6 +370,46 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "route.line"},
 		},
 		{
+			name:   "route with an unknown granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"line"}}`),
+			want:   []string{"line 2", `route granularity "line"`},
+		},
+		{
+			name:   "route with an unknown fallback",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","fallback":"guess"}}`),
+			want:   []string{"line 2", `route fallback "guess"`},
+		},
+		{
+			name:   "route with a fallback on a decision the blocks carried",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","fallback":"outside-blocks"}}`),
+			want:   []string{"line 2", `route fallback "outside-blocks"`, `granularity "block"`},
+		},
+		{
+			name:   "route with a fallback and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","fallback":"position-unknown"}}`),
+			want:   []string{"line 2", `route fallback "position-unknown"`, "granularity"},
+		},
+		{
+			name:   "route with a column and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":9}}`),
+			want:   []string{"line 2", "route column", "granularity"},
+		},
+		{
+			name:   "route with a file candidate count and no granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":0}}`),
+			want:   []string{"line 2", "route file_candidates", "granularity"},
+		},
+		{
+			name:   "route with a negative column",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
+			want:   []string{"line 2", "route.column"},
+		},
+		{
+			name:   "route with a negative file candidate count",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":-1}}`),
+			want:   []string{"line 2", "route.file_candidates"},
+		},
+		{
 			name:   "progress without its kind field",
 			stream: stream(runStart, `{"seq":2,"type":"progress","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"progress":{}}`),
 			want:   []string{"line 2", "kind"},
@@ -416,6 +456,52 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not mention %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
+	t.Parallel()
+	// A fallback is what dropped a route to the file, so it belongs on a
+	// route decided by file and nowhere else. Every other combination of the
+	// two labels is a route the routing could have taken.
+	cases := []struct {
+		name  string
+		route string
+	}{
+		{
+			name:  "a file route that fell back",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"file","fallback":"outside-blocks"}`,
+		},
+		{
+			name:  "a file route that recorded no fallback",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"file"}`,
+		},
+		{
+			name:  "a block route",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"block"}`,
+		},
+		{
+			name:  "a block route carrying its column and candidate count",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"block","column":9,"file_candidates":3}`,
+		},
+		{
+			name:  "a file route that found no candidate",
+			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"file","fallback":"outside-blocks","column":9}`,
+		},
+		{
+			name:  "a route from a recording made before the labels existed",
+			route: `{"path":"a.go","reason":"coverage-reaching"}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			line := `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":` + testCase.route + `}`
+			events, err := readEvents(strings.NewReader(stream(runStart, line)))
+			if err != nil || len(events) != 2 {
+				t.Fatalf("read (%d events, %v), want the run-start and the route", len(events), err)
 			}
 		})
 	}

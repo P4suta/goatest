@@ -65,3 +65,7 @@ run_windows = [
 [tasks.trace-summary]
 description = "Summarize a goatest-trace-v1 stream into the run's performance breakdown"
 run = "go run ./internal/devtools/tracesummary"
+
+[tasks.report-diff]
+description = "Compare two assurance reports: verdict, accounting, mutant transitions, and lost kills"
+run = "go run ./internal/devtools/reportdiff"

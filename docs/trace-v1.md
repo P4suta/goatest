@@ -215,9 +215,47 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `rule` | the mutation operator that produced it |
 | `path` | the mutated file |
 | `line` | the mutated line |
+| `column` | the mutated byte column on that line, 1-based |
 | `reaching_targets` | the target IDs coverage says reach the mutation |
 | `plan` | the executions the mutant will be given |
 | `reason` | `coverage-reaching` or `unreached` |
+| `granularity` | `block` or `file`: what the reaching set was decided on |
+| `fallback` | `position-unknown` or `outside-blocks`, when a block decision dropped back to the file |
+| `file_candidates` | how many targets cover the mutated file at all |
+
+`column`, `granularity`, `fallback` and `file_candidates` are additive: a
+recording made before they existed carries none of them, and each is omitted
+when it is empty.
+
+`granularity` is what marks a route as carrying that metadata at all. On a
+route that names one, an absent `file_candidates` means zero candidates; on a
+route that names none, the metadata was never recorded, and a reader reports
+the absence rather than a reduction of nothing. The marker is therefore
+required beside the rest: a route carrying a `column` or a `file_candidates`
+without a `granularity` would read as metadata-free while carrying some, and
+both the schema and the trace reader reject it.
+
+The fallback ladder is three steps. A mutant whose position the engine did not
+report cannot be placed in any block, so it is routed by file with fallback
+`position-unknown`. A position no instrumented block contains is a gap in the
+coverage the toolchain measured rather than an absence of tests, so it is
+routed by file with fallback `outside-blocks`. Every other mutant is routed by
+`block`, with no fallback. A route that reaches nothing while its position does
+sit inside an instrumented block is a mutant in code no test executes, and is
+reported as `unreached` rather than fallen back.
+
+A fallback is why a block decision dropped back to the file, so a route that
+records one records `granularity: file`. A `fallback` on any other route — on
+`granularity: block`, or on a route that records no granularity at all —
+contradicts itself, and both the schema and the trace reader reject it.
+
+Two labels are worth reading carefully. A target restored from a checkpoint
+carries no block evidence, so it is admitted to a reaching set by file match
+while the route as a whole still records `granularity: block` — that is a
+target included conservatively, not a fallback. A file no test binary was ever
+linked against has no candidates at all, and its routes carry
+`granularity: file` with `fallback: outside-blocks` and `file_candidates: 0`,
+which is omitted from the wire as the zero it is.
 
 A plan entry is `individual:<target>` for a target run on its own,
 `batch:<package>(<count>)` for related targets of one package run together,

@@ -212,12 +212,22 @@ for it.
 
 `mise run trace-summary <trace.jsonl>` aggregates one recording into the
 performance breakdown of its run: phase durations, the command classes the run
-spent its time in, and what became of the mutants it executed. Every number
-comes from a recorded value, so summarizing a trace twice prints the same
-bytes; a line the trace contract does not allow is an error naming the line,
-because a total that quietly skipped an event would be a confident wrong
-number. This is how the mutation phase was measured at 98% of a full run
-before the performance work started — measure before attributing.
+spent its time in, how coverage routed the mutants, and what became of the ones
+it executed. Every number comes from a recorded value, so summarizing a trace
+twice prints the same bytes; a line the trace contract does not allow is an
+error naming the line, because a total that quietly skipped an event would be a
+confident wrong number. This is how the mutation phase was measured at 98% of a
+full run before the performance work started — measure before attributing.
+
+`mise run report-diff -- before.json after.json` compares two assurance
+reports: the verdict, every accounting counter, what became of the mutants both
+runs discovered, and the mutants that stopped being killed. It is the other
+half of the same measurement — the trace summary says what a change cost, and
+the comparison says what it changed about the answer. A change meant to alter
+how a run works without altering what it concludes is judged by both: no lost
+kill in the comparison, and a smaller bill in the summary. A regression is
+reported rather than failed on, so the exit code says whether the two reports
+could be read rather than what they said.
 
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
