@@ -132,6 +132,8 @@ func TestParseCoverageSortsAndDeduplicatesBlocks(t *testing.T) {
 		"example.com/sample/a.go:5.29,6.16 1 1\n" +
 		"example.com/sample/a.go:5.29,6.16 1 2\n" +
 		"example.com/sample/a.go:5.29,5.40 1 1\n" +
+		"example.com/sample/a.go:5.29,6.12 1 1\n" +
+		"example.com/sample/a.go:5.3,6.16 1 1\n" +
 		"example.com/sample/a.go:4.1,5.29 1 1\n")
 	coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
 	if err != nil {
@@ -140,7 +142,9 @@ func TestParseCoverageSortsAndDeduplicatesBlocks(t *testing.T) {
 	want := []gotest.FileCoverage{
 		{Path: "a.go", Blocks: []gotest.CoverageBlock{
 			{StartLine: 4, StartColumn: 1, EndLine: 5, EndColumn: 29},
+			{StartLine: 5, StartColumn: 3, EndLine: 6, EndColumn: 16},
 			{StartLine: 5, StartColumn: 29, EndLine: 5, EndColumn: 40},
+			{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 12},
 			{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
 		}},
 		{Path: "z.go", Blocks: []gotest.CoverageBlock{{StartLine: 9, StartColumn: 2, EndLine: 9, EndColumn: 10}}},
