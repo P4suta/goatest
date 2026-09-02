@@ -132,6 +132,7 @@ many goroutines record at once.
 | `exec` | `exec` | a command of the mutation workspace returned |
 | `mutant-exec` | `mutant` | one mutant execution returned |
 | `route` | `route` | coverage decided a mutant's execution plan |
+| `probe-exec` | `probe` | one probe execution of a test target returned |
 | `progress` | `progress` | the run reported a progress note |
 | `artifact` | `artifact` | the run wrote a file |
 | `run-end` | `run` | the recording closes; always the last line |
@@ -223,18 +224,19 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `fallback` | `position-unknown` or `outside-blocks`, when a block decision dropped back to the file |
 | `file_candidates` | how many targets cover the mutated file at all |
 | `discharged` | the reaching targets a proof removed, each with the proof that removed it |
+| `probed` | whether the engine compiled a probe of this mutant into the probe tree |
 
-`column`, `granularity`, `fallback`, `file_candidates` and `discharged` are
-additive: a recording made before they existed carries none of them, and each
-is omitted when it is empty.
+`column`, `granularity`, `fallback`, `file_candidates`, `discharged` and
+`probed` are additive: a recording made before they existed carries none of
+them, and each is omitted when it is empty.
 
 `granularity` is what marks a route as carrying that metadata at all. On a
 route that names one, an absent `file_candidates` means zero candidates; on a
 route that names none, the metadata was never recorded, and a reader reports
 the absence rather than a reduction of nothing. The marker is therefore
-required beside the rest: a route carrying a `column`, a `file_candidates` or a
-`discharged` without a `granularity` would read as metadata-free while carrying
-some, and both the schema and the trace reader reject it.
+required beside the rest: a route carrying a `column`, a `file_candidates`, a
+`discharged` or a `probed` without a `granularity` would read as metadata-free
+while carrying some, and both the schema and the trace reader reject it.
 
 `discharged` is the other half of the reaching measurement. On a route of
 `granularity: block`, `reaching_targets` together with the targets of
@@ -258,6 +260,14 @@ without any execution at all: coverage reached it, the proof answered for every
 target that did, and the run recorded a surviving mutant without running
 anything. Such a route carries no `plan`, because the package suite behind an
 empty plan would run the very tests the proof ruled out.
+
+`probed` says the engine compiled a probe of this mutant into the probe tree,
+so the probe pass measured it. A measured target that does not name the mutant
+among the `infected` of its `probe-exec` event never made the mutant's site
+differ, and therefore can never observe it. A mutant the engine has no probe
+form for carries no `probed`, and neither does a recording made before the pass
+existed: an absent marker is an absent measurement rather than a mutant nothing
+infected.
 
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.
@@ -295,6 +305,47 @@ has no plan at all; every other plan is derived from the targets that reach it.
 Reading `route` beside the `mutant-exec` events that follow it is how a trace
 answers "why did this mutant run *that*" — the question a report can only
 answer with its outcome.
+
+### `probe`
+
+One probe execution of a test target, recorded after the engine answered so
+that the execution and what it measured are one line.
+
+| Field | Meaning |
+| --- | --- |
+| `target` | the target that ran, the identity `discharged` and `killed_by` name it by |
+| `package` | the package the target belongs to |
+| `args` | the test flags the execution ran with |
+| `timeout_ms` | the timeout the execution was given |
+| `outcome` | `measured`, `test-failed`, `timed-out`, or `unavailable` |
+| `exit_code` | the exit status |
+| `duration_ms` | how long it ran |
+| `infected` | the mutants the target made differ, by their full mutant identity |
+| `error` | the error the execution failed with, if it failed |
+
+A probe pass runs every baseline target once against a probe-instrumented tree
+no mutant is active in, and records per mutant whether the value at its site
+ever differed from the constant the mutant would put there.
+
+Facts come from a `measured` execution alone. The other three outcomes, and an
+execution carrying an `error` instead of an outcome, say nothing about any
+mutant: a reader treats every mutant as infected by such a target rather than
+as one the pass proved anything about. `infected` therefore appears beside
+`measured` and nowhere else, and both the schema and the trace reader reject it
+elsewhere.
+
+`infected` names each mutant once, by the same full identity `mutant_id`
+carries, in ascending catalogue order, so two recordings of one pass list them
+in one order. A measured execution with no `infected` at all is the strongest
+thing the pass says about a target: that target infected nothing, so no mutant
+of the pass can be observed by it.
+
+The record describes the execution and never the tree it ran in: no path to a
+probe log, no environment names, and no environment values. `args` are the test
+flags the execution selected its target with.
+
+Probe executions run concurrently and the recorder serialises them, so the
+stream holds one complete line per execution, in completion order.
 
 ### `progress`
 
@@ -358,16 +409,18 @@ an error. The field is therefore never empty on a `run-end` goatest wrote.
 ## What is deterministic
 
 Every field of an event is deterministic except its `timestamp`, its
-`elapsed_ms`, and the `duration_ms` of a phase, a command, or a mutant
-execution. JSON field order is the declaration order of the event, not a map
-iteration, so two recordings of the same events differ only where time differs.
+`elapsed_ms`, and the `duration_ms` of a phase, a command, a mutant execution,
+or a probe execution. JSON field order is the declaration order of the event,
+not a map iteration, so two recordings of the same events differ only where
+time differs.
 
-The *stream* is a weaker promise than the fields. Baseline commands and mutant
-executions run concurrently and are recorded when they return, so a second run
-of the same repository may interleave `exec`, `mutant-exec`, and `route` events
-differently and hand them different sequence numbers. What holds is the
-relationship a reader needs: a mutant's `route` is always recorded before the
-executions it explains, and `seq` order is the order of the file.
+The *stream* is a weaker promise than the fields. Baseline commands, probe
+executions and mutant executions run concurrently and are recorded when they
+return, so a second run of the same repository may interleave `exec`,
+`probe-exec`, `mutant-exec`, and `route` events differently and hand them
+different sequence numbers. What holds is the relationship a reader needs: a
+mutant's `route` is always recorded before the executions it explains, and
+`seq` order is the order of the file.
 
 A trace also depends on what the run actually did. Trace options take no part
 in cache identity, so a warm run answers from the cache — and its trace records
