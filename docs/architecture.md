@@ -29,6 +29,13 @@ target that executed the file, and a position no target executed is left to its
 package suite. See [the assurance contract](assurance-contract.md) for the rule
 and [trace v1](trace-v1.md) for how each decision is recorded.
 
+Changeset routing reads two things about each top-level target: the files its
+baseline run covered, and the import closure its test binary links. That
+closure is the package's own transitive imports together with the imports its
+test files add, each in-module test import expanded through the same `go list`
+listing, so a change to a helper a target reaches only from a `_test.go` file
+still re-selects that target.
+
 Verification is read-only. A killing fuzz artifact or generated test is stored
 through `internal/repair` as an isolated candidate. The separate `fix --apply`
 operation validates candidates against a copied repository and performs the
