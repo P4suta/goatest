@@ -257,6 +257,67 @@ func TestRunSaysTheBranchLayerWasNotAuditedWithoutACatalog(t *testing.T) {
 	}
 }
 
+// probedRecording is a recording of a run whose probe pass measured its one
+// killer, naming the mutants that killer saw infect. It is the shape the
+// infection layer is audited over, and the shape the layer is left out of when
+// the probe pass is missing.
+func probedRecording(t *testing.T, infected ...string) (string, string) {
+	t.Helper()
+	stream := recordedRun(t, []string{killerTarget},
+		probeMeasured(2, killerTarget, infected...),
+		probedRoute(3, firstMutant, 11, 4, killerTarget),
+		killedBy(4, firstMutant, firstDisplay, killerTarget),
+	)
+	return writeTrace(t, stream), writeProfiles(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16)},
+	})
+}
+
+func TestRunAuditsTheInfectionLayerWhenTheRecordingHoldsAProbePass(t *testing.T) {
+	t.Parallel()
+	// The layer decides by facts the recording itself carries, so it is audited
+	// with no third input: a probe pass in the trace is the whole condition.
+	tracePath, profiles := probedRecording(t, firstMutant)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-module", fixtureModule, tracePath, profiles}, &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("run exited %d, want %d; stderr: %s", code, exitSuccess, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		infectionLayerName, infectionDischargeHeading,
+		"routes of a probed mutant", "targets the probe measured",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the audit does not say %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, whyInfectionNotAudited) {
+		t.Errorf("a recording holding a probe pass says the layer was not audited:\n%s", got)
+	}
+}
+
+func TestRunExitsOneOnAnInfectionViolation(t *testing.T) {
+	t.Parallel()
+	// The probe pass measured the killer and never saw the mutant infect, and
+	// the run killed it there anyway. That is the finding this tool exists for,
+	// so it reaches stdout and the exit code a gate reads.
+	tracePath, profiles := probedRecording(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-module", fixtureModule, tracePath, profiles}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("run exited %d on a violation, want %d", code, exitFailure)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("run wrote %q to stderr, want the violation on stdout", stderr.String())
+	}
+	for _, want := range []string{firstDisplay, killerTarget, infectionLayerName, whyNeverInfected} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("the audit does not report %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestRunReportsACatalogItCannotRead(t *testing.T) {
 	t.Parallel()
 	tracePath, profiles := soundRecording(t)
