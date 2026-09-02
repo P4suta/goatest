@@ -515,9 +515,13 @@ func TestStartAcceptsReadyResponseAtExactProtocolLimit(t *testing.T) {
 		t.Fatalf("line length = %d", len(line))
 	}
 	_, _, _ = installFakeResourceStart(t, line)
-	provider, err := start(context.Background(), "db", "request-1", Spec{Command: []string{"provider"}, Timeout: time.Second})
-	if err != nil || len(provider.environment["PAD"]) != len(response.Environment["PAD"]) {
-		t.Fatalf("start error = %v, PAD length = %d", err, len(provider.environment["PAD"]))
+	// The line is 1 MiB and decoding it under -race on a loaded runner has taken over a second; the readiness timeout is not what this test measures.
+	provider, err := start(context.Background(), "db", "request-1", Spec{Command: []string{"provider"}, Timeout: time.Minute})
+	if err != nil {
+		t.Fatalf("start error = %v", err)
+	}
+	if len(provider.environment["PAD"]) != len(response.Environment["PAD"]) {
+		t.Fatalf("PAD length = %d, want %d", len(provider.environment["PAD"]), len(response.Environment["PAD"]))
 	}
 }
 
