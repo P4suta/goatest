@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,11 @@ import (
 
 // columnGap separates two columns of a table.
 const columnGap = "  "
+
+// durationMillisecondLimit is the largest magnitude of milliseconds that
+// converts into a duration. A duration counts nanoseconds in a signed 64-bit
+// integer, so a thousand times more milliseconds than that overflows it.
+const durationMillisecondLimit = int64(math.MaxInt64) / int64(time.Millisecond)
 
 // renderComparison renders the whole comparison of two reports, ending in a
 // newline. It reads the comparison alone: the same pair of reports renders the
@@ -230,7 +236,16 @@ func pad(cell string, width int, right bool) string {
 
 // formatDuration renders recorded milliseconds. The report is the only source
 // of the value, so the same pair prints the same duration forever.
+//
+// A duration counts nanoseconds, so a count past durationMillisecondLimit does
+// not convert into one: the multiplication wraps, and a report claiming a
+// hundred million years would print as a negative duration. Such a count is
+// printed as the milliseconds the report carried, which says what was read
+// rather than what it wrapped to.
 func formatDuration(milliseconds int64) string {
+	if milliseconds > durationMillisecondLimit || milliseconds < -durationMillisecondLimit {
+		return strconv.FormatInt(milliseconds, 10) + "ms"
+	}
 	return (time.Duration(milliseconds) * time.Millisecond).String()
 }
 

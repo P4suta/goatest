@@ -123,8 +123,14 @@ type MutantRecord struct {
 //
 // Granularity, Fallback, FileCandidates and Column describe how the reaching
 // set was narrowed. They are additive: a recording made before they existed
-// carries none of them, so every one of them is omitted when it is empty and
-// an absent value reads as unrecorded rather than as zero.
+// carries none of them, so every one of them is omitted when it is empty.
+//
+// Granularity is what marks a route as carrying that metadata at all. On a
+// route that names one, an absent FileCandidates is a count of zero — a file
+// no test binary was ever linked against — rather than a missing measurement;
+// on a route that names none, the metadata was never recorded. A Fallback is
+// why a decision by block dropped back to the file, so a route carrying one is
+// a route of GranularityFile.
 type RouteRecord struct {
 	MutantID        string   `json:"mutant_id,omitempty"`
 	Rule            string   `json:"rule,omitempty"`

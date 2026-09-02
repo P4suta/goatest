@@ -364,6 +364,12 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 		return fmt.Errorf("unknown route fallback %q, want %q or %q",
 			record.Fallback, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
 	}
+	// A fallback names why a decision by block dropped back to the file, so a
+	// route recording one that was decided otherwise contradicts itself.
+	if record.Fallback != "" && record.Granularity != trace.GranularityFile {
+		return fmt.Errorf("route fallback %q on granularity %q, want granularity %q: a fallback is what dropped the route to the file",
+			record.Fallback, record.Granularity, trace.GranularityFile)
+	}
 	if err := checkNotNegative("route.line", int64(record.Line)); err != nil {
 		return err
 	}

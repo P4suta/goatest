@@ -187,7 +187,7 @@
         "plan": { "type": "array", "items": { "type": "string" } },
         "reason": { "enum": ["coverage-reaching", "unreached"] },
         "granularity": {
-          "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone. Absent in a recording made before routing reported it.",
+          "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone. Absent in a recording made before routing reported it, and present on every route that carries any of the routing metadata beside it.",
           "enum": ["block", "file"]
         },
         "fallback": {
@@ -195,10 +195,16 @@
           "enum": ["position-unknown", "outside-blocks"]
         },
         "file_candidates": {
-          "description": "How many targets cover the mutated file at all, which is the reaching set the file alone would have selected.",
+          "description": "How many targets cover the mutated file at all, which is the reaching set the file alone would have selected. Absent on a route carrying a granularity means no candidate at all.",
           "type": "integer",
           "minimum": 0
         }
+      },
+      "if": { "required": ["fallback"] },
+      "then": {
+        "description": "A fallback is why a decision by block dropped back to the file, so the route that records one was decided by file.",
+        "required": ["granularity"],
+        "properties": { "granularity": { "const": "file" } }
       }
     },
     "progress": {

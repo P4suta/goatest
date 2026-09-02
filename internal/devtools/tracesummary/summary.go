@@ -336,11 +336,18 @@ type routeTotal struct {
 	// fanOut counts the routes by how many targets they reached, one entry
 	// per bucket of fanOutBucketLabels.
 	fanOut []int
-	// reaching and candidates are the two sides of the reduction routing
-	// bought: the targets the routes selected, and the targets covering the
-	// mutated file that they were selected from.
-	reaching   int
-	candidates int
+	// reaching is the targets every route selected, whatever it recorded of
+	// how it was decided.
+	reaching int
+	// recorded is how many routes named a granularity, which is what marks a
+	// route as carrying its routing metadata at all. recordedReaching and
+	// candidates are the two sides of the reduction those routes bought: the
+	// targets they selected, and the targets covering the mutated file that
+	// they were selected from. Both are summed over the recorded routes
+	// alone, so a route that recorded nothing cannot move either side.
+	recorded         int
+	recordedReaching int
+	candidates       int
 }
 
 // fanOutBucketLabels names the buckets of the reaching-target histogram, which
@@ -386,7 +393,9 @@ func routingBlock(events []trace.Event) []string {
 	if countedLabels(total.fallbacks) > 0 {
 		lines = append(lines, "fallbacks: "+formatLabelCounts(total.fallbacks))
 	}
-	lines = append(lines, "reduction: "+formatReduction(total.candidates, total.reaching), "", "reaching targets per route")
+	lines = append(lines,
+		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
+		"", "reaching targets per route")
 	labels := fanOutBucketLabels()
 	rows := make([][]string, 0, len(labels))
 	for index, count := range total.fanOut {
@@ -424,6 +433,11 @@ func routeTotals(events []trace.Event) routeTotal {
 		}
 		total.fanOut[fanOutBucketIndex(len(record.ReachingTargets))]++
 		total.reaching += len(record.ReachingTargets)
+		if record.Granularity == "" {
+			continue
+		}
+		total.recorded++
+		total.recordedReaching += len(record.ReachingTargets)
 		total.candidates += record.FileCandidates
 	}
 	total.mutants = len(mutants)
@@ -462,14 +476,23 @@ func formatLabelCounts(counts []labelCount) string {
 	return strings.Join(parts, ", ")
 }
 
-// formatReduction renders what routing saved: the targets the file alone would
-// have selected against the ones the routes did. A recording that carried no
-// candidate count at all is reported as unrecorded rather than as a reduction
-// of nothing, because the field is absent from a recording made before it
-// existed and from a route that found no candidate.
-func formatReduction(candidates, reaching int) string {
-	if candidates <= 0 {
+// formatReduction renders what routing saved over the routes that recorded
+// how they were decided: the targets the file alone would have selected
+// against the ones those routes did.
+//
+// A granularity is what marks a route as carrying its routing metadata, so
+// recorded is how many routes carry any of it. On such a route an absent
+// candidate count is a count of zero, which is a file no test binary was ever
+// linked against rather than a missing measurement; on a route without a
+// granularity the metadata was never recorded at all, and nothing but that is
+// reported. A zero candidate count has no share to take, so the reduction it
+// bought is named rather than divided by nothing.
+func formatReduction(recorded, candidates, reaching int) string {
+	if recorded <= 0 {
 		return "not recorded"
+	}
+	if candidates <= 0 {
+		return fmt.Sprintf("file candidates %d -> reaching %d (nothing to reduce)", candidates, reaching)
 	}
 	return fmt.Sprintf("file candidates %d -> reaching %d (%s fewer)",
 		candidates, reaching, formatShare(int64(candidates-reaching), int64(candidates)))
