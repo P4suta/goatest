@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -120,10 +121,77 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 	input := TargetEvidence{Target: goanalysis.Target{
 		ID: "target", Name: "TestValue", Kind: goanalysis.KindTest, Package: "example.test/project", RelativeDir: ".", Path: "value_test.go", Line: 7,
 		Capabilities: []string{"db"}, Dependencies: []string{"example.test/dependency"},
-	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond}
+	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond,
+		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+			{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1},
+		}}}}
 	restored := restoreTargetEvidence(*checkpointTargetEvidence(input))
 	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind || !slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration {
 		t.Fatalf("restored target = %+v, want %+v", restored, input)
+	}
+	// Blocks are far too large to rewrite on every checkpoint, so a checkpoint
+	// carries none of them and a restored target says so with a nil Covered.
+	if restored.Covered != nil {
+		t.Fatalf("restored blocks = %+v, want none", restored.Covered)
+	}
+}
+
+func TestCollectBaselineKeepsBlocksForFreshTargetsAndNoneForResumedOnes(t *testing.T) {
+	model := baselineModel()
+	resumedTarget := baselineTestTarget("TestResumed")
+	freshTarget := baselineTestTarget("TestFresh")
+	resumed := TargetEvidence{
+		Target: resumedTarget, CoveredFiles: []string{"value.go"}, Duration: 11 * time.Millisecond,
+		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+			{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+		}}},
+	}
+	resume := &checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{{
+		ID: resumedTarget.ID, Executed: true, Target: checkpointTargetEvidence(resumed),
+		Inventory: report.TargetDisposition{
+			ID: resumedTarget.ID, Name: resumedTarget.Name, Kind: "test", Package: resumedTarget.Package, Status: "passed",
+		},
+	}}}
+	workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+		if len(command.Argv) > 0 && command.Argv[0] != "go" {
+			contents := "mode: set\n" +
+				"fixture.example/module/value.go:5.29,6.16 1 1\n" +
+				"fixture.example/module/value.go:7.3,8.4 1 0\n"
+			if err := os.WriteFile(coverageProfileArgument(command), []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return gomutants.CommandResult{Duration: 13 * time.Millisecond}, nil
+	}}
+	result, err := CollectBaseline(t.Context(), workspace, model, []BaselineTarget{
+		{Target: resumedTarget}, {Target: freshTarget},
+	}, BaselineOptions{ArtifactDirectory: t.TempDir(), Resume: resume})
+	if err != nil || len(result.Targets) != 2 {
+		t.Fatalf("CollectBaseline = (%+v, %v)", result, err)
+	}
+	for _, target := range result.Targets {
+		switch target.Target.Name {
+		case resumedTarget.Name:
+			if target.Covered != nil || !slices.Equal(target.CoveredFiles, []string{"value.go"}) {
+				t.Errorf("resumed target = %+v, want file evidence without blocks", target)
+			}
+		case freshTarget.Name:
+			want := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+				{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+			}}}
+			if !reflect.DeepEqual(target.Covered, want) {
+				t.Errorf("fresh target blocks = %+v, want %+v", target.Covered, want)
+			}
+		default:
+			t.Errorf("unexpected target %+v", target)
+		}
+	}
+	wantInstrumented := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+		{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+		{StartLine: 7, StartColumn: 3, EndLine: 8, EndColumn: 4},
+	}}}
+	if !reflect.DeepEqual(result.Instrumented, wantInstrumented) {
+		t.Fatalf("instrumented = %+v, want %+v", result.Instrumented, wantInstrumented)
 	}
 }
 
