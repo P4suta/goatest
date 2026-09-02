@@ -30,6 +30,7 @@ type coordinatorCache struct {
 	putErr            error
 	gets              []string
 	puts              []report.Report
+	putDigests        []string
 	checkpoint        checkpoint.State
 	checkpointFound   bool
 	checkpointGetErr  error
@@ -42,8 +43,9 @@ func (cache *coordinatorCache) Get(digest string) (report.Report, bool, error) {
 	return cache.getReport, cache.found, cache.getErr
 }
 
-func (cache *coordinatorCache) Put(_ string, value report.Report) error {
+func (cache *coordinatorCache) Put(digest string, value report.Report) error {
 	cache.puts = append(cache.puts, value)
+	cache.putDigests = append(cache.putDigests, digest)
 	return cache.putErr
 }
 
@@ -452,6 +454,9 @@ func TestProbePassDoesNotEnterTheCacheIdentity(t *testing.T) {
 	if probed.cache.puts[0].Snapshot != probed.digest || replayed.cache.puts[0].Snapshot != probed.digest {
 		t.Fatalf("cached under %q and %q, want the digest %q the inputs decided",
 			probed.cache.puts[0].Snapshot, replayed.cache.puts[0].Snapshot, probed.digest)
+	}
+	if !slices.Equal(probed.cache.putDigests, []string{probed.digest}) || !slices.Equal(replayed.cache.putDigests, []string{probed.digest}) {
+		t.Fatalf("cache writes keyed %v probed and %v replayed, want %q", probed.cache.putDigests, replayed.cache.putDigests, probed.digest)
 	}
 	if !slices.Equal(probed.cache.gets, replayed.cache.gets) {
 		t.Fatalf("cache lookups = %v probed and %v replayed", probed.cache.gets, replayed.cache.gets)

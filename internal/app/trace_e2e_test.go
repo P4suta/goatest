@@ -122,7 +122,8 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	}
 	// The round runs one probe pass, between preparing the catalogue and
 	// executing it.
-	if probes := slices.Index(phases, "probe"); probes < 0 || phases[probes-1] != "mutation-prepare" || phases[probes+1] != "mutation" {
+	if probes := slices.Index(phases, "probe"); probes < 1 || probes+1 >= len(phases) ||
+		phases[probes-1] != "mutation-prepare" || phases[probes+1] != "mutation" {
 		t.Errorf("probe phase sits at %d of %v", probes, phases)
 	}
 
