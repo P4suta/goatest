@@ -230,7 +230,10 @@ when it is empty.
 `granularity` is what marks a route as carrying that metadata at all. On a
 route that names one, an absent `file_candidates` means zero candidates; on a
 route that names none, the metadata was never recorded, and a reader reports
-the absence rather than a reduction of nothing.
+the absence rather than a reduction of nothing. The marker is therefore
+required beside the rest: a route carrying a `column` or a `file_candidates`
+without a `granularity` would read as metadata-free while carrying some, and
+both the schema and the trace reader reject it.
 
 The fallback ladder is three steps. A mutant whose position the engine did not
 report cannot be placed in any block, so it is routed by file with fallback

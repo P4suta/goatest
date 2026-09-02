@@ -343,7 +343,8 @@ func checkMutant(record trace.MutantRecord, fields map[string]json.RawMessage) e
 }
 
 func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) error {
-	if _, err := requiredFields(fields, "route", "path", "reason"); err != nil {
+	inner, err := requiredFields(fields, "route", "path", "reason")
+	if err != nil {
 		return err
 	}
 	if record.Reason != trace.ReasonCoverageReaching && record.Reason != trace.ReasonUnreached {
@@ -376,7 +377,21 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	if err := checkNotNegative("route.column", int64(record.Column)); err != nil {
 		return err
 	}
-	return checkNotNegative("route.file_candidates", int64(record.FileCandidates))
+	if err := checkNotNegative("route.file_candidates", int64(record.FileCandidates)); err != nil {
+		return err
+	}
+	// The granularity is what marks a route as carrying its routing metadata,
+	// so a column or a candidate count without one is a route the summary
+	// would read as metadata-free while it carries some. Presence is what
+	// matters, not the value: a recorded zero is metadata too.
+	if record.Granularity == "" {
+		for _, field := range []string{"column", "file_candidates"} {
+			if _, present := inner[field]; present {
+				return fmt.Errorf("route %s recorded without a granularity: the granularity is what marks a route as carrying its routing metadata", field)
+			}
+		}
+	}
+	return nil
 }
 
 func checkProgress(record trace.ProgressRecord, fields map[string]json.RawMessage) error {

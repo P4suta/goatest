@@ -200,12 +200,23 @@
           "minimum": 0
         }
       },
-      "if": { "required": ["fallback"] },
-      "then": {
-        "description": "A fallback is why a decision by block dropped back to the file, so the route that records one was decided by file.",
-        "required": ["granularity"],
-        "properties": { "granularity": { "const": "file" } }
-      }
+      "allOf": [
+        {
+          "if": { "required": ["fallback"] },
+          "then": {
+            "description": "A fallback is why a decision by block dropped back to the file, so the route that records one was decided by file.",
+            "required": ["granularity"],
+            "properties": { "granularity": { "const": "file" } }
+          }
+        },
+        {
+          "if": { "anyOf": [{ "required": ["column"] }, { "required": ["file_candidates"] }] },
+          "then": {
+            "description": "The granularity is what marks a route as carrying its routing metadata, so a route carrying any of it names one.",
+            "required": ["granularity"]
+          }
+        }
+      ]
     },
     "progress": {
       "description": "A progress note forwarded from the run.",
