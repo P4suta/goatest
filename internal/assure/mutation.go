@@ -62,7 +62,7 @@ const (
 	mutationSurvivedSummary         = "all reaching tests passed with this mutation active"
 	mutationFullyDischargedSummary  = "no reaching test was run: every one was discharged because none takes the branch this mutation narrows"
 	mutationPartlyDischargedSummary = mutationSurvivedSummary +
-		"; %d more were discharged without running because none takes the branch this mutation narrows"
+		"; %d more discharged without running because none takes the branch this mutation narrows"
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used

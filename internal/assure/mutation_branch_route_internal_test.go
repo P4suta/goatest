@@ -325,7 +325,7 @@ func TestEvaluateMutationsRunsOnlyTheTargetsAProofLeavesAndCountsTheRest(t *test
 	if !slices.Equal(ran, []string{"-test.run=^TestTakesIt$"}) {
 		t.Fatalf("executions = %v, want only the target the proof left", ran)
 	}
-	wantSummary := "all reaching tests passed with this mutation active; 1 more were discharged without running because none takes the branch this mutation narrows"
+	wantSummary := "all reaching tests passed with this mutation active; 1 more discharged without running because none takes the branch this mutation narrows"
 	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "surviving-mutant" ||
 		evaluation.Findings[0].Summary != wantSummary {
 		t.Fatalf("evaluation = %+v, want one surviving-mutant finding summarised %q", evaluation, wantSummary)
