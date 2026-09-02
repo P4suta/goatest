@@ -239,6 +239,8 @@ keeps a mutant to the coverage blocks containing its position, and the
 branch-never-taken proof behind it — and the invariant
 every layer has to satisfy is that it drops no killer: for each mutant a target
 actually killed, the narrowed rule must still route that mutant to that target.
+Why every speed-up is such a layer, and why a budget never is, is
+[ADR 0004](adr/0004-proof-layers-not-budgets.md).
 The rule is reimplemented from the recording and the coverage profiles of the
 run's temporary directory rather than called out of `internal/assure`, because
 an audit that asked the code under audit whether it was right would only prove
