@@ -49,6 +49,15 @@ const (
 	FallbackOutsideBlocks   = "outside-blocks"
 )
 
+// Discharge reasons name the proof that removed a target from a reaching set.
+// A target whose coverage reaches the mutated position through a branch it
+// never takes cannot observe the mutation, so the proof discharges it instead
+// of the run executing it. Only the reasons a proof produces are named here;
+// the rest arrive with their producers.
+const (
+	DischargeBranchNeverTaken = "branch-never-taken"
+)
+
 // Event is one line of a trace. Its JSON field order is part of the contract
 // consumers read, so the declaration order below is the wire order: the
 // identity of the event first, then the single payload it carries.
@@ -131,18 +140,34 @@ type MutantRecord struct {
 // on a route that names none, the metadata was never recorded. A Fallback is
 // why a decision by block dropped back to the file, so a route carrying one is
 // a route of GranularityFile.
+//
+// Discharged is the other half of the reaching measurement: on a route of
+// GranularityBlock, ReachingTargets together with the targets of Discharged
+// are the targets whose covered blocks contain the mutated position. A proof
+// removed the discharged ones, so a discharged target never appears in
+// ReachingTargets as well.
 type RouteRecord struct {
-	MutantID        string   `json:"mutant_id,omitempty"`
-	Rule            string   `json:"rule,omitempty"`
-	Path            string   `json:"path"`
-	Line            int      `json:"line,omitempty"`
-	Column          int      `json:"column,omitempty"`
-	ReachingTargets []string `json:"reaching_targets,omitempty"`
-	Plan            []string `json:"plan,omitempty"`
-	Reason          string   `json:"reason"`
-	Granularity     string   `json:"granularity,omitempty"`
-	Fallback        string   `json:"fallback,omitempty"`
-	FileCandidates  int      `json:"file_candidates,omitempty"`
+	MutantID        string      `json:"mutant_id,omitempty"`
+	Rule            string      `json:"rule,omitempty"`
+	Path            string      `json:"path"`
+	Line            int         `json:"line,omitempty"`
+	Column          int         `json:"column,omitempty"`
+	ReachingTargets []string    `json:"reaching_targets,omitempty"`
+	Plan            []string    `json:"plan,omitempty"`
+	Reason          string      `json:"reason"`
+	Granularity     string      `json:"granularity,omitempty"`
+	Fallback        string      `json:"fallback,omitempty"`
+	FileCandidates  int         `json:"file_candidates,omitempty"`
+	Discharged      []Discharge `json:"discharged,omitempty"`
+}
+
+// Discharge is one target a proof removed from a reaching set, and the proof
+// that removed it. Discharging a target is a claim that executing it would
+// prove nothing about the mutant, so the trace records which proof made the
+// claim rather than the removal alone.
+type Discharge struct {
+	Target string `json:"target"`
+	Reason string `json:"reason"`
 }
 
 // ProgressRecord carries a human readable progress note forwarded from the run.

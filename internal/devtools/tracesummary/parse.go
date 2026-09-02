@@ -371,6 +371,9 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 		return fmt.Errorf("route fallback %q on granularity %q, want granularity %q: a fallback is what dropped the route to the file",
 			record.Fallback, record.Granularity, trace.GranularityFile)
 	}
+	if err := checkDischarges(record); err != nil {
+		return err
+	}
 	if err := checkNotNegative("route.line", int64(record.Line)); err != nil {
 		return err
 	}
@@ -385,11 +388,47 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	// would read as metadata-free while it carries some. Presence is what
 	// matters, not the value: a recorded zero is metadata too.
 	if record.Granularity == "" {
-		for _, field := range []string{"column", "file_candidates"} {
+		for _, field := range []string{"column", "file_candidates", "discharged"} {
 			if _, present := inner[field]; present {
 				return fmt.Errorf("route %s recorded without a granularity: the granularity is what marks a route as carrying its routing metadata", field)
 			}
 		}
+	}
+	return nil
+}
+
+// checkDischarges holds the proofs that removed a target from a reaching set to
+// the vocabulary the contract names, and to the accounting behind it: a
+// discharge names one target and the proof that removed it, a discharged
+// target is one the route no longer reaches, so a route naming the same target
+// on both sides contradicts itself, and a proof removes a target once, so a
+// route naming the same target twice would be counted twice.
+func checkDischarges(record trace.RouteRecord) error {
+	if len(record.Discharged) == 0 {
+		return nil
+	}
+	reaching := make(map[string]struct{}, len(record.ReachingTargets))
+	for _, target := range record.ReachingTargets {
+		reaching[target] = struct{}{}
+	}
+	discharged := make(map[string]struct{}, len(record.Discharged))
+	for _, discharge := range record.Discharged {
+		if err := checkNotEmpty("route.discharged.target", discharge.Target); err != nil {
+			return err
+		}
+		if discharge.Reason != trace.DischargeBranchNeverTaken {
+			return fmt.Errorf("unknown route discharge reason %q, want %q",
+				discharge.Reason, trace.DischargeBranchNeverTaken)
+		}
+		if _, reached := reaching[discharge.Target]; reached {
+			return fmt.Errorf("route discharged %q and reaches it: a discharged target is one the route no longer reaches",
+				discharge.Target)
+		}
+		if _, seen := discharged[discharge.Target]; seen {
+			return fmt.Errorf("route discharged %q twice: a proof removes a target once",
+				discharge.Target)
+		}
+		discharged[discharge.Target] = struct{}{}
 	}
 	return nil
 }

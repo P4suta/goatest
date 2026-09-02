@@ -198,6 +198,20 @@
           "description": "How many targets cover the mutated file at all, which is the reaching set the file alone would have selected. Absent on a route carrying a granularity means no candidate at all.",
           "type": "integer",
           "minimum": 0
+        },
+        "discharged": {
+          "description": "The targets a proof removed from the reaching set, each with the proof that removed it. On a route decided by block, reaching_targets and these together are the targets whose covered blocks contain the mutated position, so a discharged target is never among the reaching ones, and a proof removes a target once, so no target is discharged twice.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target", "reason"],
+            "properties": {
+              "target": { "type": "string", "minLength": 1 },
+              "reason": { "enum": ["branch-never-taken"] }
+            }
+          }
         }
       },
       "allOf": [
@@ -210,7 +224,13 @@
           }
         },
         {
-          "if": { "anyOf": [{ "required": ["column"] }, { "required": ["file_candidates"] }] },
+          "if": {
+            "anyOf": [
+              { "required": ["column"] },
+              { "required": ["file_candidates"] },
+              { "required": ["discharged"] }
+            ]
+          },
           "then": {
             "description": "The granularity is what marks a route as carrying its routing metadata, so a route carrying any of it names one.",
             "required": ["granularity"]

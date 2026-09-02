@@ -333,6 +333,12 @@ type routeTotal struct {
 	reasons       []labelCount
 	granularities []labelCount
 	fallbacks     []labelCount
+	// discharges tallies the targets a proof removed from a reaching set by
+	// the proof that removed them, and dischargedRoutes counts the routes that
+	// carry at least one. A target is discharged once, so the tally counts
+	// targets while the count beside it counts routes.
+	discharges       []labelCount
+	dischargedRoutes int
 	// fanOut counts the routes by how many targets they reached, one entry
 	// per bucket of fanOutBucketLabels.
 	fanOut []int
@@ -393,6 +399,14 @@ func routingBlock(events []trace.Event) []string {
 	if countedLabels(total.fallbacks) > 0 {
 		lines = append(lines, "fallbacks: "+formatLabelCounts(total.fallbacks))
 	}
+	// A recording no proof discharged a target in renders as it did before the
+	// proofs existed, so the line is absent rather than a tally of zeroes.
+	if discharged := countedLabels(total.discharges); discharged > 0 {
+		lines = append(lines, fmt.Sprintf("discharged: %s across %s (%s)",
+			plural(discharged, "target", "targets"),
+			plural(total.dischargedRoutes, "route", "routes"),
+			formatLabelCounts(total.discharges)))
+	}
 	lines = append(lines,
 		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
 		"", "reaching targets per route")
@@ -413,6 +427,7 @@ func routeTotals(events []trace.Event) routeTotal {
 	reasons := make(map[string]int)
 	granularities := make(map[string]int)
 	fallbacks := make(map[string]int)
+	discharges := make(map[string]int)
 	mutants := make(map[string]struct{})
 	total := routeTotal{fanOut: make([]int, len(fanOutBucketLabels()))}
 	for _, event := range events {
@@ -433,6 +448,12 @@ func routeTotals(events []trace.Event) routeTotal {
 		}
 		total.fanOut[fanOutBucketIndex(len(record.ReachingTargets))]++
 		total.reaching += len(record.ReachingTargets)
+		if len(record.Discharged) > 0 {
+			total.dischargedRoutes++
+		}
+		for _, discharge := range record.Discharged {
+			discharges[discharge.Reason]++
+		}
 		if record.Granularity == "" {
 			continue
 		}
@@ -444,6 +465,7 @@ func routeTotals(events []trace.Event) routeTotal {
 	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonUnreached)
 	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile, unrecorded)
 	total.fallbacks = tally(fallbacks, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
+	total.discharges = tally(discharges, trace.DischargeBranchNeverTaken)
 	return total
 }
 

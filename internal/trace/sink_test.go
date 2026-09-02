@@ -724,6 +724,8 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 		ReachingTargets: []string{"TestRun"},
 		Plan:            []string{"TestRun"},
 		Reason:          trace.ReasonCoverageReaching,
+		Granularity:     trace.GranularityBlock,
+		Discharged:      []trace.Discharge{{Target: "TestSkipped", Reason: trace.DischargeBranchNeverTaken}},
 	}
 	execEvent := trace.Event{Seq: 1, Type: trace.TypeExec, Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"), Exec: exec}
 	routeEvent := trace.Event{Seq: 2, Type: trace.TypeRoute, Timestamp: traceOrigin.Format("2006-01-02T15:04:05Z07:00"), Route: route}
@@ -741,6 +743,7 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	exec.Output[0] = 'X'
 	exec.ExitCode = 137
 	route.Plan[0] = "TestSomethingElse"
+	route.Discharged[0].Target = "TestSomethingElse"
 	route.Reason = trace.ReasonUnreached
 
 	kept := sink.Events()
@@ -752,6 +755,9 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	}
 	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonCoverageReaching {
 		t.Fatalf("a caller amended the route record the sink kept: %+v", kept[1].Route)
+	}
+	if kept[1].Route.Discharged[0].Target != "TestSkipped" {
+		t.Fatalf("a caller amended the discharges the sink kept: %+v", kept[1].Route.Discharged)
 	}
 
 	// The snapshot is the caller's own, down to the payload it points at.
