@@ -566,6 +566,31 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{"m-0001"}},
 		},
 		{
+			// An empty list is still the claim that the execution measured
+			// something and found nothing, and only a measured execution
+			// makes it.
+			name: "an empty infection list beside an execution that measured none",
+			record: map[string]any{"target": "TestRun", "exit_code": 1,
+				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{}},
+		},
+		{
+			// An execution either reached an outcome or was stopped by an
+			// error; a record saying neither describes no execution, and one
+			// saying both would be read as an error by one reader and as a
+			// measurement by another.
+			name:   "an execution with neither an outcome nor an error",
+			record: map[string]any{"target": "TestRun", "exit_code": 0},
+		},
+		{
+			name: "an execution with both an outcome and an error",
+			record: map[string]any{"target": "TestRun", "exit_code": 0,
+				"outcome": trace.ProbeOutcomeMeasured, "error": "goatest: probe tree unavailable"},
+		},
+		{
+			name:   "an execution carrying an empty error",
+			record: map[string]any{"target": "TestRun", "exit_code": -1, "error": ""},
+		},
+		{
 			name: "a measured execution and the mutants it infected",
 			record: map[string]any{"target": "TestRun", "exit_code": 0,
 				"outcome": trace.ProbeOutcomeMeasured, "infected": []any{"m-0001", "m-0002"}},

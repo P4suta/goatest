@@ -494,6 +494,30 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
 		},
 		{
+			// An empty list is the claim that the execution measured and found
+			// nothing, which an execution that measured none cannot make; the
+			// schema rejects the field wherever it appears beside another
+			// outcome, and so does the reader.
+			name:   "probe with an empty infection list beside an execution that measured none",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":1,"outcome":"test-failed","infected":[]}}`),
+			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
+		},
+		{
+			name:   "probe with neither an outcome nor an error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0}}`),
+			want:   []string{"line 2", "neither an outcome nor an error"},
+		},
+		{
+			name:   "probe with both an outcome and an error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"outcome":"measured","error":"goatest: probe tree unavailable"}}`),
+			want:   []string{"line 2", "both an outcome and an error"},
+		},
+		{
+			name:   "probe with an empty error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":-1,"error":""}}`),
+			want:   []string{"line 2", "probe.error"},
+		},
+		{
 			name:   "probe payload on a mutant execution",
 			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":{"id":"m-0001"},"probe":{"target":"TestRun","exit_code":0}}`),
 			want:   []string{"line 2", "probe"},
