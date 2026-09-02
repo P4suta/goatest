@@ -186,6 +186,37 @@ func TestParseCoverageReportsAMalformedSpan(t *testing.T) {
 	}
 }
 
+func TestParseCoverageRejectsASpanThatIsNotAHalfOpenBlock(t *testing.T) {
+	t.Parallel()
+	for _, span := range []string{
+		"0.1,2.2", "1.0,2.2", "1.1,0.2", "1.1,2.0", "-1.1,2.2", "1.-1,2.2", // coordinates are 1-based
+		"3.4,3.4", "3.4,3.3", "3.4,2.9", // the end must follow the start, or the block is empty
+	} {
+		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
+		coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
+		const want = "goatest: malformed coverage span on line 2"
+		if err == nil || err.Error() != want {
+			t.Errorf("ParseCoverage(%q) error = %v, want %q", span, err, want)
+		}
+		if coverage.Covered != nil || coverage.Instrumented != nil {
+			t.Errorf("ParseCoverage(%q) = %+v, want no coverage", span, coverage)
+		}
+	}
+}
+
+func TestParseCoverageAcceptsABlockThatEndsOnALaterLineAtAnEarlierColumn(t *testing.T) {
+	t.Parallel()
+	profile := []byte("mode: set\nexample.com/sample/a.go:5.29,6.2 1 1\n")
+	coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
+	if err != nil {
+		t.Fatalf("ParseCoverage() error = %v", err)
+	}
+	want := []gotest.CoverageBlock{{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 2}}
+	if len(coverage.Covered) != 1 || !reflect.DeepEqual(coverage.Covered[0].Blocks, want) {
+		t.Fatalf("ParseCoverage().Covered = %+v, want one file with blocks %+v", coverage.Covered, want)
+	}
+}
+
 func TestCoverageBlockContainsIsHalfOpen(t *testing.T) {
 	t.Parallel()
 	block := gotest.CoverageBlock{StartLine: 7, StartColumn: 5, EndLine: 9, EndColumn: 3}
