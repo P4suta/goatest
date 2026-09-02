@@ -378,3 +378,97 @@ func TestCoverageFilesIsTheCoveredPathsOfParseCoverage(t *testing.T) {
 		t.Fatalf("CoveredPaths of nothing = %#v, want an empty non-nil slice", paths)
 	}
 }
+
+// guardedBodySpan is the span a branch proof reports for the body of
+//
+//	3	func clamp(value, limit int) int {
+//	4		if value <= limit {
+//	5			return value
+//	6		}
+//	7		return limit
+//	8	}
+//
+// which opens at the brace on 4.12 and closes at the brace on 6.2. The blocks
+// the tests below place inside and outside it are the ones cmd/cover records
+// around that body: Go 1.26 begins the body's block at the opening brace and
+// the block after it one column past the closing brace, Go 1.27 begins the
+// body's block at its first statement and the block after it at the statement
+// that follows the body.
+func guardedBodySpan() gotest.CoverageSpan {
+	return gotest.CoverageSpan{StartLine: 4, StartColumn: 12, EndLine: 6, EndColumn: 2}
+}
+
+func TestFileCoverageStartsWithinAsksOnlyWhereABlockBegins(t *testing.T) {
+	t.Parallel()
+	sameLine := gotest.CoverageSpan{StartLine: 4, StartColumn: 12, EndLine: 4, EndColumn: 30}
+	for _, test := range []struct {
+		name  string
+		span  gotest.CoverageSpan
+		block gotest.CoverageBlock
+		want  bool
+	}{
+		{name: "at the opening brace", block: gotest.CoverageBlock{StartLine: 4, StartColumn: 12, EndLine: 6, EndColumn: 3}, want: true},
+		{name: "at the first statement", block: gotest.CoverageBlock{StartLine: 5, StartColumn: 3, EndLine: 6, EndColumn: 1}, want: true},
+		{name: "before the span but ending inside it", block: gotest.CoverageBlock{StartLine: 3, StartColumn: 34, EndLine: 5, EndColumn: 10}},
+		{name: "one column before the opening brace", block: gotest.CoverageBlock{StartLine: 4, StartColumn: 11, EndLine: 6, EndColumn: 3}},
+		{name: "at the closing brace", block: gotest.CoverageBlock{StartLine: 6, StartColumn: 2, EndLine: 7, EndColumn: 14}, want: true},
+		{name: "one column past the closing brace", block: gotest.CoverageBlock{StartLine: 6, StartColumn: 3, EndLine: 7, EndColumn: 14}},
+		{name: "on a line after the span", block: gotest.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 7, EndColumn: 14}},
+		{name: "on a line before the span", block: gotest.CoverageBlock{StartLine: 3, StartColumn: 34, EndLine: 4, EndColumn: 12}},
+		{name: "same line, at the start", span: sameLine, block: gotest.CoverageBlock{StartLine: 4, StartColumn: 12, EndLine: 4, EndColumn: 20}, want: true},
+		{name: "same line, at the end", span: sameLine, block: gotest.CoverageBlock{StartLine: 4, StartColumn: 30, EndLine: 5, EndColumn: 3}, want: true},
+		{name: "same line, one column past the end", span: sameLine, block: gotest.CoverageBlock{StartLine: 4, StartColumn: 31, EndLine: 5, EndColumn: 3}},
+		{name: "same line, one column before the start", span: sameLine, block: gotest.CoverageBlock{StartLine: 4, StartColumn: 11, EndLine: 4, EndColumn: 20}},
+		{
+			name:  "an end that precedes its start",
+			span:  gotest.CoverageSpan{StartLine: 6, StartColumn: 2, EndLine: 4, EndColumn: 12},
+			block: gotest.CoverageBlock{StartLine: 5, StartColumn: 3, EndLine: 6, EndColumn: 1},
+		},
+		{
+			name:  "an end that precedes its start on one line",
+			span:  gotest.CoverageSpan{StartLine: 4, StartColumn: 30, EndLine: 4, EndColumn: 12},
+			block: gotest.CoverageBlock{StartLine: 4, StartColumn: 20, EndLine: 4, EndColumn: 25},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			span := test.span
+			if span == (gotest.CoverageSpan{}) {
+				span = guardedBodySpan()
+			}
+			file := gotest.FileCoverage{Path: "value.go", Blocks: []gotest.CoverageBlock{test.block}}
+			if got := file.StartsWithin(span); got != test.want {
+				t.Fatalf("FileCoverage{%+v}.StartsWithin(%+v) = %t, want %t", test.block, span, got, test.want)
+			}
+		})
+	}
+}
+
+func TestFileCoverageStartsWithinReadsEveryBlockAndHoldsNothingWhenEmpty(t *testing.T) {
+	t.Parallel()
+	span := guardedBodySpan()
+	for _, blocks := range [][]gotest.CoverageBlock{
+		{ // as Go 1.26 records the header, the body, and the statement after it
+			{StartLine: 3, StartColumn: 34, EndLine: 4, EndColumn: 12},
+			{StartLine: 4, StartColumn: 12, EndLine: 6, EndColumn: 3},
+			{StartLine: 6, StartColumn: 3, EndLine: 7, EndColumn: 14},
+		},
+		{ // and as Go 1.27 records the same three
+			{StartLine: 4, StartColumn: 2, EndLine: 4, EndColumn: 12},
+			{StartLine: 5, StartColumn: 3, EndLine: 6, EndColumn: 1},
+			{StartLine: 7, StartColumn: 2, EndLine: 7, EndColumn: 14},
+		},
+	} {
+		ran := gotest.FileCoverage{Path: "value.go", Blocks: blocks}
+		if !ran.StartsWithin(span) {
+			t.Errorf("%+v begins no block inside %+v", ran, span)
+		}
+		skipped := gotest.FileCoverage{Path: "value.go", Blocks: []gotest.CoverageBlock{blocks[0], blocks[2]}}
+		if skipped.StartsWithin(span) {
+			t.Errorf("%+v begins a block inside %+v without running the body", skipped, span)
+		}
+	}
+	if (gotest.FileCoverage{}).StartsWithin(span) {
+		t.Error("a file with no blocks begins one inside a span")
+	}
+}

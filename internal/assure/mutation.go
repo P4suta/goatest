@@ -53,6 +53,18 @@ const (
 	mutationPlanPackageSuite = "package-suite"
 )
 
+// The summaries a surviving mutant is reported through: the one a run reached
+// by executing every test that could observe the mutation, the one a branch
+// proof answered for entirely, and the one a proof answered part of. A
+// discharge is a test that was not run, so a summary that named none of them
+// would describe a suite that never ran them at all.
+const (
+	mutationSurvivedSummary         = "all reaching tests passed with this mutation active"
+	mutationFullyDischargedSummary  = "no reaching test was run: every one was discharged because none takes the branch this mutation narrows"
+	mutationPartlyDischargedSummary = mutationSurvivedSummary +
+		"; %d more discharged without running because none takes the branch this mutation narrows"
+)
+
 // MutationSession is the narrow reusable part of the go-mutants bridge used
 // by the assurance evaluator. Exec must permit concurrent calls, matching the
 // go-mutants Session contract. The interface also keeps scheduler tests free
@@ -244,7 +256,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
-		unit.addFinding(seed.mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		unit.addFinding(seed.mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
 		evaluation.append(unit)
 		checkpointMutation(options, seed.mutant.ID, unit)
 	}
@@ -409,8 +421,12 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 }
 
 type mutationSeed struct {
-	mutant     gomutants.Mutant
-	reaching   []TargetEvidence
+	mutant   gomutants.Mutant
+	reaching []TargetEvidence
+	// discharged counts the reaching targets a proof removed before anything
+	// ran. The serial fuzz pass reports the survivors it settles, and it has
+	// only the seed to report them from.
+	discharged int
 	evaluation MutationEvaluation
 	resolved   bool
 	err        error
@@ -466,7 +482,17 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
-	seed := mutationSeed{mutant: mutant, reaching: route.reaching}
+	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: len(route.discharged)}
+	if len(seed.reaching) == 0 && len(route.discharged) > 0 {
+		// Coverage reached this mutation and a proof answered for every target
+		// that did: nothing is left that could observe it, and running the
+		// package suite would only run those same discharged tests again. That
+		// no test takes the branch the mutation narrows is the finding.
+		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
+		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationFullyDischargedSummary, options.Accepted)
+		seed.resolved = true
+		return seed
+	}
 	if len(seed.reaching) == 0 {
 		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
 		request := gomutants.ExecRequest{
@@ -549,10 +575,21 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	// the serial pass would mean the survivors — the mutants that cost the
 	// most to execute again — are exactly the results a dying run loses.
 	if !reachedByFuzz(seed.reaching) {
-		seed.evaluation.addFinding(mutant, "surviving-mutant", "all reaching tests passed with this mutation active", options.Accepted)
+		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
 		seed.resolved = true
 	}
 	return seed
+}
+
+// mutationSurvivalSummary describes a mutant every test that could observe it
+// passed on. The discharged tests are counted in the summary because a reader
+// comparing the finding against the coverage of the file would otherwise go
+// looking for the tests that never ran.
+func mutationSurvivalSummary(discharged int) string {
+	if discharged == 0 {
+		return mutationSurvivedSummary
+	}
+	return fmt.Sprintf(mutationPartlyDischargedSummary, discharged)
 }
 
 // reachedByFuzz reports whether any target that reaches a mutant can fuzz it,
@@ -706,7 +743,10 @@ func batchMutationPlan(targets []TargetEvidence) string {
 // coverage proves reach it, the evidence that decided them, the executions
 // that routing planned for them, and the reason the plan is what it is. A
 // mutant no target reaches has no coverage to route by and is left to its
-// package suite.
+// package suite, and a mutant whose reaching targets a proof discharged has
+// coverage that reaches it and nothing left to run: its plan is empty rather
+// than the package suite, because the suite would run the very tests the proof
+// just ruled out.
 //
 // The reaching targets are named in the order they will be executed, which is
 // cheapest first, and the plan follows the same order: the individual runs,
@@ -717,13 +757,17 @@ func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions 
 	record := trace.RouteRecord{
 		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path,
 		Line: max(mutant.Line, 0), Column: max(mutant.Column, 0),
-		Plan: []string{mutationPlanPackageSuite}, Reason: trace.ReasonUnreached,
+		Reason:      trace.ReasonCoverageReaching,
 		Granularity: route.granularity, Fallback: route.fallback, FileCandidates: route.fileCandidates,
+		Discharged: route.discharged,
+	}
+	if len(route.reaching) == 0 && len(route.discharged) == 0 {
+		record.Plan, record.Reason = []string{mutationPlanPackageSuite}, trace.ReasonUnreached
+		return record
 	}
 	if len(route.reaching) == 0 {
 		return record
 	}
-	record.Reason = trace.ReasonCoverageReaching
 	record.ReachingTargets = make([]string, len(route.reaching))
 	for index, target := range route.reaching {
 		record.ReachingTargets[index] = target.Target.ID
@@ -754,6 +798,7 @@ func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
 // decides what runs.
 type mutationRoute struct {
 	reaching       []TargetEvidence
+	discharged     []trace.Discharge
 	granularity    string
 	fallback       string
 	fileCandidates int
@@ -773,6 +818,9 @@ type mutationRoute struct {
 // A position that instrumentation does describe and no target ran reaches
 // nobody. That is not a fallback but the answer: the mutation lives in code
 // the measured targets never execute, and the package suite settles it.
+//
+// A reaching set decided by block is then narrowed once more, by the proof the
+// engine may attach to the mutation itself: see dischargeNarrowedBranch.
 func routeMutant(mutant gomutants.Mutant, targets []TargetEvidence, instrumented []goanalysis.FileCoverage) mutationRoute {
 	path := filepath.ToSlash(mutant.Path)
 	candidates := make([]TargetEvidence, 0, len(targets))
@@ -795,9 +843,82 @@ func routeMutant(mutant gomutants.Mutant, targets []TargetEvidence, instrumented
 			reaching = append(reaching, target)
 		}
 	}
+	kept, discharged := dischargeNarrowedBranch(mutant, orderReachingTargets(reaching), blocks, path)
 	return mutationRoute{
-		reaching: orderReachingTargets(reaching), granularity: trace.GranularityBlock, fileCandidates: len(candidates),
+		reaching: kept, discharged: discharged,
+		granularity: trace.GranularityBlock, fileCandidates: len(candidates),
 	}
+}
+
+// dischargeNarrowedBranch removes the targets a branch proof shows cannot
+// observe the mutation, and names each of them with the proof that removed it.
+//
+// go-mutants attaches the proof to an edit that can only make the condition of
+// an `if` or a `for` less often true, and reports the span of the body that
+// condition gates. Write C for the original condition and C' for the mutated
+// one: C' implies C, and the whole condition is inert, so a target during which
+// no statement of the gated body ran evaluated C to false every time it was
+// evaluated, evaluated C' to false there too, took the same branch on every
+// evaluation, and therefore ran identically on both programs. Executing it
+// against the mutant would establish nothing that has not already been
+// established, so it is discharged instead of run.
+//
+// The proof is used only where it is a proof. A fuzz target explores inputs
+// beyond the corpus its coverage was measured on, so its blocks do not bound
+// what it will execute. A target restored from a checkpoint carries no blocks
+// at all, and silence is not evidence of absence. Neither is the body itself:
+// unless some instrumented block begins inside the span, the body was never
+// measured, and every target's silence about it means nothing. Everything the
+// proof does not cover is kept, which is what the run did before it existed.
+func dischargeNarrowedBranch(mutant gomutants.Mutant, reaching []TargetEvidence, instrumented goanalysis.FileCoverage, path string) ([]TargetEvidence, []trace.Discharge) {
+	span, proved := narrowedBranchSpan(mutant)
+	if !proved || !instrumented.StartsWithin(span) {
+		return reaching, nil
+	}
+	kept := make([]TargetEvidence, 0, len(reaching))
+	var discharged []trace.Discharge
+	for _, target := range reaching {
+		covered, _ := goanalysis.FindFileCoverage(target.Covered, path)
+		if target.Target.Kind == goanalysis.KindFuzz || target.Covered == nil || covered.StartsWithin(span) {
+			kept = append(kept, target)
+			continue
+		}
+		discharged = append(discharged, trace.Discharge{
+			Target: target.Target.ID, Reason: trace.DischargeBranchNeverTaken,
+		})
+	}
+	if len(discharged) == 0 {
+		return reaching, nil
+	}
+	return kept, discharged
+}
+
+// narrowedBranchSpan is the gated body of a mutant's branch proof, when the
+// proof is one routing may act on. Everything the span is claimed to be is
+// checked before anything is concluded from it, because a discharge is a
+// decision not to run a test: the coordinates are the 1-based positions of a
+// source span, the body does not end before it starts, and the edit precedes
+// the body it gates, which is what makes it the condition rather than part of
+// the body. A proof that fails any of it discharges nothing.
+func narrowedBranchSpan(mutant gomutants.Mutant) (goanalysis.CoverageSpan, bool) {
+	proof := mutant.Branch
+	if proof == nil {
+		return goanalysis.CoverageSpan{}, false
+	}
+	span := goanalysis.CoverageSpan{
+		StartLine: proof.BodyStartLine, StartColumn: proof.BodyStartColumn,
+		EndLine: proof.BodyEndLine, EndColumn: proof.BodyEndColumn,
+	}
+	if span.StartLine < 1 || span.StartColumn < 1 || span.EndLine < 1 || span.EndColumn < 1 {
+		return goanalysis.CoverageSpan{}, false
+	}
+	if span.EndLine < span.StartLine || span.EndLine == span.StartLine && span.EndColumn < span.StartColumn {
+		return goanalysis.CoverageSpan{}, false
+	}
+	if mutant.Line > span.StartLine || mutant.Line == span.StartLine && mutant.Column >= span.StartColumn {
+		return goanalysis.CoverageSpan{}, false
+	}
+	return span, true
 }
 
 // fileMutationRoute is the route taken when the blocks cannot decide: every

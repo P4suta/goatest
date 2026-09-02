@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -179,4 +180,137 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 			t.Errorf("mutant %s was routed at %d, after it ran at %d", event.Mutant.ID, sequence, event.Seq)
 		}
 	}
+}
+
+// oneRoute returns the single route a rule was recorded for, failing the test
+// when the recording holds any other number: an assertion about "the" mutant of
+// a rule is only an assertion when exactly one mutant carries it.
+func oneRoute(t *testing.T, events []trace.Event, rule string) trace.RouteRecord {
+	t.Helper()
+	var found []trace.RouteRecord
+	for _, event := range traceOfType(events, trace.TypeRoute) {
+		if event.Route.Rule == rule {
+			found = append(found, *event.Route)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("the recording holds %d routes for %s, want one: %+v", len(found), rule, found)
+	}
+	return found[0]
+}
+
+// mutantArguments returns the arguments every recorded execution of one mutant
+// ran with, one entry per execution.
+func mutantArguments(events []trace.Event, id string) []string {
+	var arguments []string
+	for _, event := range traceOfType(events, trace.TypeMutantExec) {
+		if event.Mutant.ID == id {
+			arguments = append(arguments, strings.Join(event.Mutant.Args, " "))
+		}
+	}
+	return arguments
+}
+
+// TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch pins the proof
+// layer against a real run: the tests a branch proof shows cannot observe a
+// mutation are named in the route and never executed, the test that can observe
+// it still is and still kills it, and a mutation every reaching test was
+// discharged for is reported as a survivor without a single execution.
+func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T) {
+	t.Parallel()
+	repository := testkit.NewRepo(t).NarrowedBranchFixture().Git()
+	directory := filepath.Join(t.TempDir(), "trace")
+	service := app.Service{
+		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
+		Environment: os.Environ(),
+	}
+	var stdout, stderr bytes.Buffer
+	// The fixture leaves a mutation no test can observe alive on purpose, so the
+	// run is insufficient rather than assured.
+	exit := cli.Run(t.Context(), []string{"verify", "--json", "--trace=" + directory}, &stdout, &stderr, service)
+	if exit != cli.ExitInsufficient {
+		t.Fatalf("verify exit = %d\nstdout: %s\nstderr: %s", exit, stdout.String(), stderr.String())
+	}
+	var result report.Report
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	recording := traceRun(t, directory)
+	validateTraceStream(t, recording)
+	events := readTrace(t, recording)
+
+	identified := make(map[string]string, len(result.Targets))
+	for _, target := range result.Targets {
+		identified[target.Name] = target.ID
+	}
+
+	// The clamp's equal case enters the guarded body and the case above the
+	// limit does not, so the proof discharges that one alone.
+	clamp := oneRoute(t, events, "le-to-lt")
+	if clamp.Reason != trace.ReasonCoverageReaching || clamp.Granularity != trace.GranularityBlock {
+		t.Fatalf("clamp route = %+v, want a route decided by coverage blocks", clamp)
+	}
+	wantDischarged := []trace.Discharge{{Target: identified["TestClampAbove"], Reason: trace.DischargeBranchNeverTaken}}
+	if !reflect.DeepEqual(clamp.Discharged, wantDischarged) {
+		t.Fatalf("clamp route discharged %+v, want %+v", clamp.Discharged, wantDischarged)
+	}
+	wantReaching := []string{identified["TestClampAtLimit"], identified["TestClampBelow"]}
+	slices.Sort(wantReaching)
+	if reaching := slices.Sorted(slices.Values(clamp.ReachingTargets)); !slices.Equal(reaching, wantReaching) {
+		t.Fatalf("clamp route reaches %v, want %v", reaching, wantReaching)
+	}
+	for _, arguments := range mutantArguments(events, clamp.MutantID) {
+		if strings.Contains(arguments, "TestClampAbove") {
+			t.Errorf("the discharged target ran anyway: %s", arguments)
+		}
+	}
+	if status := mutantStatus(t, result, clamp.MutantID); status != report.MutantKilled {
+		t.Fatalf("clamp mutant %s = %s, want it killed by the test the proof kept", clamp.MutantID, status)
+	}
+
+	// The loader's only test never produces an error, so every test the blocks
+	// route to the guarded body is discharged and nothing is left to run.
+	load := oneRoute(t, events, "nil-error-branch")
+	if load.Reason != trace.ReasonCoverageReaching || load.Granularity != trace.GranularityBlock ||
+		len(load.ReachingTargets) != 0 || len(load.Plan) != 0 {
+		t.Fatalf("load route = %+v, want a coverage-reaching route with nothing left to run", load)
+	}
+	wantDischarged = []trace.Discharge{{Target: identified["TestLoad"], Reason: trace.DischargeBranchNeverTaken}}
+	if !reflect.DeepEqual(load.Discharged, wantDischarged) {
+		t.Fatalf("load route discharged %+v, want %+v", load.Discharged, wantDischarged)
+	}
+	if arguments := mutantArguments(events, load.MutantID); len(arguments) != 0 {
+		t.Fatalf("the fully discharged mutant ran %d times: %v", len(arguments), arguments)
+	}
+	wantSummary := "no reaching test was run: every one was discharged because none takes the branch this mutation narrows"
+	if summary := mutantFinding(t, result, load.MutantID); summary.Kind != "surviving-mutant" || summary.Summary != wantSummary {
+		t.Fatalf("load finding = %+v, want a surviving-mutant summarised %q", summary, wantSummary)
+	}
+}
+
+// mutantStatus is the inventory status one mutant was given.
+func mutantStatus(t *testing.T, result report.Report, id string) report.MutantStatus {
+	t.Helper()
+	for _, mutant := range result.Mutants {
+		if mutant.ID == id {
+			return mutant.Status
+		}
+	}
+	t.Fatalf("mutant %s is absent from the inventory", id)
+	return ""
+}
+
+// mutantFinding is the single finding one mutant was reported through.
+func mutantFinding(t *testing.T, result report.Report, id string) report.Finding {
+	t.Helper()
+	var found []report.Finding
+	for _, finding := range result.Findings {
+		if finding.MutantID == id {
+			found = append(found, finding)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("mutant %s has %d findings, want one: %+v", id, len(found), found)
+	}
+	return found[0]
 }

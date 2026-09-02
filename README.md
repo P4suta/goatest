@@ -21,7 +21,8 @@ For `standard-v1`, goatest:
    toolchain, platform, declared environment, configuration, and tool versions;
 2. classifies native `TestX`, `FuzzX`, and `ExampleX` results through
    `test2json`, including skips and setup failures;
-3. routes tests by coverage blocks and mutant spans;
+3. routes tests by coverage blocks and mutant spans, and discharges the
+   reaching tests a branch proof shows cannot observe a mutant;
 4. runs relevant race checks (reported as a static estimate in
    `standard-v1`; `deep-v1` races every package);
 5. evaluates every selected `go-mutants` mutant, with a passing original
@@ -260,7 +261,7 @@ under [`docs/`](docs/).
 Development is test-driven. The suite includes the full weak-test → survivor →
 targeted fuzz → corpus promotion → fresh-session kill flow, exact-cache and
 impact-graph cases, provider/resource failures and cleanup, deterministic
-renderers, and the external `go-mutants v0.1.2` bridge contract.
+renderers, and the external `go-mutants` bridge contract at the commit `go.mod` pins.
 
 Licensed under either [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.

@@ -50,7 +50,11 @@ const goMutantsModulePath = "github.com/P4suta/go-mutants"
 // and TestGoMutantsEvidenceVersionMatchesPinnedModule holds it there; every
 // built binary reports the version its build info actually linked instead, so
 // a shipped identity can never drift behind this constant.
-const goMutantsFallbackVersion = "v0.1.2"
+//
+// The pin is a pseudo-version of go-mutants' main branch: the branch proof
+// goatest routes by is only there, and the tagged releases sit on another
+// branch, which is why the pseudo-version reads as v0.0.0 while being ahead.
+const goMutantsFallbackVersion = "v0.0.0-20260902170940-d0cdb7ed194e"
 
 // GoMutantsVersion resolves the go-mutants version linked into this binary
 // from its build info, honoring a replace directive because the replacement

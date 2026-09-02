@@ -9,6 +9,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+    # go-mutants is pinned to a pseudo-version of its main branch, which is
+    # where the branch proof lives; its tags sit on another branch and sort
+    # above the pseudo-version, so any "update" to one would be a downgrade.
+    ignore:
+      - dependency-name: github.com/P4suta/go-mutants
     groups:
       go-modules:
         patterns: ["*"]
