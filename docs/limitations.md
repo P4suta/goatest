@@ -17,6 +17,21 @@ self-dogfood is not external compatibility evidence.
   changed non-test Go file. The pinned go-mutants API does not expose line-range
   selection, so this can over-select work but cannot omit a mutant in a selected
   changed file.
+- Mutation routing places a mutant by the start position of its mutation, so a
+  mutation spanning several lines is routed by the block that contains its
+  first byte. Where the coverage toolchain and the mutation catalog disagree
+  about a position — a `//line` directive is honoured by one and ignored by the
+  other — the position lands in no block and the mutant is routed by its whole
+  file, which is the same work routing did before blocks were read.
+- Only execution the baseline coverage profiles record can narrow routing. A
+  test that reaches code another way — re-executing the test binary as a
+  subprocess, for instance — leaves no block behind, so a mutant only that test
+  covers is treated as unreached and confirmed by its package suite rather than
+  by the test itself.
+- A baseline target restored from a checkpoint carries the files it reached but
+  not the blocks inside them, so it is routed at file granularity for the rest
+  of the run. A resumed run therefore executes at least the work a cold run
+  would, never less. See [checkpoint v1](checkpoint-v1.md).
 - `replay` currently accepts only mutation-backed findings with a recorded
   mutant identity. Other finding kinds are rejected instead of executing an
   unrelated mutation set.

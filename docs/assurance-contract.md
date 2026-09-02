@@ -36,6 +36,25 @@ race detector for every resolved package.
 Benchmarks are not part of either correctness contract. A future performance
 contract must be explicit rather than treating ordinary benchmarks as tests.
 
+## Mutation routing
+
+A mutant is run by the measured targets that reach it. Reach is decided by the
+coverage blocks of the baseline profiles and the start position — line and
+1-based byte column — the catalog reports for the mutation: a target reaches
+the mutant when one of the blocks it executed contains that position.
+
+The decision gives way to the whole file whenever the evidence cannot carry it.
+A mutant with no reported position, and a position that lies in a gap between
+the blocks the coverage toolchain cut, are both routed by every target that
+executed the file, which is what routing did before blocks were read. A target
+restored from a checkpoint carries no blocks and keeps reaching its whole file.
+
+A position that instrumentation describes and no measured target executed
+reaches nothing, and the package suite establishes its disposition, exactly as
+for a mutant in a file no target covers. Such a mutant is `unreached`, not
+`surviving`; both are `survived` in the mutant inventory, so the accounting
+equations below are unaffected by how a mutant was routed.
+
 ## Mutation confirmation
 
 A mutant is `killed` only after:

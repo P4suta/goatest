@@ -11,7 +11,7 @@ CLI/config
    ├─ top-level coverage graph ── changeset routing
    ├─ resource leases
    ├─ race checks
-   ├─ go-mutants catalog + execution + paired confirmation
+   ├─ go-mutants catalog + block-routed execution + paired confirmation
    ├─ targeted native fuzz / generation candidate validation
    └─ report v1 + exact cache/checkpoint
 ```
@@ -21,6 +21,13 @@ native targets and coverage, `internal/mutationbridge` freezes the external
 go-mutants contract, and `internal/evidence` creates content identities and the
 impact graph. Providers run as subprocesses behind strict JSON protocols; core
 contains no network client or LLM SDK.
+
+Mutation routing reads the baseline coverage at block granularity: a mutant is
+run by the targets whose executed blocks contain its start position, cheapest
+target first. A position that cannot be placed in a block widens back to every
+target that executed the file, and a position no target executed is left to its
+package suite. See [the assurance contract](assurance-contract.md) for the rule
+and [trace v1](trace-v1.md) for how each decision is recorded.
 
 Verification is read-only. A killing fuzz artifact or generated test is stored
 through `internal/repair` as an isolated candidate. The separate `fix --apply`
