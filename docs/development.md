@@ -241,12 +241,17 @@ The profiles name their files under a module path, which defaults to the
 `module` directive of `./go.mod` — the repository the tool is run from — and
 `-module` names another when the recording came from a different one. A layer is
 any rule that narrows what a mutant is executed against — the block routing that
-keeps a mutant to the coverage blocks containing its position, and the
-branch-never-taken proof behind it — and the invariant
+keeps a mutant to the coverage blocks containing its position, the
+branch-never-taken proof behind it, and the infection facts of the probe pass,
+which drop a target whose measured probe run never saw the mutant infect — and
+the invariant
 every layer has to satisfy is that it drops no killer: for each mutant a target
 actually killed, the narrowed rule must still route that mutant to that target.
 Why every speed-up is such a layer, and why a budget never is, is
 [ADR 0004](adr/0004-proof-layers-not-budgets.md).
+The `infection` layer reads the recording alone, so it is audited whenever the
+recording holds a probe pass and left out — with a line under the layer table
+saying so — whenever it holds none.
 The rule is reimplemented from the recording and the coverage profiles of the
 run's temporary directory rather than called out of `internal/assure`, because
 an audit that asked the code under audit whether it was right would only prove
