@@ -11,7 +11,8 @@ CLI/config
    ├─ top-level coverage graph ── changeset routing
    ├─ resource leases
    ├─ race checks
-   ├─ go-mutants catalog + block-routed execution + paired confirmation
+   ├─ go-mutants catalog + infection probe pass
+   ├─ block-routed mutant execution + paired confirmation
    ├─ targeted native fuzz / generation candidate validation
    └─ report v1 + exact cache/checkpoint
 ```
@@ -31,6 +32,22 @@ of a branch, the targets that never entered the body that branch gates are
 discharged from the reaching set instead of executed. See
 [the assurance contract](assurance-contract.md) for the rule
 and [trace v1](trace-v1.md) for how each decision is recorded.
+
+Between preparing the catalog and executing it, a `probe` phase measures
+infection. go-mutants builds a second instrumented tree — the program the user
+wrote, with no mutant ever active, in which each site it has a probe form for
+records without side effects whether the mutated value would have differed —
+and the pass runs each baseline test and example target against it once, at
+about the cost of one baseline. What comes back, per target, is the set of
+mutants that target made differ: a mutant a measured target left out is one
+that target can never distinguish from the original program, whatever else it
+executes. Fuzz targets are not probed, because the mutation phase fuzzes beyond
+the seed corpus a probe would measure. **This version routes nothing by it.**
+The facts are kept in memory beside the target's coverage and recorded in the
+trace so the layer can be audited offline against a full run's kills before a
+single execution is discharged by it. Replaying one mutant skips the pass
+entirely and routes as it did before the pass existed, which only executes
+more.
 
 Changeset routing reads two things about each top-level target: the files its
 baseline run covered, and the import closure its test binary links. That

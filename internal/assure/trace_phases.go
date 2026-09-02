@@ -19,6 +19,7 @@ const (
 	phaseGraph           = "graph"
 	phaseRace            = "race"
 	phaseMutationPrepare = "mutation-prepare"
+	phaseProbe           = "probe"
 	phaseMutation        = "mutation"
 	phaseRepair          = "repair"
 	phaseFinalize        = "finalize"

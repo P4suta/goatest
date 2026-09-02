@@ -66,12 +66,13 @@ const (
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
-// by the assurance evaluator. Exec must permit concurrent calls, matching the
-// go-mutants Session contract. The interface also keeps scheduler tests free
-// of subprocesses.
+// by the assurance evaluator. Exec and Probe must permit concurrent calls,
+// matching the go-mutants Session contract. The interface also keeps scheduler
+// tests free of subprocesses.
 type MutationSession interface {
 	Catalog() gomutants.Catalog
 	Exec(context.Context, gomutants.ExecRequest) (gomutants.MutantResult, error)
+	Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error)
 }
 
 // TargetEvidence is one top-level Go test/fuzz target and the source files it
@@ -81,12 +82,36 @@ type MutationSession interface {
 // lives in memory only: blocks are far too large to rewrite on every
 // checkpoint, so a target restored from a checkpoint carries nil there and
 // routing treats it as reaching everything in CoveredFiles.
+//
+// Probed reports that the probe pass measured this target. Infected is then the
+// catalogue indices of the mutants whose site the target made differ, ascending
+// and distinct, and is meaningful only when Probed is true. A target the pass
+// did not measure - it failed, timed out, was unavailable, errored, was a fuzz
+// target, was restored from a checkpoint, or the pass was not run - carries
+// Probed == false and is treated as infecting every mutant it reaches. Both
+// live in memory only, like the blocks and for the same reason: they describe
+// one execution of one run.
 type TargetEvidence struct {
 	Target       goanalysis.Target
 	CoveredFiles []string
 	Covered      []goanalysis.FileCoverage
 	Environment  []string
 	Duration     time.Duration
+	Probed       bool
+	Infected     []uint32
+}
+
+// infects reports whether this target could observe the mutant at one catalogue
+// index. A target the probe pass did not measure carries no facts and infects
+// everything it reaches, because nothing recorded what it did; a measured one
+// infects exactly the mutants it named, and a mutant it left out is one it can
+// never distinguish from the original program.
+func (evidence TargetEvidence) infects(index uint32) bool {
+	if !evidence.Probed {
+		return true
+	}
+	_, found := slices.BinarySearch(evidence.Infected, index)
+	return found
 }
 
 type MutationOptions struct {
@@ -753,13 +778,19 @@ func batchMutationPlan(targets []TargetEvidence) string {
 // the batches of related targets behind them, and the fuzzing that a
 // surviving mutant falls through to last. The position is clamped because a
 // trace records a position or nothing, never a negative one.
+//
+// The probe flag is the engine's, not routing's: it says the probe tree carries
+// a form of this mutant, so a measured target that does not name it never made
+// its site differ. Routing does not act on it yet, and an audit reading the
+// recording needs it to tell that absence from the absence of a mutant no
+// measurement could ever name.
 func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions []mutationSeedExecution) trace.RouteRecord {
 	record := trace.RouteRecord{
 		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path,
 		Line: max(mutant.Line, 0), Column: max(mutant.Column, 0),
 		Reason:      trace.ReasonCoverageReaching,
 		Granularity: route.granularity, Fallback: route.fallback, FileCandidates: route.fileCandidates,
-		Discharged: route.discharged,
+		Discharged: route.discharged, Probed: mutant.Probed,
 	}
 	if len(route.reaching) == 0 && len(route.discharged) == 0 {
 		record.Plan, record.Reason = []string{mutationPlanPackageSuite}, trace.ReasonUnreached
@@ -953,9 +984,16 @@ func orderReachingTargets(targets []TargetEvidence) []TargetEvidence {
 func seedRequest(mutant gomutants.Mutant, target TargetEvidence, timeout time.Duration) gomutants.ExecRequest {
 	return gomutants.ExecRequest{
 		Mutant: mutant.ID, Package: target.Target.Package,
-		Args: []string{"-test.run=^" + regexp.QuoteMeta(target.Target.Name) + "$"},
+		Args: []string{targetRunArgument(target)},
 		Env:  slices.Clone(target.Environment), Timeout: timeout,
 	}
+}
+
+// targetRunArgument selects one target and nothing else. The mutation phase and
+// the probe pass share it because a measurement of a target is only a
+// measurement of that target if it ran what the mutation phase will run.
+func targetRunArgument(target TargetEvidence) string {
+	return "-test.run=^" + regexp.QuoteMeta(target.Target.Name) + "$"
 }
 
 func batchSeedRequest(mutant gomutants.Mutant, targets []TargetEvidence, timeout time.Duration) gomutants.ExecRequest {

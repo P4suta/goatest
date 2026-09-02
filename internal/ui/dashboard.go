@@ -94,6 +94,8 @@ func dashboardPhase(kind string) (string, bool) {
 		return "race", true
 	case "mutation-prepare", "mutation-target", "mutation-progress":
 		return "mutation", true
+	case "probe-target", "probe-progress", "probe-summary":
+		return "probe", true
 	case "repair-applied":
 		return "repair", true
 	default:

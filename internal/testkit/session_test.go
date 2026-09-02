@@ -165,6 +165,74 @@ func TestScriptedSessionAnswersWithAnIndependentResultCopy(t *testing.T) {
 	}
 }
 
+// TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix pins the probe half
+// of the fake: one answer per target, selected the way the probe pass selects
+// its target, and every request recorded whether or not a rule covered it.
+func TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix(t *testing.T) {
+	t.Parallel()
+	session := testkit.NewSession(catalogFixture())
+	session.OnProbe("fixture.example/assured").
+		Return(gomutants.ProbeResult{Outcome: gomutants.ProbeTestFailed, ExitCode: 1})
+	session.OnProbe("fixture.example/assured", "-test.run=^TestBoundary$").
+		Return(gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{0, 1}})
+	session.OnProbe("fixture.example/other").Do(func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, OutputTail: request.Package}, nil
+	})
+
+	measured, err := session.Probe(t.Context(), gomutants.ProbeRequest{
+		Package: "fixture.example/assured", Args: []string{"-test.run=^TestBoundary$"},
+	})
+	if err != nil || measured.Outcome != gomutants.ProbeMeasured || !slices.Equal(measured.Infected, []uint32{0, 1}) {
+		t.Fatalf("specific route = %+v, err = %v", measured, err)
+	}
+	measured.Infected[0] = 9
+	if again, _ := session.Probe(t.Context(), gomutants.ProbeRequest{
+		Package: "fixture.example/assured", Args: []string{"-test.run=^TestBoundary$"},
+	}); !slices.Equal(again.Infected, []uint32{0, 1}) {
+		t.Fatalf("Probe shares infection storage: %v", again.Infected)
+	}
+	failed, err := session.Probe(t.Context(), gomutants.ProbeRequest{
+		Package: "fixture.example/assured", Args: []string{"-test.run=^TestOther$"},
+	})
+	if err != nil || failed.Outcome != gomutants.ProbeTestFailed {
+		t.Fatalf("general route = %+v, err = %v", failed, err)
+	}
+	handled, err := session.Probe(t.Context(), gomutants.ProbeRequest{Package: "fixture.example/other"})
+	if err != nil || handled.OutputTail != "fixture.example/other" {
+		t.Fatalf("handler route = %+v, err = %v", handled, err)
+	}
+
+	// A pass nothing scripted is one no probe runtime answered: the outcome
+	// that carries no facts, rather than a measurement of nothing.
+	unscripted, err := session.Probe(t.Context(), gomutants.ProbeRequest{Package: "fixture.example/unscripted"})
+	if err != nil || unscripted.Outcome != gomutants.ProbeUnavailable || unscripted.ExitCode != 0 || unscripted.Infected != nil {
+		t.Fatalf("unscripted probe = %+v, err = %v", unscripted, err)
+	}
+	requests := session.ProbeRequests()
+	if len(requests) != 5 || requests[0].Package != "fixture.example/assured" || requests[4].Package != "fixture.example/unscripted" {
+		t.Fatalf("probe requests = %+v", requests)
+	}
+	requests[0].Package = "mutated"
+	if again := session.ProbeRequests(); again[0].Package != "fixture.example/assured" {
+		t.Error("ProbeRequests returned an aliased slice")
+	}
+}
+
+func TestScriptedSessionReturnsScriptedProbeFailures(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("probe log could not be read")
+	session := testkit.NewSession(catalogFixture())
+	session.OnProbe("fixture.example/assured").Fail(failure)
+
+	result, err := session.Probe(t.Context(), gomutants.ProbeRequest{Package: "fixture.example/assured"})
+	if !errors.Is(err, failure) {
+		t.Fatalf("err = %v, want %v", err, failure)
+	}
+	if result.Outcome != "" || result.Infected != nil {
+		t.Errorf("failed Probe returned %+v, want the zero result", result)
+	}
+}
+
 func TestScriptedSessionSupportsConcurrentExec(t *testing.T) {
 	t.Parallel()
 	const executions = 16

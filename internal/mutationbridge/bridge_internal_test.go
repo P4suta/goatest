@@ -105,6 +105,25 @@ func TestWorkspacePrepareMapsAndClonesEveryOption(t *testing.T) {
 	}
 }
 
+// TestPrepareForwardsTheProbeFlag pins the one option that decides whether a
+// session can answer the infection question at all. A probe tree costs a second
+// instrumentation and a second set of test binaries, so a caller that never
+// asks for one must never be given one, and a caller that asks must get one:
+// Session.Probe answers with ErrProbeNotPrepared otherwise.
+func TestPrepareForwardsTheProbeFlag(t *testing.T) {
+	t.Parallel()
+	for _, probe := range []bool{false, true} {
+		engine := &fakeMutationWorkspace{session: &gomutants.Session{}}
+		workspace := &Workspace{inner: engine}
+		if _, err := workspace.Prepare(context.Background(), PrepareOptions{Contract: "standard-v1", Probe: probe}); err != nil {
+			t.Fatalf("Prepare(Probe=%t) error = %v", probe, err)
+		}
+		if engine.prepare.Probe != probe {
+			t.Errorf("prepared Probe = %t, want %t", engine.prepare.Probe, probe)
+		}
+	}
+}
+
 func TestWorkspacePrepareRejectsContractBeforeEngineAndWrapsEngineFailure(t *testing.T) {
 	engine := &fakeMutationWorkspace{}
 	workspace := &Workspace{inner: engine}

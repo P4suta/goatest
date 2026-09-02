@@ -47,6 +47,13 @@ it reaches every mutant in a file it covered. That is the conservative
 direction — a resumed run executes at least the work a cold run would, and the
 `route` events of a trace say which targets were included that way.
 
+The infection facts of the probe pass are in memory only for the same reason and
+under the same rule. A checkpoint carries none of them, so a restored target
+says it was never probed and is treated as infecting every mutant it reaches —
+the reading a run gave before the pass existed, and the only sound reading of a
+target nothing measured. The probe pass itself is not a save boundary and adds
+no field to `checkpoint-v1`.
+
 ## Save boundaries
 
 A checkpoint is replaced after each complete scheduling boundary:

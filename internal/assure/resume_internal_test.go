@@ -75,6 +75,12 @@ type resumeMutationSession struct {
 
 func (session *resumeMutationSession) Catalog() gomutants.Catalog { return session.catalog }
 
+// Probe answers with no facts: these tests resume mutation work, and a resumed
+// target is one the probe pass never measured.
+func (session *resumeMutationSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
 func (session *resumeMutationSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.calls = append(session.calls, request.Mutant)
 	session.requests = append(session.requests, request)
@@ -251,6 +257,7 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 		ID: "target", Name: "TestValue", Kind: goanalysis.KindTest, Package: "example.test/project", RelativeDir: ".", Path: "value_test.go", Line: 7,
 		Capabilities: []string{"db"}, Dependencies: []string{"example.test/dependency"},
 	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond,
+		Probed: true, Infected: []uint32{1, 4},
 		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 			{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1},
 		}}}}
@@ -262,6 +269,12 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 	// carries none of them and a restored target says so with a nil Covered.
 	if restored.Covered != nil {
 		t.Fatalf("restored blocks = %+v, want none", restored.Covered)
+	}
+	// Infection facts belong to the probe pass of one run and are never
+	// checkpointed, so a restored target says it was never probed and is
+	// treated as infecting every mutant it reaches.
+	if restored.Probed || restored.Infected != nil {
+		t.Fatalf("restored infection facts = %+v, want none", restored)
 	}
 }
 
