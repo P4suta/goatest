@@ -1,0 +1,103 @@
+{
+  "document_type": "go-mutants/catalog",
+  "schema_version": 1,
+  "tool_version": "0.0.0-fixture",
+  "workspace": {
+    "module_path": "example.com/audited",
+    "go_version": "1.26.0"
+  },
+  "selection": {
+    "profile": "strong"
+  },
+  "mutants": [
+    {
+      "id": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "display_id": "a1b2c3d4e5f60718293a",
+      "path": "pkg/subject.go",
+      "package": "example.com/audited/pkg",
+      "family": "boolean-connective",
+      "rule": "or-to-and",
+      "line": 20,
+      "column": 4,
+      "original": "||",
+      "replacement": "&&",
+      "branch": {
+        "direction": "decreasing",
+        "body_start_line": 20,
+        "body_start_column": 15,
+        "body_end_line": 22,
+        "body_end_column": 3
+      }
+    },
+    {
+      "id": "b1c2d3e4f5061728394a5b6c7d8e9f01b1c2d3e4f5061728394a5b6c7d8e9f01",
+      "display_id": "b1c2d3e4f5061728394a",
+      "path": "pkg/subject.go",
+      "package": "example.com/audited/pkg",
+      "family": "boolean-connective",
+      "rule": "or-to-and",
+      "line": 30,
+      "column": 4,
+      "original": "||",
+      "replacement": "&&",
+      "branch": {
+        "direction": "decreasing",
+        "body_start_line": 30,
+        "body_start_column": 15,
+        "body_end_line": 32,
+        "body_end_column": 3
+      }
+    },
+    {
+      "id": "c1d2e3f405162738495a6b7c8d9e0f12c1d2e3f405162738495a6b7c8d9e0f12",
+      "display_id": "c1d2e3f405162738495a",
+      "path": "pkg/subject.go",
+      "package": "example.com/audited/pkg",
+      "family": "comparison",
+      "rule": "eq-to-neq",
+      "line": 11,
+      "column": 4,
+      "original": "==",
+      "replacement": "!="
+    },
+    {
+      "id": "e1f203142536475869708a9bacbdcedfe1f203142536475869708a9bacbdcedf",
+      "display_id": "e1f20314253647586970",
+      "path": "pkg/subject.go",
+      "package": "example.com/audited/pkg",
+      "family": "boolean-connective",
+      "rule": "or-to-and",
+      "line": 40,
+      "column": 20,
+      "original": "||",
+      "replacement": "&&",
+      "branch": {
+        "direction": "decreasing",
+        "body_start_line": 40,
+        "body_start_column": 4,
+        "body_end_line": 42,
+        "body_end_column": 3
+      }
+    },
+    {
+      "id": "f1a2b3c4d5e60718293a4b5c6d7e8f90f1a2b3c4d5e60718293a4b5c6d7e8f90",
+      "display_id": "f1a2b3c4d5e60718293a",
+      "path": "pkg/subject.go",
+      "package": "example.com/audited/pkg",
+      "family": "boolean-connective",
+      "rule": "or-to-and",
+      "line": 11,
+      "column": 8,
+      "original": "||",
+      "replacement": "&&",
+      "branch": {
+        "direction": "decreasing",
+        "body_start_line": 70,
+        "body_start_column": 2,
+        "body_end_line": 72,
+        "body_end_column": 3
+      }
+    }
+  ],
+  "skips": []
+}
