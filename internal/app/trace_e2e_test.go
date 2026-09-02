@@ -176,7 +176,10 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		if event.Route.Reason != trace.ReasonCoverageReaching && event.Route.Reason != trace.ReasonUnreached {
 			t.Errorf("route %+v has no reason", event.Route)
 		}
-		if len(event.Route.Plan) == 0 {
+		// A route has a plan unless a proof answered for every target that
+		// reached it: the package suite behind an empty plan would run the very
+		// tests the proof just ruled out.
+		if len(event.Route.Plan) == 0 && len(event.Route.Discharged) == 0 {
 			t.Errorf("route %+v has no plan", event.Route)
 		}
 		if event.Route.Granularity != trace.GranularityBlock && event.Route.Granularity != trace.GranularityFile {
@@ -205,6 +208,73 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 			t.Errorf("mutant %s was routed at %d, after it ran at %d", event.Mutant.ID, sequence, event.Seq)
 		}
 	}
+	assertInfectionDischargesAreSelfConsistent(t, result, events)
+}
+
+// assertInfectionDischargesAreSelfConsistent holds every never-infected
+// discharge of a real recording to the measurement it was taken on: the route
+// names a probed mutant, the pass measured the target it removed, that
+// measurement left the mutant out, and the run never executed the pair.
+//
+// The fixture returns the value a return-zero mutation puts there for one of
+// its tests, so that test infects nothing and the recording carries at least
+// one such discharge; a recording without one would prove nothing here.
+func assertInfectionDischargesAreSelfConsistent(t *testing.T, result report.Report, events []trace.Event) {
+	t.Helper()
+	measured := make(map[string][]string)
+	for _, event := range traceOfType(events, trace.TypeProbeExec) {
+		if event.Probe.Outcome == trace.ProbeOutcomeMeasured {
+			measured[event.Probe.Target] = event.Probe.Infected
+		}
+	}
+	named := make(map[string]string, len(result.Targets))
+	for _, target := range result.Targets {
+		named[target.ID] = target.Name
+	}
+	discharges := 0
+	for _, event := range traceOfType(events, trace.TypeRoute) {
+		for _, discharge := range event.Route.Discharged {
+			if discharge.Reason != trace.DischargeNeverInfected {
+				continue
+			}
+			discharges++
+			if !event.Route.Probed {
+				t.Errorf("route %+v discharged %s without a probe form of the mutant", event.Route, discharge.Target)
+			}
+			infected, ran := measured[discharge.Target]
+			if !ran {
+				t.Errorf("route %+v discharged %s, which the pass never measured", event.Route, discharge.Target)
+				continue
+			}
+			if slices.Contains(infected, event.Route.MutantID) {
+				t.Errorf("route %+v discharged %s, which the pass saw make its site differ", event.Route, discharge.Target)
+			}
+			for _, arguments := range mutantArguments(events, event.Route.MutantID) {
+				if slices.Contains(selectedTests(arguments), named[discharge.Target]) {
+					t.Errorf("the discharged target ran anyway: %s", arguments)
+				}
+			}
+		}
+	}
+	if discharges == 0 {
+		t.Error("no reaching target was discharged as never-infected")
+	}
+}
+
+// selectedTests are the tests one recorded execution selected. A run groups the
+// targets it executes as it pleases, so a discharged target is looked for among
+// the names the selection carries rather than in the string it was rendered as.
+func selectedTests(arguments string) []string {
+	for _, argument := range strings.Fields(arguments) {
+		pattern, selective := strings.CutPrefix(argument, "-test.run=")
+		if !selective {
+			continue
+		}
+		pattern = strings.TrimSuffix(strings.TrimPrefix(pattern, "^"), "$")
+		pattern = strings.TrimSuffix(strings.TrimPrefix(pattern, "("), ")")
+		return strings.Split(pattern, "|")
+	}
+	return nil
 }
 
 // oneRoute returns the single route a rule was recorded for, failing the test

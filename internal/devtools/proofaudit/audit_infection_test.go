@@ -417,6 +417,43 @@ func TestAuditMeasuresWhatTheInfectionLayerWouldHaveSaved(t *testing.T) {
 	}
 }
 
+func TestAuditKeepsEveryKillerOfARunThatAlreadyDischargedByInfection(t *testing.T) {
+	t.Parallel()
+	// A run that applies the layer records the discharge and never executes the
+	// target it removed, so every kill that reaches the audit comes from a
+	// target the rule kept and the layer holds. The savings measurement then
+	// reads nothing: it counts the reaching targets the rule would still drop,
+	// and a discharged target is one the route no longer reaches.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16)},
+		secondTarget: {ran(10, 2, 12, 16)},
+	})
+	route := probedRoute(5, firstMutant, 11, 4, killerTarget)
+	route.Route.FileCandidates = 2
+	route.Route.Discharged = []trace.Discharge{{Target: secondTarget, Reason: trace.DischargeNeverInfected}}
+	stream := recordedRun(t, []string{killerTarget, secondTarget},
+		probeMeasured(3, killerTarget, firstMutant),
+		probeMeasured(4, secondTarget),
+		route,
+		killedBy(6, firstMutant, firstDisplay, killerTarget),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if len(result.violations) != 0 || len(result.unverifiable) != 0 {
+		t.Fatalf("audited a run that applied the layer as %d violations and %d unverifiable pairs, want none: %+v %+v",
+			len(result.violations), len(result.unverifiable), result.violations, result.unverifiable)
+	}
+	row := layerRow(t, result, infectionLayerName)
+	if row.audited != 1 || row.kept != 1 {
+		t.Errorf("the infection layer audited %+v, want the one killer the rule kept", row)
+	}
+	want := dischargeSavings{routes: 1, reaching: 1}
+	if result.infection != want {
+		t.Errorf("the audit measured %+v, want %+v: the discharged target is no longer a reaching one",
+			result.infection, want)
+	}
+}
+
 func TestAuditCountsProbeExecutionsAndMeasuredTargets(t *testing.T) {
 	t.Parallel()
 	// The two counts say how far the probe pass got: how many targets it

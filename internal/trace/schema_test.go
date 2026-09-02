@@ -431,6 +431,12 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
 			accepted:    true,
 		},
+		{
+			name:        "a discharge by the proof the probe pass produces",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected},
+			accepted:    true,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -486,6 +492,13 @@ func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
 		{
 			name:       "two targets discharged by the same proof",
 			discharged: []any{once, map[string]any{"target": "TestAlsoSkipped", "reason": trace.DischargeBranchNeverTaken}},
+			accepted:   true,
+		},
+		{
+			// One route may carry both proofs: each names the target it removed,
+			// and the reasons are read per entry rather than per route.
+			name:       "two targets discharged by different proofs",
+			discharged: []any{once, map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected}},
 			accepted:   true,
 		},
 	}

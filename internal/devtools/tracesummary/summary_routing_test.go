@@ -31,18 +31,25 @@ func routeEvent(mutantID string, reaching int, reason, granularity, fallback str
 	}}
 }
 
-// dischargedRouteEvent is one route a proof removed targets from. The
+// dischargedRouteEvent is one route the proofs removed targets from. The
 // discharged targets are named rather than generated, because a discharged
 // target is one the route no longer reaches and must not collide with the
 // reaching ones.
-func dischargedRouteEvent(mutantID string, reaching int, targets ...string) trace.Event {
-	event := routeEvent(mutantID, reaching, trace.ReasonCoverageReaching, trace.GranularityBlock, "", reaching+len(targets))
-	discharged := make([]trace.Discharge, 0, len(targets))
-	for _, target := range targets {
-		discharged = append(discharged, trace.Discharge{Target: target, Reason: trace.DischargeBranchNeverTaken})
-	}
+func dischargedRouteEvent(mutantID string, reaching int, discharged ...trace.Discharge) trace.Event {
+	event := routeEvent(mutantID, reaching, trace.ReasonCoverageReaching, trace.GranularityBlock, "", reaching+len(discharged))
 	event.Route.Discharged = discharged
 	return event
+}
+
+// branchDischarge and infectionDischarge are one target each of the two proofs
+// removes: the branch a target never takes, and the mutated value it never
+// makes differ.
+func branchDischarge(target string) trace.Discharge {
+	return trace.Discharge{Target: target, Reason: trace.DischargeBranchNeverTaken}
+}
+
+func infectionDischarge(target string) trace.Discharge {
+	return trace.Discharge{Target: target, Reason: trace.DischargeNeverInfected}
 }
 
 // countOf is what one label of a fixed-order tally counted, and -1 when the
@@ -196,12 +203,15 @@ func TestRoutingBlockReportsAZeroCandidateCountAsAMeasuredReduction(t *testing.T
 func TestRouteTotalsCountDischargesByReason(t *testing.T) {
 	t.Parallel()
 	totals := routeTotals([]trace.Event{
-		dischargedRouteEvent("mutant-a", 2, "TestSkipped", "TestOther"),
-		dischargedRouteEvent("mutant-b", 1, "TestSkipped"),
+		dischargedRouteEvent("mutant-a", 2, branchDischarge("TestSkipped"), infectionDischarge("TestOther")),
+		dischargedRouteEvent("mutant-b", 1, branchDischarge("TestSkipped")),
 		routeEvent("mutant-c", 3, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 3),
 	})
-	if got := countOf(totals.discharges, trace.DischargeBranchNeverTaken); got != 3 {
-		t.Errorf("branch-never-taken discharges = %d, want the 3 targets the proofs removed", got)
+	if got := countOf(totals.discharges, trace.DischargeBranchNeverTaken); got != 2 {
+		t.Errorf("branch-never-taken discharges = %d, want the 2 targets that proof removed", got)
+	}
+	if got := countOf(totals.discharges, trace.DischargeNeverInfected); got != 1 {
+		t.Errorf("never-infected discharges = %d, want the 1 target the probe facts removed", got)
 	}
 	if totals.dischargedRoutes != 2 {
 		t.Errorf("routes carrying a discharge = %d, want 2", totals.dischargedRoutes)
@@ -216,10 +226,12 @@ func TestRouteTotalsCountDischargesByReason(t *testing.T) {
 func TestRoutingBlockReportsDischargedTargetsAndRoutes(t *testing.T) {
 	t.Parallel()
 	lines := strings.Join(routingBlock([]trace.Event{
-		dischargedRouteEvent("mutant-a", 2, "TestSkipped", "TestOther"),
-		dischargedRouteEvent("mutant-b", 1, "TestSkipped"),
+		dischargedRouteEvent("mutant-a", 2, branchDischarge("TestSkipped"), infectionDischarge("TestOther")),
+		dischargedRouteEvent("mutant-b", 1, branchDischarge("TestSkipped")),
 	}), "\n")
-	if want := "discharged: 3 targets across 2 routes (branch-never-taken 3)"; !strings.Contains(lines, want) {
+	// The proofs are tallied in the order the engine applies them, so one
+	// recording prints one line whichever of them removed which target.
+	if want := "discharged: 3 targets across 2 routes (branch-never-taken 2, never-infected 1)"; !strings.Contains(lines, want) {
 		t.Errorf("the block does not carry %q:\n%s", want, lines)
 	}
 }
