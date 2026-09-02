@@ -256,7 +256,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 			continue
 		}
 
-		unit.addFinding(seed.mutant, "surviving-mutant", mutationSurvivedSummary, options.Accepted)
+		unit.addFinding(seed.mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
 		evaluation.append(unit)
 		checkpointMutation(options, seed.mutant.ID, unit)
 	}
@@ -421,8 +421,12 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 }
 
 type mutationSeed struct {
-	mutant     gomutants.Mutant
-	reaching   []TargetEvidence
+	mutant   gomutants.Mutant
+	reaching []TargetEvidence
+	// discharged counts the reaching targets a proof removed before anything
+	// ran. The serial fuzz pass reports the survivors it settles, and it has
+	// only the seed to report them from.
+	discharged int
 	evaluation MutationEvaluation
 	resolved   bool
 	err        error
@@ -478,7 +482,7 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
-	seed := mutationSeed{mutant: mutant, reaching: route.reaching}
+	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: len(route.discharged)}
 	if len(seed.reaching) == 0 && len(route.discharged) > 0 {
 		// Coverage reached this mutation and a proof answered for every target
 		// that did: nothing is left that could observe it, and running the
@@ -571,7 +575,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	// the serial pass would mean the survivors — the mutants that cost the
 	// most to execute again — are exactly the results a dying run loses.
 	if !reachedByFuzz(seed.reaching) {
-		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationSurvivalSummary(len(route.discharged)), options.Accepted)
+		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
 		seed.resolved = true
 	}
 	return seed
