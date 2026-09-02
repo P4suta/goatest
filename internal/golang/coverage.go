@@ -168,7 +168,8 @@ func FindFileCoverage(files []FileCoverage, path string) (FileCoverage, bool) {
 // parseCoverageSpan reads the "startLine.startColumn,endLine.endColumn" span
 // of a coverage profile line. A span is only accepted when it names a block
 // the rest of the package can rely on: 1-based coordinates, and an end that
-// follows the start, so that the half-open block is not empty or reversed.
+// does not precede the start. An end equal to the start is the empty block
+// cmd/cover emits for a clause with no statements; it contains no position.
 func parseCoverageSpan(span string) (CoverageBlock, bool) {
 	start, end, ok := strings.Cut(span, ",")
 	if !ok {
@@ -181,7 +182,7 @@ func parseCoverageSpan(span string) (CoverageBlock, bool) {
 	if block.EndLine, block.EndColumn, ok = parseCoveragePosition(end); !ok {
 		return CoverageBlock{}, false
 	}
-	if block.EndLine < block.StartLine || block.EndLine == block.StartLine && block.EndColumn <= block.StartColumn {
+	if block.EndLine < block.StartLine || block.EndLine == block.StartLine && block.EndColumn < block.StartColumn {
 		return CoverageBlock{}, false
 	}
 	return block, true
