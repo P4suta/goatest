@@ -92,7 +92,8 @@ func TestRenderComparisonBreaksDownTwoReports(t *testing.T) {
 
 func TestRenderComparisonDependsOnTheReportsAlone(t *testing.T) {
 	t.Parallel()
-	if renderSample() != renderSample() {
+	first, second := renderSample(), renderSample()
+	if first != second {
 		t.Error("two renderings of one pair of reports differ; the comparison is not deterministic")
 	}
 }

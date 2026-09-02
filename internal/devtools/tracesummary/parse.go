@@ -350,7 +350,27 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 		return fmt.Errorf("unknown route reason %q, want %q or %q",
 			record.Reason, trace.ReasonCoverageReaching, trace.ReasonUnreached)
 	}
-	return checkNotNegative("route.line", int64(record.Line))
+	// The routing labels are additive, so an empty one is a recording made
+	// before the field existed rather than a deviation. A value outside the
+	// contract is a deviation, because a summary that counted it would be
+	// counting a label nothing produces.
+	if record.Granularity != "" &&
+		record.Granularity != trace.GranularityBlock && record.Granularity != trace.GranularityFile {
+		return fmt.Errorf("unknown route granularity %q, want %q or %q",
+			record.Granularity, trace.GranularityBlock, trace.GranularityFile)
+	}
+	if record.Fallback != "" &&
+		record.Fallback != trace.FallbackPositionUnknown && record.Fallback != trace.FallbackOutsideBlocks {
+		return fmt.Errorf("unknown route fallback %q, want %q or %q",
+			record.Fallback, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
+	}
+	if err := checkNotNegative("route.line", int64(record.Line)); err != nil {
+		return err
+	}
+	if err := checkNotNegative("route.column", int64(record.Column)); err != nil {
+		return err
+	}
+	return checkNotNegative("route.file_candidates", int64(record.FileCandidates))
 }
 
 func checkProgress(record trace.ProgressRecord, fields map[string]json.RawMessage) error {

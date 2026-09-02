@@ -11,6 +11,9 @@ total: 120ms across 1 phase in 1 pass
 exec classes by total duration
 no command was executed in this recording
 
+routing
+no mutant was routed in this recording
+
 mutant executions
 no mutant was executed in this recording
 

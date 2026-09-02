@@ -21,6 +21,16 @@ duration  share  calls   mean  class
     30ms   0.3%      1   30ms  go tool test2json -t -p github.com/P4suta/goatest/internal/assure
 total: 11.262s across 6 calls in 5 classes
 
+routing
+routes: 1 across 1 mutant
+reasons: coverage-reaching 1, unreached 0
+granularity: block 1, file 0, (unrecorded) 0
+reduction: file candidates 3 -> reaching 1 (66.7% fewer)
+
+reaching targets per route
+targets  routes   share
+1             1  100.0%
+
 mutant executions
 executions: 6 across 4 mutants (1.50 per mutant)
 duration: 1m2.225s total, 10.37s mean
@@ -31,6 +41,13 @@ killed              3  50.0%      15ms
 timed_out           1  16.7%      1m0s
 survived            1  16.7%      2.2s
 (none)              1  16.7%      10ms
+
+executions by final disposition
+disposition  mutants  executions  share  duration
+killed             1           3  50.0%      15ms
+timed_out          1           1  16.7%      1m0s
+survived           1           1  16.7%      2.2s
+(none)             1           1  16.7%      10ms
 
 mutants by executions
 executions  duration  mutant                package

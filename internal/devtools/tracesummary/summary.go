@@ -35,10 +35,11 @@ const (
 // Placeholders for a value the recording did not carry. They are printed
 // rather than left blank so that a missing value reads as missing.
 const (
-	noCommand = "(no command)"
-	noOutcome = "(none)"
-	noValue   = "-"
-	ellipsis  = "..."
+	noCommand  = "(no command)"
+	noOutcome  = "(none)"
+	noValue    = "-"
+	ellipsis   = "..."
+	unrecorded = "(unrecorded)"
 )
 
 // renderSummary renders the whole breakdown of one recording, ending in a
@@ -51,6 +52,7 @@ func renderSummary(source string, events []trace.Event) string {
 		headerBlock(source, events),
 		phaseBlock(events),
 		execBlock(events),
+		routingBlock(events),
 		mutantBlock(events),
 		runBlock(events),
 	}
@@ -312,6 +314,167 @@ func isAbsolutePath(argument string) bool {
 	return drive >= 'a' && drive <= 'z' && (argument[2] == '\\' || argument[2] == '/')
 }
 
+// labelCount is one label of a tally and how often the recording carried it.
+// A tally is built in a fixed order rather than by iterating a map, so the
+// same recording prints the same line.
+type labelCount struct {
+	label string
+	count int
+}
+
+// routeTotal is what the route events of a recording add up to: how many
+// routes there were, over how many mutants, how each of them was decided, and
+// how many targets they selected out of the ones the file alone would have.
+type routeTotal struct {
+	routes  int
+	mutants int
+	// reasons, granularities and fallbacks tally the routes by each of the
+	// three labels a route carries, in the order the block prints them.
+	reasons       []labelCount
+	granularities []labelCount
+	fallbacks     []labelCount
+	// fanOut counts the routes by how many targets they reached, one entry
+	// per bucket of fanOutBucketLabels.
+	fanOut []int
+	// reaching and candidates are the two sides of the reduction routing
+	// bought: the targets the routes selected, and the targets covering the
+	// mutated file that they were selected from.
+	reaching   int
+	candidates int
+}
+
+// fanOutBucketLabels names the buckets of the reaching-target histogram, which
+// is the one place their number is decided. The buckets double, because the
+// interesting difference between two routings is an order of magnitude of
+// fan-out rather than a target or two.
+func fanOutBucketLabels() []string {
+	return []string{"0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"}
+}
+
+// fanOutBucketIndex is the bucket a fan-out of the given size belongs to.
+// Nothing and one target get a bucket each, because "no test reaches this" and
+// "exactly one does" are the two answers a routing change is judged by;
+// everything above the last bound falls into the open bucket that closes the
+// histogram.
+func fanOutBucketIndex(reaching int) int {
+	if reaching <= 0 {
+		return 0
+	}
+	last := len(fanOutBucketLabels()) - 1
+	index := 1
+	for bound := 2; index < last && reaching >= bound; bound *= 2 {
+		index++
+	}
+	return index
+}
+
+// routingBlock breaks the routing decisions down: how many mutants were
+// routed, on what evidence, and how much of the file-wide candidate set the
+// routes actually selected. A recording made before routing reported its
+// granularity carries none of it, and the block says so rather than reading
+// the absence as a decision.
+func routingBlock(events []trace.Event) []string {
+	total := routeTotals(events)
+	lines := []string{"routing"}
+	if total.routes == 0 {
+		return append(lines, "no mutant was routed in this recording")
+	}
+	lines = append(lines,
+		fmt.Sprintf("routes: %d across %s", total.routes, plural(total.mutants, "mutant", "mutants")),
+		"reasons: "+formatLabelCounts(total.reasons),
+		"granularity: "+formatLabelCounts(total.granularities))
+	if countedLabels(total.fallbacks) > 0 {
+		lines = append(lines, "fallbacks: "+formatLabelCounts(total.fallbacks))
+	}
+	lines = append(lines, "reduction: "+formatReduction(total.candidates, total.reaching), "", "reaching targets per route")
+	labels := fanOutBucketLabels()
+	rows := make([][]string, 0, len(labels))
+	for index, count := range total.fanOut {
+		if count == 0 {
+			continue
+		}
+		rows = append(rows, []string{labels[index], strconv.Itoa(count), formatShare(int64(count), int64(total.routes))})
+	}
+	columns := []column{{"targets", false}, {"routes", true}, {"share", true}}
+	return append(lines, renderTable(columns, rows)...)
+}
+
+// routeTotals sums the route events of a recording.
+func routeTotals(events []trace.Event) routeTotal {
+	reasons := make(map[string]int)
+	granularities := make(map[string]int)
+	fallbacks := make(map[string]int)
+	mutants := make(map[string]struct{})
+	total := routeTotal{fanOut: make([]int, len(fanOutBucketLabels()))}
+	for _, event := range events {
+		if event.Type != trace.TypeRoute || event.Route == nil {
+			continue
+		}
+		record := event.Route
+		total.routes++
+		mutants[record.MutantID] = struct{}{}
+		reasons[record.Reason]++
+		granularity := record.Granularity
+		if granularity == "" {
+			granularity = unrecorded
+		}
+		granularities[granularity]++
+		if record.Fallback != "" {
+			fallbacks[record.Fallback]++
+		}
+		total.fanOut[fanOutBucketIndex(len(record.ReachingTargets))]++
+		total.reaching += len(record.ReachingTargets)
+		total.candidates += record.FileCandidates
+	}
+	total.mutants = len(mutants)
+	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonUnreached)
+	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile, unrecorded)
+	total.fallbacks = tally(fallbacks, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
+	return total
+}
+
+// tally projects counted labels onto the labels the contract names, in that
+// order. The map is read by key alone, so no iteration order reaches the
+// output.
+func tally(counts map[string]int, labels ...string) []labelCount {
+	projected := make([]labelCount, 0, len(labels))
+	for _, label := range labels {
+		projected = append(projected, labelCount{label: label, count: counts[label]})
+	}
+	return projected
+}
+
+// countedLabels is how many routes a whole tally accounts for.
+func countedLabels(counts []labelCount) int {
+	total := 0
+	for _, count := range counts {
+		total += count.count
+	}
+	return total
+}
+
+// formatLabelCounts renders a tally as one line.
+func formatLabelCounts(counts []labelCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, fmt.Sprintf("%s %d", count.label, count.count))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatReduction renders what routing saved: the targets the file alone would
+// have selected against the ones the routes did. A recording that carried no
+// candidate count at all is reported as unrecorded rather than as a reduction
+// of nothing, because the field is absent from a recording made before it
+// existed and from a route that found no candidate.
+func formatReduction(candidates, reaching int) string {
+	if candidates <= 0 {
+		return "not recorded"
+	}
+	return fmt.Sprintf("file candidates %d -> reaching %d (%s fewer)",
+		candidates, reaching, formatShare(int64(candidates-reaching), int64(candidates)))
+}
+
 // mutantTotal is what one mutant cost across every execution of it.
 type mutantTotal struct {
 	id         string
@@ -326,6 +489,73 @@ type outcomeTotal struct {
 	outcome    string
 	duration   int64
 	executions int
+}
+
+// dispositionTotal is what one final disposition cost. A mutant a repair round
+// revisits is executed again and may end elsewhere than it started, so an
+// outcome total answers "what did the executions conclude" while a disposition
+// total answers "what did the mutants that concluded this way cost".
+type dispositionTotal struct {
+	disposition string
+	mutants     int
+	executions  int
+	duration    int64
+}
+
+// dispositionTotals charges every execution of a mutant to the outcome its
+// last execution reached, most executions first. That is the whole point of
+// the table: a mutant that survives in the end was paid for by every execution
+// it took to get there, including the ones that killed an earlier version.
+func dispositionTotals(events []trace.Event) []dispositionTotal {
+	type mutantRun struct {
+		outcome    string
+		executions int
+		duration   int64
+	}
+	runs := make(map[string]*mutantRun)
+	for _, event := range events {
+		if event.Type != trace.TypeMutantExec || event.Mutant == nil {
+			continue
+		}
+		record := event.Mutant
+		run, kept := runs[record.ID]
+		if !kept {
+			run = &mutantRun{}
+			runs[record.ID] = run
+		}
+		run.outcome = record.Outcome
+		run.executions++
+		run.duration += record.DurationMS
+	}
+	index := make(map[string]*dispositionTotal, len(runs))
+	for _, run := range runs {
+		disposition := run.outcome
+		if disposition == "" {
+			disposition = noOutcome
+		}
+		total, kept := index[disposition]
+		if !kept {
+			total = &dispositionTotal{disposition: disposition}
+			index[disposition] = total
+		}
+		total.mutants++
+		total.executions += run.executions
+		total.duration += run.duration
+	}
+	totals := make([]dispositionTotal, 0, len(index))
+	for _, total := range index {
+		totals = append(totals, *total)
+	}
+	slices.SortFunc(totals, func(first, second dispositionTotal) int {
+		if order := cmp.Compare(second.executions, first.executions); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(second.duration, first.duration); order != 0 {
+			return order
+		}
+		return cmp.Compare(first.disposition, second.disposition)
+	})
+	return totals
 }
 
 // mutantBlock breaks the mutant executions down: how many there were, how many
@@ -360,6 +590,23 @@ func mutantBlock(events []trace.Event) []string {
 	}
 	outcomeColumns := []column{{"outcome", false}, {"executions", true}, {"share", true}, {"duration", true}}
 	lines = append(lines, renderTable(outcomeColumns, rows)...)
+
+	dispositions := dispositionTotals(events)
+	lines = append(lines, "", "executions by final disposition")
+	rows = make([][]string, 0, len(dispositions))
+	for _, total := range dispositions {
+		rows = append(rows, []string{
+			total.disposition,
+			strconv.Itoa(total.mutants),
+			strconv.Itoa(total.executions),
+			formatShare(int64(total.executions), int64(executions)),
+			formatDuration(total.duration),
+		})
+	}
+	dispositionColumns := []column{
+		{"disposition", false}, {"mutants", true}, {"executions", true}, {"share", true}, {"duration", true},
+	}
+	lines = append(lines, renderTable(dispositionColumns, rows)...)
 
 	heading := "mutants by executions"
 	shown := mutants

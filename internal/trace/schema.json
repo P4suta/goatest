@@ -182,9 +182,23 @@
         "rule": { "type": "string" },
         "path": { "type": "string" },
         "line": { "type": "integer", "minimum": 0 },
+        "column": { "type": "integer", "minimum": 0 },
         "reaching_targets": { "type": "array", "items": { "type": "string" } },
         "plan": { "type": "array", "items": { "type": "string" } },
-        "reason": { "enum": ["coverage-reaching", "unreached"] }
+        "reason": { "enum": ["coverage-reaching", "unreached"] },
+        "granularity": {
+          "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone. Absent in a recording made before routing reported it.",
+          "enum": ["block", "file"]
+        },
+        "fallback": {
+          "description": "Why a route that would have been decided by block dropped back to the file. Absent when none did.",
+          "enum": ["position-unknown", "outside-blocks"]
+        },
+        "file_candidates": {
+          "description": "How many targets cover the mutated file at all, which is the reaching set the file alone would have selected.",
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "progress": {

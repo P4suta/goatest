@@ -30,6 +30,25 @@ const (
 	ReasonUnreached        = "unreached"
 )
 
+// Routing granularities name the evidence a route was decided on: the coverage
+// blocks that contain the mutated position, or the whole file when the
+// position could not be placed in one.
+const (
+	GranularityBlock = "block"
+	GranularityFile  = "file"
+)
+
+// Routing fallbacks name why a route that would have been decided by block
+// dropped back to the file. A mutant whose position the engine did not report
+// cannot be placed in any block; a position no instrumented block contains is
+// outside the coverage the toolchain measured, which is a gap in the evidence
+// rather than an absence of tests. Both fall back to the file, which is the
+// conservative side.
+const (
+	FallbackPositionUnknown = "position-unknown"
+	FallbackOutsideBlocks   = "outside-blocks"
+)
+
 // Event is one line of a trace. Its JSON field order is part of the contract
 // consumers read, so the declaration order below is the wire order: the
 // identity of the event first, then the single payload it carries.
@@ -101,14 +120,23 @@ type MutantRecord struct {
 
 // RouteRecord explains how a mutant was routed: the targets coverage says reach
 // it, the plan derived from them, and the reason that plan was chosen.
+//
+// Granularity, Fallback, FileCandidates and Column describe how the reaching
+// set was narrowed. They are additive: a recording made before they existed
+// carries none of them, so every one of them is omitted when it is empty and
+// an absent value reads as unrecorded rather than as zero.
 type RouteRecord struct {
 	MutantID        string   `json:"mutant_id,omitempty"`
 	Rule            string   `json:"rule,omitempty"`
 	Path            string   `json:"path"`
 	Line            int      `json:"line,omitempty"`
+	Column          int      `json:"column,omitempty"`
 	ReachingTargets []string `json:"reaching_targets,omitempty"`
 	Plan            []string `json:"plan,omitempty"`
 	Reason          string   `json:"reason"`
+	Granularity     string   `json:"granularity,omitempty"`
+	Fallback        string   `json:"fallback,omitempty"`
+	FileCandidates  int      `json:"file_candidates,omitempty"`
 }
 
 // ProgressRecord carries a human readable progress note forwarded from the run.
