@@ -275,9 +275,17 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "error": { "type": "string" }
+        "error": {
+          "description": "The error that stopped the execution before it reached an outcome.",
+          "type": "string",
+          "minLength": 1
+        }
       },
       "allOf": [
+        {
+          "description": "An execution either reached an outcome or was stopped by an error: a record saying neither describes no execution, and one saying both would be an error to one reader and a measurement to another.",
+          "oneOf": [{ "required": ["outcome"] }, { "required": ["error"] }]
+        },
         {
           "if": { "required": ["infected"] },
           "then": {

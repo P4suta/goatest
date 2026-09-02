@@ -441,11 +441,13 @@ func checkDischarges(record trace.RouteRecord) error {
 
 // checkProbe holds one probe execution to its part of the contract: it names
 // the target that ran and the status it returned with, its timings are
-// durations, and its outcome is one the contract names. An empty outcome is an
-// execution that carries the error that stopped it instead, so it is accepted
-// as the absence it is.
+// durations, its outcome is one the contract names, and it ended in exactly
+// one way — with that outcome, or with the error that stopped it before one.
+// A record saying neither describes no execution, and one saying both would
+// be counted as an error by one reader and as a measurement by another.
 func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) error {
-	if _, err := requiredFields(fields, "probe", "target", "exit_code"); err != nil {
+	probe, err := requiredFields(fields, "probe", "target", "exit_code")
+	if err != nil {
 		return err
 	}
 	if err := checkNotEmpty("probe.target", record.Target); err != nil {
@@ -465,17 +467,35 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 			trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
 			trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable)
 	}
-	return checkInfections(record)
+	// Presence is read from the line rather than from the decoded record, as
+	// the schema reads it: an empty error and an empty infection list are
+	// fields the record carries, not fields it left out.
+	_, outcome := probe["outcome"]
+	_, failure := probe["error"]
+	switch {
+	case outcome && failure:
+		return errors.New("probe carries both an outcome and an error: an execution reached an outcome or was stopped by an error, never both")
+	case !outcome && !failure:
+		return errors.New("probe carries neither an outcome nor an error: an execution reached an outcome or was stopped by an error")
+	case failure:
+		if err := checkNotEmpty("probe.error", record.Error); err != nil {
+			return err
+		}
+	}
+	_, infected := probe["infected"]
+	return checkInfections(record, infected)
 }
 
 // checkInfections holds the mutants a probe execution infected to the
 // accounting behind them: a mutant is named by an identity, an execution
 // infects a mutant once, so a record naming the same one twice would be
 // counted twice, and only a measured execution observed anything at all, so
-// infections beside any other outcome are facts an execution that measured
-// none claims.
-func checkInfections(record trace.ProbeRecord) error {
-	if len(record.Infected) == 0 {
+// infections beside any other outcome — an empty list included, which is the
+// claim that the execution measured and found nothing — are facts an
+// execution that measured none claims. recorded says whether the line carries
+// the field at all, which the decoded record cannot tell from an empty list.
+func checkInfections(record trace.ProbeRecord, recorded bool) error {
+	if !recorded {
 		return nil
 	}
 	if record.Outcome != trace.ProbeOutcomeMeasured {
