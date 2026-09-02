@@ -212,8 +212,14 @@ for it.
 
 `mise run trace-summary <trace.jsonl>` aggregates one recording into the
 performance breakdown of its run: phase durations, the command classes the run
-spent its time in, how coverage routed the mutants, and what became of the ones
-it executed. Every number comes from a recorded value, so summarizing a trace
+spent its time in, how coverage routed the mutants, what the probe pass
+measured, and what became of the ones it executed. The `probe` block counts the
+probe executions, tallies their outcomes, and reports the (target, mutant)
+infections they recorded together with the measured targets that infected
+nothing; a recording made without the pass reads `probe: not recorded` rather
+than a pass that infected nothing. The routing block counts the routes carrying
+a probe on its `probed:` line, which is absent from a recording that carries
+none. Every number comes from a recorded value, so summarizing a trace
 twice prints the same bytes; a line the trace contract does not allow is an
 error naming the line, because a total that quietly skipped an event would be a
 confident wrong number. This is how the mutation phase was measured at 98% of a
@@ -283,7 +289,7 @@ auditing are the ones made by runs that discharged nothing.
 
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
-produced any. The stream, its nine event types, and the fields of each are
+produced any. The stream, its ten event types, and the fields of each are
 specified in [trace v1](trace-v1.md); the rules behind them are recorded in
 [ADR 0002](adr/0002-trace-is-not-evidence.md). In short: a trace is never
 evidence, nothing about one changes what a run decides — a sink that fails

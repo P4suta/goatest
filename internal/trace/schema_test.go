@@ -77,7 +77,7 @@ func TestSchemaAcceptsEveryRecordedEvent(t *testing.T) {
 func TestSchemaRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
-	payloads := []string{"phase", "exec", "mutant", "route", "progress", "artifact", "run"}
+	payloads := []string{"phase", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
 	for _, document := range decodeEvents(t, scriptedEvents(t)) {
 		eventType, _ := document["type"].(string)
 		document["unknown"] = true
@@ -144,13 +144,13 @@ func TestSchemaRejectsAPayloadThatIsNotTheEventsOwn(t *testing.T) {
 	// so each event can be handed a payload belonging to another event.
 	payloads := map[string]any{}
 	for _, document := range documents {
-		for _, name := range []string{"phase", "exec", "mutant", "route", "progress", "artifact", "run"} {
+		for _, name := range []string{"phase", "exec", "mutant", "route", "probe", "progress", "artifact", "run"} {
 			if record, ok := document[name]; ok {
 				payloads[name] = record
 			}
 		}
 	}
-	if len(payloads) != 7 {
+	if len(payloads) != 8 {
 		t.Fatalf("the recording holds %d payloads, want one of each", len(payloads))
 	}
 
@@ -283,13 +283,14 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			record := amended["route"].(map[string]any)
 			delete(record, "granularity")
 			delete(record, "fallback")
-			// The column, the candidate count and the discharges are routing
-			// metadata too, and a route that carries any of it must name its
-			// granularity; they go so that the pair under test is the only
-			// thing the schema sees.
+			// The column, the candidate count, the discharges and the probe
+			// marker are routing metadata too, and a route that carries any of
+			// it must name its granularity; they go so that the pair under test
+			// is the only thing the schema sees.
 			delete(record, "column")
 			delete(record, "file_candidates")
 			delete(record, "discharged")
+			delete(record, "probed")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -337,6 +338,7 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 		{name: "a zero candidate count without a granularity", metadata: map[string]any{"file_candidates": 0}},
 		{name: "a discharge without a granularity", metadata: map[string]any{
 			"discharged": []any{map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}}}},
+		{name: "a probe marker without a granularity", metadata: map[string]any{"probed": true}},
 		{name: "a column beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9}, accepted: true},
 		{name: "a candidate count beside a file granularity", granularity: trace.GranularityFile, metadata: map[string]any{"file_candidates": 3}, accepted: true},
 		{name: "both beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9, "file_candidates": 3}, accepted: true},
@@ -353,6 +355,7 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 			delete(record, "column")
 			delete(record, "file_candidates")
 			delete(record, "discharged")
+			delete(record, "probed")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -438,6 +441,7 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 			delete(record, "fallback")
 			delete(record, "column")
 			delete(record, "file_candidates")
+			delete(record, "probed")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
 			}
@@ -498,6 +502,193 @@ func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
 			}
 			if !testCase.accepted && err == nil {
 				t.Fatalf("a route discharging %v passed the schema", testCase.discharged)
+			}
+		})
+	}
+}
+
+func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var probe, mutant map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		switch document["type"] {
+		case trace.TypeProbeExec:
+			probe = document
+		case trace.TypeMutantExec:
+			mutant = document
+		}
+	}
+	if probe == nil || mutant == nil {
+		t.Fatal("the recording holds no probe-exec event or no mutant-exec event")
+	}
+	// A probe record says which target ran against the probe tree and what it
+	// measured, so it names the target and the exit status it returned with,
+	// and the mutants it infected are facts a measured execution alone has.
+	cases := []struct {
+		name     string
+		record   map[string]any
+		accepted bool
+	}{
+		{
+			name:   "a probe execution that names no target",
+			record: map[string]any{"exit_code": 0},
+		},
+		{
+			name:   "a probe execution without the status it returned with",
+			record: map[string]any{"target": "TestRun"},
+		},
+		{
+			name:   "a target with no identity",
+			record: map[string]any{"target": "", "exit_code": 0},
+		},
+		{
+			name:   "an outcome the contract does not name",
+			record: map[string]any{"target": "TestRun", "exit_code": 0, "outcome": "guessed"},
+		},
+		{
+			name:   "a duration below zero",
+			record: map[string]any{"target": "TestRun", "exit_code": 0, "duration_ms": -1},
+		},
+		{
+			name: "the same mutant infected twice",
+			record: map[string]any{"target": "TestRun", "exit_code": 0,
+				"outcome": trace.ProbeOutcomeMeasured, "infected": []any{"m-0001", "m-0001"}},
+		},
+		{
+			name: "an infected mutant with no identity",
+			record: map[string]any{"target": "TestRun", "exit_code": 0,
+				"outcome": trace.ProbeOutcomeMeasured, "infected": []any{""}},
+		},
+		{
+			name: "infections beside an execution that measured none",
+			record: map[string]any{"target": "TestRun", "exit_code": 1,
+				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{"m-0001"}},
+		},
+		{
+			// An empty list is still the claim that the execution measured
+			// something and found nothing, and only a measured execution
+			// makes it.
+			name: "an empty infection list beside an execution that measured none",
+			record: map[string]any{"target": "TestRun", "exit_code": 1,
+				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{}},
+		},
+		{
+			// An execution either reached an outcome or was stopped by an
+			// error; a record saying neither describes no execution, and one
+			// saying both would be read as an error by one reader and as a
+			// measurement by another.
+			name:   "an execution with neither an outcome nor an error",
+			record: map[string]any{"target": "TestRun", "exit_code": 0},
+		},
+		{
+			name: "an execution with both an outcome and an error",
+			record: map[string]any{"target": "TestRun", "exit_code": 0,
+				"outcome": trace.ProbeOutcomeMeasured, "error": "goatest: probe tree unavailable"},
+		},
+		{
+			name:   "an execution carrying an empty error",
+			record: map[string]any{"target": "TestRun", "exit_code": -1, "error": ""},
+		},
+		{
+			name: "a measured execution and the mutants it infected",
+			record: map[string]any{"target": "TestRun", "exit_code": 0,
+				"outcome": trace.ProbeOutcomeMeasured, "infected": []any{"m-0001", "m-0002"}},
+			accepted: true,
+		},
+		{
+			name:     "a measured execution that infected nothing",
+			record:   map[string]any{"target": "TestRun", "exit_code": 0, "outcome": trace.ProbeOutcomeMeasured},
+			accepted: true,
+		},
+		{
+			name:     "an execution carrying the error that stopped it",
+			record:   map[string]any{"target": "TestRun", "exit_code": -1, "error": "goatest: probe tree unavailable"},
+			accepted: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, probe)
+			amended["probe"] = testCase.record
+			// The amendment is round-tripped through JSON so that the value
+			// the schema sees is the one a recording would carry.
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a probe execution recording %v was rejected: %v", testCase.record, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a probe execution recording %v passed the schema", testCase.record)
+			}
+		})
+	}
+
+	// The payload and its event are one contract in both directions.
+	carried := cloneDocument(t, mutant)
+	carried["probe"] = probe["probe"]
+	if err := compiled.Validate(cloneDocument(t, carried)); err == nil {
+		t.Error("a mutant-exec event carrying a probe payload passed the schema; an event carries its own payload alone")
+	}
+	unpaid := cloneDocument(t, probe)
+	delete(unpaid, "probe")
+	if err := compiled.Validate(unpaid); err == nil {
+		t.Error("a probe-exec event without its payload passed the schema")
+	}
+}
+
+func TestSchemaRequiresAGranularityBesideProbed(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// Whether a mutant was probed is routing metadata like the rest, and the
+	// granularity is what marks a route as carrying any of it. Presence is what
+	// matters, not the value: a recorded false is metadata too.
+	cases := []struct {
+		name        string
+		granularity string
+		probed      any
+		accepted    bool
+	}{
+		{name: "a probed route without a granularity", probed: true},
+		{name: "a route that recorded no probe without a granularity", probed: false},
+		{name: "a probed route beside the granularity it was decided on", granularity: trace.GranularityBlock, probed: true, accepted: true},
+		{name: "a route of a mutant without a probe form", granularity: trace.GranularityBlock, probed: false, accepted: true},
+		{name: "a route from a recording made before the probe pass", granularity: trace.GranularityBlock, accepted: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "granularity")
+			delete(record, "fallback")
+			delete(record, "column")
+			delete(record, "file_candidates")
+			delete(record, "discharged")
+			delete(record, "probed")
+			if testCase.granularity != "" {
+				record["granularity"] = testCase.granularity
+			}
+			if testCase.probed != nil {
+				record["probed"] = testCase.probed
+			}
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route with granularity %q and probed %v was rejected: %v",
+					testCase.granularity, testCase.probed, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route with granularity %q and probed %v passed the schema",
+					testCase.granularity, testCase.probed)
 			}
 		})
 	}

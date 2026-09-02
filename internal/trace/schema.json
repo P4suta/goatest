@@ -21,6 +21,7 @@
         "exec",
         "mutant-exec",
         "route",
+        "probe-exec",
         "progress",
         "artifact",
         "run-end"
@@ -45,6 +46,7 @@
     "exec": { "$ref": "#/$defs/exec" },
     "mutant": { "$ref": "#/$defs/mutant" },
     "route": { "$ref": "#/$defs/route" },
+    "probe": { "$ref": "#/$defs/probe" },
     "progress": { "$ref": "#/$defs/progress" },
     "artifact": { "$ref": "#/$defs/artifact" },
     "run": { "$ref": "#/$defs/run" }
@@ -73,6 +75,10 @@
     {
       "if": { "required": ["type"], "properties": { "type": { "const": "route" } } },
       "then": { "required": ["route"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "probe-exec" } } },
+      "then": { "required": ["probe"] }
     },
     {
       "if": { "required": ["type"], "properties": { "type": { "const": "progress" } } },
@@ -105,6 +111,10 @@
     {
       "if": { "required": ["route"] },
       "then": { "properties": { "type": { "const": "route" } } }
+    },
+    {
+      "if": { "required": ["probe"] },
+      "then": { "properties": { "type": { "const": "probe-exec" } } }
     },
     {
       "if": { "required": ["progress"] },
@@ -212,6 +222,10 @@
               "reason": { "enum": ["branch-never-taken"] }
             }
           }
+        },
+        "probed": {
+          "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
+          "type": "boolean"
         }
       },
       "allOf": [
@@ -228,12 +242,56 @@
             "anyOf": [
               { "required": ["column"] },
               { "required": ["file_candidates"] },
-              { "required": ["discharged"] }
+              { "required": ["discharged"] },
+              { "required": ["probed"] }
             ]
           },
           "then": {
             "description": "The granularity is what marks a route as carrying its routing metadata, so a route carrying any of it names one.",
             "required": ["granularity"]
+          }
+        }
+      ]
+    },
+    "probe": {
+      "description": "One probe execution of a test target against the probe tree, recorded without the environment it ran in and without a path into that tree.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "exit_code"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "package": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "outcome": {
+          "description": "What became of the execution. Absent only on one carrying the error that stopped it instead.",
+          "enum": ["measured", "test-failed", "timed-out", "unavailable"]
+        },
+        "exit_code": { "type": "integer" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "infected": {
+          "description": "The mutants whose site this target made differ from the constant the mutant would put there, by their full mutant identity, each named once. A mutant a measured target left out is one that target can never observe.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "error": {
+          "description": "The error that stopped the execution before it reached an outcome.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "description": "An execution either reached an outcome or was stopped by an error: a record saying neither describes no execution, and one saying both would be an error to one reader and a measurement to another.",
+          "oneOf": [{ "required": ["outcome"] }, { "required": ["error"] }]
+        },
+        {
+          "if": { "required": ["infected"] },
+          "then": {
+            "description": "Only a measured execution observed anything, so the infections it recorded come with the outcome that measured them.",
+            "required": ["outcome"],
+            "properties": { "outcome": { "const": "measured" } }
           }
         }
       ]

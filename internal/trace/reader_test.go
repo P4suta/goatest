@@ -55,6 +55,26 @@ func TestReadSummaryRejectsUnknownFieldsAndOutOfOrderSequences(t *testing.T) {
 	}
 }
 
+func TestReadSummaryCountsAProbeExecAndRejectsOneWithoutItsPayload(t *testing.T) {
+	directory := t.TempDir()
+	writeTraceEvents(t, directory,
+		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+		Event{Seq: 2, Type: TypeProbeExec, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000,
+			Probe: &ProbeRecord{Target: "TestRun", Outcome: ProbeOutcomeMeasured, Infected: []string{"m-0001"}}},
+	)
+	measured, err := ReadSummary(directory)
+	if err != nil || measured.Counts[TypeProbeExec] != 1 {
+		t.Fatalf("summary of a probe pass = (%+v, %v)", measured, err)
+	}
+	writeTraceEvents(t, directory,
+		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+		Event{Seq: 2, Type: TypeProbeExec, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000},
+	)
+	if _, err := ReadSummary(directory); err == nil {
+		t.Fatal("reader accepted a probe-exec event without its payload")
+	}
+}
+
 func writeTraceEvents(t *testing.T, directory string, events ...Event) {
 	t.Helper()
 	var data []byte

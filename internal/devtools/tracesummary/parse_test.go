@@ -38,8 +38,8 @@ func TestReadEventsKeepsTheStreamInOrderWithItsPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the sample trace: %v", err)
 	}
-	if len(events) != 29 {
-		t.Fatalf("read %d events, want 29", len(events))
+	if len(events) != 30 {
+		t.Fatalf("read %d events, want 30", len(events))
 	}
 	if events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
 		t.Errorf("first event is %+v, want the run-start of %s", events[0], trace.SchemaV1)
@@ -56,17 +56,26 @@ func TestReadEventsKeepsTheStreamInOrderWithItsPayloads(t *testing.T) {
 	if events[17].Seq != 18 || events[18].Seq != 20 {
 		t.Errorf("sequence numbers %d and %d around the drop, want 18 and 20", events[17].Seq, events[18].Seq)
 	}
-	execs := 0
+	execs, probes := 0, 0
 	for _, event := range events {
-		if event.Type == trace.TypeExec {
+		switch event.Type {
+		case trace.TypeExec:
 			execs++
 			if event.Exec == nil {
 				t.Fatalf("exec event %d carries no payload", event.Seq)
+			}
+		case trace.TypeProbeExec:
+			probes++
+			if event.Probe == nil || len(event.Probe.Infected) != 2 {
+				t.Fatalf("probe event %d = %+v, want the two mutants the probe pass infected", event.Seq, event.Probe)
 			}
 		}
 	}
 	if execs != 6 {
 		t.Errorf("read %d exec events, want 6", execs)
+	}
+	if probes != 1 {
+		t.Errorf("read %d probe-exec events, want 1", probes)
 	}
 }
 
@@ -433,6 +442,95 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			name:   "route with a negative file candidate count",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":-1}}`),
 			want:   []string{"line 2", "route.file_candidates"},
+		},
+		{
+			name:   "route probed without a granularity",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","probed":true}}`),
+			want:   []string{"line 2", "route probed", "granularity"},
+		},
+		{
+			name:   "probe without the target it ran",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"exit_code":0}}`),
+			want:   []string{"line 2", `"probe.target"`},
+		},
+		{
+			name:   "probe without the status it returned with",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun"}}`),
+			want:   []string{"line 2", `"probe.exit_code"`},
+		},
+		{
+			name:   "probe with an empty target",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"","exit_code":0}}`),
+			want:   []string{"line 2", "probe.target"},
+		},
+		{
+			name:   "probe with a negative timeout",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"timeout_ms":-1}}`),
+			want:   []string{"line 2", "probe.timeout_ms"},
+		},
+		{
+			name:   "probe with a negative duration",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"duration_ms":-1}}`),
+			want:   []string{"line 2", "probe.duration_ms"},
+		},
+		{
+			name:   "probe with an outcome the contract does not name",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"outcome":"guessed"}}`),
+			want:   []string{"line 2", `probe outcome "guessed"`},
+		},
+		{
+			name:   "probe that infected a mutant with no identity",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"outcome":"measured","infected":[""]}}`),
+			want:   []string{"line 2", "probe.infected"},
+		},
+		{
+			name:   "probe that infected the same mutant twice",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"outcome":"measured","infected":["m-0001","m-0001"]}}`),
+			want:   []string{"line 2", `infected "m-0001" twice`},
+		},
+		{
+			name:   "probe infections beside an execution that measured none",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":1,"outcome":"test-failed","infected":["m-0001"]}}`),
+			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
+		},
+		{
+			// An empty list is the claim that the execution measured and found
+			// nothing, which an execution that measured none cannot make; the
+			// schema rejects the field wherever it appears beside another
+			// outcome, and so does the reader.
+			name:   "probe with an empty infection list beside an execution that measured none",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":1,"outcome":"test-failed","infected":[]}}`),
+			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
+		},
+		{
+			name:   "probe with neither an outcome nor an error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0}}`),
+			want:   []string{"line 2", "neither an outcome nor an error"},
+		},
+		{
+			name:   "probe with both an outcome and an error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"outcome":"measured","error":"goatest: probe tree unavailable"}}`),
+			want:   []string{"line 2", "both an outcome and an error"},
+		},
+		{
+			name:   "probe with an empty error",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":-1,"error":""}}`),
+			want:   []string{"line 2", "probe.error"},
+		},
+		{
+			name:   "probe payload on a mutant execution",
+			stream: stream(runStart, `{"seq":2,"type":"mutant-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"mutant":{"id":"m-0001"},"probe":{"target":"TestRun","exit_code":0}}`),
+			want:   []string{"line 2", "probe"},
+		},
+		{
+			name:   "probe-exec without its payload",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1}`),
+			want:   []string{"line 2", "probe"},
+		},
+		{
+			name:   "null probe payload",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":null}`),
+			want:   []string{"line 2", "null", "probe"},
 		},
 		{
 			name:   "progress without its kind field",

@@ -89,6 +89,18 @@ func recordScript(clock *fakeClock, sink trace.Sink) {
 		Granularity:     trace.GranularityBlock,
 		FileCandidates:  3,
 		Discharged:      []trace.Discharge{{Target: "TestSkipped", Reason: trace.DischargeBranchNeverTaken}},
+		Probed:          true,
+	})
+	clock.Advance(time.Second)
+	recorder.ProbeExec(trace.ProbeRecord{
+		Target:     "TestRun",
+		Package:    "example.com/app/internal/assure",
+		Args:       []string{"-test.run=^TestRun$"},
+		TimeoutMS:  30000,
+		Outcome:    trace.ProbeOutcomeMeasured,
+		ExitCode:   0,
+		DurationMS: 800,
+		Infected:   []string{"m-0001"},
 	})
 	clock.Advance(time.Second)
 	recorder.Progress("mutation-progress", "3/10")
@@ -120,11 +132,12 @@ var scriptedJSONL = []string{
 	`{"seq":2,"type":"phase-start","timestamp":"2026-01-02T03:04:06Z","elapsed_ms":1000,"phase":{"name":"mutation"}}`,
 	`{"seq":3,"type":"exec","timestamp":"2026-01-02T03:04:07Z","elapsed_ms":2000,"exec":{"argv":["go","test","./..."],"dir":"internal/assure","env_names":["GOCACHE","GOFLAGS"],"timeout_ms":60000,"exit_code":1,"duration_ms":1200}}`,
 	`{"seq":4,"type":"mutant-exec","timestamp":"2026-01-02T03:04:08Z","elapsed_ms":3000,"mutant":{"id":"m-0001","display_id":"cond-negate internal/assure/run.go:42","package":"example.com/app/internal/assure","args":["-run","TestRun"],"timeout_ms":30000,"outcome":"killed","killed_by":"TestRun","duration_ms":900}}`,
-	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`,
-	`{"seq":6,"type":"progress","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
-	`{"seq":7,"type":"artifact","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,
-	`{"seq":8,"type":"phase-end","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"phase":{"name":"mutation","duration_ms":6000}}`,
-	`{"seq":9,"type":"run-end","timestamp":"2026-01-02T03:04:13Z","elapsed_ms":8000,"run":{"verdict":"assured","events_emitted":8,"events_dropped":0}}`,
+	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}],"probed":true}}`,
+	`{"seq":6,"type":"probe-exec","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"probe":{"target":"TestRun","package":"example.com/app/internal/assure","args":["-test.run=^TestRun$"],"timeout_ms":30000,"outcome":"measured","exit_code":0,"duration_ms":800,"infected":["m-0001"]}}`,
+	`{"seq":7,"type":"progress","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
+	`{"seq":8,"type":"artifact","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,
+	`{"seq":9,"type":"phase-end","timestamp":"2026-01-02T03:04:13Z","elapsed_ms":8000,"phase":{"name":"mutation","duration_ms":7000}}`,
+	`{"seq":10,"type":"run-end","timestamp":"2026-01-02T03:04:14Z","elapsed_ms":9000,"run":{"verdict":"assured","events_emitted":9,"events_dropped":0}}`,
 }
 
 func TestRecordedEventsPinTheirJSONFieldNamesAndOrder(t *testing.T) {
@@ -148,7 +161,8 @@ func TestEveryEventTypeIsRecordedOnceInSequenceOrder(t *testing.T) {
 	t.Parallel()
 	want := []string{
 		trace.TypeRunStart, trace.TypePhaseStart, trace.TypeExec, trace.TypeMutantExec,
-		trace.TypeRoute, trace.TypeProgress, trace.TypeArtifact, trace.TypePhaseEnd, trace.TypeRunEnd,
+		trace.TypeRoute, trace.TypeProbeExec, trace.TypeProgress, trace.TypeArtifact,
+		trace.TypePhaseEnd, trace.TypeRunEnd,
 	}
 	events := scriptedEvents(t)
 	var got []string
@@ -339,10 +353,63 @@ func TestRouteRecordsUnreachedMutantsWithoutTargets(t *testing.T) {
 	// The routing fields are additive: a route that carries none of them must
 	// serialise none of them, or a recording made by a run that never decided
 	// a granularity would claim one the schema does not allow.
-	for _, field := range []string{"reaching_targets", "plan", "column", "granularity", "fallback", "file_candidates", "discharged"} {
+	for _, field := range []string{"reaching_targets", "plan", "column", "granularity", "fallback", "file_candidates", "discharged", "probed"} {
 		if strings.Contains(string(encoded), field) {
 			t.Errorf("unreached route carries %s: %s", field, encoded)
 		}
+	}
+}
+
+func TestProbeExecOmitsWhatItDidNotMeasure(t *testing.T) {
+	t.Parallel()
+	clock := newClock()
+	sink := trace.NewMemorySink(0)
+	recorder := trace.New(sink, clock.Now)
+	// A target whose tests failed against the probe tree measured nothing, so
+	// the record says which target ran and claims no mutant.
+	recorder.ProbeExec(trace.ProbeRecord{
+		Target:     "TestRun",
+		Outcome:    trace.ProbeOutcomeTestFailed,
+		ExitCode:   1,
+		DurationMS: 400,
+	})
+	// An execution that never returned an outcome carries the error that
+	// stopped it, which is the one case an outcome is absent.
+	recorder.ProbeExec(trace.ProbeRecord{
+		Target:   "TestOther",
+		ExitCode: -1,
+		Error:    "goatest: probe tree unavailable",
+	})
+
+	events := sink.Events()
+	if len(events) != 3 || events[1].Probe == nil || events[2].Probe == nil {
+		t.Fatalf("recorded %+v, want two probe events", events)
+	}
+	failed, err := json.Marshal(events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(failed), `"outcome":"test-failed"`) {
+		t.Errorf("a failed probe execution does not record its outcome: %s", failed)
+	}
+	// Only a measured execution says anything about a mutant, so a failed one
+	// carries no infections, and the fields it was given none of are omitted.
+	for _, field := range []string{"infected", "package", "args", "timeout_ms", "error"} {
+		if strings.Contains(string(failed), field) {
+			t.Errorf("a probe execution that measured nothing carries %s: %s", field, failed)
+		}
+	}
+	errored, err := json.Marshal(events[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"error":"goatest: probe tree unavailable"`, `"exit_code":-1`} {
+		if !strings.Contains(string(errored), want) {
+			t.Errorf("an errored probe execution does not carry %s: %s", want, errored)
+		}
+	}
+	if strings.Contains(string(errored), "outcome") {
+		t.Errorf("an errored probe execution claims an outcome: %s", errored)
 	}
 }
 
@@ -454,6 +521,7 @@ func TestNilRecorderIsAnInertNoOp(t *testing.T) {
 	recorder.Exec(trace.ExecRecord{Argv: []string{"go", "test"}})
 	recorder.MutantExec(trace.MutantRecord{ID: "m-0001"})
 	recorder.Route(trace.RouteRecord{MutantID: "m-0001", Reason: trace.ReasonUnreached})
+	recorder.ProbeExec(trace.ProbeRecord{Target: "TestRun"})
 	recorder.Progress("snapshot", "detail")
 	recorder.Artifact("report", "report.json")
 	recorder.RunEnd("assured", errors.New("ignored"))
