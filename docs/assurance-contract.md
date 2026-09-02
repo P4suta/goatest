@@ -110,6 +110,16 @@ It cannot have observed the mutation. Such a target is *discharged*, exactly as
 a branch proof discharges one: removed from the reaching set without being
 executed, and named in the route's `discharged` with reason `never-infected`.
 
+That the recording is a proof is the engine's obligation, as the branch proof
+is. A mutant does not evaluate the operand it replaced, so go-mutants attaches
+a probe form only where leaving that operand unevaluated changes nothing
+observable — every operand of the statement is effect-free — where the
+recorded comparison is always reached — the replaced operand cannot panic —
+and where equal values mean equal behaviour, which rules out a floating-point
+or complex result. goatest states nothing about a site the engine did not
+claim, and holds what the engine does claim to the recorded kills of every
+dogfood run through the offline `proofaudit` infection layer.
+
 The narrowing applies only where the measurement carries it, and everything else
 is kept. A mutant the engine compiled no probe form for — `Mutant.Probed` is
 false — is absent from every measurement there will ever be, so its absence from

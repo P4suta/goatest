@@ -210,7 +210,7 @@
           "minimum": 0
         },
         "discharged": {
-          "description": "The targets a proof removed from the reaching set, each with the proof that removed it: a branch the target never takes, or a mutated site the probe pass measured it never make differ. On a route decided by block, reaching_targets and these together are the targets whose covered blocks contain the mutated position, so a discharged target is never among the reaching ones, and a proof removes a target once, so no target is discharged twice.",
+          "description": "The targets a proof removed from the reaching set, each with the proof that removed it: a branch the target never takes, or a mutated site the probe pass measured the target never made differ. On a route decided by block, reaching_targets and these together are the targets whose covered blocks contain the mutated position, so a discharged target is never among the reaching ones, and a proof removes a target once, so no target is discharged twice.",
           "type": "array",
           "uniqueItems": true,
           "items": {
