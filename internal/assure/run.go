@@ -54,7 +54,7 @@ const goMutantsModulePath = "github.com/P4suta/go-mutants"
 // The pin is a pseudo-version of go-mutants' main branch: the branch proof
 // goatest routes by is only there, and the tagged releases sit on another
 // branch, which is why the pseudo-version reads as v0.0.0 while being ahead.
-const goMutantsFallbackVersion = "v0.0.0-20260902170940-d0cdb7ed194e"
+const goMutantsFallbackVersion = "v0.0.0-20260902214351-fb36fecf91a7"
 
 // GoMutantsVersion resolves the go-mutants version linked into this binary
 // from its build info, honoring a replace directive because the replacement
@@ -214,6 +214,7 @@ type runDependencies struct {
 	relevantRacePackages   func(goanalysis.Model, []string, []TargetEvidence) []string
 	collectRaceWithOptions func(context.Context, CommandWorkspace, goanalysis.Model, []string, string, RaceOptions) (RaceResult, error)
 	prepareSession         func(context.Context, *mutationbridge.Workspace, mutationbridge.PrepareOptions) (MutationSession, error)
+	probeTargets           func(context.Context, MutationSession, []TargetEvidence, ProbeOptions) (ProbeEvaluation, error)
 	evaluateMutations      func(context.Context, MutationSession, []TargetEvidence, MutationOptions) (MutationEvaluation, error)
 	attemptRepairs         func(context.Context, string, []report.Finding, GenerationOptions) (GenerationEvaluation, error)
 	buildGraph             func(string, goanalysis.Model, []TargetEvidence) (evidence.Graph, error)
@@ -533,6 +534,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Packages:  packages,
 			Jobs:      mutationJobs, BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
 			VerifyArgv: verifyArgv, VerifyEnv: resourceEnv, VerifyTimeout: options.CommandTimeout,
+			// Replaying one mutant does not pay for a probe tree it would
+			// measure against once: its routing is then the pre-probe one,
+			// which only ever executes more.
+			Probe: options.ReplayMutantID == "",
 		})
 		if err != nil {
 			_ = closeRound()
@@ -545,6 +550,32 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			mutationDetail = "1 mutant"
 		}
 		emit(options, "mutation-target", mutationDetail)
+
+		if options.ReplayMutantID == "" {
+			// The probe pass measures which mutants each target could observe
+			// at all. It changes no routing decision in this version; what it
+			// establishes is recorded so the layer can be audited against a
+			// full run's kills before anything is discharged by it.
+			phases.enter(phaseProbe)
+			probeCount := probeTargetCount(baseline.Targets)
+			probeDetail := fmt.Sprintf("%d targets", probeCount)
+			if probeCount == 1 {
+				probeDetail = "1 target"
+			}
+			emit(options, "probe-target", probeDetail)
+			probed, probeErr := dependencies.probeTargets(ctx, session, baseline.Targets, ProbeOptions{
+				Contract: contract, Timeout: options.CommandTimeout, TestArgs: slices.Clone(options.TestArgs),
+				Jobs: mutationJobs, Trace: options.Trace, Progress: probeProgress(options),
+			})
+			if probeErr != nil {
+				_ = closeRound()
+				return report.Report{}, probeErr
+			}
+			// The only later reader of these targets is the mutation phase; the
+			// checkpoint keeps a form of its own, written while the baseline ran.
+			baseline.Targets = probed.Targets
+			emit(options, "probe-summary", fmt.Sprintf("%d measured, %d without facts", probed.Measured, probed.Unmeasured))
+		}
 
 		phases.enter(phaseMutation)
 		mutationResume := checkpointController.mutation(catalog, root)
@@ -1166,6 +1197,17 @@ func mutationProgress(options Options) func(completed, total int) {
 		step := max(1, (total+99)/100)
 		if completed == 1 || completed == total || completed%step == 0 {
 			emit(options, "mutation-progress", fmt.Sprintf("%d/%d", completed, total))
+		}
+	}
+}
+
+// probeProgress reports the probe pass the way the mutation phase reports
+// itself, so a watcher reads one kind of progress line through both.
+func probeProgress(options Options) func(completed, total int) {
+	return func(completed, total int) {
+		step := max(1, (total+99)/100)
+		if completed == 1 || completed == total || completed%step == 0 {
+			emit(options, "probe-progress", fmt.Sprintf("%d/%d", completed, total))
 		}
 	}
 }

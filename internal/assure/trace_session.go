@@ -41,6 +41,13 @@ func (traced tracedSession) Exec(ctx context.Context, request gomutants.ExecRequ
 	return result, err
 }
 
+// Probe measures one target against the probe tree. It records nothing of its
+// own: a probe request names the package and the flags but not the target
+// identity a record is read by, so the probe pass records what it measured.
+func (traced tracedSession) Probe(ctx context.Context, request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	return traced.session.Probe(ctx, request)
+}
+
 // mutantExecutionRecord describes one mutant execution for the trace. The
 // identity is the one the engine resolved, falling back to the one that was
 // requested when an execution produced no result to resolve it from.

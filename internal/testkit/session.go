@@ -17,10 +17,12 @@ import (
 // ScriptedWorkspace it satisfies the assurance runner's session contract
 // structurally, so testkit stays free of an import cycle.
 type ScriptedSession struct {
-	mutex    sync.Mutex
-	catalog  gomutants.Catalog
-	rules    []*MutantRule
-	requests []gomutants.ExecRequest
+	mutex         sync.Mutex
+	catalog       gomutants.Catalog
+	rules         []*MutantRule
+	requests      []gomutants.ExecRequest
+	probeRules    []*ProbeRule
+	probeRequests []gomutants.ProbeRequest
 }
 
 // MutantRule is one scripted mutant outcome. A rule registered without a
@@ -118,6 +120,107 @@ func (session *ScriptedSession) Requests() []gomutants.ExecRequest {
 	return requests
 }
 
+// ProbeRule is one scripted probe outcome. A rule registered without a response
+// answers with the zero result.
+type ProbeRule struct {
+	mutex   *sync.Mutex
+	pkg     string
+	args    []string
+	handler func(gomutants.ProbeRequest) (gomutants.ProbeResult, error)
+}
+
+// OnProbe registers a rule for probes of pkg, restricted to the requests whose
+// arguments start with args. The longest matching argument prefix wins whatever
+// the registration order, and equal prefixes resolve to the rule registered
+// first, so one package can answer differently per target.
+func (session *ScriptedSession) OnProbe(pkg string, args ...string) *ProbeRule {
+	rule := &ProbeRule{
+		mutex: &session.mutex,
+		pkg:   pkg,
+		args:  slices.Clone(args),
+		handler: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+			return gomutants.ProbeResult{}, nil
+		},
+	}
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	session.probeRules = append(session.probeRules, rule)
+	return rule
+}
+
+// Return answers every matching request with result. The result is copied when
+// the rule is registered and again for every response, infections included, so
+// that neither the caller that scripted it nor one that receives it shares the
+// storage a later response reads.
+func (rule *ProbeRule) Return(result gomutants.ProbeResult) *ProbeRule {
+	scripted := cloneProbeResult(result)
+	return rule.Do(func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return cloneProbeResult(scripted), nil
+	})
+}
+
+// Fail answers every matching request with err and the zero result, modelling a
+// pass that produced no measurement at all.
+func (rule *ProbeRule) Fail(err error) *ProbeRule {
+	return rule.Do(func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{}, err
+	})
+}
+
+// Do answers every matching request with handler, for the outcomes that depend
+// on the request itself.
+func (rule *ProbeRule) Do(handler func(gomutants.ProbeRequest) (gomutants.ProbeResult, error)) *ProbeRule {
+	rule.mutex.Lock()
+	defer rule.mutex.Unlock()
+	rule.handler = handler
+	return rule
+}
+
+// Probe records the request and answers it from the routing table. A request no
+// rule covers answers that no probe runtime was available, which is the outcome
+// that carries no facts: a fake that answered "measured, nothing infected"
+// would hand a test the one reading that is unsound.
+func (session *ScriptedSession) Probe(_ context.Context, request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	handler := session.routeProbe(request)
+	if handler == nil {
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+	}
+	return handler(request)
+}
+
+// ProbeRequests returns every recorded probe request in call order, detached
+// from the session so that an assertion cannot corrupt the record.
+func (session *ScriptedSession) ProbeRequests() []gomutants.ProbeRequest {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	requests := make([]gomutants.ProbeRequest, len(session.probeRequests))
+	for index, request := range session.probeRequests {
+		requests[index] = cloneProbeRequest(request)
+	}
+	return requests
+}
+
+// routeProbe records one probe request and selects its handler under a single
+// lock, for the same reason route does.
+func (session *ScriptedSession) routeProbe(request gomutants.ProbeRequest) func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	session.probeRequests = append(session.probeRequests, cloneProbeRequest(request))
+	var selected *ProbeRule
+	for _, rule := range session.probeRules {
+		if rule.pkg != request.Package || !hasPrefix(request.Args, rule.args) {
+			continue
+		}
+		if selected == nil || len(rule.args) > len(selected.args) {
+			selected = rule
+		}
+	}
+	if selected == nil {
+		return nil
+	}
+	return selected.handler
+}
+
 // route records one request and selects its handler under a single lock, for
 // the same reason ScriptedWorkspace.route does.
 func (session *ScriptedSession) route(request gomutants.ExecRequest) func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -157,6 +260,19 @@ func cloneMutantResult(result gomutants.MutantResult) gomutants.MutantResult {
 }
 
 func cloneExecRequest(request gomutants.ExecRequest) gomutants.ExecRequest {
+	request.Args = slices.Clone(request.Args)
+	request.Env = slices.Clone(request.Env)
+	return request
+}
+
+// cloneProbeResult detaches the infections, which a caller may legitimately
+// sort, filter, or hand on.
+func cloneProbeResult(result gomutants.ProbeResult) gomutants.ProbeResult {
+	result.Infected = slices.Clone(result.Infected)
+	return result
+}
+
+func cloneProbeRequest(request gomutants.ProbeRequest) gomutants.ProbeRequest {
 	request.Args = slices.Clone(request.Args)
 	request.Env = slices.Clone(request.Env)
 	return request
