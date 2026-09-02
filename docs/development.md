@@ -229,13 +229,14 @@ kill in the comparison, and a smaller bill in the summary. A regression is
 reported rather than failed on, so the exit code says whether the two reports
 could be read rather than what they said.
 
-`mise run proof-audit -- [-module PATH] <trace.jsonl> <profiles-dir>` audits
-the proof layers of one recorded run against the kills that run proved. The
-profiles name their files under a module path, which defaults to the `module`
-directive of `./go.mod` — the repository the tool is run from — and `-module`
-names another when the recording came from a different one. A layer is any rule that
-narrows what a mutant is executed against — today the block routing that keeps
-a mutant to the coverage blocks containing its position — and the invariant
+`mise run proof-audit -- [-module PATH] [-catalog PATH] <trace.jsonl> <profiles-dir>`
+audits the proof layers of one recorded run against the kills that run proved.
+The profiles name their files under a module path, which defaults to the
+`module` directive of `./go.mod` — the repository the tool is run from — and
+`-module` names another when the recording came from a different one. A layer is
+any rule that narrows what a mutant is executed against — the block routing that
+keeps a mutant to the coverage blocks containing its position, and the
+branch-never-taken proof behind it — and the invariant
 every layer has to satisfy is that it drops no killer: for each mutant a target
 actually killed, the narrowed rule must still route that mutant to that target.
 The rule is reimplemented from the recording and the coverage profiles of the
@@ -248,6 +249,35 @@ rule and not the reading. The two halves come from one
 every layer kept every killer. A recording cut short — a run killed, or one
 whose disk filled — is audited up to its last complete line, but a malformed
 line with more lines after it is refused rather than skipped.
+
+The `branch` layer decides by a proof the recording does not carry, so it needs
+a third input. `-catalog` names a `go-mutants list --json` document, produced
+from the repository root of the same tree the run recorded:
+
+```sh
+go run github.com/P4suta/go-mutants/cmd/go-mutants list --json --profile strong > catalog.json
+```
+
+The tree has to match: mutant identities are content-addressed, so a catalog
+taken from another commit lists none of the mutants the recording names, and the
+audit reports every pair as one it could not decide rather than pretending to.
+**Without `-catalog` the layer is not audited at all**, and the report prints
+`branch: not audited (no -catalog given)` under the layer table instead of a row
+of zeroes — a layer nobody checked and a layer that came out clean must never
+read the same.
+
+With one, the table gains a `branch` row beside `reach`. Its `violations` is the
+column the whole tool exists to print a zero in; `inapplicable` counts the kill
+pairs whose mutant carries no proof, which the layer changes nothing about and
+which are kept apart from `kept` so that a layer proving almost nothing cannot
+report almost every pair as one it preserves. The `branch discharge` block below
+it is the other half of the question — soundness says the layer may be used,
+this says whether it is worth using. It counts the routed mutants carrying a
+proof, the reaching targets the rule would drop, the routes it would leave with
+no reaching target at all, and the recorded executions that would not have
+happened. All four are measured from the routes and the profiles rather than
+read off the `discharged` targets of the trace, because the recordings worth
+auditing are the ones made by runs that discharged nothing.
 
 A trace directory holds `trace.jsonl`, one JSON object per line in sequence
 order, and `output/<seq>.txt`, the captured output of the commands that
