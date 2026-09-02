@@ -208,6 +208,14 @@ func branchLayer(catalog *mutantCatalog) layer {
 // cmd/cover records the body's first block starting at the opening brace on one
 // toolchain and at the first statement on another, and only the start is inside
 // the span under both.
+//
+// A fuzz target is held to the proof like any other killer, although the engine
+// never discharges one. The exemption guards the fuzzing pass, which explores
+// past the coverage the seed corpus measured — and that pass selects no test,
+// so its kills are never a pair. A kill attributed to a fuzz target is its seed
+// corpus killing the mutant, and a seed corpus that never entered the body
+// under measurement cannot have entered it under an inert condition either: if
+// it killed anyway, the proof was wrong, and that is the violation to print.
 func decideBranch(catalog *mutantCatalog, pair killPair, recorded evidence) finding {
 	listed, known := catalog.lookup(pair.mutant)
 	if !known {
