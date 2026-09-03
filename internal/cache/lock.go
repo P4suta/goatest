@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/P4suta/goatest/internal/advisorylock"
 )
 
 const lockFileName = ".lock"
@@ -33,7 +35,7 @@ func Acquire(ctx context.Context, root string, onWait func()) (*Lease, error) {
 	}
 	waiting := false
 	for {
-		locked, lockErr := tryAdvisoryLock(file)
+		locked, lockErr := advisorylock.Try(file)
 		if lockErr != nil {
 			_ = file.Close()
 			return nil, fmt.Errorf("goatest: acquire cache lock: %w", lockErr)
@@ -66,7 +68,7 @@ func (lease *Lease) Release() error {
 		return nil
 	}
 	lease.once.Do(func() {
-		lease.err = unlockAdvisory(lease.file)
+		lease.err = advisorylock.Release(lease.file)
 		if closeErr := lease.file.Close(); lease.err == nil {
 			lease.err = closeErr
 		}

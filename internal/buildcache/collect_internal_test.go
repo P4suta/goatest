@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/P4suta/goatest/internal/advisorylock"
 )
 
 // collectMoment is the fixed moment these assertions are timed against.
@@ -156,7 +158,7 @@ func TestCollectLockedSkipsALayerAnotherProcessIsCollecting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = held.Close() }()
-	locked, err := tryAdvisoryLock(held)
+	locked, err := advisorylock.Try(held)
 	if err != nil || !locked {
 		t.Fatalf("holding the collection lock = (%t, %v)", locked, err)
 	}
@@ -167,7 +169,7 @@ func TestCollectLockedSkipsALayerAnotherProcessIsCollecting(t *testing.T) {
 	if ran || collected != (Collected{}) {
 		t.Fatalf("collection against a held lock = (%+v, %t), want nothing collected", collected, ran)
 	}
-	if err := unlockAdvisory(held); err != nil {
+	if err := advisorylock.Release(held); err != nil {
 		t.Fatal(err)
 	}
 	if _, ran, err := layer.collectLockedWithHooks(Policy{MaxBytes: 1}, 0, collectMoment, layerHooks{}); err != nil || !ran {
