@@ -43,12 +43,16 @@ const (
 	legacyBuildCachePrefix = legacyPrefix + "build-cache-"
 )
 
-// temporaryPrefixes are the names goatest makes directly under the temporary
+// TemporaryPrefixes are the names goatest makes directly under the temporary
 // root, and so the only names its sweep may collect. Everything else in that
 // directory belongs to somebody else, including go-mutants' own snapshots and
 // scratch directories: those carry owner files of their own and are collected
 // by go-mutants' sweep, which runs whenever a workspace is opened.
-func temporaryPrefixes() []string {
+//
+// It is exported for `goatest cache status` and `goatest cache gc`, which sweep
+// the same directory on demand and must sweep exactly what a run sweeps: two
+// lists that could disagree would be two conventions.
+func TemporaryPrefixes() []string {
 	return []string{
 		runScratchPrefix,
 		legacyPrefix + baselineScratchName,
@@ -147,7 +151,7 @@ func (scratch runScratch) buildCacheLayer() (string, error) {
 // would be in the progress stream of every run of every repository that never
 // crashes, and a reader learns to skip exactly that kind of line.
 func sweepRunTemporaries(options Options, sweep func(string, []string, time.Time) (tempowner.Result, error), now time.Time) {
-	result, err := sweep(options.TempDirectory, temporaryPrefixes(), now)
+	result, err := sweep(options.TempDirectory, TemporaryPrefixes(), now)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
 	}

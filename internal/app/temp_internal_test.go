@@ -4,6 +4,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -74,15 +75,18 @@ func TestCacheStatusReportsTheOrphansAndTheDirectoriesRunsKept(t *testing.T) {
 	if err != nil || status.Verdict != report.VerdictCompleted {
 		t.Fatalf("cache status = %+v, %v", status, err)
 	}
-	if !hasEvidenceDetail(status, "orphans", "abandoned=1 bytes=4096 live=0 kept=0") {
-		t.Fatalf("cache status evidence = %+v, want the orphan reported", status.Evidence)
+	// The size is the fixture's own, measured rather than assumed: an
+	// abandoned directory holds its owner pair as well as what the run wrote.
+	orphaned := fmt.Sprintf("abandoned=1 bytes=%d live=0 kept=0", tempowner.Size(orphan))
+	if !hasEvidenceDetail(status, "orphans", orphaned) {
+		t.Fatalf("cache status evidence = %+v, want %q", status.Evidence, orphaned)
 	}
 	// One entry per kept directory, saying whether it is still there, and a
 	// total for the reader who only wants to know whether to care.
 	if !hasEvidenceStatus(status, "goatest-run-kept", "kept") || !hasEvidenceStatus(status, "goatest-run-gone", "missing") {
 		t.Fatalf("cache status evidence = %+v, want both ledger entries reported", status.Evidence)
 	}
-	if !hasEvidenceDetail(status, "kept-temp", "entries=2 bytes=1032 missing=1") {
+	if !hasEvidenceDetail(status, "kept-temp-status", "entries=2 bytes=1032 missing=1") {
 		t.Fatalf("cache status evidence = %+v, want the kept total reported", status.Evidence)
 	}
 	// Status inspects and never collects: a person asking what is on their
@@ -117,12 +121,13 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 		Root: root, Progress: io.Discard, TempDirectory: temporary,
 		Now: func() time.Time { return moment.Add(time.Minute) },
 	}
+	reclaimed := fmt.Sprintf("removed=1 bytes=%d live=0 kept=0", tempowner.Size(orphan))
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
 	if err != nil || collected.Verdict != report.VerdictCompleted {
 		t.Fatalf("cache gc = %+v, %v", collected, err)
 	}
-	if !hasEvidenceDetail(collected, "sweep", "removed=1 bytes=4096 live=0 kept=0") {
-		t.Fatalf("cache gc evidence = %+v, want the orphan collected", collected.Evidence)
+	if !hasEvidenceDetail(collected, "sweep", reclaimed) {
+		t.Fatalf("cache gc evidence = %+v, want %q", collected.Evidence, reclaimed)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("stat the orphan after a gc = %v, want it gone", err)
@@ -161,7 +166,7 @@ func TestCacheStatusOfAMachineThatHasKeptNothingReportsNothing(t *testing.T) {
 	if !hasEvidenceDetail(status, "orphans", "abandoned=0 bytes=0 live=0 kept=0") {
 		t.Fatalf("cache status evidence = %+v, want an empty temporary directory reported", status.Evidence)
 	}
-	if !hasEvidenceDetail(status, "kept-temp", "entries=0 bytes=0 missing=0") {
+	if !hasEvidenceDetail(status, "kept-temp-status", "entries=0 bytes=0 missing=0") {
 		t.Fatalf("cache status evidence = %+v, want an empty ledger reported", status.Evidence)
 	}
 }
