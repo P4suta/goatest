@@ -284,6 +284,14 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	if err != nil {
 		emit(options, "temp-unavailable", err.Error())
 	}
+	// Every workspace of this run is closed through here. Closing is where the
+	// engine names the directories a keeping run asked it to keep, and a path
+	// nobody wrote down is litter rather than something a developer can find.
+	closeWorkspace := func(workspace *mutationbridge.Workspace) error {
+		err := dependencies.closeWorkspace(workspace)
+		recordKept(options, scratch, artifactMutationWorkspace, workspace.Preserved(), now())
+		return err
+	}
 	// A build cache that cannot be opened is reported and then done without. It
 	// makes a run faster and decides nothing, so a disk that refuses it costs
 	// time and never a verdict.
@@ -303,7 +311,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		// Last, because the build cache layer is inside it: removing that
 		// layer first keeps the peak smaller, and this removal covers whatever
 		// is left.
-		releaseRunScratch(options, dependencies.removeRunScratch, scratch)
+		releaseRunScratch(options, dependencies.removeRunScratch, scratch, now())
 	}()
 	var appliedRepairs []report.Repair
 	phases := runPhases{recorder: options.Trace}
@@ -316,43 +324,44 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 			ReportDirectory: ".goatest",
 			Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
-			Trace:           options.Trace,
+			Trace:           options.Trace, KeepTemp: options.KeepTemp,
 		})
 		if err != nil {
 			return report.Report{}, err
 		}
+		reportMutationSweep(options, workspace.Swept())
 		// Every command below reaches the workspace through this wrapper, which
 		// is the one place that decides which layer of the build cache a
 		// command's writes land in.
 		commands := withBuildCache(workspace, buildCache)
 		metadata, err := dependencies.inspectWorkspace(ctx, commands)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
 			selectedModel, selectErr := inspectSelectedPackages(ctx, commands, options.Packages, options.BuildTags, options.CommandTimeout)
 			if selectErr != nil {
-				_ = dependencies.closeWorkspace(workspace)
+				_ = closeWorkspace(workspace)
 				return report.Report{}, selectErr
 			}
 			metadata.model = selectedModel
 		}
 		inputs, digest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		phases.enter(phaseCacheCheck)
 		if round == 0 && len(loaded.Resources) == 0 {
 			cached, found, cacheErr := cacheStore.Get(digest)
 			if cacheErr != nil {
-				_ = dependencies.closeWorkspace(workspace)
+				_ = closeWorkspace(workspace)
 				return report.Report{}, cacheErr
 			}
 			if found && cachedAcceptanceValid(cached, accepted) {
 				emit(options, "cache-hit", digest)
-				if closeErr := dependencies.closeWorkspace(workspace); closeErr != nil {
+				if closeErr := closeWorkspace(workspace); closeErr != nil {
 					return report.Report{}, closeErr
 				}
 				return cached, nil
@@ -362,7 +371,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		phases.enter(phaseDiscover)
 		targets, err := dependencies.discoverTargets(root, metadata.model.Packages)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		allTargets := slices.Clone(targets)
@@ -392,7 +401,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Acceptances: slices.Clone(acceptances),
 				Limitations: projectExcludeLimitations(loaded.Project.Exclude),
 			}
-			if closeErr := dependencies.closeWorkspace(workspace); closeErr != nil {
+			if closeErr := closeWorkspace(workspace); closeErr != nil {
 				return report.Report{}, closeErr
 			}
 			if err := cacheStore.Put(digest, result); err != nil {
@@ -408,7 +417,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		phases.enter(phaseResources)
 		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets, options.Environment)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		var controlMutex sync.Mutex
@@ -425,11 +434,12 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 					ReportDirectory: ".goatest",
 					Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
-					Trace:           options.Trace,
+					Trace:           options.Trace, KeepTemp: options.KeepTemp,
 				})
 				if openErr != nil {
 					return gomutants.CommandResult{}, openErr
 				}
+				reportMutationSweep(options, opened.Swept())
 				controlWorkspace = opened
 			}
 			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags, scratch)
@@ -440,10 +450,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			if controlWorkspace == nil {
 				return nil
 			}
-			return dependencies.closeWorkspace(controlWorkspace)
+			return closeWorkspace(controlWorkspace)
 		}
 		closeRound := func() error {
-			return errors.Join(closeControl(), manager.Close(), dependencies.closeWorkspace(workspace))
+			return errors.Join(closeControl(), manager.Close(), closeWorkspace(workspace))
 		}
 
 		phases.enter(phaseBaseline)

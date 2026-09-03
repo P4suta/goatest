@@ -51,11 +51,18 @@ func TestARunRecordsTheDirectoryItKeptInTheLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []keptledger.Entry{{
-		Path: harness.runScratch, RunID: filepath.Base(harness.runScratch), KeptAt: moment,
-	}}
-	if !reflect.DeepEqual(ledger.Entries, want) {
-		t.Fatalf("ledger entries = %+v, want %+v", ledger.Entries, want)
+	if len(ledger.Entries) != 1 {
+		t.Fatalf("ledger entries = %+v, want the one directory the run kept", ledger.Entries)
+	}
+	entry := ledger.Entries[0]
+	if entry.Path != harness.runScratch || entry.RunID != filepath.Base(harness.runScratch) || !entry.KeptAt.Equal(moment) {
+		t.Fatalf("ledger entry = %+v, want the run scratch, named for this run, kept at %s", entry, moment)
+	}
+	// The size is measured rather than assumed: a kept run scratch holds at
+	// least its own owner pair, and what a person deciding whether to care
+	// reads is how much disk it is costing them.
+	if entry.Bytes <= 0 {
+		t.Fatalf("ledger entry bytes = %d, want what the directory held", entry.Bytes)
 	}
 }
 

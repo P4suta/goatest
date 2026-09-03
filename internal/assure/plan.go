@@ -61,16 +61,18 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		// packages — so it bounds the layer on the way out like a run does.
 		collectRunBuildCache(options, loaded, buildCache, planMoment(options))
 		resultErr = errors.Join(resultErr, releaseBuildCache(options, buildCache))
-		releaseRunScratch(options, os.RemoveAll, scratch)
+		releaseRunScratch(options, os.RemoveAll, scratch, planMoment(options))
 	}()
 	workspace, err := mutationbridge.Open(ctx, root, mutationbridge.Options{
 		GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 		ReportDirectory: ".goatest",
 		Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
+		KeepTemp:        options.KeepTemp,
 	})
 	if err != nil {
 		return report.Report{}, err
 	}
+	reportMutationSweep(options, workspace.Swept())
 	defer func() { resultErr = errors.Join(resultErr, workspace.Close()) }()
 	commands := withBuildCache(workspace, buildCache)
 	metadata, err := inspectWorkspace(ctx, commands)

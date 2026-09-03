@@ -229,6 +229,7 @@ func (validator *repositoryValidator) open(ctx context.Context, root string) (va
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
 		ReportDirectory: ".goatest", Environment: environment, Trace: validator.options.Trace,
+		KeepTemp: validator.options.KeepTemp,
 	})
 }
 

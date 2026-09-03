@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/P4suta/goatest/internal/tempowner"
@@ -72,6 +73,12 @@ type runScratch struct {
 	// fallback is the temporary root the run was configured with, which is
 	// where its directories go when there is no scratch to put them in.
 	fallback string
+	// root is the repository the run is verifying. The ledger of what the run
+	// kept lives there, and the marker names it so that a person who finds the
+	// directory knows which project it belongs to.
+	root string
+	// id names the run in the marker and in every ledger entry it writes.
+	id string
 	// owner holds the lock and the marker for as long as the run is using the
 	// directory. It is nil when the pair could not be written, which costs the
 	// next run's sweep its liveness signal and costs this run nothing.
@@ -86,17 +93,29 @@ type runScratch struct {
 // a run that could not make one at all still has somewhere to write: neither is
 // a reason to stop, and both are worth reporting.
 func openRunScratch(makeScratch func(string, string) (string, error), fallback, root string, now time.Time) (runScratch, error) {
+	scratch := runScratch{fallback: fallback, root: root, id: unownedRunID(now)}
 	directory, err := makeScratch(fallback, runScratchPrefix)
 	if err != nil {
-		return runScratch{fallback: fallback}, fmt.Errorf("goatest: create run scratch: %w", err)
+		return scratch, fmt.Errorf("goatest: create run scratch: %w", err)
 	}
-	scratch := runScratch{dir: directory, fallback: fallback}
-	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: filepath.Base(directory), Root: root}, now)
+	// The name mkdtemp made is the run's identity from here on: it is unique by
+	// construction, it is the name a person sees on the disk, and it is what
+	// ties a marker, a trace artifact and a ledger entry to one another.
+	scratch.dir, scratch.id = directory, filepath.Base(directory)
+	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: scratch.id, Root: root}, now)
 	if err != nil {
 		return scratch, fmt.Errorf("goatest: claim run scratch: %w", err)
 	}
 	scratch.owner = owner
 	return scratch, nil
+}
+
+// unownedRunID names a run that has no scratch directory to be named after. It
+// follows the convention a recording uses for a run that never reached a report
+// identity — the moment it ran and the process it ran in — because that is the
+// only identity available before anything of the run exists.
+func unownedRunID(now time.Time) string {
+	return runScratchPrefix + now.UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
 }
 
 // subdirectory names the parent and the prefix one kind of the run's temporary
