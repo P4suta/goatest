@@ -118,6 +118,12 @@ type CountAccounting struct {
 // Discovered must equal Executed + CompileRejected + Accepted + OutOfScope +
 // Unknown;
 // Executed must equal Killed + Survived + Inconclusive.
+//
+// ReusedKilled and ReusedSurvived count the mutants inside Killed and Survived
+// whose verdict this run resolved from evidence an earlier run recorded rather
+// than by executing anything. Executed counts a mutant that reached a terminal
+// execution disposition, however it reached one, so the two are a partition of
+// it rather than something beside it and their sum never exceeds it.
 type MutantAccounting struct {
 	Discovered      int `json:"discovered"`
 	Selected        int `json:"selected"`
@@ -129,6 +135,8 @@ type MutantAccounting struct {
 	Accepted        int `json:"accepted"`
 	OutOfScope      int `json:"out_of_scope"`
 	Unknown         int `json:"unknown"`
+	ReusedKilled    int `json:"reused_killed,omitempty"`
+	ReusedSurvived  int `json:"reused_survived,omitempty"`
 }
 
 type MutantStatus string
@@ -146,14 +154,24 @@ const (
 // MutantDisposition is the one-and-only terminal classification for a
 // discovered mutant. The redundant Accounting aggregate is validated against
 // this inventory before a report can be persisted or reused from cache.
+//
+// Reused says this run resolved the disposition from evidence an earlier run
+// recorded instead of executing the mutant, and Provenance names that run by
+// the snapshot it verified, in the "snapshot=<digest>" form a Repair carries.
+// The two are one fact stated twice and are audited against each other: a
+// verdict this run did not observe is only worth reading beside the run that
+// did. Both are additive, so a report written before evidence was ever reused
+// carries neither.
 type MutantDisposition struct {
-	ID      string       `json:"id"`
-	Status  MutantStatus `json:"status"`
-	Path    string       `json:"path"`
-	Line    int          `json:"line"`
-	Package string       `json:"package"`
-	Rule    string       `json:"rule"`
-	Detail  string       `json:"detail,omitempty"`
+	ID         string       `json:"id"`
+	Status     MutantStatus `json:"status"`
+	Path       string       `json:"path"`
+	Line       int          `json:"line"`
+	Package    string       `json:"package"`
+	Rule       string       `json:"rule"`
+	Detail     string       `json:"detail,omitempty"`
+	Reused     bool         `json:"reused,omitempty"`
+	Provenance string       `json:"provenance,omitempty"`
 }
 
 type Accounting struct {

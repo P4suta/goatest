@@ -74,5 +74,7 @@ func productionRunDependencies() runDependencies {
 		buildGraph:             buildGraph,
 		mergeGraph:             mergeGraph,
 		saveGraph:              evidence.SaveGraph,
+		loadMutationEvidence:   evidence.LoadMutation,
+		saveMutationEvidence:   evidence.SaveMutation,
 	}
 }

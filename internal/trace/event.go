@@ -170,6 +170,13 @@ type MutantRecord struct {
 // mutant no measurement could ever have named. It is absent on a recording made
 // before the probe pass existed and on a mutant the engine has no probe form
 // for.
+//
+// Reused says the run resolved this mutant from evidence an earlier run
+// recorded instead of executing it. Nothing ran, so the recording carries no
+// execution of the mutant at all and the plan is the reuse itself: a reader
+// that finds a reused route and an execution of the same mutant is reading a
+// contradiction. It is absent on a recording made before evidence was reused
+// and on every mutant a run executed.
 type RouteRecord struct {
 	MutantID        string      `json:"mutant_id,omitempty"`
 	Rule            string      `json:"rule,omitempty"`
@@ -184,6 +191,7 @@ type RouteRecord struct {
 	FileCandidates  int         `json:"file_candidates,omitempty"`
 	Discharged      []Discharge `json:"discharged,omitempty"`
 	Probed          bool        `json:"probed,omitempty"`
+	Reused          bool        `json:"reused,omitempty"`
 }
 
 // Discharge is one target a proof removed from a reaching set, and the proof

@@ -858,3 +858,88 @@ func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	}
 	return clone
 }
+
+// TestSchemaRejectsARouteWithANonBooleanReused pins the one shape the new
+// field has. A reuse is a yes or a no: anything else is a recording a reader
+// would have to interpret, and an interpreted audit trail is not one.
+func TestSchemaRejectsARouteWithANonBooleanReused(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	for _, value := range []any{"true", 1, []any{true}} {
+		amended := cloneDocument(t, route)
+		amended["route"].(map[string]any)["reused"] = value
+		if err := compiled.Validate(cloneDocument(t, amended)); err == nil {
+			t.Errorf("a route with reused %v passed the schema", value)
+		}
+	}
+	// A recording made before the field existed carries no reuse at all, and
+	// stays a recording this schema reads.
+	amended := cloneDocument(t, route)
+	delete(amended["route"].(map[string]any), "reused")
+	if err := compiled.Validate(cloneDocument(t, amended)); err != nil {
+		t.Fatalf("a route recorded before reuse existed was rejected: %v", err)
+	}
+}
+
+// TestSchemaTiesAReusedRouteToThePlanThatSaysSo pins the contract from both
+// sides. Nothing ran for a reused mutant, so a reused route plans the reuse and
+// nothing else — a reused route that plans a target or the package suite is a
+// recording that contradicts itself — and a route whose plan is the reuse is a
+// reused route, so a reader cannot be told "reused" by one field and not the
+// other.
+func TestSchemaTiesAReusedRouteToThePlanThatSaysSo(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	cases := []struct {
+		name   string
+		reused any
+		plan   []any
+		valid  bool
+	}{
+		{name: "reused with the reuse as the plan", reused: true, plan: []any{"reused"}, valid: true},
+		{name: "reused planning a target", reused: true, plan: []any{"TestRun"}, valid: false},
+		{name: "reused planning the package suite", reused: true, plan: []any{"package-suite"}, valid: false},
+		{name: "reused planning the reuse and a target", reused: true, plan: []any{"reused", "TestRun"}, valid: false},
+		{name: "reused planning nothing", reused: true, plan: []any{}, valid: false},
+		{name: "the reuse planned without saying so", reused: nil, plan: []any{"reused"}, valid: false},
+		{name: "the reuse planned and denied", reused: false, plan: []any{"reused"}, valid: false},
+		{name: "executed with a target as the plan", reused: nil, plan: []any{"TestRun"}, valid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			fields := amended["route"].(map[string]any)
+			fields["plan"] = tc.plan
+			delete(fields, "reused")
+			if tc.reused != nil {
+				fields["reused"] = tc.reused
+			}
+			err := compiled.Validate(cloneDocument(t, amended))
+			if tc.valid && err != nil {
+				t.Errorf("rejected: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Error("passed the schema")
+			}
+		})
+	}
+}

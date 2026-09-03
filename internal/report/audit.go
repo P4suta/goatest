@@ -249,11 +249,18 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 	values := []int{
 		count.Discovered, count.Selected, count.Executed, count.Killed, count.Survived,
 		count.Inconclusive, count.CompileRejected, count.Accepted, count.OutOfScope, count.Unknown,
+		count.ReusedKilled, count.ReusedSurvived,
 	}
 	for _, value := range values {
 		if value < 0 {
 			return errors.New("goatest: mutant accounting contains a negative count")
 		}
+	}
+	// A reused verdict is one of the executions, not an extra one: it is a
+	// mutant that reached a terminal disposition without this run executing it.
+	if count.ReusedKilled+count.ReusedSurvived > count.Executed {
+		return fmt.Errorf("goatest: mutant accounting reused %d of %d executions",
+			count.ReusedKilled+count.ReusedSurvived, count.Executed)
 	}
 	if count.Discovered != count.Executed+count.CompileRejected+count.Accepted+count.OutOfScope+count.Unknown {
 		return fmt.Errorf("goatest: mutant disposition mismatch: discovered=%d executed=%d compile-rejected=%d accepted=%d out-of-scope=%d unknown=%d",
@@ -285,15 +292,24 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 			return fmt.Errorf("goatest: mutant inventory contains duplicate ID %s", disposition.ID)
 		}
 		seen[disposition.ID] = struct{}{}
+		if err := validateReuse(disposition); err != nil {
+			return err
+		}
 		switch disposition.Status {
 		case MutantKilled:
 			observed.Selected++
 			observed.Executed++
 			observed.Killed++
+			if disposition.Reused {
+				observed.ReusedKilled++
+			}
 		case MutantSurvived:
 			observed.Selected++
 			observed.Executed++
 			observed.Survived++
+			if disposition.Reused {
+				observed.ReusedSurvived++
+			}
 		case MutantInconclusive:
 			observed.Selected++
 			observed.Executed++
@@ -317,6 +333,32 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 		return fmt.Errorf("goatest: mutant inventory does not match accounting: inventory=%+v accounting=%+v", observed, count)
 	}
 	return nil
+}
+
+// validateReuse holds one disposition to the two things a reused verdict has
+// to be: traceable and possible.
+//
+// Traceable, because a verdict this run did not observe is only auditable
+// beside the run that did observe it, so the flag and the provenance are
+// required of each other in both directions. Possible, because evidence is
+// only ever recorded about a mutant that reached a terminal execution
+// disposition: nothing was ever executed for a compile rejection, an
+// acceptance, or a mutant outside the scope, so there is nothing about one of
+// those that could have been reused.
+func validateReuse(disposition MutantDisposition) error {
+	if disposition.Reused != (disposition.Provenance != "") {
+		return fmt.Errorf("goatest: mutant %s reuse and provenance disagree: reused=%t provenance=%q",
+			disposition.ID, disposition.Reused, disposition.Provenance)
+	}
+	if !disposition.Reused {
+		return nil
+	}
+	switch disposition.Status {
+	case MutantKilled, MutantSurvived, MutantInconclusive:
+		return nil
+	default:
+		return fmt.Errorf("goatest: mutant %s reused a %q disposition, which no run executes", disposition.ID, disposition.Status)
+	}
 }
 
 func validateVerdictScope(input Report) error {

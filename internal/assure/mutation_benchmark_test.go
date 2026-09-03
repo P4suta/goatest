@@ -21,6 +21,6 @@ func BenchmarkMutationAccounting(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		_, _ = mutationAccounting(catalog, "", evaluation)
+		_, _ = mutationAccounting(catalog, "", evaluation, nil)
 	}
 }
