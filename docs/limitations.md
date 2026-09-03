@@ -97,7 +97,10 @@ self-dogfood is not external compatibility evidence.
   `.goatest/kept-temp-v1.json`, so a successful untraced run still leaves a
   record of what it left behind. `goatest cache status` lists the entries and
   `goatest cache gc` removes the ones older than `[cache] ttl`; a directory
-  removed by hand leaves an entry that the next `gc` drops.
+  removed by hand leaves an entry that the next `gc` drops. A collection removes
+  a directory only when the directory's own marker says it was kept, so one
+  whose marker was deleted is never collected: it stays listed as `unverified`
+  and has to be removed by hand.
 - The sweep that collects the leftovers of killed runs judges a directory with
   no owner marker by age alone, and spares one younger than 24 hours: it may be
   a run in progress under a binary from before the marker existed. Such a

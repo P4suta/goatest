@@ -48,9 +48,15 @@ answered either.
    scratch at the end covers whatever is left, including what a killed step
    never got to.
 
-2. **A run that cannot make one still runs.** Every consumer takes the parent
-   *and* the prefix from the scratch, and a scratch that could not be made
-   answers with the temporary root and the `goatest-` names the sweep knows. The
+2. **A run that cannot make or claim one still runs.** Every consumer takes the
+   parent *and* the prefix from the scratch, and a scratch that could not be
+   made answers with the temporary root and the `goatest-` names the sweep
+   knows. A scratch that was made but could not be claimed answers the same
+   way, and is removed again: an unowned directory is one a later sweep judges
+   by age alone, so using it would mean writing a run's work somewhere another
+   goatest is entitled to delete. The exception is a claim refused because
+   somebody else holds the lock, which makes the directory theirs and not ours
+   to remove. The
    same rule covers a validation outside any run (`goatest fix`), which has no
    run scratch at all. No path in this design can produce a directory nothing
    recognizes.
@@ -109,22 +115,32 @@ answered either.
    survive the removal of every one of them and because the commands that read
    it are already run from a repository.
 
-8. **`[cache] ttl` bounds a keep, and nothing else does.** `goatest cache gc`
+8. **The ledger names a directory; the directory says whether it may be
+   removed.** Before a collection removes anything it asks `tempowner.KeptBy`,
+   which reads the marker in the directory: goatest's own naming the run the
+   entry names, or the mutation engine's, which names no run of ours. The
+   ledger is a file in a repository — editable by hand, corruptible by a bad
+   merge — and a recursive delete is not something a path alone may authorize.
+   An entry nothing vouches for is kept and reported rather than acted on, and
+   so is one whose path cannot be stat'ed: only `fs.ErrNotExist` means a
+   directory is gone.
+
+9. **`[cache] ttl` bounds a keep, and nothing else does.** `goatest cache gc`
    removes a kept directory once it is older than the TTL and drops the entries
    of directories that are already gone. No byte budget applies: a keep is a
    request somebody made on purpose, and the only bound that respects the
    request is time. A developer who wants one back sooner removes it by hand,
    and the next `gc` drops its entry.
 
-9. **None of this can fail a run.** A sweep that fails, a scratch that cannot be
-   made, claimed or removed, and a ledger that cannot be written are progress
-   notes — `temp-sweep`, `temp-unavailable`, `kept-temp-unrecorded` — and the
-   run reaches the same verdict it would have reached. This is housekeeping done
-   on the way to measuring mutants, and housekeeping that could fail a
-   verification would be worse than no housekeeping at all. For the same reason
-   none of it enters any cache identity: where a run put its directories and
-   what its sweep found are facts about the machine, exactly as
-   [0002](0002-trace-is-not-evidence.md) says of a trace.
+10. **None of this can fail a run.** A sweep that fails, a scratch that cannot
+    be made, claimed or removed, and a ledger that cannot be written are
+    progress notes — `temp-sweep`, `temp-unavailable`, `kept-temp-unrecorded` —
+    and the run reaches the same verdict it would have reached. This is
+    housekeeping done on the way to measuring mutants, and housekeeping that
+    could fail a verification would be worse than no housekeeping at all. For
+    the same reason none of it enters any cache identity: where a run put its
+    directories and what its sweep found are facts about the machine, exactly
+    as [0002](0002-trace-is-not-evidence.md) says of a trace.
 
 ## Consequences
 
@@ -148,6 +164,11 @@ answered either.
   understand. It is decoded with `DisallowUnknownFields` and a schema check,
   because the one thing its reader goes on to do is remove the directories it
   names.
+- A kept directory whose marker is removed can no longer be collected: the
+  collection has nothing to check the ledger against, so the entry stays listed
+  as `unverified` and the directory waits for a person. That is the safe side of
+  the trade — the alternative is trusting a path in an editable file — and it is
+  in [limitations](../limitations.md).
 - A directory a developer removes by hand leaves an entry behind until the next
   `gc`. `cache status` reports it as `missing` rather than pretending it is
   there, which is also how the ledger stays honest about a temporary directory

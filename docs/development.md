@@ -450,9 +450,12 @@ scratch at the end covers whatever is left, including the fuzz cache an
 original-control execution makes for a `-test.fuzz` argument (`control-fuzz-*`,
 also removed when that command returns) and anything a killed step never got to.
 
-A run that could not make its scratch directory makes all of them beside it
-instead, under the `goatest-` names the sweep knows, and says so with a
-`temp-unavailable` note. Nothing in this area can fail a run: a scratch that cannot be made,
+A run that could not make its scratch directory — or could not claim it, which
+is the same thing, because a directory with no owner pair is one the next sweep
+may take while this run is writing in it — makes all of them beside it instead,
+under the `goatest-` names the sweep knows, and says so with a
+`temp-unavailable` note. The unclaimed directory is removed again unless
+somebody else holds its lock, in which case it was never this run's to remove. Nothing in this area can fail a run: a scratch that cannot be made,
 claimed or removed, a sweep that fails, and a ledger that cannot be written are
 all progress notes, and the run reaches its verdict either way.
 
@@ -472,8 +475,9 @@ names `goatest-baseline-`, `goatest-candidate-`, `goatest-control-fuzz-`,
 `goatest-build-cache-` — whose lock is free and whose marker does not say kept,
 or which carries no marker at all and has been untouched for 24 hours. It never
 follows a symbolic link, and one entry it cannot judge never stops the others.
-A run sweeps before it writes anything; `goatest cache gc` sweeps on demand and
-`goatest cache status` inspects without removing. All three sweep only a
+A run and a plan both sweep before they write anything — a plan makes the same
+directories, so it leaves the same leftovers — and `goatest cache gc` sweeps on
+demand while `goatest cache status` inspects without removing. All three sweep only a
 directory somebody named: an empty `TempDirectory` collects nothing, because a
 value nobody set must never become the machine's own temporary directory, and
 `cmd/goatest` is the one layer that names it. A run still makes its scratch
@@ -496,7 +500,18 @@ directory and, on a failure, `preserved-paths.txt` in the diagnostics bundle.
 directory with its path, the run that kept it, when, and how big it was.
 `goatest cache status` lists them, and `goatest cache gc` removes the ones older
 than `[cache] ttl` and drops the entries of directories that are already gone.
-`internal/keptledger` owns that file.
+`internal/keptledger` owns that file, and writes it under a lock of its own so
+that a run recording a keep beside a collection cannot lose its entry to it.
+
+What the ledger never is, is authority. It is a file in the repository that a
+person can edit and a bad merge can mangle, and what a collection does with a
+path is remove the directory whole — so before it removes anything,
+`tempowner.KeptBy` asks the directory itself whether it was kept on purpose:
+goatest's marker naming the run the entry names, or the mutation engine's, which
+names no run of ours. An entry nothing vouches for keeps its place and reads as
+`unverified` in `cache status`; one whose path cannot even be stat'ed reads as
+`unreadable`, because a stat nobody could answer is not a directory that is
+gone.
 
 A test's own fixtures are not kept, because `--keep-temp` is an option of the
 tool rather than of the suite: a test that drives a real one points
