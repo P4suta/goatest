@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
 // The variables the helper process is told where to serve from. The cache
@@ -35,8 +36,11 @@ const (
 // print afterwards would land in the middle of the protocol the go command is
 // reading.
 func TestCacheProgramHelper(t *testing.T) {
-	if os.Getenv(cacheProgramHelper) == "" {
-		t.Skip("not the cache program helper process")
+	// Returning rather than skipping is the convention every helper in this
+	// module follows: a skip is a finding to goatest's own baseline, and a
+	// helper that was not asked for has nothing to report.
+	if !testkit.HelperEnabled(cacheProgramHelper) {
+		return
 	}
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
 	if os.Getenv(cacheProgramPersist) != "" {
@@ -263,6 +267,12 @@ func compileCacheFixture(t *testing.T, goBinary, fixture, base, scratch string, 
 		// into a hard failure for every go command below it.
 		"GOFLAGS=-buildvcs=false",
 		"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off",
+		// The helper is this test binary run again, and goatest's own baseline
+		// builds it with coverage. A covered binary that exits through os.Exit
+		// writes its counters to GOCOVERDIR and, given none, warns about it on
+		// stderr — which the go command relays, and which would fail the silent
+		// build asserted below. A binary built without coverage ignores it.
+		"GOCOVERDIR=" + t.TempDir(),
 		"GOCACHEPROG=" + program,
 		cacheProgramHelper + "=1",
 		cacheProgramBase + "=" + base,
