@@ -40,8 +40,6 @@ type runBuildCache struct {
 	plain string
 	// persisting is the GOCACHEPROG value whose writes land in base.
 	persisting string
-	// maxBytes is the bound both layers are collected to.
-	maxBytes int64
 }
 
 // openRunBuildCache prepares both layers and renders the two cache programs one
@@ -72,7 +70,7 @@ func openRunBuildCache(program, base, temporaryRoot string, maxBytes int64) (run
 	if err := (buildcache.Layer{Dir: scratch, Touch: buildcache.ScratchTouchInterval}).Prepare(); err != nil {
 		return discard(err)
 	}
-	cache := runBuildCache{scratch: scratch, base: base, maxBytes: maxBytes}
+	cache := runBuildCache{scratch: scratch, base: base}
 	if cache.plain, err = buildcache.Program(program, base, scratch, false, maxBytes); err != nil {
 		return discard(err)
 	}
