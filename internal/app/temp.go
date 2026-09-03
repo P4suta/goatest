@@ -4,7 +4,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 
@@ -75,23 +77,29 @@ func keptTemporaryStatus(root string) []report.Evidence {
 	}
 	items := make([]report.Evidence, 0, len(ledger.Entries)+1)
 	var bytes int64
-	missing := 0
+	missing, unreadable := 0, 0
 	for _, entry := range ledger.Entries {
 		status := "kept"
-		if _, err := os.Stat(entry.Path); err != nil {
+		detail := fmt.Sprintf("path=%s bytes=%d kept-at=%s", entry.Path, entry.Bytes, entry.KeptAt.UTC().Format(time.RFC3339))
+		switch _, statErr := os.Stat(entry.Path); {
+		case errors.Is(statErr, fs.ErrNotExist):
 			status = "missing"
 			missing++
+		case statErr != nil:
+			// Not missing: nobody could tell. The entry stays, and so does
+			// whatever is at that path, until somebody can read it.
+			status = "unreadable"
+			unreadable++
+			detail += " error=" + statErr.Error()
 		}
 		bytes += entry.Bytes
-		items = append(items, report.Evidence{
-			Kind: "kept-temp", ID: entry.RunID, Status: status,
-			Detail: fmt.Sprintf("path=%s bytes=%d kept-at=%s", entry.Path, entry.Bytes, entry.KeptAt.UTC().Format(time.RFC3339)),
-		})
+		items = append(items, report.Evidence{Kind: "kept-temp", ID: entry.RunID, Status: status, Detail: detail})
 	}
-	return append(items, report.Evidence{
-		Kind: "kept-temp", ID: "kept-temp-status", Status: "ready",
-		Detail: fmt.Sprintf("entries=%d bytes=%d missing=%d", len(ledger.Entries), bytes, missing),
-	})
+	total := fmt.Sprintf("entries=%d bytes=%d missing=%d", len(ledger.Entries), bytes, missing)
+	if unreadable != 0 {
+		total += fmt.Sprintf(" errors=%d", unreadable)
+	}
+	return append(items, report.Evidence{Kind: "kept-temp", ID: "kept-temp-status", Status: "ready", Detail: total})
 }
 
 // collectKeptTemporaries removes the directories a --keep-temp run kept once
@@ -112,8 +120,18 @@ func collectKeptTemporaries(root string, ttl time.Duration, moment time.Time) re
 	var removedBytes int64
 	removed, failures := 0, 0
 	for _, entry := range ledger.Entries {
-		if _, statErr := os.Stat(entry.Path); statErr != nil {
+		_, statErr := os.Stat(entry.Path)
+		if errors.Is(statErr, fs.ErrNotExist) {
+			// The directory is gone, so its entry goes with it.
 			removed++
+			continue
+		}
+		if statErr != nil {
+			// A stat nobody could answer says nothing about whether the
+			// directory is there, and an entry dropped on that evidence would
+			// leave it on the disk with nothing tracking it.
+			failures++
+			remaining = append(remaining, entry)
 			continue
 		}
 		if ttl <= 0 || moment.Sub(entry.KeptAt) < ttl {
