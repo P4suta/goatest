@@ -91,6 +91,18 @@ func keptTemporaryStatus(root string) []report.Evidence {
 			status = "unreadable"
 			unreadable++
 			detail += " error=" + statErr.Error()
+		default:
+			// The entry says a run kept this directory. Whether the directory
+			// agrees is what decides if a collection may ever remove it, so a
+			// reader is told now rather than left to wonder why `gc` keeps
+			// passing one by.
+			if kept, markerErr := tempowner.KeptBy(entry.Path, entry.RunID); !kept || markerErr != nil {
+				status = "unverified"
+				unreadable++
+				if markerErr != nil {
+					detail += " error=" + markerErr.Error()
+				}
+			}
 		}
 		bytes += entry.Bytes
 		items = append(items, report.Evidence{Kind: "kept-temp", ID: entry.RunID, Status: status, Detail: detail})
@@ -120,7 +132,7 @@ func collectKeptTemporaries(root string, ttl time.Duration, moment time.Time) re
 	var removedBytes int64
 	removed, failures := 0, 0
 	for _, entry := range ledger.Entries {
-		_, statErr := os.Stat(entry.Path)
+		info, statErr := os.Stat(entry.Path)
 		if errors.Is(statErr, fs.ErrNotExist) {
 			// The directory is gone, so its entry goes with it.
 			removed++
@@ -135,6 +147,16 @@ func collectKeptTemporaries(root string, ttl time.Duration, moment time.Time) re
 			continue
 		}
 		if ttl <= 0 || moment.Sub(entry.KeptAt) < ttl {
+			remaining = append(remaining, entry)
+			continue
+		}
+		// The ledger names the path; the directory says whether it is ours.
+		// Only the second is authority to remove anything, because the ledger
+		// is a file in a repository that a person can edit and a bad merge can
+		// mangle, and what happens next is a recursive delete.
+		kept, markerErr := tempowner.KeptBy(entry.Path, entry.RunID)
+		if markerErr != nil || !kept || !info.IsDir() {
+			failures++
 			remaining = append(remaining, entry)
 			continue
 		}

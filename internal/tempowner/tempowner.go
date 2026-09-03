@@ -169,6 +169,53 @@ func (owner *Owner) Keep() error {
 	return owner.Release()
 }
 
+// engineSchema is the marker schema of go-mutants, whose temporary directories
+// goatest asks it to keep and therefore has to recognize. It is spelled out
+// here because the engine is another module and its own package is internal to
+// it; only the two fields below are read, and both are part of the convention
+// the two packages share rather than of that module's API.
+const engineSchema = "go-mutants-temp-owner-v1"
+
+// KeptBy reports whether dir carries a marker saying somebody kept it on
+// purpose: goatest's own marker naming the given run, or the mutation engine's,
+// which names no run of ours because the engine keeps its own directories at a
+// run's request and records only its own bookkeeping.
+//
+// It is the question `goatest cache gc` has to ask before it removes anything.
+// The ledger it reads paths from is a file in a repository — editable by hand,
+// corruptible by a bad merge — so a path alone is never authority to delete a
+// directory. The directory itself is.
+//
+// A directory that is not there, carries no marker, or carries somebody else's
+// is not kept and is not a failure: those are ordinary answers about a path
+// nothing vouches for. A marker that cannot be read is a failure, because "I
+// could not tell" is not the same answer as no.
+func KeptBy(dir, runID string) (bool, error) {
+	raw, err := os.ReadFile(MarkerPath(dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var marker struct {
+		Schema string `json:"schema"`
+		RunID  string `json:"run_id"`
+		Kept   bool   `json:"kept"`
+	}
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		return false, fmt.Errorf("reading the marker of %s: %w", dir, err)
+	}
+	switch marker.Schema {
+	case Schema:
+		return marker.Kept && marker.RunID == runID, nil
+	case engineSchema:
+		return marker.Kept, nil
+	default:
+		return false, nil
+	}
+}
+
 // ReadMarker decodes the marker in dir. A directory that carries none reports
 // [fs.ErrNotExist], which is how an unowned directory is told from an owned
 // one.
