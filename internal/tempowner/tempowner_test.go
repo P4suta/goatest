@@ -115,6 +115,27 @@ func TestKeepRecordsTheDecisionWhereTheNextRunReadsIt(t *testing.T) {
 	}
 }
 
+func TestKeepingLeavesNothingBesideTheOwnerPair(t *testing.T) {
+	t.Parallel()
+	dir, owner := claimed(t, tempowner.Marker{RunID: "kept"}, time.Now())
+	if err := owner.Keep(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The marker is replaced through a temporary file and a rename, so that a
+	// process killed in the middle of recording a keep leaves the marker it had
+	// rather than half of the new one: a torn marker does not say kept, and the
+	// next sweep would collect the directory somebody asked to keep. What the
+	// rename can be seen to do from outside is leave nothing behind.
+	names := []string{entries[0].Name(), entries[len(entries)-1].Name()}
+	if len(entries) != 2 || names[0] != tempowner.MarkerName || names[1] != tempowner.LockName {
+		t.Fatalf("directory after a keep = %v, want the owner pair alone", names)
+	}
+}
+
 func TestReadMarkerReportsADirectoryThatCarriesNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -184,17 +184,46 @@ func ReadMarker(dir string) (Marker, error) {
 	return marker, nil
 }
 
-// writeMarker commits the marker, replacing whatever was there. The write is
-// small and single-shot rather than a temporary-and-rename, because the one
-// reader of a torn marker is [Sweep], which treats an unreadable marker as one
-// that does not say kept — the safe reading, since the lock has already
-// answered the only question that decides a removal.
+// writeMarker commits the marker through a temporary file and a rename, so that
+// a process killed in the middle of a write leaves the marker it had rather
+// than half of a new one.
+//
+// It matters for exactly one write, and it matters a lot for that one: [Sweep]
+// reads a torn marker as one that does not say kept, so a keep interrupted
+// halfway would leave a directory somebody asked to keep for the next sweep to
+// collect. The claim is written the same way because there is no reason for the
+// two to differ.
 func writeMarker(dir string, marker Marker) error {
 	raw, err := json.Marshal(marker)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(MarkerPath(dir), append(raw, '\n'), markerPerm)
+	temporary, err := os.CreateTemp(dir, ".owner-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := writeAndSync(temporary, append(raw, '\n')); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, markerPerm); err != nil {
+		return err
+	}
+	return os.Rename(name, MarkerPath(dir))
+}
+
+// writeAndSync commits the bytes to the disk and closes the file whatever
+// happened, because a temporary file left open is a temporary file Windows will
+// not let anybody rename.
+func writeAndSync(file *os.File, data []byte) error {
+	if _, err := file.Write(data); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	return file.Close()
 }
 
 // acquire opens one lock file and tries to take it. A lock somebody else holds
