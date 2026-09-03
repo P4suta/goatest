@@ -13,6 +13,19 @@
 // It lives in the repository's own .goatest directory rather than beside the
 // directories it names, because it has to survive the removal of every one of
 // them and because the commands that read it are already run from a repository.
+//
+// # Who may write it
+//
+// Every writer today already holds the repository's cache lease: a run records
+// what it kept while `internal/app` still holds the lease it took around the
+// whole verification, and `goatest cache gc` collects inside the lease its own
+// command takes. That is what actually serializes two goatest processes on one
+// repository.
+//
+// [Update] does not rely on it. It takes an exclusive advisory lock beside the
+// ledger for the load-change-save that every write is, because the failure it
+// prevents is silent: an interleaved write loses an entry, and a lost entry is
+// a directory on somebody's disk that nothing will ever collect again.
 package keptledger
 
 import (
@@ -26,6 +39,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/P4suta/goatest/internal/advisorylock"
 )
 
 const (
@@ -39,6 +54,21 @@ const (
 	// ledgerPerm is owner-only, like everything else goatest writes about a
 	// developer's machine.
 	ledgerPerm fs.FileMode = 0o600
+
+	// lockSuffix names the lock beside the ledger. It is a second file rather
+	// than a lock on the ledger itself because the ledger is replaced by a
+	// rename, and a lock belongs to a file rather than to a name: the writer of
+	// the new file and the holder of the old one would contend over nothing.
+	lockSuffix = ".lock"
+
+	// lockPatience is how long a writer waits for another one. A ledger write
+	// is a small read, a change and a rename, so a wait this long means
+	// something is wrong rather than busy, and reporting that is more use than
+	// waiting on it.
+	lockPatience = 2 * time.Second
+
+	// lockPoll is how often the wait asks again.
+	lockPoll = 5 * time.Millisecond
 )
 
 // An Entry is one directory a run kept and nothing has removed yet.
@@ -101,19 +131,79 @@ func Load(path string) (Ledger, error) {
 // directory is one entry, and a path recorded twice would be counted twice by
 // every reader and removed once by the collector.
 func Append(path string, entries ...Entry) error {
+	return Update(path, func(ledger *Ledger) error {
+		for _, entry := range entries {
+			entry.KeptAt = entry.KeptAt.UTC()
+			if index := slices.IndexFunc(ledger.Entries, func(existing Entry) bool { return existing.Path == entry.Path }); index >= 0 {
+				ledger.Entries[index] = entry
+				continue
+			}
+			ledger.Entries = append(ledger.Entries, entry)
+		}
+		return nil
+	})
+}
+
+// Update reads the ledger, hands it to mutate, and writes back what mutate left
+// — all of it under the lock beside the ledger, so that two writers cannot each
+// read the same document and write back half of the result.
+//
+// A ledger nobody has written yet that mutate leaves empty is not created: an
+// empty document would say a repository once kept something and no longer does,
+// which is a different fact from never having kept anything.
+func Update(path string, mutate func(*Ledger) error) error {
+	release, err := lock(path)
+	if err != nil {
+		return err
+	}
+	defer release()
 	ledger, err := Load(path)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		entry.KeptAt = entry.KeptAt.UTC()
-		if index := slices.IndexFunc(ledger.Entries, func(existing Entry) bool { return existing.Path == entry.Path }); index >= 0 {
-			ledger.Entries[index] = entry
-			continue
-		}
-		ledger.Entries = append(ledger.Entries, entry)
+	recorded := len(ledger.Entries)
+	if err := mutate(&ledger); err != nil {
+		return err
+	}
+	if recorded == 0 && len(ledger.Entries) == 0 {
+		return nil
 	}
 	return Save(path, ledger)
+}
+
+// lock takes the exclusive lock beside the ledger and answers with the release
+// that must follow it.
+//
+// A lock somebody else holds is waited on rather than refused, because the
+// wait is milliseconds and the caller has nothing better to do with the answer.
+// A wait that runs out is reported: at that point the holder is not busy, it is
+// stuck, and a run that hung on its own bookkeeping would be worse than one
+// that says it could not record what it kept.
+func lock(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path+lockSuffix, os.O_CREATE|os.O_RDWR, ledgerPerm)
+	if err != nil {
+		return nil, err
+	}
+	for waited := time.Duration(0); ; waited += lockPoll {
+		held, lockErr := advisorylock.Try(file)
+		if lockErr != nil {
+			return nil, errors.Join(fmt.Errorf("goatest: lock %s: %w", path, lockErr), file.Close())
+		}
+		if held {
+			return func() {
+				_ = advisorylock.Release(file)
+				_ = file.Close()
+			}, nil
+		}
+		if waited >= lockPatience {
+			return nil, errors.Join(
+				fmt.Errorf("goatest: %s is held by another process", path+lockSuffix), file.Close())
+		}
+		time.Sleep(lockPoll)
+	}
 }
 
 // Save writes the ledger whole, sorted oldest first.

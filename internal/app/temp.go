@@ -123,64 +123,63 @@ func keptTemporaryStatus(root string) []report.Evidence {
 // they were working on it, and nobody wants forever. A configuration with no
 // TTL keeps them until somebody removes them, which is what it says.
 func collectKeptTemporaries(root string, ttl time.Duration, moment time.Time) report.Evidence {
-	path := keptledger.Path(root)
-	ledger, err := keptledger.Load(path)
+	var removedBytes int64
+	removed, failures := 0, 0
+	remaining := 0
+	// The whole read-decide-write runs inside the ledger's own lock, so that a
+	// run recording a keep beside this collection cannot lose its entry to it.
+	err := keptledger.Update(keptledger.Path(root), func(ledger *keptledger.Ledger) error {
+		kept := make([]keptledger.Entry, 0, len(ledger.Entries))
+		for _, entry := range ledger.Entries {
+			info, statErr := os.Stat(entry.Path)
+			if errors.Is(statErr, fs.ErrNotExist) {
+				// The directory is gone, so its entry goes with it.
+				removed++
+				continue
+			}
+			if statErr != nil {
+				// A stat nobody could answer says nothing about whether the
+				// directory is there, and an entry dropped on that evidence
+				// would leave it on the disk with nothing tracking it.
+				failures++
+				kept = append(kept, entry)
+				continue
+			}
+			if ttl <= 0 || moment.Sub(entry.KeptAt) < ttl {
+				kept = append(kept, entry)
+				continue
+			}
+			// The ledger names the path; the directory says whether it is ours.
+			// Only the second is authority to remove anything, because the
+			// ledger is a file in a repository that a person can edit and a bad
+			// merge can mangle, and what happens next is a recursive delete.
+			vouched, markerErr := tempowner.KeptBy(entry.Path, entry.RunID)
+			if markerErr != nil || !vouched || !info.IsDir() {
+				failures++
+				kept = append(kept, entry)
+				continue
+			}
+			// Measured now rather than trusted from the entry: what the
+			// collection reclaimed is what was on the disk when it ran.
+			size := tempowner.Size(entry.Path)
+			if removeErr := os.RemoveAll(entry.Path); removeErr != nil {
+				failures++
+				kept = append(kept, entry)
+				continue
+			}
+			removed++
+			removedBytes += size
+		}
+		ledger.Entries = kept
+		remaining = len(kept)
+		return nil
+	})
 	if err != nil {
 		return report.Evidence{Kind: "kept-temp", ID: "kept-temp-gc", Status: "unavailable", Detail: err.Error()}
 	}
-	remaining := make([]keptledger.Entry, 0, len(ledger.Entries))
-	var removedBytes int64
-	removed, failures := 0, 0
-	for _, entry := range ledger.Entries {
-		info, statErr := os.Stat(entry.Path)
-		if errors.Is(statErr, fs.ErrNotExist) {
-			// The directory is gone, so its entry goes with it.
-			removed++
-			continue
-		}
-		if statErr != nil {
-			// A stat nobody could answer says nothing about whether the
-			// directory is there, and an entry dropped on that evidence would
-			// leave it on the disk with nothing tracking it.
-			failures++
-			remaining = append(remaining, entry)
-			continue
-		}
-		if ttl <= 0 || moment.Sub(entry.KeptAt) < ttl {
-			remaining = append(remaining, entry)
-			continue
-		}
-		// The ledger names the path; the directory says whether it is ours.
-		// Only the second is authority to remove anything, because the ledger
-		// is a file in a repository that a person can edit and a bad merge can
-		// mangle, and what happens next is a recursive delete.
-		kept, markerErr := tempowner.KeptBy(entry.Path, entry.RunID)
-		if markerErr != nil || !kept || !info.IsDir() {
-			failures++
-			remaining = append(remaining, entry)
-			continue
-		}
-		// Measured now rather than trusted from the entry: what the collection
-		// reclaimed is what was on the disk when it ran.
-		size := tempowner.Size(entry.Path)
-		if removeErr := os.RemoveAll(entry.Path); removeErr != nil {
-			failures++
-			remaining = append(remaining, entry)
-			continue
-		}
-		removed++
-		removedBytes += size
-	}
-	detail := fmt.Sprintf("removed-entries=%d removed-bytes=%d remaining=%d", removed, removedBytes, len(remaining))
+	detail := fmt.Sprintf("removed-entries=%d removed-bytes=%d remaining=%d", removed, removedBytes, remaining)
 	if failures != 0 {
 		detail += fmt.Sprintf(" errors=%d", failures)
-	}
-	if removed == 0 {
-		return report.Evidence{Kind: "kept-temp", ID: "kept-temp-gc", Status: "completed", Detail: detail}
-	}
-	ledger.Entries = remaining
-	if err := keptledger.Save(path, ledger); err != nil {
-		return report.Evidence{Kind: "kept-temp", ID: "kept-temp-gc", Status: "unavailable", Detail: err.Error()}
 	}
 	return report.Evidence{Kind: "kept-temp", ID: "kept-temp-gc", Status: "completed", Detail: detail}
 }
