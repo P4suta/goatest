@@ -29,7 +29,7 @@ func Main(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("goatest cacheprog", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, usage)
+		_, _ = fmt.Fprintln(stderr, usage)
 		flags.PrintDefaults()
 	}
 	base := flags.String("base", "", "the persistent layer this machine keeps")
@@ -40,33 +40,33 @@ func Main(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "goatest: cacheprog takes no arguments, got %q\n", flags.Arg(0))
+		_, _ = fmt.Fprintf(stderr, "goatest: cacheprog takes no arguments, got %q\n", flags.Arg(0))
 		flags.Usage()
 		return 2
 	}
 	if *scratch == "" {
-		fmt.Fprintln(stderr, "goatest: cacheprog requires --scratch")
+		_, _ = fmt.Fprintln(stderr, "goatest: cacheprog requires --scratch")
 		flags.Usage()
 		return 2
 	}
 	if *persist && *base == "" {
-		fmt.Fprintln(stderr, "goatest: cacheprog --persist requires --base")
+		_, _ = fmt.Fprintln(stderr, "goatest: cacheprog --persist requires --base")
 		flags.Usage()
 		return 2
 	}
 	if *maxBytes < 0 {
-		fmt.Fprintf(stderr, "goatest: cacheprog --max-bytes %d must not be negative\n", *maxBytes)
+		_, _ = fmt.Fprintf(stderr, "goatest: cacheprog --max-bytes %d must not be negative\n", *maxBytes)
 		flags.Usage()
 		return 2
 	}
 	layers, err := openLayers(*base, *scratch, *persist, *maxBytes)
 	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
+		_, _ = fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
 	var stats Stats
 	if err := Serve(context.Background(), stdin, stdout, layers, &stats); err != nil {
-		fmt.Fprintln(stderr, err.Error())
+		_, _ = fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
 	return 0
