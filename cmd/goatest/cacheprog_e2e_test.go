@@ -263,6 +263,12 @@ func compileCacheFixture(t *testing.T, goBinary, fixture, base, scratch string, 
 		// into a hard failure for every go command below it.
 		"GOFLAGS=-buildvcs=false",
 		"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off",
+		// The helper is this test binary run again, and goatest's own baseline
+		// builds it with coverage. A covered binary that exits through os.Exit
+		// writes its counters to GOCOVERDIR and, given none, warns about it on
+		// stderr — which the go command relays, and which would fail the silent
+		// build asserted below. A binary built without coverage ignores it.
+		"GOCOVERDIR=" + t.TempDir(),
 		"GOCACHEPROG=" + program,
 		cacheProgramHelper + "=1",
 		cacheProgramBase + "=" + base,
