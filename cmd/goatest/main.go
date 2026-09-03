@@ -34,10 +34,19 @@ func main() {
 }
 
 func realMain(arguments []string) int {
-	return realMainStreams(arguments, os.Stdin, os.Stdout, os.Stderr, app.Service{
+	return realMainStreams(arguments, os.Stdin, os.Stdout, os.Stderr, cliService())
+}
+
+// cliService is the service the goatest CLI runs on. It is the one layer that
+// may name what belongs to the machine this process runs on: the binary a go
+// command re-executes to reach the build cache, and the per-machine directory
+// that cache lives in. Below it both are options, and both are left empty by
+// every process that is not this CLI.
+func cliService() app.Service {
+	return app.Service{
 		Root: ".", Progress: os.Stderr, Output: os.Stdout, Interactive: interactiveTerminal,
-		Executable: goatestExecutable(),
-	})
+		Executable: goatestExecutable(), UserCacheDir: os.UserCacheDir,
+	}
 }
 
 // goatestExecutable names this binary so that a go command started by a run can

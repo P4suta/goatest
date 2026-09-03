@@ -50,7 +50,17 @@ type Service struct {
 	// an application embedding it — must leave it empty and gets the
 	// toolchain's own cache.
 	Executable string
-	Progress   io.Writer
+	// UserCacheDir names the per-machine cache root goatest's build cache lives
+	// below unless a project configured another. Only a composition root that
+	// knows this process is the goatest CLI on a real machine may fill it in:
+	// the directory it names is inspected by `cache status` and collected by
+	// `cache gc` and by every run that ends, so a process that is not that CLI
+	// — a test binary running this service in-process, an application
+	// embedding it — must leave it nil and then never touches the machine's
+	// cache directory. Its zero value is a process with no per-machine cache
+	// root: the build cache is the one the project configured, or none.
+	UserCacheDir func() (string, error)
+	Progress     io.Writer
 	// Output is the stream the final report is rendered to. A jsonl UI streams
 	// its progress events there so that one pipe carries the whole stream; a
 	// service without one falls back to the plain progress stream.
@@ -78,9 +88,6 @@ type Service struct {
 	// through, filled in the same way and for the same reason.
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
-	// userCacheDir names the per-machine cache root the build cache lives below
-	// unless a project configured another. Its zero value is os.UserCacheDir.
-	userCacheDir func() (string, error)
 	// notes is the renderer the current run reports its progress through,
 	// selected per request by runAndWrite; every note of a run funnels through
 	// it. Its zero value renders plain lines to Progress, which is what every
@@ -411,10 +418,12 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 // layer that may answer either question: below it, both are options.
 //
 // The two are resolved separately and on purpose. Where the cache lives is a
-// property of the machine and the project, and maintenance needs it whoever is
-// asking; what program serves it is a property of this process. Tying the first
-// to the second made `goatest cache status` and `goatest cache gc` silently
-// report an empty cache whenever nothing had named an executable.
+// property of the machine and the project, and maintenance needs it whether or
+// not this process could serve the cache; what program serves it is a property
+// of this process. Tying the first to the second made `goatest cache status`
+// and `goatest cache gc` silently report an empty cache whenever nothing had
+// named an executable. Both halves are still named by a composition root, and
+// only there: see Executable and UserCacheDir.
 func (service Service) buildCacheLocation(root string) (string, string) {
 	return service.Executable, service.buildCacheDirectory(root)
 }
@@ -422,18 +431,21 @@ func (service Service) buildCacheLocation(root string) (string, string) {
 // buildCacheDirectory resolves where the build cache lives, whether or not this
 // process can serve it.
 //
-// An empty answer is a machine with nowhere to keep a layer rather than a
-// failure: no user cache directory and none configured, or a configuration that
-// will not load — and that last one is reported by the run that loads the same
-// file a moment later, which is the layer that owns the failure.
+// The per-machine default is only ever the one UserCacheDir names, and this
+// layer will not go looking: a service nobody handed a resolver is not the
+// goatest CLI, and inspecting or collecting the running developer's own cache
+// on its behalf is the one thing no embedded service may do.
+//
+// An empty answer is nowhere to keep a layer rather than a failure: no
+// per-machine cache root and none configured, or a configuration that will not
+// load — and that last one is reported by the run that loads the same file a
+// moment later, which is the layer that owns the failure.
 func (service Service) buildCacheDirectory(root string) string {
-	resolveUserCacheDir := service.userCacheDir
-	if resolveUserCacheDir == nil {
-		resolveUserCacheDir = os.UserCacheDir
-	}
 	var fallback string
-	if userCache, cacheErr := resolveUserCacheDir(); cacheErr == nil && userCache != "" {
-		fallback = filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
+	if service.UserCacheDir != nil {
+		if userCache, cacheErr := service.UserCacheDir(); cacheErr == nil && userCache != "" {
+			fallback = filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
+		}
 	}
 	loaded, err := config.Load(root)
 	if err != nil {

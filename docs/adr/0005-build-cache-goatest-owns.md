@@ -149,8 +149,15 @@ toolchain makes by TTL.
 
     Where the cache *lives* is resolved separately, and does not need the
     executable at all. It is a property of the machine and the project, and
-    `cache status` and `cache gc` need it whoever is asking; tying the two
-    together made maintenance silently report an empty cache.
+    `cache status` and `cache gc` need it whether or not this process could
+    serve the cache; tying the two together made maintenance silently report an
+    empty cache. Separately, though, is not lower: the machine's cache root is
+    named only by the composition root as well, because `cache status` inspects
+    that directory and `cache gc` and every closing run collect it — so an
+    embedded service or a test binary that resolved it for itself would be
+    deleting entries out of the running developer's own build cache. A process
+    that names no cache root keeps its layer where the project configured one,
+    or keeps none.
 
 ## Consequences
 

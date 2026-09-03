@@ -25,9 +25,10 @@ line. Loading the untouched skeleton yields exactly the defaults.
   exact-input cache entry and are collected with it. `build_max_bytes`
   (non-negative, 2 GiB by default) bounds the separate build cache goatest
   serves its go commands from, and `build_dir` says where that cache lives — a
-  relative path is read from the repository root, and the default is a
-  per-machine directory below the user cache directory, because a compiled
-  standard library is the same for every repository on the machine. The two
+  relative path is read from the repository root, and the default under the
+  `goatest` CLI is a per-machine directory below the user cache directory,
+  because a compiled standard library is the same for every repository on the
+  machine. The two
   bounds are separate because the two stores hold different things at different
   scales: verdicts of a few kilobytes, and object files measured in gigabytes.
   Every run enforces `build_max_bytes` when it ends, so it is a bound and not
