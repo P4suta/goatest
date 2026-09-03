@@ -69,6 +69,15 @@ func TestBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestBoundaryAtZero exercises the guarded return at the value a return-zero
+// mutation puts there, so the probe pass measures one target that makes no
+// mutated site differ and routing has a target to discharge.
+func TestBoundaryAtZero(t *testing.T) {
+	if got := Boundary(0); got != 0 {
+		t.Fatalf("Boundary(0) = %d, want 0", got)
+	}
+}
 `
 
 // narrowedBranchSource is the module NarrowedBranchFixture writes. Both
@@ -167,8 +176,11 @@ func (repository *Repo) File(path, contents string) *Repo {
 }
 
 // BoundaryFixture writes the smallest module an assurance run has a verdict
-// for: one guarded boundary and the test that pins it. The module path stays
-// whatever Module already selected, so a caller may name its own fixture.
+// for: one guarded boundary, the test that pins it, and a second test that
+// exercises the boundary at the value a return-zero mutation would put there —
+// a target the probe pass measures and sees infect nothing, which is what gives
+// the run a target to discharge and still a test that kills. The module path
+// stays whatever Module already selected, so a caller may name its own fixture.
 func (repository *Repo) BoundaryFixture() *Repo {
 	repository.t.Helper()
 	if repository.module == "" {

@@ -57,9 +57,13 @@ self-dogfood is not external compatibility evidence.
   behaviour differs between runs — a clock, a map iteration order, an unseeded
   random source — may make a mutant's site differ in the run that would kill it
   and not in the one the probe measured; the probe pass is as blind to that as
-  reach is to a flaky target. Nothing is discharged by these facts in this
-  version, so the cost of the blind spot today is a recorded number that may be
-  optimistic and never an execution that was skipped. The pass also sees only
+  reach is to a flaky target. A target discharged as `never-infected` is an
+  execution skipped on the strength of one probe measurement, exactly as reach
+  skips one on the strength of one coverage measurement, so the cost of the
+  blind spot is the same as the cost of reach's: a mutant reported as surviving
+  where a rerun of the discharged test might have killed it. The offline
+  `proofaudit` infection layer is how the project checks the rule against the
+  kills a full run actually proved. The pass also sees only
   what its probe tree records: a mutant the engine has no probe form for is
   absent from every measurement there will ever be, and is read as infected by
   every target rather than as one nothing infected. Fuzz targets are not probed

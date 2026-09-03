@@ -251,7 +251,13 @@ Why every speed-up is such a layer, and why a budget never is, is
 [ADR 0004](adr/0004-proof-layers-not-budgets.md).
 The `infection` layer reads the recording alone, so it is audited whenever the
 recording holds a probe pass and left out — with a line under the layer table
-saying so — whenever it holds none.
+saying so — whenever it holds none. Routing now discharges by the rule that layer
+audits, so a violation it reports is a killer a run actually skipped rather than
+one it would have skipped had the layer been switched on. Its
+`infection discharge` block still measures what the layer would buy on top of
+the recording, which on a run that already applied it is nothing: the targets it
+discharged have left `reaching_targets`, and the trace's own `discharged`
+entries are what to read there instead.
 The rule is reimplemented from the recording and the coverage profiles of the
 run's temporary directory rather than called out of `internal/assure`, because
 an audit that asked the code under audit whether it was right would only prove

@@ -411,7 +411,8 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		{
 			name:   "route with an unknown discharge reason",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestSkipped","reason":"a-hunch"}]}}`),
-			want:   []string{"line 2", `route discharge reason "a-hunch"`},
+			want: []string{"line 2", `route discharge reason "a-hunch"`,
+				`"` + trace.DischargeBranchNeverTaken + `"`, `"` + trace.DischargeNeverInfected + `"`},
 		},
 		{
 			name:   "route with a discharge that names no target",
@@ -422,6 +423,24 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			name:   "route with a discharge and no granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
 			want:   []string{"line 2", "route discharged", "granularity"},
+		},
+		{
+			name:   "route with a discharge on a decision the file carried",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"file","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", `route discharged "TestSkipped"`, `granularity "file"`, `granularity "block"`},
+		},
+		{
+			name:   "route with an infection discharge and no probe marker",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestNeverInfects","reason":"never-infected"}]}}`),
+			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
+		},
+		{
+			// An absent marker and a recorded false are the same claim: the
+			// pass measured nothing about this mutant, so nothing it measured
+			// removed a target from the reaching set.
+			name:   "route with an infection discharge on a mutant it recorded no probe of",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestNeverInfects","reason":"never-infected"}],"probed":false}}`),
+			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
 		},
 		{
 			name:   "route that discharged a target it also reaches",
@@ -627,6 +646,26 @@ func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
 				t.Fatalf("read (%d events, %v), want the run-start and the route", len(events), err)
 			}
 		})
+	}
+}
+
+func TestReadEventsAcceptsARouteDischargedByEitherProof(t *testing.T) {
+	t.Parallel()
+	// Two proofs remove targets from a reaching set, and one route may carry
+	// both: the reason is read per entry, so a route mixing them is a route the
+	// routing takes.
+	line := `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":` +
+		`{"path":"a.go","reason":"coverage-reaching","granularity":"block","reaching_targets":["TestRun"],` +
+		`"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},` +
+		`{"target":"TestNeverInfects","reason":"never-infected"}],"probed":true}}`
+	events, err := readEvents(strings.NewReader(stream(runStart, line)))
+	if err != nil || len(events) != 2 {
+		t.Fatalf("read (%d events, %v), want the run-start and the route", len(events), err)
+	}
+	if route := events[1].Route; route == nil || len(route.Discharged) != 2 ||
+		route.Discharged[0].Reason != trace.DischargeBranchNeverTaken ||
+		route.Discharged[1].Reason != trace.DischargeNeverInfected {
+		t.Fatalf("route = %+v, want both proofs preserved in the order they were recorded", events[1].Route)
 	}
 }
 

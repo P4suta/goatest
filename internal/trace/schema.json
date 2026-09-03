@@ -210,7 +210,7 @@
           "minimum": 0
         },
         "discharged": {
-          "description": "The targets a proof removed from the reaching set, each with the proof that removed it. On a route decided by block, reaching_targets and these together are the targets whose covered blocks contain the mutated position, so a discharged target is never among the reaching ones, and a proof removes a target once, so no target is discharged twice.",
+          "description": "The targets a proof removed from the reaching set, each with the proof that removed it: a branch the target never takes, or a mutated site the probe pass measured the target never made differ. On a route decided by block, reaching_targets and these together are the targets whose covered blocks contain the mutated position, so a discharged target is never among the reaching ones, and a proof removes a target once, so no target is discharged twice.",
           "type": "array",
           "uniqueItems": true,
           "items": {
@@ -219,12 +219,12 @@
             "required": ["target", "reason"],
             "properties": {
               "target": { "type": "string", "minLength": 1 },
-              "reason": { "enum": ["branch-never-taken"] }
+              "reason": { "enum": ["branch-never-taken", "never-infected"] }
             }
           }
         },
         "probed": {
-          "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
+          "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ and is discharged from the reaching set. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
           "type": "boolean"
         }
       },
@@ -235,6 +235,32 @@
             "description": "A fallback is why a decision by block dropped back to the file, so the route that records one was decided by file.",
             "required": ["granularity"],
             "properties": { "granularity": { "const": "file" } }
+          }
+        },
+        {
+          "if": { "required": ["discharged"] },
+          "then": {
+            "description": "A proof removes a target from a reaching set the blocks decided, so the route that records one was decided by block.",
+            "required": ["granularity"],
+            "properties": { "granularity": { "const": "block" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["discharged"],
+            "properties": {
+              "discharged": {
+                "contains": {
+                  "required": ["reason"],
+                  "properties": { "reason": { "const": "never-infected" } }
+                }
+              }
+            }
+          },
+          "then": {
+            "description": "The infection proof is the probe pass's measurement of this mutant, so the route that records one was probed.",
+            "required": ["probed"],
+            "properties": { "probed": { "const": true } }
           }
         },
         {

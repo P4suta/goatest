@@ -394,6 +394,7 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 		name        string
 		granularity string
 		discharge   map[string]any
+		probed      bool
 		accepted    bool
 	}{
 		{
@@ -431,6 +432,15 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
 			accepted:    true,
 		},
+		{
+			// The infection proof is the probe pass's measurement of this
+			// mutant, so the route that records one carries the probe marker.
+			name:        "a discharge by the proof the probe pass produces",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected},
+			probed:      true,
+			accepted:    true,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -444,6 +454,9 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 			delete(record, "probed")
 			if testCase.granularity != "" {
 				record["granularity"] = testCase.granularity
+			}
+			if testCase.probed {
+				record["probed"] = true
 			}
 			record["discharged"] = []any{testCase.discharge}
 			err := compiled.Validate(cloneDocument(t, amended))
@@ -486,6 +499,13 @@ func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
 		{
 			name:       "two targets discharged by the same proof",
 			discharged: []any{once, map[string]any{"target": "TestAlsoSkipped", "reason": trace.DischargeBranchNeverTaken}},
+			accepted:   true,
+		},
+		{
+			// One route may carry both proofs: each names the target it removed,
+			// and the reasons are read per entry rather than per route.
+			name:       "two targets discharged by different proofs",
+			discharged: []any{once, map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected}},
 			accepted:   true,
 		},
 	}
@@ -689,6 +709,137 @@ func TestSchemaRequiresAGranularityBesideProbed(t *testing.T) {
 			if !testCase.accepted && err == nil {
 				t.Fatalf("a route with granularity %q and probed %v passed the schema",
 					testCase.granularity, testCase.probed)
+			}
+		})
+	}
+}
+
+func TestSchemaRequiresAProbeMarkerBesideAnInfectionDischarge(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// The infection proof is the probe pass's measurement of this mutant, so a
+	// route that records one was probed. The branch proof is read off the
+	// coverage the run already had and says nothing about the pass either way,
+	// so a route carrying that proof alone stands whether or not it was probed.
+	branch := map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}
+	infection := map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected}
+	cases := []struct {
+		name       string
+		discharged []any
+		probed     any
+		accepted   bool
+	}{
+		{name: "an infection discharge without a probe marker", discharged: []any{infection}},
+		{name: "an infection discharge on a route that recorded no probe", discharged: []any{infection}, probed: false},
+		{name: "an infection discharge beside the pass that measured it", discharged: []any{infection}, probed: true, accepted: true},
+		{name: "a branch discharge without a probe marker", discharged: []any{branch}, accepted: true},
+		{name: "a branch discharge on a route that recorded no probe", discharged: []any{branch}, probed: false, accepted: true},
+		{name: "both proofs beside the pass that measured one of them", discharged: []any{branch, infection}, probed: true, accepted: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			// Every route under test was decided by block, which is the only
+			// granularity a discharge is recorded on; the fallback and the rest
+			// of the routing metadata go so that the pair under test is the only
+			// thing the schema sees.
+			record["granularity"] = trace.GranularityBlock
+			delete(record, "fallback")
+			delete(record, "column")
+			delete(record, "file_candidates")
+			delete(record, "probed")
+			record["discharged"] = testCase.discharged
+			if testCase.probed != nil {
+				record["probed"] = testCase.probed
+			}
+			// The amendment is round-tripped through JSON so that the value
+			// the schema sees is the one a recording would carry.
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route discharging %v with probed %v was rejected: %v",
+					testCase.discharged, testCase.probed, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route discharging %v with probed %v passed the schema",
+					testCase.discharged, testCase.probed)
+			}
+		})
+	}
+}
+
+func TestSchemaAcceptsADischargeOnlyOnARouteDecidedByBlock(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	// A proof removes a target from a reaching set the blocks decided, so a
+	// route that records one was decided by block. A route decided by file has
+	// no such set to remove a target from, whichever proof would have removed it.
+	cases := []struct {
+		name        string
+		granularity string
+		discharge   map[string]any
+		probed      any
+		accepted    bool
+	}{
+		{
+			name:        "a branch discharge on a route the file decided",
+			granularity: trace.GranularityFile,
+			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
+		},
+		{
+			name:        "a branch discharge on the decision the blocks carried",
+			granularity: trace.GranularityBlock,
+			discharge:   map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken},
+			accepted:    true,
+		},
+		{
+			name:        "an infection discharge on a route the file decided",
+			granularity: trace.GranularityFile,
+			discharge:   map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected},
+			probed:      true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			record["granularity"] = testCase.granularity
+			delete(record, "fallback")
+			delete(record, "column")
+			delete(record, "file_candidates")
+			delete(record, "probed")
+			record["discharged"] = []any{testCase.discharge}
+			if testCase.probed != nil {
+				record["probed"] = testCase.probed
+			}
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("a route with granularity %q discharging %v was rejected: %v",
+					testCase.granularity, testCase.discharge, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("a route with granularity %q discharging %v passed the schema",
+					testCase.granularity, testCase.discharge)
 			}
 		})
 	}

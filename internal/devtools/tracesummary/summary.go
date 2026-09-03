@@ -335,9 +335,10 @@ type routeTotal struct {
 	granularities []labelCount
 	fallbacks     []labelCount
 	// discharges tallies the targets a proof removed from a reaching set by
-	// the proof that removed them, and dischargedRoutes counts the routes that
-	// carry at least one. A target is discharged once, so the tally counts
-	// targets while the count beside it counts routes.
+	// the proof that removed them, in the order the engine applies the proofs,
+	// and dischargedRoutes counts the routes that carry at least one. A target
+	// is discharged once, so the tally counts targets while the count beside it
+	// counts routes.
 	discharges       []labelCount
 	dischargedRoutes int
 	// probed counts the routes whose mutant the engine compiled a probe of. A
@@ -478,7 +479,7 @@ func routeTotals(events []trace.Event) routeTotal {
 	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonUnreached)
 	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile, unrecorded)
 	total.fallbacks = tally(fallbacks, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
-	total.discharges = tally(discharges, trace.DischargeBranchNeverTaken)
+	total.discharges = tally(discharges, trace.DischargeBranchNeverTaken, trace.DischargeNeverInfected)
 	return total
 }
 

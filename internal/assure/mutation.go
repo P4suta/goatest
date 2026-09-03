@@ -54,15 +54,26 @@ const (
 )
 
 // The summaries a surviving mutant is reported through: the one a run reached
-// by executing every test that could observe the mutation, the one a branch
-// proof answered for entirely, and the one a proof answered part of. A
-// discharge is a test that was not run, so a summary that named none of them
-// would describe a suite that never ran them at all.
+// by executing every test that could observe the mutation, the one the proofs
+// answered for entirely, and the one they answered part of. A discharge is a
+// test that was not run, so a summary that named none of them would describe a
+// suite that never ran them at all.
+//
+// Each of the two shapes opens the same way and closes with the clause of the
+// proof that answered. The branch proof alone is spelled out as a whole
+// sentence, because it is the summary every report written so far carries and
+// the after-run comparisons read it byte for byte.
 const (
 	mutationSurvivedSummary         = "all reaching tests passed with this mutation active"
-	mutationFullyDischargedSummary  = "no reaching test was run: every one was discharged because none takes the branch this mutation narrows"
-	mutationPartlyDischargedSummary = mutationSurvivedSummary +
-		"; %d more discharged without running because none takes the branch this mutation narrows"
+	mutationFullyDischargedOpening  = "no reaching test was run: every one was discharged because "
+	mutationPartlyDischargedOpening = mutationSurvivedSummary + "; %d more discharged without running because "
+
+	mutationBranchDischargeClause    = "none takes the branch this mutation narrows"
+	mutationInfectionDischargeClause = "none makes the mutated value differ"
+	mutationMixedDischargeClause     = "%d take no branch this mutation narrows and %d never make the mutated value differ"
+
+	mutationFullyDischargedSummary  = mutationFullyDischargedOpening + mutationBranchDischargeClause
+	mutationPartlyDischargedSummary = mutationPartlyDischargedOpening + mutationBranchDischargeClause
 )
 
 // MutationSession is the narrow reusable part of the go-mutants bridge used
@@ -448,10 +459,11 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 type mutationSeed struct {
 	mutant   gomutants.Mutant
 	reaching []TargetEvidence
-	// discharged counts the reaching targets a proof removed before anything
-	// ran. The serial fuzz pass reports the survivors it settles, and it has
-	// only the seed to report them from.
-	discharged int
+	// discharged is the reaching targets a proof removed before anything ran,
+	// each beside the proof that removed it. The serial fuzz pass reports the
+	// survivors it settles, and it has only the seed to report them from, so it
+	// carries the proofs rather than a count of them.
+	discharged []trace.Discharge
 	evaluation MutationEvaluation
 	resolved   bool
 	err        error
@@ -507,14 +519,14 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
-	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: len(route.discharged)}
+	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: route.discharged}
 	if len(seed.reaching) == 0 && len(route.discharged) > 0 {
-		// Coverage reached this mutation and a proof answered for every target
-		// that did: nothing is left that could observe it, and running the
-		// package suite would only run those same discharged tests again. That
-		// no test takes the branch the mutation narrows is the finding.
+		// Coverage reached this mutation and the proofs answered for every
+		// target that did: nothing is left that could observe it, and running
+		// the package suite would only run those same discharged tests again.
+		// What each proof established about them is the finding.
 		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
-		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationFullyDischargedSummary, options.Accepted)
+		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationDischargedSummary(route.discharged), options.Accepted)
 		seed.resolved = true
 		return seed
 	}
@@ -606,15 +618,73 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	return seed
 }
 
+// mutationDischargeCounts is how many reaching targets each proof answered for
+// before anything ran. The two are counted apart because they establish
+// different things about the tests that never ran, and a reader who has to go
+// and look at the suite needs to know which.
+type mutationDischargeCounts struct {
+	branch    int
+	infection int
+}
+
+// countMutationDischarges reads the proofs of a discharge list. A reason the
+// infection proof did not produce is the branch proof's, because those are the
+// two routing applies and a discharge carries one of them.
+func countMutationDischarges(discharged []trace.Discharge) mutationDischargeCounts {
+	var counts mutationDischargeCounts
+	for _, discharge := range discharged {
+		if discharge.Reason == trace.DischargeNeverInfected {
+			counts.infection++
+			continue
+		}
+		counts.branch++
+	}
+	return counts
+}
+
+func (counts mutationDischargeCounts) total() int { return counts.branch + counts.infection }
+
+// clause names what the proofs established about the tests that were not run.
+// One proof answering for all of them says so of every one; two proofs
+// answering for some each can only say how many, because neither statement is
+// true of the whole set.
+func (counts mutationDischargeCounts) clause() string {
+	switch {
+	case counts.infection == 0:
+		return mutationBranchDischargeClause
+	case counts.branch == 0:
+		return mutationInfectionDischargeClause
+	default:
+		return fmt.Sprintf(mutationMixedDischargeClause, counts.branch, counts.infection)
+	}
+}
+
 // mutationSurvivalSummary describes a mutant every test that could observe it
 // passed on. The discharged tests are counted in the summary because a reader
 // comparing the finding against the coverage of the file would otherwise go
 // looking for the tests that never ran.
-func mutationSurvivalSummary(discharged int) string {
-	if discharged == 0 {
+func mutationSurvivalSummary(discharged []trace.Discharge) string {
+	counts := countMutationDischarges(discharged)
+	switch {
+	case counts.total() == 0:
 		return mutationSurvivedSummary
+	case counts.infection == 0:
+		return fmt.Sprintf(mutationPartlyDischargedSummary, counts.total())
+	default:
+		return fmt.Sprintf(mutationPartlyDischargedOpening, counts.total()) + counts.clause()
 	}
-	return fmt.Sprintf(mutationPartlyDischargedSummary, discharged)
+}
+
+// mutationDischargedSummary describes a mutant no reaching test was run for,
+// because a proof answered for every one of them. It names what was proved
+// rather than the count alone: a mutant nothing ran is a finding a reader has
+// to be able to act on without opening the trace.
+func mutationDischargedSummary(discharged []trace.Discharge) string {
+	counts := countMutationDischarges(discharged)
+	if counts.infection == 0 {
+		return mutationFullyDischargedSummary
+	}
+	return mutationFullyDischargedOpening + counts.clause()
 }
 
 // reachedByFuzz reports whether any target that reaches a mutant can fuzz it,
@@ -781,9 +851,9 @@ func batchMutationPlan(targets []TargetEvidence) string {
 //
 // The probe flag is the engine's, not routing's: it says the probe tree carries
 // a form of this mutant, so a measured target that does not name it never made
-// its site differ. Routing does not act on it yet, and an audit reading the
-// recording needs it to tell that absence from the absence of a mutant no
-// measurement could ever name.
+// its site differ. Routing discharges such a target from the reaching set, and
+// an audit reading the recording needs the flag to tell that absence from the
+// absence of a mutant no measurement could ever name.
 func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions []mutationSeedExecution) trace.RouteRecord {
 	record := trace.RouteRecord{
 		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path,
@@ -850,8 +920,8 @@ type mutationRoute struct {
 // nobody. That is not a fallback but the answer: the mutation lives in code
 // the measured targets never execute, and the package suite settles it.
 //
-// A reaching set decided by block is then narrowed once more, by the proof the
-// engine may attach to the mutation itself: see dischargeNarrowedBranch.
+// A reaching set decided by block is then narrowed once more, by the proofs
+// routing holds about the mutation itself: see dischargeReachingTargets.
 func routeMutant(mutant gomutants.Mutant, targets []TargetEvidence, instrumented []goanalysis.FileCoverage) mutationRoute {
 	path := filepath.ToSlash(mutant.Path)
 	candidates := make([]TargetEvidence, 0, len(targets))
@@ -874,11 +944,86 @@ func routeMutant(mutant gomutants.Mutant, targets []TargetEvidence, instrumented
 			reaching = append(reaching, target)
 		}
 	}
-	kept, discharged := dischargeNarrowedBranch(mutant, orderReachingTargets(reaching), blocks, path)
+	kept, discharged := dischargeReachingTargets(mutant, orderReachingTargets(reaching), blocks, path)
 	return mutationRoute{
 		reaching: kept, discharged: discharged,
 		granularity: trace.GranularityBlock, fileCandidates: len(candidates),
 	}
+}
+
+// dischargeReachingTargets narrows an ordered reaching set by every proof
+// routing holds, and names each removed target with the proof that removed it.
+//
+// The proofs are asked in the order they are applied: the branch proof first,
+// then the infection facts, each on what the one before it left. A target both
+// would remove is therefore recorded under branch-never-taken, which keeps
+// every recording made so far comparable with the ones made after the second
+// proof arrived.
+//
+// The discharges come back in the order of the ordered reaching set — cheapest
+// first, the order they would have run in — whichever proof removed each of
+// them, so a route's reaching targets and its discharges stay two orderings cut
+// from the same one.
+func dischargeReachingTargets(mutant gomutants.Mutant, ordered []TargetEvidence, instrumented goanalysis.FileCoverage, path string) ([]TargetEvidence, []trace.Discharge) {
+	unbranched, branch := dischargeNarrowedBranch(mutant, ordered, instrumented, path)
+	kept, infection := dischargeNeverInfected(mutant, unbranched)
+	if len(branch) == 0 && len(infection) == 0 {
+		return ordered, nil
+	}
+	proofs := make(map[string]string, len(branch)+len(infection))
+	for _, discharge := range slices.Concat(branch, infection) {
+		proofs[discharge.Target] = discharge.Reason
+	}
+	discharged := make([]trace.Discharge, 0, len(proofs))
+	for _, target := range ordered {
+		if reason, removed := proofs[target.Target.ID]; removed {
+			discharged = append(discharged, trace.Discharge{Target: target.Target.ID, Reason: reason})
+		}
+	}
+	return kept, discharged
+}
+
+// dischargeNeverInfected removes the targets the probe pass measured cannot
+// observe the mutation, and names each of them with the proof that removed it.
+//
+// The probe tree is the program the user wrote with no mutant ever active, and
+// the probe form of a mutant records, without effects of its own, whether the
+// value the original computed at the mutated site ever differed from the
+// constant the mutant puts there. A target the pass measured and that never saw
+// that site differ ran the original and the mutant through identical states: it
+// cannot have observed the mutation, so executing it against the mutant would
+// establish nothing that is not already established, and it is discharged
+// instead of run.
+//
+// The proof is used only where it is a proof. A mutant the engine compiled no
+// probe form for is absent from every measurement there will ever be, and that
+// absence says nothing about any target. A target the pass could not measure —
+// its test failed, it timed out, the tree was unavailable, it errored, it was
+// restored from a checkpoint, or it is a fuzz target, which the pass never
+// probes because fuzzing explores past the corpus a probe would measure —
+// carries no facts at all, and silence is not evidence of absence. Both are
+// read off TargetEvidence.infects, which is fail-closed for exactly that
+// reason. Everything the proof does not cover is kept, which is what the run
+// did before it existed.
+func dischargeNeverInfected(mutant gomutants.Mutant, reaching []TargetEvidence) ([]TargetEvidence, []trace.Discharge) {
+	if !mutant.Probed {
+		return reaching, nil
+	}
+	kept := make([]TargetEvidence, 0, len(reaching))
+	var discharged []trace.Discharge
+	for _, target := range reaching {
+		if target.infects(mutant.Index) {
+			kept = append(kept, target)
+			continue
+		}
+		discharged = append(discharged, trace.Discharge{
+			Target: target.Target.ID, Reason: trace.DischargeNeverInfected,
+		})
+	}
+	if len(discharged) == 0 {
+		return reaching, nil
+	}
+	return kept, discharged
 }
 
 // dischargeNarrowedBranch removes the targets a branch proof shows cannot

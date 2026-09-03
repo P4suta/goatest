@@ -42,12 +42,14 @@ about the cost of one baseline. What comes back, per target, is the set of
 mutants that target made differ: a mutant a measured target left out is one
 that target can never distinguish from the original program, whatever else it
 executes. Fuzz targets are not probed, because the mutation phase fuzzes beyond
-the seed corpus a probe would measure. **This version routes nothing by it.**
-The facts are kept in memory beside the target's coverage and recorded in the
-trace so the layer can be audited offline against a full run's kills before a
-single execution is discharged by it. Replaying one mutant skips the pass
-entirely and routes as it did before the pass existed, which only executes
-more.
+the seed corpus a probe would measure. A measured target that left a probed
+mutant out of its infections is discharged from that mutant's reaching set with
+reason `never-infected`; everything the measurement does not cover — an unprobed
+mutant, an unmeasured target, a fuzz target, a route the blocks could not
+decide — is kept. The facts are kept in memory beside the target's coverage and
+recorded in the trace so the layer stays auditable offline against a full run's
+kills. Replaying one mutant skips the pass entirely and routes as it did before
+the pass existed, which only executes more.
 
 Changeset routing reads two things about each top-level target: the files its
 baseline run covered, and the import closure its test binary links. That

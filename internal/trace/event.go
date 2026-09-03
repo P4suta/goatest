@@ -52,11 +52,14 @@ const (
 
 // Discharge reasons name the proof that removed a target from a reaching set.
 // A target whose coverage reaches the mutated position through a branch it
-// never takes cannot observe the mutation, so the proof discharges it instead
-// of the run executing it. Only the reasons a proof produces are named here;
-// the rest arrive with their producers.
+// never takes cannot observe the mutation, and neither can one the probe pass
+// measured and never saw make the mutated site differ: it ran the original and
+// the mutant through identical states. Each proof discharges its targets
+// instead of the run executing them. Only the reasons a proof produces are
+// named here; the rest arrive with their producers.
 const (
 	DischargeBranchNeverTaken = "branch-never-taken"
+	DischargeNeverInfected    = "never-infected"
 )
 
 // Outcomes of a probe execution. Only a measured one carries facts: the other
@@ -162,7 +165,9 @@ type MutantRecord struct {
 //
 // Probed says that the engine compiled a probe of this mutant into the probe
 // tree, so a measured target that does not name the mutant among its
-// infections never made its site differ. It is absent on a recording made
+// infections never made its site differ. Routing discharges such a target from
+// this mutant's reaching set, which is what the flag lets a reader tell from a
+// mutant no measurement could ever have named. It is absent on a recording made
 // before the probe pass existed and on a mutant the engine has no probe form
 // for.
 type RouteRecord struct {

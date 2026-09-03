@@ -88,7 +88,65 @@ tests the proof has already ruled out. That no test takes the branch the
 mutation narrows is the finding — a real gap in the suite, stated for the cost
 of reading a coverage profile.
 
-Both narrowings are proof layers in the sense of
+### Discharging a test the probe pass shows cannot observe the mutation
+
+A reaching set decided by block is narrowed a second time by what the probe pass
+measured. Write reaching for the routing decision as a whole:
+
+```text
+reaching(m, t) = covered-block(m, t)
+               ∧ ¬branch-discharged(m, t)
+               ∧ ¬(probed(m) ∧ measured(t) ∧ m ∉ infected(t))
+```
+
+The probe tree is the program the user wrote, with no mutant ever active. For
+each mutation the engine has a probe form of, that tree records — without
+effects of its own — whether the value the original computed at the mutated site
+ever differed from the constant the mutant would put there. So a target the pass
+measured and that never saw that site differ ran the original program and the
+mutated one through identical states: every value either program computed at the
+site was the same value, and nothing downstream of the site could differ either.
+It cannot have observed the mutation. Such a target is *discharged*, exactly as
+a branch proof discharges one: removed from the reaching set without being
+executed, and named in the route's `discharged` with reason `never-infected`.
+
+That the recording is a proof is the engine's obligation, as the branch proof
+is. A mutant does not evaluate the operand it replaced, so go-mutants attaches
+a probe form only where leaving that operand unevaluated changes nothing
+observable — every operand of the statement is effect-free — where the
+recorded comparison is always reached — the replaced operand cannot panic —
+and where equal values mean equal behaviour, which rules out a floating-point
+or complex result. goatest states nothing about a site the engine did not
+claim, and holds what the engine does claim to the recorded kills of every
+dogfood run through the offline `proofaudit` infection layer.
+
+The narrowing applies only where the measurement carries it, and everything else
+is kept. A mutant the engine compiled no probe form for — `Mutant.Probed` is
+false — is absent from every measurement there will ever be, so its absence from
+one says nothing. A target the pass did not measure carries no facts at all: its
+test failed, it timed out, the probe tree was unavailable, the execution
+errored, it was restored from a checkpoint, or it is a fuzz target, which the
+pass never probes because fuzzing explores past the corpus a probe would
+measure. As for the branch proof, the narrowing is attempted on a route decided
+by block with no fallback and never on one decided by file: a file route is the
+answer routing falls back to when the blocks cannot decide, and it is not
+narrowed further.
+
+Both proofs may answer for targets of the same route. They are applied in order
+— branch first, then infection — so a target both would remove is recorded under
+`branch-never-taken`, and the entries stay in run order whichever proof removed
+each of them. A mutant every reaching target was discharged for is resolved
+without a single execution and reported as a `surviving-mutant`, whichever proof
+or pair of proofs answered.
+
+Both narrowings share the reach layer's one blind spot: each rests on one
+measured execution per target. A target whose behaviour differs between runs may
+enter a body, or make a site differ, in the run that would kill the mutant and
+not in the one that was measured. That is the same evidence coverage-based
+routing has always rested on, and it is recorded in
+[limitations](limitations.md).
+
+All three narrowings are proof layers in the sense of
 [ADR 0004](adr/0004-proof-layers-not-budgets.md): an execution is removed only
 where evidence the run already holds proves it could not observe the mutant,
 never by a time budget, a sample, or an exclusion of slow targets, and a layer
