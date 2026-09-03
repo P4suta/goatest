@@ -293,3 +293,77 @@ func TestTheBuildCacheScratchIsTheBuildDirectoryOfTheRunScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A directory a run could not claim is not a directory a run may use. Nothing
+// in it says who is working there, so the next sweep judges it by age alone and
+// may remove it — with a live run's baseline artifacts, candidate trees and
+// build cache inside. A run that cannot own its scratch works beside one, under
+// the names the sweep knows, exactly as a run that could not make one does.
+func TestARunWillNotUseAScratchItCouldNotClaim(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		spoil   func(*testing.T, string)
+		removed bool
+	}{
+		{
+			name: "the owner pair cannot be written",
+			// A lock that is a directory can be neither opened nor taken. The
+			// directory the run just made is empty, so removing it costs
+			// nothing and leaves no anonymous directory behind.
+			spoil: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Mkdir(tempowner.LockPath(dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			removed: true,
+		},
+		{
+			name: "somebody else holds it",
+			// However implausibly a run came by a directory somebody else owns,
+			// it is not the run's to remove.
+			spoil: func(t *testing.T, dir string) {
+				t.Helper()
+				owner, err := tempowner.Claim(dir, tempowner.Marker{RunID: "another run"}, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = owner.Release() })
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newRunCoordinatorHarness(t)
+			temporary := t.TempDir()
+			harness.dependencies.makeRunScratch = func(_, pattern string) (string, error) {
+				directory, err := os.MkdirTemp(harness.temporary, pattern)
+				if err != nil {
+					return "", err
+				}
+				harness.runScratch = directory
+				test.spoil(t, directory)
+				return directory, nil
+			}
+			result, err := harness.run(Options{TempDirectory: temporary})
+			if err != nil || result.Verdict != report.VerdictAssured {
+				t.Fatalf("run = (%+v, %v), want the verdict the run established", result, err)
+			}
+			if _, reported := eventDetail(harness.events, "temp-unavailable"); !reported {
+				t.Fatalf("progress notes = %+v, want a temp-unavailable note", harness.events)
+			}
+			// The whole of the observable difference: everything is made beside
+			// the scratch that could not be claimed, never inside it.
+			if harness.baselineParent != temporary || harness.baselinePattern != "goatest-baseline-" {
+				t.Fatalf("baseline scratch made in %q as %q, want one beside the unclaimed directory",
+					harness.baselineParent, harness.baselinePattern)
+			}
+			_, statErr := os.Stat(harness.runScratch)
+			if test.removed && !os.IsNotExist(statErr) {
+				t.Fatalf("stat the unclaimed directory = %v, want the empty directory taken back", statErr)
+			}
+			if !test.removed && statErr != nil {
+				t.Fatalf("stat the directory somebody else owns = %v, want it left alone", statErr)
+			}
+		})
+	}
+}
