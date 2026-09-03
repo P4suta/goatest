@@ -425,6 +425,24 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "route discharged", "granularity"},
 		},
 		{
+			name:   "route with a discharge on a decision the file carried",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"file","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
+			want:   []string{"line 2", `route discharged "TestSkipped"`, `granularity "file"`, `granularity "block"`},
+		},
+		{
+			name:   "route with an infection discharge and no probe marker",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestNeverInfects","reason":"never-infected"}]}}`),
+			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
+		},
+		{
+			// An absent marker and a recorded false are the same claim: the
+			// pass measured nothing about this mutant, so nothing it measured
+			// removed a target from the reaching set.
+			name:   "route with an infection discharge on a mutant it recorded no probe of",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestNeverInfects","reason":"never-infected"}],"probed":false}}`),
+			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
+		},
+		{
 			name:   "route that discharged a target it also reaches",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"coverage-reaching","granularity":"block","reaching_targets":["TestRun"],"discharged":[{"target":"TestRun","reason":"branch-never-taken"}]}}`),
 			want:   []string{"line 2", `discharged "TestRun"`, "reaches"},
