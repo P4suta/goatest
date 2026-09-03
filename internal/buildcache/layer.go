@@ -43,6 +43,13 @@ const (
 	markerText = "This is goatest's build cache. goatest writes, reads, and collects every" +
 		" file below this directory, and nothing else does; removing it whole is safe" +
 		" and only costs the next run the work of compiling again.\n"
+	// markerTemporaryPrefix and markerTemporarySuffix bracket the name the
+	// marker is written under before it is renamed into place. They are spelled
+	// out because claim has to recognise one: a process killed between the
+	// create and the rename leaves exactly this name at the root of the layer,
+	// and it is goatest's own.
+	markerTemporaryPrefix = ".marker-"
+	markerTemporarySuffix = ".tmp"
 
 	// BaseTouchInterval is how stale an action's file time may become in the
 	// layer the machine keeps before a read refreshes it. It is the go
@@ -182,7 +189,8 @@ func (layer Layer) prepareWithHooks(hooks layerHooks) error {
 	}
 	// Writing the marker is also the writability probe: it is the one write
 	// every layer takes, and a layer that cannot take it cannot serve.
-	if err := writeFile(filepath.Join(layer.Dir, MarkerName), []byte(markerText), ".marker-*.tmp", hooks); err != nil {
+	if err := writeFile(filepath.Join(layer.Dir, MarkerName), []byte(markerText),
+		markerTemporaryPrefix+"*"+markerTemporarySuffix, hooks); err != nil {
 		return fmt.Errorf("goatest: prepare build cache layer: %w", err)
 	}
 	return nil
@@ -194,6 +202,9 @@ func (layer Layer) prepareWithHooks(hooks layerHooks) error {
 // from. A directory that does not exist, one that is empty, and one holding
 // only goatest's own names are all claimable; anything else is somebody's, and
 // the refusal writes nothing into it.
+//
+// It also sweeps the one piece of litter goatest's own crash can leave at the
+// root, which is a marker temporary a process died before renaming.
 func (layer Layer) claim(hooks layerHooks) error {
 	entries, err := hooks.readDir(layer.Dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -209,6 +220,44 @@ func (layer Layer) claim(hooks layerHooks) error {
 					" so goatest will not store in it, collect it, or remove anything from it",
 				layer.Dir, entry.Name())
 		}
+		if markerTemporaryName(entry.Name()) {
+			if err := layer.sweepMarkerTemporary(entry.Name(), hooks); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// sweepMarkerTemporary removes a marker temporary that no live Prepare can
+// still be about to rename.
+//
+// It is only ever goatest's own litter: Prepare writes the marker through this
+// temporary and renames it into place, so a process killed between the two
+// leaves it at the root and nothing ever comes back for it. Left there it would
+// make every later Prepare refuse the layer, which would take the machine's
+// whole build cache away from the tool that made it until somebody deleted a
+// file goatest wrote.
+//
+// Staleness is what keeps the sweep from being a race. A Prepare running beside
+// this one is between the create and the rename for microseconds, and its
+// temporary has to still be there for it to rename, so nothing younger than the
+// window this layer already protects its entries for is touched. A temporary
+// another process swept first is not an error either: gone is what was wanted.
+func (layer Layer) sweepMarkerTemporary(name string, hooks layerHooks) error {
+	path := filepath.Join(layer.Dir, name)
+	info, err := hooks.stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("goatest: read build cache layer: %w", err)
+	}
+	if hooks.now().Sub(info.ModTime()) < layer.MinIdle() {
+		return nil
+	}
+	if err := hooks.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("goatest: remove build cache marker temporary: %w", err)
 	}
 	return nil
 }
@@ -216,13 +265,23 @@ func (layer Layer) claim(hooks layerHooks) error {
 // ownedLayerName reports whether a name at the root of a layer is one goatest
 // writes. A layer whose marker a user deleted still holds only these, so it is
 // still claimable: the refusal is for directories that hold somebody else's
-// files, not for ones goatest made and somebody tidied.
+// files, not for ones goatest made and somebody tidied — or ones goatest made
+// and its own crash left half finished.
 func ownedLayerName(name string) bool {
 	switch name {
 	case MarkerName, collectedName, actionsDirectory, objectsDirectory, statsDirectory:
 		return true
 	}
-	return false
+	return markerTemporaryName(name)
+}
+
+// markerTemporaryName reports whether a name at the root of a layer is one the
+// marker write can leave behind. It matches the whole pattern rather than any
+// hidden temporary, because a directory somebody else owns may well hold
+// hidden temporaries of its own and those are exactly what claim exists to
+// refuse.
+func markerTemporaryName(name string) bool {
+	return strings.HasPrefix(name, markerTemporaryPrefix) && strings.HasSuffix(name, markerTemporarySuffix)
 }
 
 // ensureWithHooks creates the directories this layer's own writes need, and

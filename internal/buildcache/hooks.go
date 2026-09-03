@@ -48,10 +48,13 @@ type layerHooks struct {
 	remove func(path string) error
 	// rename publishes a written temporary file as the stored entry.
 	rename func(oldPath, newPath string) error
+	// now is the clock the age of a leftover temporary file is measured
+	// against, which is what tells a crash apart from a Prepare in flight.
+	now func() time.Time
 }
 
-// resolved returns the hooks with every unset operation filled in from the os
-// and io packages.
+// resolved returns the hooks with every unset operation filled in from the os,
+// io, and time packages.
 func (hooks layerHooks) resolved() layerHooks {
 	if hooks.mkdirAll == nil {
 		hooks.mkdirAll = os.MkdirAll
@@ -81,6 +84,9 @@ func (hooks layerHooks) resolved() layerHooks {
 	}
 	if hooks.rename == nil {
 		hooks.rename = os.Rename
+	}
+	if hooks.now == nil {
+		hooks.now = time.Now
 	}
 	return hooks
 }
