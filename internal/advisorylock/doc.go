@@ -3,9 +3,12 @@
 
 // Package advisorylock takes the exclusive advisory lock an open file carries.
 //
-// The lock is advisory: it excludes whoever else asks for it through this
-// package and nobody else, so it coordinates goatest's own processes rather
-// than protecting a file from the world. It belongs to the open file
+// On unix the lock is advisory: it excludes whoever else asks for it through
+// flock and nobody else, so it coordinates goatest's own processes rather than
+// protecting a file from the world. On Windows the lock is mandatory for the
+// one byte it covers, but every file locked here is empty and nothing reads or
+// writes that byte, so the effect is the same: only another Try is ever
+// refused. It belongs to the open file
 // description and not to the process, which means two descriptions of one path
 // contend even inside a single process — that is what a cacheprog child and its
 // parent are, and it is also what lets a test hold the lock against itself
