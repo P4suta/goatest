@@ -183,6 +183,60 @@ selected   = executed + compile-rejected + accepted + unknown
 The aggregate counts must exactly match the ID-level mutant inventory. Any
 `unknown` disposition requires `ERROR`.
 
+### Reusing a kill an earlier run confirmed
+
+A full run — the whole project, in a first round no repair has modified —
+records every kill it confirmed through one named test or example target, and
+the next such run resolves a mutant from that record instead of executing it
+when all of the following hold:
+
+1. the mutant has the same identity, which is content-addressed, so the
+   mutated file is byte-for-byte what it was;
+2. the recorded killer is a target this run's own coverage still routes to the
+   mutant, after every discharge above;
+3. that target has the same behaviour key it had when the kill was recorded;
+   and
+4. this run's own baseline ran that target on the original tree and saw it
+   pass.
+
+The fourth is the control. The recording run watched the mutant fail, the
+original pass, and the mutant fail again; this run supplies fresh evidence that
+the original still passes, and the report names the run that supplied the
+rest.
+
+The behaviour key is an allowlist over what the run already digested for its
+own snapshot identity: every Go file of the packages the target's test binary
+links, the `testdata` and embedded files beside those packages, the module
+manifests, the external module digests, the toolchain, the platform, the
+selected environment, the contract, the test arguments, the build tags, both
+timeouts, the goatest and go-mutants versions, and a fuzz target's corpus. A
+dependency's own `_test.go` files are outside the key, because they are never
+compiled into the binary; the target's own package's test files are always in
+it. Diagnostics — tracing, kept temporaries — and parallelism are outside
+every key, because neither changes what a test observes.
+
+Two kinds of kill are neither recorded nor believed. A kill fuzzing found is a
+claim about one budget, not the next. A kill by a batch or a package suite
+proves that one of several targets killed the mutant without naming which, so
+there is nothing a later run could check the key of. A record whose killer no
+longer reaches, whose key changed, or whose control did not pass is ignored and
+the mutant executes; a record about a mutant no longer in the catalogue is
+dropped when the store is written.
+
+Reuse is confined to the run a record can be a claim about: a first round,
+because a later round verifies a tree an earlier round repaired; the whole
+project rather than a changeset or a package scope, which narrow the claim; no
+configured resources, which carry runtime state a digest cannot see; and no
+replay. `goatest replay` therefore always executes, which is what makes it a
+reproduction. A store that cannot be read is discarded with a progress note and
+the round executes everything; a store that cannot be written is a note and
+nothing more.
+
+A reused verdict is one of the executed dispositions, not something beside
+them: `reused_killed + reused_survived <= executed`, each reused disposition
+carries the `provenance` of the run that observed it, and its route in the
+trace records the reuse with no execution beside it.
+
 ## Acceptances
 
 An acceptance is human authorization, not a mutation result. It requires a

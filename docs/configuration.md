@@ -82,3 +82,11 @@ the go command opens a cached file after the response that named it, so the
 bound is soft by at most one hour of writes. Removing the directory whole is
 always safe: it costs the next run the work of compiling again, and the
 directory says so in a `README` beside its contents.
+
+The mutation evidence store, `.goatest/cache/mutation-evidence-v1.json`, is
+one file beside the exact-input cache rather than an entry in it: it is
+rewritten by every full run of the whole project, pruned to the mutants the
+current catalogue still names, and never expires, so `cache gc` neither counts
+nor removes it. Deleting the file only makes the next run execute every
+mutant; see [the assurance contract](assurance-contract.md) for what a run
+reuses from it.

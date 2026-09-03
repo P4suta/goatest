@@ -45,12 +45,15 @@ const (
 
 // The forms an entry of a recorded execution plan takes: one target run on its
 // own, several related targets of one package run together, the fuzzing of one
-// target, and the package suite a mutant no target reaches is left to.
+// target, the package suite a mutant no target reaches is left to, and the
+// reuse of a verdict an earlier run established, which is the one plan that
+// runs nothing at all.
 const (
 	mutationPlanIndividual   = "individual:"
 	mutationPlanBatch        = "batch:"
 	mutationPlanFuzz         = "fuzz:"
 	mutationPlanPackageSuite = "package-suite"
+	mutationPlanReused       = "reused"
 )
 
 // The summaries a surviving mutant is reported through: the one a run reached
@@ -150,6 +153,11 @@ type MutationOptions struct {
 	// from a position no profile describes, and never writes to it, so the
 	// same slice is shared by every worker.
 	Instrumented []goanalysis.FileCoverage
+	// Evidence is what earlier runs established about these mutants, and where
+	// what this run establishes is collected. A nil collector is an evaluation
+	// that reuses nothing and records nothing, which is what a run outside the
+	// full-run guard is given.
+	Evidence *MutationEvidence
 }
 
 type MutationEvaluation struct {
@@ -296,7 +304,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		evaluation.append(unit)
 		checkpointMutation(options, seed.mutant.ID, unit)
 	}
-	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation)
+	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation, options.Evidence)
 	return evaluation, nil
 }
 
@@ -381,7 +389,7 @@ func validateMutationCatalog(catalog gomutants.Catalog) error {
 	return nil
 }
 
-func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation) (report.MutantAccounting, []report.MutantDisposition) {
+func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation, collected *MutationEvidence) (report.MutantAccounting, []report.MutantDisposition) {
 	accounting := report.MutantAccounting{Discovered: len(catalog.Mutants)}
 	selected := make(map[string]bool)
 	for _, mutant := range catalog.Mutants {
@@ -431,14 +439,22 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 				detail = "selected mutant has no terminal disposition"
 			}
 		}
+		// Only a selected mutant is ever evaluated, so only a selected mutant
+		// can carry a reuse; the provenance travels with the flag, because
+		// each is what makes the other auditable.
+		reused, provenance := collected.disposition(mutant.ID)
 		dispositions = append(dispositions, report.MutantDisposition{
 			ID: mutant.ID, Status: status, Path: mutant.Path, Line: mutant.Line,
 			Package: mutant.Package, Rule: mutant.Rule, Detail: detail,
+			Reused: reused, Provenance: provenance,
 		})
 		switch status {
 		case report.MutantKilled:
 			accounting.Killed++
 			accounting.Executed++
+			if reused {
+				accounting.ReusedKilled++
+			}
 		case report.MutantSurvived:
 			accounting.Survived++
 			accounting.Executed++
@@ -470,12 +486,18 @@ type mutationSeed struct {
 }
 
 // mutationSeedExecution is one planned execution of a mutant: the request that
-// runs it, the detail that names it in the evidence, and the plan entry that
-// names it in a trace.
+// runs it, the detail that names it in the evidence, the plan entry that names
+// it in a trace, and the target a kill it confirms is attributable to.
+//
+// The killer is zero on a batch, which selects several targets at once: the
+// engine reports that the selection failed, and a later run would need to know
+// which target of it to check the recorded kill against. A vague record is
+// worse than none, so a batched kill records nothing.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
 	plan    string
+	killer  targetIdentity
 }
 
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
@@ -520,6 +542,15 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
 	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: route.discharged}
+	if killer, reused := options.Evidence.reuseKill(mutant, route); reused {
+		// An earlier run watched this target kill this mutant, and every
+		// condition under which that is still true holds. Nothing is executed,
+		// and what is reported is what executing it would have reported.
+		options.Trace.Route(reusedMutationRoute(mutant, route))
+		seed.evaluation.addKill(mutant, mutationKillDetail(killer.Target.Name, options))
+		seed.resolved = true
+		return seed
+	}
 	if len(seed.reaching) == 0 && len(route.discharged) > 0 {
 		// Coverage reached this mutation and the proofs answered for every
 		// target that did: nothing is left that could observe it, and running
@@ -581,11 +612,10 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				return seed
 			}
 			if confirmed {
-				detail := execution.detail
-				if options.OriginalControl != nil {
-					detail += " (paired confirmation)"
-				}
-				seed.evaluation.addKill(mutant, detail)
+				seed.evaluation.addKill(mutant, mutationKillDetail(execution.detail, options))
+				// Only an execution of one named target is a kill a later run
+				// could check: recordKill refuses everything else.
+				options.Evidence.recordKill(mutant, execution.killer)
 			} else {
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
@@ -772,17 +802,22 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 			request: request,
 			detail:  target.Target.Name,
 			plan:    mutationPlanIndividual + target.Target.Name,
+			killer:  identify(target.Target),
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
 		duration := batchMutationDuration(batch)
 		request := batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout))
 		request.Args = append(request.Args, options.TestArgs...)
-		executions = append(executions, mutationSeedExecution{
+		execution := mutationSeedExecution{
 			request: request,
 			detail:  batchMutationDetail(batch),
 			plan:    batchMutationPlan(batch),
-		})
+		}
+		if len(batch) == 1 {
+			execution.killer = identify(batch[0].Target)
+		}
+		executions = append(executions, execution)
 	}
 	return executions
 }
@@ -883,6 +918,30 @@ func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions 
 		}
 	}
 	return record
+}
+
+// reusedMutationRoute describes a mutant whose verdict this run took from an
+// earlier run's evidence. It is the route the mutant would have been given,
+// with the plan replaced by the reuse itself: the reaching targets and the
+// narrowing that decided them are what the reuse was checked against, and a
+// reader has to be able to see both. Nothing was executed, so the recording
+// holds no execution of this mutant beside it.
+func reusedMutationRoute(mutant gomutants.Mutant, route mutationRoute) trace.RouteRecord {
+	record := mutationSeedRoute(mutant, route, nil)
+	record.Plan = []string{mutationPlanReused}
+	record.Reused = true
+	return record
+}
+
+// mutationKillDetail names what killed a mutant, and says so in the vocabulary
+// the confirmation used. A reused kill is described exactly as the execution
+// that established it was, because it is the same claim about the same target:
+// what distinguishes the two is the provenance the disposition carries.
+func mutationKillDetail(target string, options MutationOptions) string {
+	if options.OriginalControl != nil {
+		return target + " (paired confirmation)"
+	}
+	return target
 }
 
 func (evaluation *MutationEvaluation) append(other MutationEvaluation) {

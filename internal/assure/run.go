@@ -54,7 +54,7 @@ const goMutantsModulePath = "github.com/P4suta/go-mutants"
 // The pin is a pseudo-version of go-mutants' main branch: the branch proof
 // goatest routes by is only there, and the tagged releases sit on another
 // branch, which is why the pseudo-version reads as v0.0.0 while being ahead.
-const goMutantsFallbackVersion = "v0.0.0-20260902214351-fb36fecf91a7"
+const goMutantsFallbackVersion = "v0.0.0-20260903131207-b5d08c832c89"
 
 // GoMutantsVersion resolves the go-mutants version linked into this binary
 // from its build info, honoring a replace directive because the replacement
@@ -228,6 +228,8 @@ type runDependencies struct {
 	buildGraph             func(string, goanalysis.Model, []TargetEvidence) (evidence.Graph, error)
 	mergeGraph             func(evidence.Graph, *evidence.GraphRecord, impactSelection) evidence.Graph
 	saveGraph              func(string, evidence.GraphRecord) error
+	loadMutationEvidence   func(path, modulePath string) (evidence.MutationStore, bool, error)
+	saveMutationEvidence   func(path string, store evidence.MutationStore) error
 }
 
 // Run verifies a repository from a frozen snapshot. It repeats from a new
@@ -611,6 +613,26 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			emit(options, "probe-summary", fmt.Sprintf("%d measured, %d without facts", probed.Measured, probed.Unmeasured))
 		}
 
+		// The evidence of earlier runs is read once, here, where everything a
+		// behaviour key is built from is known and before anything is routed.
+		// A store that cannot be trusted is dropped rather than believed: the
+		// round then executes every mutant and records what it establishes,
+		// which replaces what could not be read.
+		var mutationEvidence *MutationEvidence
+		evidencePath := filepath.Join(root, ".goatest", "cache", mutationEvidenceFileName)
+		if mutationEvidenceGuarded(round, loaded, options) {
+			mutationStore, _, evidenceErr := dependencies.loadMutationEvidence(evidencePath, metadata.model.ModulePath)
+			if evidenceErr != nil {
+				emit(options, "mutation-evidence-rejected", evidenceErr.Error())
+				mutationStore = evidence.MutationStore{}
+			}
+			mutationEvidence = newRunMutationEvidence(
+				mutationStore,
+				newTargetKeySources(inputs, metadata.model, contract, options),
+				baseline.Targets, baseline.Inventory, digest,
+			)
+		}
+
 		phases.enter(phaseMutation)
 		mutationResume := checkpointController.mutation(catalog, root)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
@@ -624,12 +646,22 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			OriginalControl: originalControl,
 			Trace:           options.Trace,
 			Instrumented:    baseline.Instrumented,
+			Evidence:        mutationEvidence,
 		})
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, err
 		}
 		checkpointController.completeMutation()
+		// The store is written once, now that the phase has established
+		// everything it will. A run that cannot write it has still proved
+		// everything it claims, so the failure is a note and the next run
+		// simply starts cold.
+		if mutationEvidence != nil {
+			if err := dependencies.saveMutationEvidence(evidencePath, mutationEvidence.store(catalog, metadata.model.ModulePath)); err != nil {
+				emit(options, "mutation-evidence-unsaved", err.Error())
+			}
+		}
 		baseReport.Accounting.Mutants = mutation.Accounting
 		baseReport.Mutants = slices.Clone(mutation.Mutants)
 		baseReport.Resume = checkpointController.resumeMetadata()

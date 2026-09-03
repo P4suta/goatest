@@ -280,6 +280,9 @@ func JSONSchema() []byte {
 				"discovered": integerType, "selected": integerType, "executed": integerType,
 				"killed": integerType, "survived": integerType, "inconclusive": integerType,
 				"compile_rejected": integerType, "accepted": integerType, "out_of_scope": integerType, "unknown": integerType,
+				// The reuse counters are optional, so every report written
+				// before evidence was ever reused still validates.
+				"reused_killed": integerType, "reused_survived": integerType,
 			}),
 			"mutantDisposition": objectSchema([]string{"id", "status", "path", "line", "package", "rule"}, map[string]any{
 				"id": nonEmptyString,
@@ -288,6 +291,7 @@ func JSONSchema() []byte {
 					string(MutantAccepted), string(MutantOutOfScope), string(MutantUnknown),
 				}},
 				"path": stringType, "line": integerType, "package": stringType, "rule": stringType, "detail": stringType,
+				"reused": map[string]any{"type": "boolean"}, "provenance": stringType,
 			}),
 			"acceptance": objectSchema([]string{"id", "reason", "expires"}, map[string]any{
 				"id": nonEmptyString, "reason": nonEmptyString, "expires": nonEmptyString,

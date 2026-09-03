@@ -655,3 +655,46 @@ func jsonLines(t *testing.T, data []byte) []string {
 	}
 	return lines
 }
+
+// TestAReusedRouteIsPinnedApartFromTheScript pins the wire shape of a reuse
+// where the script cannot hold it: the script executes its one mutant, and a
+// route reused beside an execution of the same mutant would be the
+// contradiction docs/trace-v1.md tells a reader to reject. A reused route
+// plans the reuse and nothing else, and the recording holds no execution of
+// the mutant at all.
+func TestAReusedRouteIsPinnedApartFromTheScript(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(0)
+	recorder := trace.New(sink, newClock().Now)
+	recorder.Route(trace.RouteRecord{
+		MutantID:        "m-0002",
+		Rule:            "cond-negate",
+		Path:            "internal/assure/run.go",
+		Line:            57,
+		Column:          3,
+		ReachingTargets: []string{"TestRun"},
+		Plan:            []string{"reused"},
+		Reason:          trace.ReasonCoverageReaching,
+		Granularity:     trace.GranularityBlock,
+		FileCandidates:  3,
+		Reused:          true,
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	events := sink.Events()
+	if len(events) != 2 || events[1].Type != trace.TypeRoute {
+		t.Fatalf("recorded %d events, want the run start and one route", len(events))
+	}
+	encoded, err := json.Marshal(events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"seq":2,"type":"route","timestamp":"2026-01-02T03:04:05Z","elapsed_ms":0,"route":{"mutant_id":"m-0002","rule":"cond-negate","path":"internal/assure/run.go","line":57,"column":3,"reaching_targets":["TestRun"],"plan":["reused"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"reused":true}}`
+	if string(encoded) != want {
+		t.Errorf("reused route\n got %s\nwant %s", encoded, want)
+	}
+	if err := compileSchema(t).Validate(decodeEvents(t, events)[1]); err != nil {
+		t.Errorf("the reused route was rejected by the schema: %v", err)
+	}
+}

@@ -204,3 +204,37 @@ func packageStream(t *testing.T, packages ...map[string]any) *bytes.Reader {
 	}
 	return bytes.NewReader(stream.Bytes())
 }
+
+// TestDecodePackagesRecordsEmbeddedFilesRelativeToTheModule pins the one input
+// of a test binary that lives outside both the import graph and the package's
+// own directory listing: `go list` reports embedded files relative to the
+// package, and a consumer comparing them against a repository scan needs them
+// relative to the module, once each and in a stable order.
+func TestDecodePackagesRecordsEmbeddedFilesRelativeToTheModule(t *testing.T) {
+	t.Parallel()
+	moduleDir := filepath.Join(t.TempDir(), "module")
+	embedding := listedPackage("example.com/m/app", filepath.Join(moduleDir, "app"), "example.com/m", moduleDir, "fmt")
+	embedding["EmbedFiles"] = []string{"templates/page.tmpl", "static/app.css"}
+	embedding["TestEmbedFiles"] = []string{"testdata/golden.txt", "templates/page.tmpl"}
+	embedding["XTestEmbedFiles"] = []string{"testdata/external.txt"}
+	root := listedPackage("example.com/m", moduleDir, "example.com/m", moduleDir, "fmt")
+	root["EmbedFiles"] = []string{"schema.json"}
+	plain := listedPackage("example.com/m/plain", filepath.Join(moduleDir, "plain"), "example.com/m", moduleDir, "fmt")
+
+	model, err := gotest.DecodePackages(packageStream(t, embedding, root, plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"example.com/m": {"schema.json"},
+		"example.com/m/app": {
+			"app/static/app.css", "app/templates/page.tmpl", "app/testdata/external.txt", "app/testdata/golden.txt",
+		},
+		"example.com/m/plain": nil,
+	}
+	for _, pkg := range model.Packages {
+		if !slices.Equal(pkg.EmbedFiles, want[pkg.ImportPath]) {
+			t.Errorf("%s embed files = %v, want %v", pkg.ImportPath, pkg.EmbedFiles, want[pkg.ImportPath])
+		}
+	}
+}

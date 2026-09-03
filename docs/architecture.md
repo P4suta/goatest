@@ -51,6 +51,21 @@ recorded in the trace so the layer stays auditable offline against a full run's
 kills. Replaying one mutant skips the pass entirely and routes as it did before
 the pass existed, which only executes more.
 
+Across runs, the mutation phase keeps a store of the kills it confirmed through
+one named target, `.goatest/cache/mutation-evidence-v1.json`, read once before
+the phase and written once after it. A full run — the whole project, in a
+first round — resolves a mutant from that store when the recorded killer still
+reaches the mutant, has the same behaviour key — an allowlist over the digests
+the run already computed for its snapshot: the test binary's package closure,
+the data and embedded files beside it, manifests, dependencies, toolchain,
+platform, environment, contract, arguments, tags, timeouts, versions — and
+passed in this run's own baseline, which is the fresh control. Every other
+record executes, and a record about a mutant the catalogue no longer names is
+pruned when the store is written back. The report marks each reused
+disposition with its provenance and the trace records the reuse as a route
+with no execution beside it. The rule is in
+[the assurance contract](assurance-contract.md).
+
 Changeset routing reads two things about each top-level target: the files its
 baseline run covered, and the import closure its test binary links. That
 closure is the package's own transitive imports together with the imports its
