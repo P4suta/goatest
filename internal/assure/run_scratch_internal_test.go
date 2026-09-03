@@ -152,6 +152,25 @@ func TestARunCollectsWhatEarlierRunsLeftBehindBeforeItWritesAnything(t *testing.
 	}
 }
 
+// A run whose caller named no temporary directory sweeps nothing at all. It
+// still makes its scratch where the operating system puts one, because creating
+// a directory there is what every temporary directory has always done — but
+// collecting there on nobody's instruction would reach every goatest directory
+// on the machine, including the ones live runs are working in.
+func TestARunNeverSweepsATemporaryDirectoryNobodyNamed(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.sweepResult = tempowner.Result{Removed: []string{"/tmp/goatest-run-somebody-elses"}}
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.sweepParents) != 0 {
+		t.Fatalf("sweeps = %q, want none from a run that was given no temporary directory", harness.sweepParents)
+	}
+	if detail, reported := eventDetail(harness.events, "temp-sweep"); reported {
+		t.Fatalf("temp-sweep note = %q, want none from a run that swept nothing", detail)
+	}
+}
+
 // A clean machine has nothing to say, and a note nobody can act on is noise in
 // every single run of a repository that never crashes.
 func TestASweepThatFoundNothingSaysNothing(t *testing.T) {

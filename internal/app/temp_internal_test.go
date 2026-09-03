@@ -153,6 +153,46 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 	}
 }
 
+// A service that names no temporary directory has not named the machine's own:
+// it has named nothing. Maintenance therefore sweeps nothing and says so, which
+// is the whole of the lesson from the afternoon a `cache gc` in a test with a
+// clock a day ahead collected the scratch directory of a run that was using it.
+func TestCacheMaintenanceNeverSweepsADirectoryNobodyNamed(t *testing.T) {
+	t.Parallel()
+	// In the machine's own temporary directory, because that is the directory
+	// this test exists to protect: unowned, old enough for the legacy rule, and
+	// removed by this test whatever happens.
+	fixture, err := os.MkdirTemp(os.TempDir(), "goatest-run-unnamed-parent-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(fixture) })
+	stale := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(fixture, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{
+		Root: t.TempDir(), Progress: io.Discard,
+		Now: func() time.Time { return time.Now().Add(48 * time.Hour) },
+	}
+	for _, action := range []string{"status", "gc"} {
+		result, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, action)
+		if err != nil || result.Verdict != report.VerdictCompleted {
+			t.Fatalf("cache %s = %+v, %v", action, result, err)
+		}
+		for _, id := range []string{"orphans", "sweep"} {
+			for _, item := range result.Evidence {
+				if item.ID == id && item.Status != "skipped" {
+					t.Fatalf("cache %s evidence %+v, want the temporary directory reported as skipped", action, item)
+				}
+			}
+		}
+		if _, err := os.Stat(fixture); err != nil {
+			t.Fatalf("stat %s after a cache %s = %v, want it untouched", fixture, action, err)
+		}
+	}
+}
+
 // The temporary directory of a machine nothing has run on is not a failure, and
 // neither is a repository whose runs have never kept anything: `cache status`
 // answers about them the same way it answers about an empty cache.

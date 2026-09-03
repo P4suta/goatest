@@ -279,3 +279,42 @@ func TestADetailLineSaysWhatTheSweepDid(t *testing.T) {
 		t.Fatalf("failed detail = %q, want %q", got, want)
 	}
 }
+
+// unnamedParentFixture makes a directory in this process's own temporary
+// directory that a sweep would take if it swept there: goatest's name, no
+// marker, and older than the age at which an unowned directory is a leftover.
+func unnamedParentFixture(t *testing.T, now time.Time) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "goatest-run-unnamed-parent-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.WriteFile(filepath.Join(dir, "payload"), make([]byte, 16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return aged(t, dir, now)
+}
+
+func TestASweepOfAParentNobodyNamedCollectsNothing(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	fixture := unnamedParentFixture(t, now)
+	// The empty parent is the case that matters, because it is the one a caller
+	// reaches by accident rather than on purpose: a value that names no
+	// temporary directory. Reading it as the machine's own temporary directory
+	// would collect the directories of every goatest on the machine, including
+	// the ones live runs are working in — which is exactly what happened once.
+	// A directory nobody named is nobody's to sweep.
+	result, err := tempowner.Sweep("", sweepPrefixes(), now)
+	if err != nil || len(result.Removed) != 0 || len(result.Errors) != 0 {
+		t.Fatalf("sweep of an unnamed parent = (%+v, %v), want an empty answer", result, err)
+	}
+	if _, err := os.Stat(fixture); err != nil {
+		t.Fatalf("stat %s after a sweep of an unnamed parent = %v, want it untouched", fixture, err)
+	}
+	inspected, err := tempowner.Inspect("", sweepPrefixes(), now)
+	if err != nil || len(inspected.Removed) != 0 {
+		t.Fatalf("inspection of an unnamed parent = (%+v, %v), want an empty answer", inspected, err)
+	}
+}
