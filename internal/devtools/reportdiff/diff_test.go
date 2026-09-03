@@ -46,31 +46,54 @@ func TestCompareCountsStatusTransitionsOverCommonMutantsOnly(t *testing.T) {
 	t.Parallel()
 	before := report.Report{Mutants: []report.MutantDisposition{
 		mutantAt("m-a", report.MutantKilled, "a.go", 1),
-		mutantAt("m-b", report.MutantSurvived, "b.go", 2),
+		mutantAt("m-b", report.MutantKilled, "b.go", 2),
 		mutantAt("m-c", report.MutantSurvived, "c.go", 3),
-		mutantAt("m-d", report.MutantKilled, "d.go", 4),
-		mutantAt("m-f", report.MutantKilled, "f.go", 6),
+		mutantAt("m-d", report.MutantSurvived, "d.go", 4),
+		mutantAt("m-e", report.MutantSurvived, "e.go", 5),
+		mutantAt("m-f", report.MutantInconclusive, "f.go", 6),
+		mutantAt("m-g", report.MutantKilled, "g.go", 7),
+		mutantAt("m-h", report.MutantKilled, "h.go", 8),
+		mutantAt("m-i", report.MutantKilled, "i.go", 9),
 	}}
 	after := report.Report{Mutants: []report.MutantDisposition{
 		mutantAt("m-a", report.MutantKilled, "a.go", 1),
 		mutantAt("m-b", report.MutantKilled, "b.go", 2),
-		mutantAt("m-c", report.MutantSurvived, "c.go", 3),
-		mutantAt("m-e", report.MutantSurvived, "e.go", 5),
-		mutantAt("m-f", report.MutantKilled, "f.go", 6),
+		mutantAt("m-c", report.MutantKilled, "c.go", 3),
+		mutantAt("m-d", report.MutantKilled, "d.go", 4),
+		mutantAt("m-e", report.MutantKilled, "e.go", 5),
+		mutantAt("m-f", report.MutantSurvived, "f.go", 6),
+		mutantAt("m-g", report.MutantInconclusive, "g.go", 7),
+		mutantAt("m-h", report.MutantSurvived, "h.go", 8),
+		mutantAt("m-j", report.MutantSurvived, "j.go", 10),
 	}}
 	result := compare(before, after)
 	// Most common transition first, then the pair itself, so two runs of the
-	// same comparison print the same matrix.
-	want := []string{"killed -> killed 2", "survived -> killed 1", "survived -> survived 1"}
+	// same comparison print the same matrix. The counts descend against the
+	// name order of the pairs, and the tie at one row is broken by a before
+	// name whose order contradicts the after names, so nothing but the count
+	// comparison followed by each tie-break in turn produces this order: a
+	// comparator that read the count last, or that fell from the before name
+	// through to the after one, sorts this fixture some other way whatever
+	// order the map hands the rows over in.
+	want := []string{
+		"survived -> killed 3",
+		"killed -> killed 2",
+		"inconclusive -> survived 1",
+		"killed -> inconclusive 1",
+		"killed -> survived 1",
+	}
 	if got := transitionLines(result.statuses); !slices.Equal(got, want) {
 		t.Fatalf("transitions = %q, want %q", got, want)
 	}
-	// m-d and m-e are in one report alone: a mutant the other report never
-	// discovered has no transition to count.
+	// m-i and m-j are in one report alone: a mutant the other report never
+	// discovered has no transition to count, so the matrix totals the eight
+	// common mutants and nothing besides.
+	counted := 0
 	for _, transition := range result.statuses {
-		if transition.mutants > 2 {
-			t.Errorf("transition %+v counts more than the common mutants", transition)
-		}
+		counted += transition.mutants
+	}
+	if counted != 8 || result.commonMutants != 8 {
+		t.Errorf("transitions count %d mutants over %d common ones, want 8 over 8", counted, result.commonMutants)
 	}
 }
 
@@ -132,13 +155,20 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 			mutantAt("m-a", report.MutantSurvived, "a.go", 1),
 			mutantAt("m-b", report.MutantSurvived, "b.go", 2),
 			mutantAt("m-c", report.MutantSurvived, "c.go", 3),
-			mutantAt("m-d", report.MutantKilled, "d.go", 4),
+			mutantAt("m-d", report.MutantSurvived, "d.go", 4),
+			mutantAt("m-e", report.MutantSurvived, "e.go", 5),
+			mutantAt("m-f", report.MutantKilled, "f.go", 6),
+			mutantAt("m-g", report.MutantSurvived, "g.go", 7),
+			mutantAt("m-h", report.MutantSurvived, "h.go", 8),
 		},
 		Findings: []report.Finding{
-			findingOf("surviving-mutant", "m-a"),
+			findingOf("unreached-mutant", "m-a"),
 			findingOf("unreached-mutant", "m-b"),
-			findingOf("surviving-mutant", "m-c"),
 			findingOf("unreached-mutant", "m-c"),
+			findingOf("surviving-mutant", "m-d"),
+			findingOf("surviving-mutant", "m-e"),
+			findingOf("surviving-mutant", "m-g"),
+			findingOf("surviving-mutant", "m-h"),
 			findingOf("race", ""),
 		},
 	}
@@ -147,24 +177,36 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 			mutantAt("m-a", report.MutantSurvived, "a.go", 1),
 			mutantAt("m-b", report.MutantSurvived, "b.go", 2),
 			mutantAt("m-c", report.MutantSurvived, "c.go", 3),
-			mutantAt("m-d", report.MutantKilled, "d.go", 4),
+			mutantAt("m-d", report.MutantSurvived, "d.go", 4),
+			mutantAt("m-e", report.MutantSurvived, "e.go", 5),
+			mutantAt("m-f", report.MutantSurvived, "f.go", 6),
+			mutantAt("m-g", report.MutantKilled, "g.go", 7),
+			mutantAt("m-h", report.MutantSurvived, "h.go", 8),
 		},
 		Findings: []report.Finding{
 			findingOf("unreached-mutant", "m-a"),
 			findingOf("unreached-mutant", "m-b"),
-			findingOf("surviving-mutant", "m-c"),
 			findingOf("unreached-mutant", "m-c"),
+			findingOf("unreached-mutant", "m-d"),
+			findingOf("unreached-mutant", "m-e"),
+			findingOf("unreached-mutant", "m-f"),
+			findingOf("surviving-mutant", "m-h"),
+			findingOf("unreached-mutant", "m-h"),
 		},
 	}
 	result := compare(before, after)
 	// A mutant with several findings is one row named by the whole set it
 	// carried, and a mutant no finding names is the absence rather than a
-	// blank cell.
+	// blank cell. The counts descend against the name order and the tie at one
+	// row is broken by a before name whose order contradicts the after names,
+	// so this order comes from the count comparison and each tie-break in
+	// turn rather than from the order the map handed the rows over in.
 	want := []string{
-		"(none) -> (none) 1",
-		"surviving-mutant -> unreached-mutant 1",
-		"surviving-mutant+unreached-mutant -> surviving-mutant+unreached-mutant 1",
-		"unreached-mutant -> unreached-mutant 1",
+		"unreached-mutant -> unreached-mutant 3",
+		"surviving-mutant -> unreached-mutant 2",
+		"(none) -> unreached-mutant 1",
+		"surviving-mutant -> (none) 1",
+		"surviving-mutant -> surviving-mutant+unreached-mutant 1",
 	}
 	if got := kindLines(result.kinds); !slices.Equal(got, want) {
 		t.Fatalf("kind transitions = %q, want %q", got, want)
@@ -175,7 +217,7 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 	for _, total := range result.kindTotals {
 		totals = append(totals, fmt.Sprintf("%s %d %d", total.name, total.before, total.after))
 	}
-	wantTotals := []string{"race 1 0", "surviving-mutant 2 1", "unreached-mutant 2 3"}
+	wantTotals := []string{"race 1 0", "surviving-mutant 4 1", "unreached-mutant 3 7"}
 	if !slices.Equal(totals, wantTotals) {
 		t.Fatalf("kind totals = %q, want %q in name order", totals, wantTotals)
 	}
