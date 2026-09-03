@@ -93,6 +93,7 @@ func recordScript(clock *fakeClock, sink trace.Sink) {
 			{Target: "TestNeverInfects", Reason: trace.DischargeNeverInfected},
 		},
 		Probed: true,
+		Reused: true,
 	})
 	clock.Advance(time.Second)
 	recorder.ProbeExec(trace.ProbeRecord{
@@ -135,7 +136,7 @@ var scriptedJSONL = []string{
 	`{"seq":2,"type":"phase-start","timestamp":"2026-01-02T03:04:06Z","elapsed_ms":1000,"phase":{"name":"mutation"}}`,
 	`{"seq":3,"type":"exec","timestamp":"2026-01-02T03:04:07Z","elapsed_ms":2000,"exec":{"argv":["go","test","./..."],"dir":"internal/assure","env_names":["GOCACHE","GOFLAGS"],"timeout_ms":60000,"exit_code":1,"duration_ms":1200}}`,
 	`{"seq":4,"type":"mutant-exec","timestamp":"2026-01-02T03:04:08Z","elapsed_ms":3000,"mutant":{"id":"m-0001","display_id":"cond-negate internal/assure/run.go:42","package":"example.com/app/internal/assure","args":["-run","TestRun"],"timeout_ms":30000,"outcome":"killed","killed_by":"TestRun","duration_ms":900}}`,
-	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},{"target":"TestNeverInfects","reason":"never-infected"}],"probed":true}}`,
+	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},{"target":"TestNeverInfects","reason":"never-infected"}],"probed":true,"reused":true}}`,
 	`{"seq":6,"type":"probe-exec","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"probe":{"target":"TestRun","package":"example.com/app/internal/assure","args":["-test.run=^TestRun$"],"timeout_ms":30000,"outcome":"measured","exit_code":0,"duration_ms":800,"infected":["m-0001"]}}`,
 	`{"seq":7,"type":"progress","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
 	`{"seq":8,"type":"artifact","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,

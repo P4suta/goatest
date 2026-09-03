@@ -112,6 +112,16 @@ type runCoordinatorHarness struct {
 	saveGraphCalls  int
 	scratchRemovals int
 
+	evidenceStore    evidence.MutationStore
+	evidenceFound    bool
+	evidenceLoadErr  error
+	evidenceSaveErr  error
+	evidenceLoads    []string
+	evidenceModules  []string
+	evidenceSaves    []string
+	evidenceSaved    []evidence.MutationStore
+	evidenceSequence []string
+
 	workspaceOptions  mutationbridge.Options
 	preparedOptions   mutationbridge.PrepareOptions
 	probeOptions      ProbeOptions
@@ -274,6 +284,18 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			harness.mutationOptions = options
 			harness.mutationTargets = slices.Clone(targets)
 			return harness.mutation, nil
+		},
+		loadMutationEvidence: func(path, modulePath string) (evidence.MutationStore, bool, error) {
+			harness.evidenceLoads = append(harness.evidenceLoads, path)
+			harness.evidenceModules = append(harness.evidenceModules, modulePath)
+			harness.evidenceSequence = append(harness.evidenceSequence, "load")
+			return harness.evidenceStore, harness.evidenceFound, harness.evidenceLoadErr
+		},
+		saveMutationEvidence: func(path string, store evidence.MutationStore) error {
+			harness.evidenceSaves = append(harness.evidenceSaves, path)
+			harness.evidenceSaved = append(harness.evidenceSaved, store)
+			harness.evidenceSequence = append(harness.evidenceSequence, "save")
+			return harness.evidenceSaveErr
 		},
 		attemptRepairs: func(_ context.Context, _ string, _ []report.Finding, options GenerationOptions) (GenerationEvaluation, error) {
 			harness.generationCalls++
@@ -628,5 +650,207 @@ func TestRunCoordinatorEmitsChangedImpactModeOnlyWhenRequested(t *testing.T) {
 				t.Fatalf("impact event = %q, want %q: %+v", found, test.kind, harness.events)
 			}
 		})
+	}
+}
+
+// coordinatorEvidenceRecord is one killed record an earlier run left behind.
+func coordinatorEvidenceRecord(id string) evidence.MutationRecord {
+	return evidence.MutationRecord{
+		MutantID: id, Path: "value.go", Package: "fixture.example/module",
+		Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + strings.Repeat("b", 64),
+		KilledBy: &evidence.TargetKey{
+			Package: "fixture.example/module", Name: "TestValue", Kind: "test", Key: strings.Repeat("c", 64),
+		},
+	}
+}
+
+// TestMutationEvidenceIsGuardedToTheFullRunItCanBeReusedIn pins every
+// dimension of the guard. A recorded verdict is a claim about the whole
+// project verified from an unmodified tree, so a run that narrows the scope,
+// carries runtime state, replays one finding, or is repairing what an earlier
+// round changed neither reads a record nor writes one.
+func TestMutationEvidenceIsGuardedToTheFullRunItCanBeReusedIn(t *testing.T) {
+	t.Parallel()
+	full := config.Config{}
+	if !mutationEvidenceGuarded(0, full, Options{}) {
+		t.Fatal("a full first round is not guarded in")
+	}
+	if !mutationEvidenceGuarded(0, full, Options{Packages: []string{"./..."}}) {
+		t.Fatal("the default package pattern is not the default")
+	}
+	for _, test := range []struct {
+		name    string
+		round   int
+		loaded  config.Config
+		options Options
+	}{
+		{name: "a repair round", round: 1},
+		{name: "a run with configured resources", loaded: config.Config{
+			Resources: map[string]config.Resource{"db": {Command: []string{"provider"}}},
+		}},
+		{name: "a changeset run", options: Options{Changed: true}},
+		{name: "a package-scoped run", options: Options{PackageScope: true}},
+		{name: "an explicit package pattern", options: Options{Packages: []string{"./internal/..."}}},
+		{name: "a mutant replay", options: Options{ReplayMutantID: "mutant-a"}},
+		{name: "a finding replay", options: Options{ReplayFindingID: "finding-a"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if mutationEvidenceGuarded(test.round, test.loaded, test.options) {
+				t.Fatalf("%s reads and writes mutation evidence", test.name)
+			}
+		})
+	}
+}
+
+// TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun pins the wiring
+// the guard decides: where the store lives, that it is read once before the
+// mutation phase and written once after it, that what is written keeps only
+// the mutants this run's catalogue still names, and that a run outside the
+// guard is handed no evidence at all.
+func TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun(t *testing.T) {
+	t.Run("a full run", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		kept, pruned := coordinatorEvidenceRecord(strings.Repeat("d", 64)), coordinatorEvidenceRecord(strings.Repeat("e", 64))
+		harness.catalog = gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: kept.MutantID, Accepted: true}}}
+		harness.mutation = MutationEvaluation{Evidence: []report.Evidence{{
+			Kind: "mutation", ID: kept.MutantID, Status: "killed", Detail: "TestValue",
+		}}}
+		harness.evidenceFound = true
+		harness.evidenceStore = evidence.MutationStore{
+			Schema: evidence.MutationSchemaV1, ModulePath: "fixture.example/module",
+			Records: []evidence.MutationRecord{kept, pruned},
+		}
+		result, err := harness.run(Options{})
+		if err != nil || result.Verdict != report.VerdictAssured {
+			t.Fatalf("run = (%+v, %v)", result, err)
+		}
+		path := filepath.Join(harness.root, ".goatest", "cache", "mutation-evidence-v1.json")
+		if !slices.Equal(harness.evidenceLoads, []string{path}) || !slices.Equal(harness.evidenceSaves, []string{path}) {
+			t.Fatalf("loads = %v, saves = %v, want both at %q", harness.evidenceLoads, harness.evidenceSaves, path)
+		}
+		if !slices.Equal(harness.evidenceModules, []string{"fixture.example/module"}) {
+			t.Fatalf("loaded under %v, want the module the run verified", harness.evidenceModules)
+		}
+		if !slices.Equal(harness.evidenceSequence, []string{"load", "save"}) {
+			t.Fatalf("evidence sequence = %v, want the store read before it is written", harness.evidenceSequence)
+		}
+		if harness.mutationOptions.Evidence == nil {
+			t.Fatal("the mutation phase was handed no evidence")
+		}
+		saved := harness.evidenceSaved[0]
+		if saved.ModulePath != "fixture.example/module" || saved.Schema != evidence.MutationSchemaV1 {
+			t.Fatalf("saved store identity = %+v", saved)
+		}
+		if len(saved.Records) != 1 || !reflect.DeepEqual(saved.Records[0], kept) {
+			t.Fatalf("saved records = %+v, want only %+v", saved.Records, kept)
+		}
+	})
+	for _, test := range []struct {
+		name    string
+		change  func(*runCoordinatorHarness)
+		options Options
+	}{
+		{name: "a changeset run", options: Options{Changed: true}},
+		{name: "a package-scoped run", options: Options{PackageScope: true}},
+		{name: "a mutant replay", options: Options{ReplayMutantID: "mutant-a"}},
+		{name: "a finding replay", options: Options{ReplayFindingID: "finding-a"}},
+		{name: "a run with configured resources", change: func(harness *runCoordinatorHarness) {
+			harness.loaded.Resources = map[string]config.Resource{"db": {Command: []string{"provider"}}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newRunCoordinatorHarness(t)
+			if test.change != nil {
+				test.change(harness)
+			}
+			if _, err := harness.run(test.options); err != nil {
+				t.Fatal(err)
+			}
+			if len(harness.evidenceLoads) != 0 || len(harness.evidenceSaves) != 0 {
+				t.Fatalf("%s read %v and wrote %v", test.name, harness.evidenceLoads, harness.evidenceSaves)
+			}
+			if harness.mutationOptions.Evidence != nil {
+				t.Fatalf("%s was handed mutation evidence", test.name)
+			}
+		})
+	}
+	t.Run("a repair round", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.dependencies.evaluateMutations = func(_ context.Context, _ MutationSession, _ []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
+			harness.mutationCalls++
+			harness.mutationOptions = options
+			if harness.mutationCalls == 1 {
+				return MutationEvaluation{Applied: true, Repairs: []report.Repair{{
+					ID: "corpus-a", Finding: "finding-a", Path: "testdata/fuzz/FuzzValue/seed", Status: "applied",
+				}}}, nil
+			}
+			return MutationEvaluation{}, nil
+		}
+		if _, err := harness.run(Options{}); err != nil {
+			t.Fatal(err)
+		}
+		// The second round verifies a tree an earlier round changed, so only
+		// the first one reads and writes the store.
+		if harness.mutationCalls != 2 || len(harness.evidenceLoads) != 1 || len(harness.evidenceSaves) != 1 {
+			t.Fatalf("%d rounds read %v and wrote %v", harness.mutationCalls, harness.evidenceLoads, harness.evidenceSaves)
+		}
+		if harness.mutationOptions.Evidence != nil {
+			t.Fatal("the repair round was handed mutation evidence")
+		}
+	})
+}
+
+// TestRunDiscardsARejectedMutationEvidenceStoreAndNotesIt pins the fail-closed
+// direction. A store that cannot be trusted is not an error the run dies of
+// and not a store the run believes: it is dropped, the reason is on the
+// progress stream, everything executes, and what this run establishes replaces
+// what could not be read.
+func TestRunDiscardsARejectedMutationEvidenceStoreAndNotesIt(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.evidenceStore = evidence.MutationStore{
+		Schema: evidence.MutationSchemaV1, ModulePath: "fixture.example/module",
+		Records: []evidence.MutationRecord{coordinatorEvidenceRecord(strings.Repeat("d", 64))},
+	}
+	harness.evidenceLoadErr = errors.New("goatest: mutation evidence identity mismatch")
+	result, err := harness.run(Options{})
+	if err != nil || result.Verdict != report.VerdictAssured {
+		t.Fatalf("run = (%+v, %v)", result, err)
+	}
+	var noted []Event
+	for _, event := range harness.events {
+		if event.Kind == "mutation-evidence-rejected" {
+			noted = append(noted, event)
+		}
+	}
+	if len(noted) != 1 || !strings.Contains(noted[0].Detail, "identity mismatch") {
+		t.Fatalf("rejection notes = %+v", noted)
+	}
+	if len(harness.evidenceSaves) != 1 || len(harness.evidenceSaved[0].Records) != 0 {
+		t.Fatalf("saved %+v, want the rejected records gone", harness.evidenceSaved)
+	}
+	if harness.mutationOptions.Evidence == nil {
+		t.Fatal("the mutation phase was handed no evidence to collect into")
+	}
+}
+
+// TestRunKeepsGoingWhenSavingMutationEvidenceFails pins that a store is a
+// cache and never a result: a run that cannot write one has established
+// everything it claims, and the next run simply starts cold.
+func TestRunKeepsGoingWhenSavingMutationEvidenceFails(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.evidenceSaveErr = errors.New("disk is full")
+	result, err := harness.run(Options{})
+	if err != nil || result.Verdict != report.VerdictAssured {
+		t.Fatalf("run = (%+v, %v)", result, err)
+	}
+	var noted []Event
+	for _, event := range harness.events {
+		if event.Kind == "mutation-evidence-unsaved" {
+			noted = append(noted, event)
+		}
+	}
+	if len(noted) != 1 || !strings.Contains(noted[0].Detail, "disk is full") {
+		t.Fatalf("unsaved notes = %+v", noted)
 	}
 }

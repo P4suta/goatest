@@ -497,3 +497,191 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 		}
 	}
 }
+
+// reusedFixture is a report of three mutants, one of them killed by evidence
+// an earlier run established rather than by an execution of this one.
+func reusedFixture() report.Report {
+	result := report.Report{
+		Schema: report.SchemaV1, RunKind: report.RunFull, Verdict: report.VerdictAssured,
+		Scope: report.Scope{
+			Requested: report.ScopeSpec{Kind: "full"},
+			Resolved:  report.ScopeSpec{Kind: "full"},
+		},
+		Accounting: report.Accounting{Mutants: report.MutantAccounting{
+			Discovered: 3, Selected: 3, Executed: 3, Killed: 3, ReusedKilled: 1,
+		}},
+		Mutants: []report.MutantDisposition{
+			{
+				ID: "mutant-01", Status: report.MutantKilled, Detail: "TestValue",
+				Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+			},
+			{ID: "mutant-02", Status: report.MutantKilled, Detail: "TestValue"},
+			{ID: "mutant-03", Status: report.MutantKilled, Detail: "TestOther"},
+		},
+	}
+	return result
+}
+
+// TestValidateReconcilesReusedCountsWithTheMutantInventory pins the audit that
+// makes the reuse counters worth reading: they are a summary of the inventory,
+// and a summary that disagrees with what it summarises is refused.
+func TestValidateReconcilesReusedCountsWithTheMutantInventory(t *testing.T) {
+	t.Parallel()
+	valid := reusedFixture()
+	if err := report.Validate(valid); err != nil {
+		t.Fatalf("a report carrying reused evidence was rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*report.Report)
+	}{
+		{name: "a reuse the counter does not know about", change: func(input *report.Report) {
+			input.Mutants[1].Reused = true
+			input.Mutants[1].Provenance = "snapshot=" + strings.Repeat("c", 64)
+		}},
+		{name: "a counter no disposition accounts for", change: func(input *report.Report) {
+			input.Accounting.Mutants.ReusedKilled = 2
+		}},
+		{name: "a survived counter no disposition accounts for", change: func(input *report.Report) {
+			input.Accounting.Mutants.ReusedSurvived = 1
+		}},
+		{name: "a negative reuse count", change: func(input *report.Report) {
+			input.Accounting.Mutants.ReusedKilled = -1
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			invalid := reusedFixture()
+			test.change(&invalid)
+			if err := report.Validate(invalid); err == nil {
+				t.Fatalf("%s passed validation", test.name)
+			}
+		})
+	}
+}
+
+// TestValidateRejectsAReusedMutantWithoutProvenance pins the audit trail. A
+// disposition that says it was not established by this run has to name the run
+// that did establish it, or the claim cannot be traced to anything.
+func TestValidateRejectsAReusedMutantWithoutProvenance(t *testing.T) {
+	t.Parallel()
+	invalid := reusedFixture()
+	invalid.Mutants[0].Provenance = ""
+	if err := report.Validate(invalid); err == nil || !strings.Contains(err.Error(), "provenance") {
+		t.Fatalf("a reused mutant without provenance = %v", err)
+	}
+}
+
+// TestValidateRejectsProvenanceWithoutTheReusedFlag pins the other direction:
+// provenance is what a reuse is audited by, so a disposition carrying one
+// while claiming this run established it contradicts itself.
+func TestValidateRejectsProvenanceWithoutTheReusedFlag(t *testing.T) {
+	t.Parallel()
+	invalid := reusedFixture()
+	invalid.Mutants[0].Reused = false
+	invalid.Accounting.Mutants.ReusedKilled = 0
+	if err := report.Validate(invalid); err == nil || !strings.Contains(err.Error(), "provenance") {
+		t.Fatalf("provenance without a reuse = %v", err)
+	}
+}
+
+// TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition pins what a
+// reuse may be about: a mutant that reached a terminal execution disposition.
+// Nothing else was ever executed, so nothing else can be reused.
+func TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition(t *testing.T) {
+	t.Parallel()
+	invalid := reusedFixture()
+	invalid.Mutants[0].Status = report.MutantCompileRejected
+	invalid.Accounting.Mutants = report.MutantAccounting{
+		Discovered: 3, Selected: 3, Executed: 2, Killed: 2, CompileRejected: 1, ReusedKilled: 1,
+	}
+	if err := report.Validate(invalid); err == nil {
+		t.Fatal("a reused compile rejection passed validation")
+	}
+}
+
+// TestValidateRejectsReusedCountsExceedingExecuted pins the inequality that
+// holds however the counters were produced: a run cannot have reused more
+// verdicts than it has mutants with a verdict.
+func TestValidateRejectsReusedCountsExceedingExecuted(t *testing.T) {
+	t.Parallel()
+	invalid := report.Report{
+		Schema: report.SchemaV1, Verdict: report.VerdictAssured,
+		Accounting: report.Accounting{Mutants: report.MutantAccounting{
+			Discovered: 1, Selected: 1, Executed: 1, Killed: 1, ReusedKilled: 1, ReusedSurvived: 1,
+		}},
+		Mutants: []report.MutantDisposition{{
+			ID: "mutant-01", Status: report.MutantKilled,
+			Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+		}},
+	}
+	if err := report.Validate(invalid); err == nil || !strings.Contains(err.Error(), "reused") {
+		t.Fatalf("more reuse than execution = %v", err)
+	}
+}
+
+// TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem pins that the two
+// additions are optional. Every report written before they existed still
+// validates, which is what keeps the reports already on disk readable.
+func TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem(t *testing.T) {
+	t.Parallel()
+	schemaBytes := report.JSONSchema()
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	if err := compiler.AddResource("https://goatest.invalid/assurance-report-v1.schema.json", document); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile("https://goatest.invalid/assurance-report-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrying := persistedFixture()
+	carrying.Accounting.Mutants = report.MutantAccounting{
+		Discovered: 1, Selected: 1, Executed: 1, Killed: 1, ReusedKilled: 1,
+	}
+	carrying.Mutants = []report.MutantDisposition{{
+		ID: "mutant-01", Status: report.MutantKilled, Path: "value.go", Line: 8,
+		Package: "example.test/fixture", Rule: "arithmetic", Detail: "TestValue",
+		Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+	}}
+	for _, test := range []struct {
+		name  string
+		input report.Report
+	}{
+		{name: "a report carrying the fields", input: carrying},
+		{name: "a report written before they existed", input: persistedFixture()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if err := report.Validate(test.input); err != nil {
+				t.Fatalf("%s was rejected by the audit: %v", test.name, err)
+			}
+			encoded := report.JSON(test.input)
+			instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := compiled.Validate(instance); err != nil {
+				t.Fatalf("%s was rejected by the schema: %v", test.name, err)
+			}
+			var decoded report.Report
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&decoded); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(report.JSON(decoded), encoded) {
+				t.Fatalf("%s did not round trip", test.name)
+			}
+		})
+	}
+	// A report written before the fields existed carries neither of them: an
+	// absent reuse is not a recorded false.
+	if strings.Contains(string(report.JSON(persistedFixture())), "reused") {
+		t.Fatal("a report that reused nothing wrote a reuse field")
+	}
+}

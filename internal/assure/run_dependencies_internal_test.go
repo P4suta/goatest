@@ -55,7 +55,8 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 		dependencies.discoverTargets == nil || dependencies.selectImpact == nil || dependencies.acquireResources == nil || dependencies.makeBaselineScratch == nil ||
 		dependencies.removeBaselineScratch == nil || dependencies.collectBaseline == nil || dependencies.concurrencyPackages == nil || dependencies.relevantRacePackages == nil ||
 		dependencies.collectRaceWithOptions == nil || dependencies.prepareSession == nil || dependencies.evaluateMutations == nil || dependencies.attemptRepairs == nil ||
-		dependencies.buildGraph == nil || dependencies.mergeGraph == nil || dependencies.saveGraph == nil {
+		dependencies.buildGraph == nil || dependencies.mergeGraph == nil || dependencies.saveGraph == nil ||
+		dependencies.loadMutationEvidence == nil || dependencies.saveMutationEvidence == nil {
 		t.Fatal("production dependencies contain a nil function")
 	}
 	store := dependencies.newCache(t.TempDir(), config.Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour})

@@ -858,3 +858,34 @@ func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	}
 	return clone
 }
+
+// TestSchemaRejectsARouteWithANonBooleanReused pins the one shape the new
+// field has. A reuse is a yes or a no: anything else is a recording a reader
+// would have to interpret, and an interpreted audit trail is not one.
+func TestSchemaRejectsARouteWithANonBooleanReused(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	for _, value := range []any{"true", 1, []any{true}} {
+		amended := cloneDocument(t, route)
+		amended["route"].(map[string]any)["reused"] = value
+		if err := compiled.Validate(cloneDocument(t, amended)); err == nil {
+			t.Errorf("a route with reused %v passed the schema", value)
+		}
+	}
+	// A recording made before the field existed carries no reuse at all, and
+	// stays a recording this schema reads.
+	amended := cloneDocument(t, route)
+	delete(amended["route"].(map[string]any), "reused")
+	if err := compiled.Validate(cloneDocument(t, amended)); err != nil {
+		t.Fatalf("a route recorded before reuse existed was rejected: %v", err)
+	}
+}
