@@ -226,6 +226,10 @@
         "probed": {
           "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ and is discharged from the reaching set. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
           "type": "boolean"
+        },
+        "reused": {
+          "description": "Whether the run resolved this mutant from evidence an earlier run recorded instead of executing it. Nothing ran, so the recording carries no execution of the mutant and the plan is the reuse itself. Absent in a recording made before evidence was reused and on every mutant a run executed.",
+          "type": "boolean"
         }
       },
       "allOf": [

@@ -203,7 +203,8 @@ func TestEvaluateMutationsNeverReusesAFuzzLoopKill(t *testing.T) {
 	}
 	keys := map[targetIdentity]string{fuzzer: key, evidenceIdentity("TestEarly", goanalysis.KindTest): digestText("early-key")}
 	passed := map[targetIdentity]bool{fuzzer: true, evidenceIdentity("TestEarly", goanalysis.KindTest): true}
-	index := evidenceIndex([]evidence.MutationRecord{killedEvidenceRecord(mutant, fuzzer, key)}, keys, passed)
+	loaded := killedEvidenceRecord(mutant, fuzzer, key)
+	index := evidenceIndex([]evidence.MutationRecord{loaded}, keys, passed)
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
 	session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		if slices.ContainsFunc(request.Args, func(argument string) bool { return strings.HasPrefix(argument, "-test.fuzz=") }) {
@@ -221,8 +222,13 @@ func TestEvaluateMutationsNeverReusesAFuzzLoopKill(t *testing.T) {
 	if len(session.requests) == 0 || evaluation.Mutants[0].Reused {
 		t.Fatalf("a fuzz kill was reused: %+v", evaluation.Mutants)
 	}
-	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
-		t.Fatalf("recorded %+v, want nothing for a fuzz kill", records)
+	// Fuzzing killed the mutant in this run too, and the store is exactly what
+	// it was: the kill added nothing, so nothing about it can be believed
+	// later. The record that was already there is kept because the mutant is
+	// still in the catalogue, and it stays as unusable as it was.
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 || !reflect.DeepEqual(records[0], loaded) {
+		t.Fatalf("store = %+v, want only the record it was given", records)
 	}
 }
 

@@ -227,10 +227,17 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `file_candidates` | how many targets cover the mutated file at all |
 | `discharged` | the reaching targets a proof removed, each with the proof that removed it: `branch-never-taken` or `never-infected` |
 | `probed` | whether the engine compiled a probe of this mutant into the probe tree |
+| `reused` | whether the run resolved this mutant from evidence an earlier run recorded instead of executing it |
 
-`column`, `granularity`, `fallback`, `file_candidates`, `discharged` and
-`probed` are additive: a recording made before they existed carries none of
+`column`, `granularity`, `fallback`, `file_candidates`, `discharged`, `probed`
+and `reused` are additive: a recording made before they existed carries none of
 them, and each is omitted when it is empty.
+
+`reused` is where a run says it did not observe a verdict itself. Such a route
+carries `plan: ["reused"]`, and the recording holds no `mutant-exec` for that
+mutant at all, because nothing ran: a reused route beside an execution of the
+same mutant is a contradiction. The run the verdict came from is named in the
+`provenance` of that mutant's disposition in the report.
 
 `granularity` is what marks a route as carrying that metadata at all. On a
 route that names one, an absent `file_candidates` means zero candidates; on a
