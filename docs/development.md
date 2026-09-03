@@ -475,7 +475,9 @@ follows a symbolic link, and one entry it cannot judge never stops the others.
 A run sweeps before it writes anything; `goatest cache gc` sweeps on demand and
 `goatest cache status` inspects without removing. go-mutants' own directories
 are not in that list: they carry owner files of their own and its `Open` sweeps
-them, which is what the `mutation-temp-sweep` progress note reports.
+them, which is what the `mutation-temp-sweep` progress note reports. Why the
+lock and not a pid, why 24 hours, and why the ledger lives in `.goatest` are
+[ADR 0006](adr/0006-every-temporary-directory-has-an-owner.md).
 
 ### What a kept directory costs, and who collects it
 
