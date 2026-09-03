@@ -4,10 +4,12 @@
 package keptledger_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,9 +137,17 @@ func TestAWrittenLedgerLeavesNothingBesideIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The write goes through a temporary file so that a ledger is never half
-	// replaced, and the temporary file is nobody's to find afterwards.
-	if len(entries) != 1 || entries[0].Name() != "kept-temp-v1.json" {
-		t.Fatalf("directory = %v, want the ledger alone", entries)
+	// replaced, and the temporary file is nobody's to find afterwards. The lock
+	// beside it is not litter: it is how two writers stay out of each other's
+	// way, and it is empty.
+	var left []string
+	for _, entry := range entries {
+		if entry.Name() != "kept-temp-v1.json" && entry.Name() != "kept-temp-v1.json.lock" {
+			left = append(left, entry.Name())
+		}
+	}
+	if len(left) != 0 {
+		t.Fatalf("directory holds %v, want the ledger and its lock alone", left)
 	}
 }
 
@@ -146,5 +156,46 @@ func TestTheLedgerLivesWhereTheRepositoryKeepsItsOwnFiles(t *testing.T) {
 	root := filepath.Join("home", "developer", "project")
 	if got, want := keptledger.Path(root), filepath.Join(root, ".goatest", "kept-temp-v1.json"); got != want {
 		t.Fatalf("ledger path = %q, want %q", got, want)
+	}
+}
+
+// Appending is a read, a change and a write, and two of them interleaved lose
+// whichever entry was written second-to-last. Every writer today runs under the
+// repository's cache lease, so this cannot happen in the field — which is
+// exactly why it must be pinned here: the day somebody writes a ledger entry
+// from outside that lease, the loss would be silent and the entry would be a
+// directory nothing ever collects.
+func TestConcurrentAppendsKeepEveryEntry(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "kept-temp-v1.json")
+	const writers, each = 2, 50
+	var group sync.WaitGroup
+	failures := make(chan error, writers*each)
+	for writer := range writers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := range each {
+				name := fmt.Sprintf("goatest-run-%d-%d", writer, index)
+				if err := keptledger.Append(path, keptledger.Entry{
+					Path: "/tmp/" + name, RunID: name, KeptAt: moment(10).Add(time.Duration(index) * time.Second),
+				}); err != nil {
+					failures <- err
+					return
+				}
+			}
+		}()
+	}
+	group.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatalf("append = %v", err)
+	}
+	ledger, err := keptledger.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger.Entries) != writers*each {
+		t.Fatalf("ledger holds %d entries, want the %d that were appended", len(ledger.Entries), writers*each)
 	}
 }
