@@ -45,6 +45,13 @@ type RepositoryValidatorOptions struct {
 	// a debugging aid: what a validation decided is decided the same way
 	// whether the tree survives it or not.
 	KeepTemp bool
+	// BuildCacheEnvironment is the cache program every command validating a
+	// candidate carries. Its writes land in the run's scratch layer and never
+	// in the layer the machine keeps: a candidate is a tree that may never be
+	// applied, so nothing it compiles has earned a place there. A validation
+	// outside a run — `goatest fix` — has no run scratch and so carries
+	// nothing, which is the toolchain's own cache.
+	BuildCacheEnvironment []string
 }
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
@@ -209,6 +216,7 @@ func (validator *repositoryValidator) open(ctx context.Context, root string) (va
 	if len(validator.options.BuildTags) != 0 {
 		environment = mutationEnvironment(environment, validator.options.BuildTags)
 	}
+	environment = append(environment, validator.options.BuildCacheEnvironment...)
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
 		ReportDirectory: ".goatest", Environment: environment, Trace: validator.options.Trace,

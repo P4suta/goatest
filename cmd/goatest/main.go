@@ -16,6 +16,7 @@ import (
 
 	"github.com/P4suta/goatest/internal/app"
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/ui"
 )
@@ -33,9 +34,24 @@ func main() {
 }
 
 func realMain(arguments []string) int {
-	return realMainWith(arguments, os.Stdout, os.Stderr, app.Service{
+	return realMainStreams(arguments, os.Stdin, os.Stdout, os.Stderr, app.Service{
 		Root: ".", Progress: os.Stderr, Output: os.Stdout, Interactive: interactiveTerminal,
+		Executable: goatestExecutable(),
 	})
+}
+
+// goatestExecutable names this binary so that a go command started by a run can
+// re-execute it as the build cache program. It is resolved here and nowhere
+// else: this is the one place that knows the running process is a goatest
+// binary and not a test binary or an application that embedded the service. A
+// process that cannot name itself gets no build cache, which costs time and
+// decides nothing.
+func goatestExecutable() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // interactiveTerminal reports whether the progress stream can carry the
@@ -51,6 +67,21 @@ func interactiveTerminal(writer io.Writer) bool {
 }
 
 func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Service) int {
+	return realMainStreams(arguments, strings.NewReader(""), stdout, stderr, service)
+}
+
+// cacheProgramCommand is the hidden subcommand a go command starts to reach
+// goatest's build cache. It is dispatched here, ahead of everything: it speaks
+// a binary protocol on stdin and stdout, so it must not pass through the flag
+// parsing, the environment-to-flag rendering, or the progress rendering that
+// every command a person types goes through. It is not in the help text
+// because nobody types it.
+const cacheProgramCommand = "cacheprog"
+
+func realMainStreams(arguments []string, stdin io.Reader, stdout, stderr io.Writer, service cli.Service) int {
+	if len(arguments) != 0 && arguments[0] == cacheProgramCommand {
+		return buildcache.Main(arguments[1:], stdin, stdout, stderr)
+	}
 	if len(arguments) == 1 && arguments[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "goatest %s\n", assure.ResolvedGoatestVersion())
 		return 0

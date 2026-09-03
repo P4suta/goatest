@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
@@ -41,7 +42,15 @@ type Service struct {
 	GoBinary      string
 	TempDirectory string
 	Environment   []string
-	Progress      io.Writer
+	// Executable is the goatest binary a go command started by a run
+	// re-executes to reach goatest's build cache. Only a composition root that
+	// knows this process is goatest may fill it in: the value is handed to the
+	// go command, which will wait on whatever it names, so a process that is
+	// not a goatest binary — a test binary running this service in-process,
+	// an application embedding it — must leave it empty and gets the
+	// toolchain's own cache.
+	Executable string
+	Progress   io.Writer
 	// Output is the stream the final report is rendered to. A jsonl UI streams
 	// its progress events there so that one pipe carries the whole stream; a
 	// service without one falls back to the plain progress stream.
@@ -69,6 +78,9 @@ type Service struct {
 	// through, filled in the same way and for the same reason.
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
+	// userCacheDir names the per-machine cache root the build cache lives below
+	// unless a project configured another. Its zero value is os.UserCacheDir.
+	userCacheDir func() (string, error)
 	// notes is the renderer the current run reports its progress through,
 	// selected per request by runAndWrite; every note of a run funnels through
 	// it. Its zero value renders plain lines to Progress, which is what every
@@ -381,6 +393,7 @@ func (service Service) selectNotes(request cli.Request) ui.Notes {
 }
 
 func (service Service) assureOptions(root string, request cli.Request) assure.Options {
+	program, base := service.buildCacheLocation(root)
 	return assure.Options{
 		Root: root, Contract: request.Contract, NoApply: true,
 		Changed: request.Changed, ChangedRef: request.ChangedRef,
@@ -388,8 +401,43 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		Packages: slices.Clone(request.Packages), PackageScope: explicitPackageScope(request.Packages),
 		TestArgs: slices.Clone(request.TestArgs),
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
-		KeepTemp: request.KeepTemp,
+		KeepTemp:          request.KeepTemp,
+		BuildCacheProgram: program, BuildCacheDir: base,
 	}
+}
+
+// buildCacheLocation resolves the executable a go command reaches goatest's
+// build cache through and the layer that cache keeps between runs. This is the
+// only layer that may answer either question: below it, both are options.
+//
+// Either answer may be empty, and an empty answer is a run without a build
+// cache rather than a failure. A service given no executable has no cache
+// program to name; a machine with no user cache directory and no configured
+// one has nowhere to keep a layer; and a configuration that will not load is
+// reported by the run that loads it a moment later, which is the layer that
+// owns that failure.
+func (service Service) buildCacheLocation(root string) (string, string) {
+	program := service.Executable
+	if program == "" {
+		return "", ""
+	}
+	resolveUserCacheDir := service.userCacheDir
+	if resolveUserCacheDir == nil {
+		resolveUserCacheDir = os.UserCacheDir
+	}
+	var fallback string
+	if userCache, cacheErr := resolveUserCacheDir(); cacheErr == nil && userCache != "" {
+		fallback = filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		return "", ""
+	}
+	base := buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
+	if base == "" {
+		return "", ""
+	}
+	return program, base
 }
 
 func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {

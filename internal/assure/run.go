@@ -169,7 +169,15 @@ type Options struct {
 	// Keeping a directory is a debugging aid and never evidence, so it takes no
 	// part in the identity a cached result is keyed on.
 	KeepTemp bool
-	Now      func() time.Time
+	// BuildCacheProgram is the goatest executable a go command started by this
+	// run reaches its build cache through. An empty program leaves GOCACHEPROG
+	// unset, which is a run that uses the toolchain's own cache; the
+	// composition root is the one layer that knows where this executable is.
+	BuildCacheProgram string
+	// BuildCacheDir is the persistent layer of that cache, the one this machine
+	// keeps between runs. An empty directory serves no cache at all.
+	BuildCacheDir string
+	Now           func() time.Time
 }
 
 type roundMetadata struct {
@@ -257,6 +265,21 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	accepted := activeAcceptance(loaded, now())
 	acceptances := activeAcceptanceMetadata(loaded, now())
 	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"), loaded.Cache)
+	// A build cache that cannot be opened is reported and then done without. It
+	// makes a run faster and decides nothing, so a disk that refuses it costs
+	// time and never a verdict.
+	buildCache, err := openRunBuildCache(options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory)
+	if err != nil {
+		emit(options, "build-cache-unavailable", err.Error())
+	}
+	defer func() {
+		if detail := buildCache.summarize(); detail != "" {
+			emit(options, "build-cache-summary", detail)
+		}
+		if closeErr := releaseBuildCache(options, buildCache); closeErr != nil {
+			emit(options, "build-cache-unavailable", closeErr.Error())
+		}
+	}()
 	var appliedRepairs []report.Repair
 	phases := runPhases{recorder: options.Trace}
 	defer phases.leave()
@@ -266,19 +289,24 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		emit(options, "snapshot", fmt.Sprintf("repair round %d", round+1))
 		workspace, err := dependencies.openWorkspace(ctx, root, mutationbridge.Options{
 			GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
-			ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
-			Trace: options.Trace,
+			ReportDirectory: ".goatest",
+			Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
+			Trace:           options.Trace,
 		})
 		if err != nil {
 			return report.Report{}, err
 		}
-		metadata, err := dependencies.inspectWorkspace(ctx, workspace)
+		// Every command below reaches the workspace through this wrapper, which
+		// is the one place that decides which layer of the build cache a
+		// command's writes land in.
+		commands := withBuildCache(workspace, buildCache)
+		metadata, err := dependencies.inspectWorkspace(ctx, commands)
 		if err != nil {
 			_ = dependencies.closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
-			selectedModel, selectErr := inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags, options.CommandTimeout)
+			selectedModel, selectErr := inspectSelectedPackages(ctx, commands, options.Packages, options.BuildTags, options.CommandTimeout)
 			if selectErr != nil {
 				_ = dependencies.closeWorkspace(workspace)
 				return report.Report{}, selectErr
@@ -364,10 +392,15 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			controlMutex.Lock()
 			defer controlMutex.Unlock()
 			if controlWorkspace == nil {
+				// The control workspace runs the project's tests, so it carries
+				// the cache program whose writes land in the run's scratch and
+				// is never wrapped: nothing it compiles is the machine's to
+				// keep.
 				opened, openErr := dependencies.openWorkspace(controlContext, root, mutationbridge.Options{
 					GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
-					ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
-					Trace: options.Trace,
+					ReportDirectory: ".goatest",
+					Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
+					Trace:           options.Trace,
 				})
 				if openErr != nil {
 					return gomutants.CommandResult{}, openErr
@@ -397,7 +430,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		for _, target := range targets {
 			emit(options, "baseline-target", target.Name+":"+target.ID)
 		}
-		baseline, err := dependencies.collectBaseline(ctx, workspace, metadata.model, baselineTargets, BaselineOptions{
+		baseline, err := dependencies.collectBaseline(ctx, commands, metadata.model, baselineTargets, BaselineOptions{
 			ArtifactDirectory: artifactDirectory, Packages: slices.Clone(options.Packages),
 			BuildTags: slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
 			ClassifyUserFailures: true,
@@ -489,7 +522,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			raceResult = RaceResult{Evidence: slices.Clone(savedRace.Evidence), Findings: slices.Clone(savedRace.Findings)}
 			emit(options, "resume-race", fmt.Sprintf("%d packages", len(racePackages)))
 		} else {
-			raceResult, err = dependencies.collectRaceWithOptions(ctx, workspace, raceModel, racePackages, contract, RaceOptions{
+			raceResult, err = dependencies.collectRaceWithOptions(ctx, commands, raceModel, racePackages, contract, RaceOptions{
 				Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
 			})
 			if err != nil {
@@ -615,6 +648,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					MutationOperators: options.MutationOperators, Packages: options.Packages,
 					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
 					Trace: options.Trace, KeepTemp: options.KeepTemp,
+					BuildCacheEnvironment: buildCache.environment(),
 				},
 			})
 			if err != nil {

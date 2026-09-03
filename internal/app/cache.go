@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/report"
@@ -34,7 +35,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
 		Evidence: []report.Evidence{{
 			Kind: "cache", ID: "policy", Status: "configured",
-			Detail: fmt.Sprintf("max-bytes=%d ttl=%s", loaded.Cache.MaxBytes, loaded.Cache.TTL),
+			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d", loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes),
 		}},
 	}
 	switch action {
@@ -53,6 +54,11 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		}
 		result.Evidence = append(result.Evidence, cacheStatusEvidence("status", status),
 			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus))
+		buildStatus, err := service.buildCacheLayer(root).Inspect()
+		if err != nil {
+			return report.Report{}, err
+		}
+		result.Evidence = append(result.Evidence, buildCacheStatusEvidence("build-status", buildStatus))
 		return result, nil
 	case "gc":
 		now := time.Now
@@ -79,10 +85,51 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			retentionGCStatusEvidence("trace", traceCollected),
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
 		)
+		// The build cache is collected here and only here. A run never collects
+		// it: the layer is shared by every repository on the machine, and a run
+		// that pruned it would be deciding for repositories it knows nothing
+		// about, in the middle of the work the layer exists to make fast.
+		buildCollected, err := service.buildCacheLayer(root).Collect(buildcache.Policy{
+			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildCacheMinIdle,
+		}, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
+		result.Evidence = append(result.Evidence,
+			buildCacheStatusEvidence("build-before", buildCollected.Before),
+			report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "completed",
+				Detail: fmt.Sprintf("removed-actions=%d removed-objects=%d removed-bytes=%d",
+					buildCollected.RemovedActions, buildCollected.RemovedObjects, buildCollected.RemovedBytes)},
+			buildCacheStatusEvidence("build-after", buildCollected.After))
 		return result, nil
 	default:
 		return report.Report{}, fmt.Errorf("goatest: cache action %q is unsupported", action)
 	}
+}
+
+// buildCacheMinIdle protects an entry a live run read or wrote moments ago from
+// a collection running beside it. It is the go command's own file-time
+// granularity, which is the window the cache refreshes an entry within: an
+// entry read inside it may have no fresher file time to prove it, and a
+// collection that removed it would take a file a running build is about to
+// open.
+const buildCacheMinIdle = time.Hour
+
+// buildCacheLayer names the build cache this repository's configuration points
+// at. A location the composition root could not resolve is the zero layer,
+// which holds nothing and collects nothing, so status and gc report an empty
+// cache rather than refusing to run.
+func (service Service) buildCacheLayer(root string) buildcache.Layer {
+	_, base := service.buildCacheLocation(root)
+	return buildcache.Layer{Dir: base}
+}
+
+func buildCacheStatusEvidence(id string, status buildcache.Status) report.Evidence {
+	detail := fmt.Sprintf("entries=%d bytes=%d", status.Entries, status.Bytes)
+	if !status.Oldest.IsZero() {
+		detail += " oldest=" + status.Oldest.UTC().Format(time.RFC3339Nano)
+	}
+	return report.Evidence{Kind: "build-cache", ID: id, Status: "ready", Detail: detail}
 }
 
 func retentionStatusEvidence(id string, status retention.Status) report.Evidence {
