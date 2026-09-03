@@ -1,0 +1,475 @@
+// SPDX-FileCopyrightText: 2026 goatest contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+package buildcache_test
+
+import (
+	"bytes"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/P4suta/goatest/internal/buildcache"
+)
+
+// reference is a fixed moment every timed assertion is written against, so a
+// test states the age of an entry rather than racing the wall clock.
+var reference = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+// identifier renders a cache key or an output identifier of the length the go
+// command uses, distinguished by its first byte.
+func identifier(value byte) []byte {
+	return append([]byte{value}, bytes.Repeat([]byte{0xab}, 31)...)
+}
+
+// prepared is a layer ready to store entries.
+func prepared(t *testing.T) buildcache.Layer {
+	t.Helper()
+	layer := buildcache.Layer{Dir: filepath.Join(t.TempDir(), "layer")}
+	if err := layer.Prepare(); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	return layer
+}
+
+// store puts one output and fails the test if it could not.
+func store(t *testing.T, layer buildcache.Layer, action, output byte, content string, at time.Time) buildcache.Entry {
+	t.Helper()
+	entry, err := layer.Put(identifier(action), identifier(output), strings.NewReader(content), int64(len(content)), at)
+	if err != nil {
+		t.Fatalf("Put(%x, %x): %v", action, output, err)
+	}
+	return entry
+}
+
+// files lists the paths below one half of a layer, relative and slash
+// separated, so an assertion names what is on the disk.
+func files(t *testing.T, layer buildcache.Layer, half string) []string {
+	t.Helper()
+	root := filepath.Join(layer.Dir, half)
+	var found []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		found = append(found, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	slices.Sort(found)
+	return found
+}
+
+// age sets an entry's file time to a moment before the reference, which is how
+// a test says how long ago something was read.
+func age(t *testing.T, path string, before time.Duration) {
+	t.Helper()
+	moment := reference.Add(-before)
+	if err := os.Chtimes(path, moment, moment); err != nil {
+		t.Fatalf("age %s: %v", path, err)
+	}
+}
+
+// actionPath is where a layer stores one cache key, as this test knows the
+// layout rather than as the package computes it: the layout is the contract a
+// concurrent run and a later goatest read the layer through.
+func actionPath(layer buildcache.Layer, action byte) string {
+	name := hexadecimalName(identifier(action))
+	return filepath.Join(layer.Dir, "actions", name[:2], name)
+}
+
+// objectPath is where a layer stores one output.
+func objectPath(layer buildcache.Layer, output byte) string {
+	name := hexadecimalName(identifier(output))
+	return filepath.Join(layer.Dir, "objects", name[:2], name)
+}
+
+func hexadecimalName(identifier []byte) string {
+	const digits = "0123456789abcdef"
+	name := make([]byte, 0, len(identifier)*2)
+	for _, value := range identifier {
+		name = append(name, digits[value>>4], digits[value&0x0f])
+	}
+	return string(name)
+}
+
+func TestLayerStoresAndReturnsOutputsByteExact(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	content := "compiled\x00package\xffbytes"
+	stored := store(t, layer, 1, 2, content, reference)
+	if stored.Size != int64(len(content)) || !filepath.IsAbs(stored.DiskPath) {
+		t.Fatalf("Put entry = %+v", stored)
+	}
+	entry, found, err := layer.Get(identifier(1), reference)
+	if err != nil || !found {
+		t.Fatalf("Get = (%+v, %t, %v)", entry, found, err)
+	}
+	if !bytes.Equal(entry.OutputID, identifier(2)) || entry.Size != int64(len(content)) {
+		t.Fatalf("Get entry = %+v", entry)
+	}
+	if !entry.Time.Equal(reference) {
+		t.Fatalf("Get entry time = %s, want %s", entry.Time, reference)
+	}
+	data, err := os.ReadFile(entry.DiskPath)
+	if err != nil || string(data) != content {
+		t.Fatalf("stored content = %q (%v), want %q", data, err, content)
+	}
+}
+
+func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name    string
+		prepare func(*testing.T, buildcache.Layer)
+	}{
+		{name: "unknown key", prepare: func(*testing.T, buildcache.Layer) {}},
+		{
+			name: "malformed action line",
+			prepare: func(t *testing.T, layer buildcache.Layer) {
+				store(t, layer, 1, 2, "content", reference)
+				if err := os.WriteFile(actionPath(layer, 1), []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "action names no output",
+			prepare: func(t *testing.T, layer buildcache.Layer) {
+				store(t, layer, 1, 2, "content", reference)
+				if err := os.WriteFile(actionPath(layer, 1), []byte(`{"output":"","size":7}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing object",
+			prepare: func(t *testing.T, layer buildcache.Layer) {
+				store(t, layer, 1, 2, "content", reference)
+				if err := os.Remove(objectPath(layer, 2)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "truncated object",
+			prepare: func(t *testing.T, layer buildcache.Layer) {
+				store(t, layer, 1, 2, "content", reference)
+				if err := os.WriteFile(objectPath(layer, 2), []byte("cut"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			layer := prepared(t)
+			testCase.prepare(t, layer)
+			entry, found, err := layer.Get(identifier(1), reference)
+			if err != nil || found {
+				t.Fatalf("Get = (%+v, %t, %v), want a miss and no error", entry, found, err)
+			}
+		})
+	}
+}
+
+func TestLayerSharesOneObjectBetweenEveryKeyThatProducedIt(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	first := store(t, layer, 1, 9, "shared", reference)
+	second := store(t, layer, 2, 9, "shared", reference)
+	if first.DiskPath != second.DiskPath {
+		t.Fatalf("two keys stored the same output at %q and %q", first.DiskPath, second.DiskPath)
+	}
+	if stored := files(t, layer, "objects"); len(stored) != 1 {
+		t.Fatalf("objects on disk = %v, want exactly one", stored)
+	}
+	if keys := files(t, layer, "actions"); len(keys) != 2 {
+		t.Fatalf("actions on disk = %v, want two", keys)
+	}
+}
+
+func TestLayerPutIsIdempotent(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	first := store(t, layer, 1, 2, "content", reference)
+	later := reference.Add(time.Hour)
+	second := store(t, layer, 1, 2, "content", later)
+	if first.DiskPath != second.DiskPath || second.Size != first.Size {
+		t.Fatalf("repeated Put = %+v, first = %+v", second, first)
+	}
+	if stored := files(t, layer, "objects"); len(stored) != 1 {
+		t.Fatalf("objects on disk = %v, want exactly one", stored)
+	}
+	entry, found, err := layer.Get(identifier(1), later)
+	if err != nil || !found || !entry.Time.Equal(later) {
+		t.Fatalf("Get after repeated Put = (%+v, %t, %v)", entry, found, err)
+	}
+}
+
+func TestLayerRefreshesAKeyOnlyOnceAnHour(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name      string
+		since     time.Duration
+		refreshed bool
+	}{
+		{name: "just read", since: time.Minute, refreshed: false},
+		{name: "read an hour ago", since: time.Hour, refreshed: true},
+		{name: "read a day ago", since: 24 * time.Hour, refreshed: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			layer := prepared(t)
+			store(t, layer, 1, 2, "content", reference)
+			path := actionPath(layer, 1)
+			age(t, path, testCase.since)
+			if _, found, err := layer.Get(identifier(1), reference); err != nil || !found {
+				t.Fatalf("Get = (%t, %v)", found, err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refreshed := info.ModTime().Equal(reference)
+			if refreshed != testCase.refreshed {
+				t.Fatalf("file time = %s, reference = %s, want refreshed=%t", info.ModTime(), reference, testCase.refreshed)
+			}
+		})
+	}
+}
+
+func TestLayerCollectRemovesWhatThePolicyNames(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		policy   buildcache.Policy
+		ages     map[byte]time.Duration
+		want     []byte
+		orphaned bool
+	}{
+		{
+			name:   "an empty policy removes nothing",
+			policy: buildcache.Policy{},
+			ages:   map[byte]time.Duration{1: 90 * 24 * time.Hour, 2: 48 * time.Hour, 3: time.Minute},
+			want:   []byte{1, 2, 3},
+		},
+		{
+			name:   "expiry removes what nothing has read",
+			policy: buildcache.Policy{TTL: 24 * time.Hour, MinIdle: time.Hour},
+			ages:   map[byte]time.Duration{1: 90 * 24 * time.Hour, 2: 48 * time.Hour, 3: time.Minute},
+			want:   []byte{3},
+		},
+		{
+			name:   "the size bound removes the least recently read first",
+			policy: buildcache.Policy{MaxBytes: 20, MinIdle: time.Hour},
+			ages:   map[byte]time.Duration{1: 90 * 24 * time.Hour, 2: 48 * time.Hour, 3: 24 * time.Hour},
+			want:   []byte{2, 3},
+		},
+		{
+			name:   "a key read within the idle window survives its own expiry",
+			policy: buildcache.Policy{MaxBytes: 1, TTL: time.Second, MinIdle: time.Hour},
+			ages:   map[byte]time.Duration{1: 90 * 24 * time.Hour, 2: 48 * time.Hour, 3: time.Minute},
+			want:   []byte{3},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			layer := prepared(t)
+			for _, key := range []byte{1, 2, 3} {
+				store(t, layer, key, key+0x10, "0123456789", reference)
+				age(t, actionPath(layer, key), testCase.ages[key])
+				age(t, objectPath(layer, key+0x10), testCase.ages[key])
+			}
+			collected, err := layer.Collect(testCase.policy, reference)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if collected.Before.Entries != 3 || collected.Before.Bytes != 30 {
+				t.Fatalf("Collect before = %+v, want 3 entries of 30 bytes", collected.Before)
+			}
+			var survived []byte
+			for _, key := range []byte{1, 2, 3} {
+				if _, found, err := layer.Get(identifier(key), reference); err != nil {
+					t.Fatalf("Get(%x): %v", key, err)
+				} else if found {
+					survived = append(survived, key)
+				}
+			}
+			if !slices.Equal(survived, testCase.want) {
+				t.Fatalf("survivors = %v, want %v", survived, testCase.want)
+			}
+			wantRemoved := 3 - len(testCase.want)
+			if collected.RemovedActions != wantRemoved || collected.RemovedObjects != wantRemoved {
+				t.Fatalf("Collect = %+v, want %d actions and objects removed", collected, wantRemoved)
+			}
+			if collected.RemovedBytes != int64(10*wantRemoved) || collected.After.Entries != len(testCase.want) {
+				t.Fatalf("Collect = %+v, want %d bytes removed and %d entries left", collected, 10*wantRemoved, len(testCase.want))
+			}
+			if stored := files(t, layer, "objects"); len(stored) != len(testCase.want) {
+				t.Fatalf("objects on disk = %v, want %d", stored, len(testCase.want))
+			}
+		})
+	}
+}
+
+func TestLayerCollectBreaksTiesByName(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	for _, key := range []byte{1, 2, 3} {
+		store(t, layer, key, key+0x10, "0123456789", reference)
+		age(t, actionPath(layer, key), 48*time.Hour)
+		age(t, objectPath(layer, key+0x10), 48*time.Hour)
+	}
+	if _, err := layer.Collect(buildcache.Policy{MaxBytes: 20, MinIdle: time.Hour}, reference); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	var survived []byte
+	for _, key := range []byte{1, 2, 3} {
+		if _, found, _ := layer.Get(identifier(key), reference); found {
+			survived = append(survived, key)
+		}
+	}
+	if !slices.Equal(survived, []byte{2, 3}) {
+		t.Fatalf("survivors = %v, want the two whose keys sort last", survived)
+	}
+}
+
+func TestLayerCollectRemovesObjectsNoKeyNames(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	store(t, layer, 1, 2, "0123456789", reference)
+	if err := os.Remove(actionPath(layer, 1)); err != nil {
+		t.Fatal(err)
+	}
+	age(t, objectPath(layer, 2), 48*time.Hour)
+	collected, err := layer.Collect(buildcache.Policy{MinIdle: time.Hour}, reference)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if collected.RemovedObjects != 1 || collected.RemovedBytes != 10 || collected.After.Bytes != 0 {
+		t.Fatalf("Collect = %+v, want the orphaned object removed", collected)
+	}
+	if stored := files(t, layer, "objects"); len(stored) != 0 {
+		t.Fatalf("objects on disk = %v, want none", stored)
+	}
+}
+
+func TestLayerCollectKeepsAnOrphanedObjectInsideTheIdleWindow(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	store(t, layer, 1, 2, "0123456789", reference)
+	if err := os.Remove(actionPath(layer, 1)); err != nil {
+		t.Fatal(err)
+	}
+	age(t, objectPath(layer, 2), time.Minute)
+	collected, err := layer.Collect(buildcache.Policy{MinIdle: time.Hour}, reference)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if collected.RemovedObjects != 0 || collected.After.Bytes != 10 {
+		t.Fatalf("Collect = %+v, want an object written a minute ago left alone", collected)
+	}
+}
+
+func TestLayerInspectAndCollectAnswerForALayerThatHoldsNothing(t *testing.T) {
+	t.Parallel()
+	empty := buildcache.Layer{Dir: filepath.Join(t.TempDir(), "never-built")}
+	status, err := empty.Inspect()
+	if err != nil || status != (buildcache.Status{}) {
+		t.Fatalf("Inspect = (%+v, %v), want the zero status", status, err)
+	}
+	collected, err := empty.Collect(buildcache.Policy{MaxBytes: 1, TTL: time.Hour, MinIdle: time.Hour}, reference)
+	if err != nil || collected != (buildcache.Collected{}) {
+		t.Fatalf("Collect = (%+v, %v), want nothing collected", collected, err)
+	}
+	if _, err := empty.Collect(buildcache.Policy{MaxBytes: -1}, reference); err == nil {
+		t.Fatal("Collect accepted a negative bound")
+	}
+}
+
+func TestLayerInspectReportsWhatTheLayerHolds(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	store(t, layer, 1, 2, "0123456789", reference)
+	store(t, layer, 3, 4, "01234", reference)
+	age(t, actionPath(layer, 1), 48*time.Hour)
+	age(t, actionPath(layer, 3), time.Minute)
+	status, err := layer.Inspect()
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if status.Entries != 2 || status.Bytes != 15 {
+		t.Fatalf("Inspect = %+v, want two entries of 15 bytes", status)
+	}
+	if want := reference.Add(-48 * time.Hour); !status.Oldest.Equal(want) {
+		t.Fatalf("Inspect oldest = %s, want %s", status.Oldest, want)
+	}
+}
+
+func TestLayerPrepareLeavesANoteAndRefusesAnUnusableDirectory(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	note, err := os.ReadFile(filepath.Join(layer.Dir, "README"))
+	if err != nil || !strings.Contains(string(note), "goatest") {
+		t.Fatalf("README = %q (%v), want a note naming goatest", note, err)
+	}
+	unnamed := buildcache.Layer{}
+	if err := unnamed.Prepare(); err == nil {
+		t.Fatal("a layer with no directory prepared successfully")
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := (buildcache.Layer{Dir: filepath.Join(file, "layer")}).Prepare(); err == nil {
+		t.Fatal("a layer below a regular file prepared successfully")
+	}
+}
+
+func TestLayerRefusesAPutItCannotAddress(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	if _, err := layer.Put(nil, identifier(2), strings.NewReader("x"), 1, reference); err == nil {
+		t.Fatal("Put accepted an empty cache key")
+	}
+	if _, err := layer.Put(identifier(1), nil, strings.NewReader("x"), 1, reference); err == nil {
+		t.Fatal("Put accepted an empty output identifier")
+	}
+	if _, err := layer.Put(identifier(1), identifier(2), strings.NewReader("x"), -1, reference); err == nil {
+		t.Fatal("Put accepted a negative size")
+	}
+	if _, err := layer.Put(identifier(1), identifier(2), strings.NewReader("xx"), 1, reference); err == nil {
+		t.Fatal("Put accepted a body longer than the declared size")
+	}
+	if _, found, err := layer.Get(identifier(1), reference); found || err != nil {
+		t.Fatalf("Get after a refused Put = (%t, %v), want a miss", found, err)
+	}
+	orphan := buildcache.Layer{}
+	if _, err := orphan.Put(identifier(1), identifier(2), strings.NewReader("x"), 1, reference); err == nil {
+		t.Fatal("a layer with no directory stored an output")
+	}
+}
+
+func TestLayerStoresAnEmptyOutput(t *testing.T) {
+	t.Parallel()
+	layer := prepared(t)
+	store(t, layer, 1, 2, "", reference)
+	entry, found, err := layer.Get(identifier(1), reference)
+	if err != nil || !found || entry.Size != 0 {
+		t.Fatalf("Get = (%+v, %t, %v), want an empty output", entry, found, err)
+	}
+}

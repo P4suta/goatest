@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -158,6 +159,40 @@ func TestEnvironmentTraceReachesTheServiceWithoutDisturbingVersionOrHelp(t *test
 	stdout.Reset()
 	if exit := realMainWith([]string{"--help"}, &stdout, &stderr, service); exit != 0 || !bytes.Contains(stdout.Bytes(), []byte("Usage:")) {
 		t.Fatalf("help exit = %d stdout = %q", exit, stdout.String())
+	}
+}
+
+// The cache program is dispatched ahead of everything the command layer knows
+// about. It speaks a binary protocol on the process streams, so it must reach
+// neither the service, nor the flag parsing, nor the environment-to-flag
+// rendering that a command a person typed passes through — and it must stay out
+// of the help text, because nobody types it.
+func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
+	t.Setenv("GOATEST_TRACE", "1")
+	t.Setenv("GOATEST_KEEP_TEMP", "1")
+	service := mainServiceFunc(func(context.Context, cli.Command, cli.Request, string) (report.Report, error) {
+		t.Fatal("the cache program reached the service")
+		return report.Report{}, nil
+	})
+	var stdout, stderr bytes.Buffer
+	scratch := t.TempDir()
+	exit := realMainStreams([]string{"cacheprog", "--scratch", scratch}, strings.NewReader(""), &stdout, &stderr, service)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("cacheprog exit = %d stderr = %q", exit, stderr.String())
+	}
+	// The opening response is the program announcing what it can do, which is
+	// the first thing a go command reads and the proof that this is the cache
+	// program rather than the command layer.
+	if !bytes.Contains(stdout.Bytes(), []byte(`"KnownCommands"`)) {
+		t.Fatalf("cacheprog stdout = %q, want the protocol", stdout.String())
+	}
+	stdout.Reset()
+	if exit := realMainStreams([]string{"cacheprog"}, strings.NewReader(""), &stdout, &stderr, service); exit != 2 {
+		t.Fatalf("cacheprog without a scratch layer = %d, want a refusal", exit)
+	}
+	stdout.Reset()
+	if exit := realMainWith([]string{"--help"}, &stdout, &stderr, service); exit != 0 || bytes.Contains(stdout.Bytes(), []byte("cacheprog")) {
+		t.Fatalf("help = %q, want the hidden command absent from it", stdout.String())
 	}
 }
 
