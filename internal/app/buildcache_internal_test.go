@@ -22,15 +22,16 @@ import (
 // two questions.
 //
 // Where the cache lives is a property of the machine and the project, and
-// `goatest cache status` and `goatest cache gc` need it whoever is asking. What
-// program serves it is a property of this process, and only a composition root
-// that knows the process is a goatest binary may answer that. Tying the first
-// to the second made maintenance silently report an empty cache.
+// `goatest cache status` and `goatest cache gc` need it whether or not this
+// process can serve that cache. What program serves it is a property of this
+// process alone. Both are named by the composition root, and they are named
+// separately: tying the directory to the executable made maintenance silently
+// report an empty cache.
 func TestBuildCacheDirectoryIsResolvedWithoutAnExecutable(t *testing.T) {
 	t.Parallel()
 	userCache := t.TempDir()
 	root := t.TempDir()
-	service := Service{userCacheDir: func() (string, error) { return userCache, nil }}
+	service := Service{UserCacheDir: func() (string, error) { return userCache, nil }}
 	want := filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
 	if got := service.buildCacheDirectory(root); got != want {
 		t.Fatalf("buildCacheDirectory without an executable = %q, want %q", got, want)
@@ -43,6 +44,51 @@ func TestBuildCacheDirectoryIsResolvedWithoutAnExecutable(t *testing.T) {
 	if program, base := withExecutable.buildCacheLocation(root); program != "/opt/bin/goatest" || base != want {
 		t.Fatalf("buildCacheLocation = (%q, %q), want the program and the directory", program, base)
 	}
+}
+
+// TestBuildCacheDirectoryIsEmptyWithoutAUserCacheDirResolver is the other half
+// of that same rule: the machine's cache directory is named by the composition
+// root too, and by nothing else.
+//
+// A service nobody handed a UserCacheDir is a process that is not the goatest
+// CLI on a real machine — a test binary running the service in-process, an
+// application that embedded it. Resolving os.UserCacheDir one layer lower let
+// every such process inspect the developer's own build cache, and a `cache gc`
+// or a run's closing collection then deleted entries out of it. A machine
+// nobody named has nowhere to keep a layer, which is a run without a build
+// cache and not a failure.
+//
+// A `build_dir` the project asked for still resolves, because that one is named
+// by the repository under test rather than by the machine.
+func TestBuildCacheDirectoryIsEmptyWithoutAUserCacheDirResolver(t *testing.T) {
+	t.Parallel()
+	t.Run("a machine nobody named", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		service := Service{}
+		if got := service.buildCacheDirectory(root); got != "" {
+			t.Fatalf("buildCacheDirectory without a user cache resolver = %q, want nowhere", got)
+		}
+		if got := service.buildCacheLayer(root).Dir; got != "" {
+			t.Fatalf("buildCacheLayer without a user cache resolver = %q, want nowhere", got)
+		}
+	})
+	t.Run("a layer the project asked for", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, config.FileName),
+			[]byte("version = 1\n[cache]\nbuild_dir = \"own-cache\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		service := Service{}
+		want := filepath.Join(root, "own-cache")
+		if got := service.buildCacheDirectory(root); got != want {
+			t.Fatalf("buildCacheDirectory without a user cache resolver = %q, want %q", got, want)
+		}
+		if got := service.buildCacheLayer(root).Dir; got != want {
+			t.Fatalf("buildCacheLayer without a user cache resolver = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestBuildCacheLocationResolvesTheProgramAndTheLayerTheMachineKeeps(t *testing.T) {
@@ -124,7 +170,7 @@ func TestBuildCacheLocationResolvesTheProgramAndTheLayerTheMachineKeeps(t *testi
 			if test.wantRepositoryBase != "" {
 				wantBase = filepath.Join(root, test.wantRepositoryBase)
 			}
-			service := Service{Executable: test.executable, userCacheDir: test.userCacheDir}
+			service := Service{Executable: test.executable, UserCacheDir: test.userCacheDir}
 			program, base := service.buildCacheLocation(root)
 			if program != test.wantProgram || base != wantBase {
 				t.Fatalf("buildCacheLocation = (%q, %q), want (%q, %q)", program, base, test.wantProgram, wantBase)
@@ -155,7 +201,7 @@ func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
 	service := Service{
 		Root: root, Progress: io.Discard,
 		Executable:   "/opt/bin/goatest",
-		userCacheDir: func() (string, error) { return userCache, nil },
+		UserCacheDir: func() (string, error) { return userCache, nil },
 		// The collection runs a day after the entry was written, so the window
 		// that protects an entry a live build just read has passed.
 		Now: func() time.Time { return stored.Add(24 * time.Hour) },

@@ -28,6 +28,30 @@ type syntheticSignal string
 func (signal syntheticSignal) String() string { return string(signal) }
 func (syntheticSignal) Signal()               {}
 
+// TestTheCLIServiceNamesWhatBelongsToTheMachine pins the one layer allowed to
+// answer either question.
+//
+// The binary a go command re-executes as the build cache program and the
+// directory that cache lives in are both properties of a real machine running
+// the goatest CLI, so both are zero in every other process: a test binary
+// running the service in-process, an application that embedded it. Resolving
+// either one layer lower broke something quietly — the executable left the go
+// command waiting on a test binary, and the directory let an in-process test
+// collect the developer's own build cache. This test is what keeps them named
+// here and nowhere else.
+func TestTheCLIServiceNamesWhatBelongsToTheMachine(t *testing.T) {
+	if _, err := os.Executable(); err != nil {
+		t.Skipf("this process cannot name its own binary: %v", err)
+	}
+	service := cliService()
+	if service.Executable == "" {
+		t.Fatal("cliService named no executable, want the running binary")
+	}
+	if service.UserCacheDir == nil {
+		t.Fatal("cliService named no user cache directory, want the machine's")
+	}
+}
+
 func TestRealMainHandlesOnlyTheExactVersionFlagAndDelegatesHelp(t *testing.T) {
 	service := mainServiceFunc(func(context.Context, cli.Command, cli.Request, string) (report.Report, error) {
 		t.Fatal("version/help unexpectedly executed the service")
