@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
 // The variables the helper process is told where to serve from. The cache
@@ -35,8 +36,11 @@ const (
 // print afterwards would land in the middle of the protocol the go command is
 // reading.
 func TestCacheProgramHelper(t *testing.T) {
-	if os.Getenv(cacheProgramHelper) == "" {
-		t.Skip("not the cache program helper process")
+	// Returning rather than skipping is the convention every helper in this
+	// module follows: a skip is a finding to goatest's own baseline, and a
+	// helper that was not asked for has nothing to report.
+	if !testkit.HelperEnabled(cacheProgramHelper) {
+		return
 	}
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
 	if os.Getenv(cacheProgramPersist) != "" {
