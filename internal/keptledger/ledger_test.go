@@ -4,10 +4,10 @@
 package keptledger_test
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,16 +38,8 @@ func TestTheLedgerIsTheDocumentTheSchemaPromises(t *testing.T) {
 	want := `{"schema":"goatest-kept-temp-v1","entries":[` +
 		`{"path":"/tmp/goatest-run-a","run_id":"goatest-run-a","kept_at":"2026-09-04T10:00:00Z","bytes":1024},` +
 		`{"path":"/tmp/goatest-run-b","run_id":"goatest-run-b","kept_at":"2026-09-04T11:00:00Z","bytes":2048}]}`
-	var compact any
-	if err := json.Unmarshal(raw, &compact); err != nil {
-		t.Fatalf("decode %s = %v", path, err)
-	}
-	encoded, err := json.Marshal(compact)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(encoded) != want {
-		t.Fatalf("ledger = %s, want %s", encoded, want)
+	if got := strings.TrimSpace(string(raw)); got != want {
+		t.Fatalf("ledger = %s, want %s", got, want)
 	}
 }
 
