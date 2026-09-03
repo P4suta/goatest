@@ -55,6 +55,18 @@ func TestTheWorkspacePassesOnWhatTheEngineSweptAndPreserved(t *testing.T) {
 	if !slices.Equal(workspace.Preserved(), []string{"/tmp/go-mutants-snapshot", "/tmp/go-mutants-scratch"}) {
 		t.Fatalf("Preserved = %v, want the paths the engine kept", workspace.Preserved())
 	}
+	// The engine names what it kept as it closes, so the answer has to survive
+	// the close: a run reads it exactly once, on the way out, and the workspace
+	// it reads it from has already let go of the engine by then.
+	if err := workspace.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(workspace.Preserved(), []string{"/tmp/go-mutants-snapshot", "/tmp/go-mutants-scratch"}) {
+		t.Fatalf("Preserved after Close = %v, want the paths the engine kept", workspace.Preserved())
+	}
+	if got := workspace.Swept(); !slices.Equal(got.Removed, []string{"/tmp/go-mutants-dead"}) {
+		t.Fatalf("Swept after Close = %+v, want what the engine reported", got)
+	}
 	// A workspace that was never opened swept nothing and kept nothing, which
 	// is what every caller that reports on both has to be able to ask.
 	for _, empty := range []*Workspace{nil, {}} {
