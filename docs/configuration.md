@@ -79,7 +79,9 @@ leftovers of runs that were killed, and each directory a `--keep-temp` run kept.
 `goatest cache gc` removes expired entries first and then the oldest entries
 until each store meets its bound — `max_bytes` for the first three,
 `build_max_bytes` for the build cache — and then collects those leftovers and
-the keeps `ttl` has expired.
+the keeps `ttl` has expired. Both commands report the temporary directory as
+`skipped` when the process running them named none, which is every process that
+is not the goatest CLI.
 Verification and maintenance hold one OS advisory lock rooted at
 `.goatest/cache`; a contending process reports `cache-wait`, and interrupting
 that wait does not start work or run GC without the lock.

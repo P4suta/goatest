@@ -473,7 +473,13 @@ names `goatest-baseline-`, `goatest-candidate-`, `goatest-control-fuzz-`,
 or which carries no marker at all and has been untouched for 24 hours. It never
 follows a symbolic link, and one entry it cannot judge never stops the others.
 A run sweeps before it writes anything; `goatest cache gc` sweeps on demand and
-`goatest cache status` inspects without removing. go-mutants' own directories
+`goatest cache status` inspects without removing. All three sweep only a
+directory somebody named: an empty `TempDirectory` collects nothing, because a
+value nobody set must never become the machine's own temporary directory, and
+`cmd/goatest` is the one layer that names it. A run still makes its scratch
+where the operating system puts one — creating a directory there is harmless,
+collecting there is not — and maintenance reports the temporary directory as
+`skipped`. go-mutants' own directories
 are not in that list: they carry owner files of their own and its `Open` sweeps
 them, which is what the `mutation-temp-sweep` progress note reports. Why the
 lock and not a pid, why 24 hours, and why the ledger lives in `.goatest` are

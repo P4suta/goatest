@@ -92,6 +92,13 @@ answered either.
    own directories are not in it — they carry owner files of their own and its
    `Open` sweeps them, which goatest reports rather than duplicates.
 
+   A sweep runs only against a directory somebody named. An empty temporary
+   root collects nothing, and `cmd/goatest` is the one layer that may name the
+   machine's own — the same rule the executable and the user cache directory
+   already follow. Resolving it one layer lower is not a convenience: it made a
+   maintenance command in a test, with no temporary directory and a clock a day
+   ahead, collect the working directory of a run that was using it.
+
 7. **A keep is recorded where it outlives the run.** `--keep-temp` marks the
    directory kept, so no sweep takes it, and writes it to
    `.goatest/kept-temp-v1.json`: path, run, moment, size. The trace already
