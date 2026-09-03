@@ -66,6 +66,13 @@ type mutationWorkspace interface {
 type Workspace struct {
 	inner mutationWorkspace
 	trace *trace.Recorder
+	// swept and preserved are what the engine reported, read from it as the
+	// workspace closes and answered from here afterwards. Close is where the
+	// engine fills the second one in and also where this workspace lets go of
+	// the engine, so without this copy the one answer a run needs would be
+	// gone in the same call that produced it.
+	swept     gomutants.SweepResult
+	preserved []string
 }
 
 var openMutationWorkspace = func(ctx context.Context, root string, options gomutants.OpenOptions) (mutationWorkspace, error) {
@@ -186,8 +193,11 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 // which is why it is passed through for the run to report and never folded
 // into anything the run decides.
 func (workspace *Workspace) Swept() gomutants.SweepResult {
-	if workspace == nil || workspace.inner == nil {
+	if workspace == nil {
 		return gomutants.SweepResult{}
+	}
+	if workspace.inner == nil {
+		return workspace.swept
 	}
 	return workspace.inner.Swept()
 }
@@ -196,8 +206,11 @@ func (workspace *Workspace) Swept() gomutants.SweepResult {
 // fills it in as it closes, so a caller reads it after Close and gets nothing
 // from a workspace that kept nothing.
 func (workspace *Workspace) Preserved() []string {
-	if workspace == nil || workspace.inner == nil {
+	if workspace == nil {
 		return nil
+	}
+	if workspace.inner == nil {
+		return slices.Clone(workspace.preserved)
 	}
 	return workspace.inner.Preserved()
 }
@@ -207,6 +220,7 @@ func (workspace *Workspace) Close() error {
 		return nil
 	}
 	err := workspace.inner.Close()
+	workspace.swept, workspace.preserved = workspace.inner.Swept(), workspace.inner.Preserved()
 	workspace.inner = nil
 	return err
 }
