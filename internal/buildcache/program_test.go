@@ -245,15 +245,19 @@ func TestMainReportsAStreamItCannotRead(t *testing.T) {
 
 func TestBaseDirectoryPrefersWhatTheProjectConfigured(t *testing.T) {
 	t.Parallel()
-	root := filepath.Join(string(filepath.Separator), "repo")
-	fallback := filepath.Join(string(filepath.Separator), "home", "cache", "goatest", "build-v1")
+	// Every path is below a real temporary directory rather than spelled from
+	// a bare separator: `\elsewhere\build` is not absolute on Windows, where an
+	// absolute path starts with its volume, and it would be joined onto root.
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	fallback := filepath.Join(base, "home", "cache", "goatest", "build-v1")
 	if got := buildcache.BaseDirectory(root, "", fallback); got != fallback {
 		t.Fatalf("BaseDirectory = %q, want the machine's default %q", got, fallback)
 	}
 	if got, want := buildcache.BaseDirectory(root, ".goatest/build", fallback), filepath.Join(root, ".goatest", "build"); got != want {
 		t.Fatalf("BaseDirectory = %q, want %q", got, want)
 	}
-	absolute := filepath.Join(string(filepath.Separator), "elsewhere", "build")
+	absolute := filepath.Join(base, "elsewhere", "build")
 	if got := buildcache.BaseDirectory(root, absolute, fallback); got != absolute {
 		t.Fatalf("BaseDirectory = %q, want %q", got, absolute)
 	}

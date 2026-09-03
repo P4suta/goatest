@@ -231,11 +231,17 @@ func TestCollectLockedAnswersForALayerItHasNoDirectoryFor(t *testing.T) {
 	if _, ran, err := (Layer{}).collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err != nil || ran {
 		t.Fatalf("collection of a layer with no directory = (%t, %v), want nothing", ran, err)
 	}
-	absent := Layer{Dir: filepath.Join(t.TempDir(), "file", "layer")}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(absent.Dir)), nil, 0o644); err != nil {
+	// The marker is a directory, which no platform opens for writing — Linux
+	// answers EISDIR and Windows access denied — and neither answer is
+	// ErrNotExist, the one open failure that means a layer nobody has built
+	// yet. A parent that is a file would only do on Linux: Windows reports a
+	// path below a file as not existing, and the failure would be read as an
+	// unbuilt layer.
+	blocked := Layer{Dir: t.TempDir()}
+	if err := os.Mkdir(blocked.collectionMarkerPath(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, ran, err := absent.collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err == nil || ran {
+	if _, ran, err := blocked.collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err == nil || ran {
 		t.Fatalf("collection of a layer it cannot lock = (%t, %v), want the failure reported", ran, err)
 	}
 }
