@@ -4,6 +4,7 @@
 package assure
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,11 +93,17 @@ type runScratch struct {
 // openRunScratch makes the directory of one run and claims it in that run's
 // name.
 //
-// It answers with the scratch and the failure together on purpose. A directory
-// that was made but could not be claimed is still the right place to write, and
-// a run that could not make one at all still has somewhere to write: neither is
-// a reason to stop, and both are worth reporting.
-func openRunScratch(makeScratch func(string, string) (string, error), fallback, root string, now time.Time) (runScratch, error) {
+// It answers with the scratch and the failure together on purpose: a run that
+// could not make or claim one still has somewhere to write, which is beside it
+// under the names the sweep knows, and neither failure is a reason to stop.
+//
+// A directory that was made but could not be claimed is deliberately not used.
+// Nothing in it says who is working there, so the next sweep would judge it by
+// age alone and could remove it with a live run's work inside. The run takes
+// back the empty directory it just made — unless the claim failed because
+// somebody else holds the lock, in which case, however implausibly the run came
+// by that path, it is not the run's to remove.
+func openRunScratch(makeScratch func(string, string) (string, error), removeScratch func(string) error, fallback, root string, now time.Time) (runScratch, error) {
 	scratch := runScratch{fallback: fallback, root: root, id: unownedRunID(now)}
 	directory, err := makeScratch(fallback, runScratchPrefix)
 	if err != nil {
@@ -105,12 +112,16 @@ func openRunScratch(makeScratch func(string, string) (string, error), fallback, 
 	// The name mkdtemp made is the run's identity from here on: it is unique by
 	// construction, it is the name a person sees on the disk, and it is what
 	// ties a marker, a trace artifact and a ledger entry to one another.
-	scratch.dir, scratch.id = directory, filepath.Base(directory)
-	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: scratch.id, Root: root}, now)
+	identity := filepath.Base(directory)
+	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: identity, Root: root}, now)
 	if err != nil {
-		return scratch, fmt.Errorf("goatest: claim run scratch: %w", err)
+		failure := fmt.Errorf("goatest: claim run scratch: %w", err)
+		if errors.Is(err, tempowner.ErrOwned) {
+			return scratch, failure
+		}
+		return scratch, errors.Join(failure, removeScratch(directory))
 	}
-	scratch.owner = owner
+	scratch.dir, scratch.id, scratch.owner = directory, identity, owner
 	return scratch, nil
 }
 

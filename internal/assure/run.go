@@ -280,7 +280,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	// attributable to it and collectable by the next one. A run that could not
 	// make or claim one says so and carries on: this is housekeeping, and
 	// housekeeping never decides a verdict.
-	scratch, err := openRunScratch(dependencies.makeRunScratch, options.TempDirectory, root, now())
+	scratch, err := openRunScratch(
+		dependencies.makeRunScratch, dependencies.removeRunScratch, options.TempDirectory, root, now())
 	if err != nil {
 		emit(options, "temp-unavailable", err.Error())
 	}

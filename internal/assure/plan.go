@@ -47,7 +47,7 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 	// A plan keeps nothing. It has no --keep-temp of its own, and a directory a
 	// plan made answers no question once the plan has printed what it found.
 	options.KeepTemp = false
-	scratch, err := openRunScratch(os.MkdirTemp, options.TempDirectory, root, planMoment(options))
+	scratch, err := openRunScratch(os.MkdirTemp, os.RemoveAll, options.TempDirectory, root, planMoment(options))
 	if err != nil {
 		emit(options, "temp-unavailable", err.Error())
 	}
