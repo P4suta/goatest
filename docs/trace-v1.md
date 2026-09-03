@@ -234,10 +234,14 @@ and `reused` are additive: a recording made before they existed carries none of
 them, and each is omitted when it is empty.
 
 `reused` is where a run says it did not observe a verdict itself. Such a route
-carries `plan: ["reused"]`, and the recording holds no `mutant-exec` for that
-mutant at all, because nothing ran: a reused route beside an execution of the
-same mutant is a contradiction. The run the verdict came from is named in the
-`provenance` of that mutant's disposition in the report.
+carries `plan: ["reused"]` and nothing else, and the recording holds no
+`mutant-exec` for that mutant at all, because nothing ran: a reused route
+beside an execution of the same mutant is a contradiction. The schema ties the
+two fields together in both directions — a route with `reused: true` must plan
+exactly `["reused"]`, and a route whose plan is `["reused"]` must say
+`reused: true` — so that a reader is never told "reused" by one field and not
+the other. The run the verdict came from is named in the `provenance` of that
+mutant's disposition in the report.
 
 `granularity` is what marks a route as carrying that metadata at all. On a
 route that names one, an absent `file_candidates` means zero candidates; on a

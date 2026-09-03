@@ -280,6 +280,22 @@
             "description": "The granularity is what marks a route as carrying its routing metadata, so a route carrying any of it names one.",
             "required": ["granularity"]
           }
+        },
+        {
+          "if": { "required": ["reused"], "properties": { "reused": { "const": true } } },
+          "then": {
+            "description": "Nothing ran for a reused mutant, so the plan of a reused route is the reuse and nothing else.",
+            "required": ["plan"],
+            "properties": { "plan": { "const": ["reused"] } }
+          }
+        },
+        {
+          "if": { "required": ["plan"], "properties": { "plan": { "const": ["reused"] } } },
+          "then": {
+            "description": "A plan that is the reuse belongs to a route that says it was reused, so a reader is not told so by one field and not the other.",
+            "required": ["reused"],
+            "properties": { "reused": { "const": true } }
+          }
         }
       ]
     },
