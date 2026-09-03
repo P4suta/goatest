@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,40 @@ func TestVerificationCacheWaitIsVisibleAndContextCancellationStopsBeforeRunner(t
 	}
 }
 
+// watchedProgress is a progress stream a test reads while the run it belongs
+// to is still writing it. Every note is kept for the assertions that come
+// after the run, and the first one naming the awaited kind closes noticed, so
+// a test waits for what the run reported rather than for a duration it
+// guessed.
+type watchedProgress struct {
+	awaited string
+	noticed chan struct{}
+	mutex   sync.Mutex
+	lines   bytes.Buffer
+	seen    bool
+}
+
+func newWatchedProgress(awaited string) *watchedProgress {
+	return &watchedProgress{awaited: awaited, noticed: make(chan struct{})}
+}
+
+func (watch *watchedProgress) Write(note []byte) (int, error) {
+	watch.mutex.Lock()
+	defer watch.mutex.Unlock()
+	written, err := watch.lines.Write(note)
+	if !watch.seen && strings.Contains(watch.lines.String(), watch.awaited) {
+		watch.seen = true
+		close(watch.noticed)
+	}
+	return written, err
+}
+
+func (watch *watchedProgress) String() string {
+	watch.mutex.Lock()
+	defer watch.mutex.Unlock()
+	return watch.lines.String()
+}
+
 func TestARunCollectsExpiredRecordingsUnderTheLeaseItOwns(t *testing.T) {
 	root := t.TempDir()
 	// A recording an earlier run left behind. Retention dates a recording by
@@ -85,21 +120,50 @@ func TestARunCollectsExpiredRecordingsUnderTheLeaseItOwns(t *testing.T) {
 	moment := recorded.Add(31 * 24 * time.Hour)
 	// A lease the run leaks instead of releasing is unlocked anyway the moment
 	// the collector finalises the file nobody closed, and then the wait below
-	// succeeds for a reason that has nothing to do with the run. The run and
-	// the wait happen with collection off, so the only thing that can unlock
-	// this cache is the run releasing what it took.
+	// succeeds for a reason that has nothing to do with the run. The whole
+	// test runs with collection off, so the only thing that can unlock this
+	// cache is the run releasing what it took.
 	collection := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(collection)
-	var progress bytes.Buffer
+	// The lease is taken before the run starts and given back only once the
+	// run has reported that it is waiting for it. Collection is the work of
+	// the owner, so the recording outliving that wait is what places the
+	// collection under the lease rather than before the run ever had it.
+	held, err := cache.Acquire(t.Context(), filepath.Join(root, ".goatest", "cache"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := newWatchedProgress("cache-wait")
 	service := app.Service{
-		Root: root, Progress: &progress,
+		Root: root, Progress: progress,
 		Now: func() time.Time { return moment },
 		Run: func(context.Context, assure.Options) (report.Report, error) {
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
 		},
 	}
-	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err != nil {
+	finished := make(chan error, 1)
+	go func() {
+		_, runErr := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
+		finished <- runErr
+	}()
+	select {
+	case <-progress.noticed:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the run never reported waiting for the cache: %q", progress.String())
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("expired recording %s was collected by a run that had not got the lease yet: %v", stale, err)
+	}
+	if err := held.Release(); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not finish once the lease it waited for was released")
 	}
 	// Only the run that owns the cache lease collects the diagnostic exhaust,
 	// so the expired recording being gone is the run saying it owned it.
@@ -117,8 +181,8 @@ func TestARunCollectsExpiredRecordingsUnderTheLeaseItOwns(t *testing.T) {
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if progress.Len() != 0 {
-		t.Fatalf("progress = %q", progress.String())
+	if !strings.Contains(progress.String(), "cache-wait") {
+		t.Fatalf("progress = %q, want the note the run reported while it waited", progress.String())
 	}
 }
 
