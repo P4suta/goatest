@@ -58,11 +58,12 @@ type Cache struct {
 	// verdicts of a few kilobytes, the other holds object files of gigabytes —
 	// and a single bound would let either starve the other.
 	BuildMaxBytes int64
-	// BuildDir is where that cache lives. An empty directory is the
-	// per-machine one below the user cache directory, which is the right
-	// default because the compiled standard library is the same for every
-	// repository on the machine. A project whose disk cannot hold it says so
-	// here; a relative path is read from the repository root.
+	// BuildDir is where that cache lives. An empty directory is, under the
+	// goatest CLI, the per-machine one below the user cache directory, which
+	// is the right default because the compiled standard library is the same
+	// for every repository on the machine; a process that names no such
+	// directory keeps no build cache then. A project whose disk cannot hold
+	// it says so here; a relative path is read from the repository root.
 	BuildDir string
 }
 
