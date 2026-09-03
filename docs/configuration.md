@@ -65,3 +65,11 @@ then the oldest entries until each store meets `max_bytes`. Verification and
 maintenance hold one OS advisory lock rooted at `.goatest/cache`; a contending
 process reports `cache-wait`, and interrupting that wait does not start work or
 run GC without the lock.
+
+The mutation evidence store, `.goatest/cache/mutation-evidence-v1.json`, is
+one file beside the exact-input cache rather than an entry in it: it is
+rewritten by every full run of the whole project, pruned to the mutants the
+current catalogue still names, and never expires, so `cache gc` neither counts
+nor removes it. Deleting the file only makes the next run execute every
+mutant; see [the assurance contract](assurance-contract.md) for what a run
+reuses from it.

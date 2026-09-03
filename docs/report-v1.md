@@ -56,6 +56,17 @@ attempt count and the numbers of baseline targets, race packages, and mutants
 reused from an exact-input checkpoint. Those counts are audit metadata; the
 restored units still contribute their ordinary evidence and accounting.
 
+A mutant disposition may say `reused: true` with a `provenance` naming the run
+that observed the verdict, in the `snapshot=<digest>` form a repair carries:
+this run resolved the mutant from evidence an earlier run recorded, under the
+conditions in [the assurance contract](assurance-contract.md), and executed
+nothing for it. The two fields are one fact stated twice and are validated
+against each other in both directions. The accounting carries the totals as
+`reused_killed` and `reused_survived`; each is part of `killed` and `survived`
+respectively, so their sum never exceeds `executed`. All four are optional and
+omitted when zero, so a report written before evidence was ever reused still
+validates.
+
 An interrupted checkpoint is not a partial report and cannot advance any
 latest-report index. Its separate strict contract and deletion rules are in
 [checkpoint v1](checkpoint-v1.md).
