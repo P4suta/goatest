@@ -149,11 +149,11 @@ func TestPutReportsABodyThatGivesOut(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("body failure")
 	layer := Layer{Dir: t.TempDir()}
-	if _, err := layer.Put(key(1), key(2), failingReader{err: failure}, 7, faultsMoment); !errors.Is(err, failure) {
+	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), failingReader{err: failure}, 7, faultsMoment); !errors.Is(err, failure) {
 		t.Fatalf("Put error = %v, want %v", err, failure)
 	}
-	if _, found, err := layer.Get(key(1), faultsMoment); found || err != nil {
-		t.Fatalf("Get after the failed Put = (%t, %v), want a miss", found, err)
+	if _, source, err := (Layers{Scratch: layer}).Get(key(1), faultsMoment); source != SourceNone || err != nil {
+		t.Fatalf("Get after the failed Put = (%s, %v), want a miss", source, err)
 	}
 }
 
@@ -171,12 +171,13 @@ func TestPrepareAndGetPropagateTheStagesTheyRunThrough(t *testing.T) {
 	}); !errors.Is(err, failure) {
 		t.Fatalf("Prepare error = %v, want %v", err, failure)
 	}
-	if _, _, err := layer.getWithHooks(key(1), faultsMoment, layerHooks{
+	layers := Layers{Scratch: layer}
+	if _, _, err := layers.getWithHooks(key(1), faultsMoment, layerHooks{
 		stat: func(string) (fs.FileInfo, error) { return nil, failure },
 	}); !errors.Is(err, failure) {
 		t.Fatalf("Get error = %v, want %v", err, failure)
 	}
-	if _, _, err := layer.getWithHooks(key(1), faultsMoment, layerHooks{
+	if _, _, err := layers.getWithHooks(key(1), faultsMoment, layerHooks{
 		stat:     func(string) (fs.FileInfo, error) { return stubLayerInfo{size: 7, modified: faultsMoment}, nil },
 		readFile: func(string) ([]byte, error) { return nil, failure },
 	}); !errors.Is(err, failure) {
@@ -190,7 +191,7 @@ func TestGetSurvivesARefreshItCannotWrite(t *testing.T) {
 	if err := layer.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layer.Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
+	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
 		t.Fatal(err)
 	}
 	stale := faultsMoment.Add(-48 * time.Hour)
@@ -198,14 +199,14 @@ func TestGetSurvivesARefreshItCannotWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	refreshed := 0
-	entry, found, err := layer.getWithHooks(key(1), faultsMoment, layerHooks{
+	entry, source, err := Layers{Scratch: layer}.getWithHooks(key(1), faultsMoment, layerHooks{
 		chtimes: func(string, time.Time, time.Time) error {
 			refreshed++
 			return errors.New("refresh failure")
 		},
 	})
-	if err != nil || !found || entry.Size != 7 {
-		t.Fatalf("Get = (%+v, %t, %v), want a hit despite the refusal to refresh", entry, found, err)
+	if err != nil || source != SourceScratch || entry.Size != 7 {
+		t.Fatalf("Get = (%+v, %s, %v), want a hit despite the refusal to refresh", entry, source, err)
 	}
 	if refreshed != 1 {
 		t.Fatalf("refresh attempts = %d, want one", refreshed)
@@ -219,7 +220,7 @@ func TestCollectAndInspectPropagateTheStagesTheyRunThrough(t *testing.T) {
 	if err := layer.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layer.Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
+	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := layer.collectWithHooks(Policy{TTL: time.Hour}, faultsMoment, layerHooks{
@@ -250,7 +251,7 @@ func TestCollectIgnoresWhatWasAlreadyGone(t *testing.T) {
 	if err := layer.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := layer.Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
+	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
 		t.Fatal(err)
 	}
 	collected, err := layer.collectWithHooks(Policy{TTL: time.Nanosecond}, faultsMoment.Add(time.Hour), layerHooks{

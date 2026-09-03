@@ -72,8 +72,8 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaults.Cache.BuildMaxBytes != 10<<30 || defaults.Cache.BuildDir != "" {
-		t.Fatalf("build cache defaults = %+v, want 10 GiB below the per-machine directory", defaults.Cache)
+	if defaults.Cache.BuildMaxBytes != 2<<30 || defaults.Cache.BuildDir != "" {
+		t.Fatalf("build cache defaults = %+v, want 2 GiB below the per-machine directory", defaults.Cache)
 	}
 	for _, test := range []struct {
 		name          string
@@ -95,7 +95,7 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 			contents: "[cache]\nbuild_max_bytes = 0\n",
 			// Zero cannot mean unbounded here: a cache nothing collects fills
 			// the disk, which is the failure this whole layer exists to avoid.
-			wantMaxBytes: 10 << 30,
+			wantMaxBytes: 2 << 30,
 		},
 		{
 			name:      "negative",
@@ -146,7 +146,7 @@ func TestInitRoundTripsTheBuildCacheBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Cache.BuildMaxBytes != 10<<30 {
+	if loaded.Cache.BuildMaxBytes != 2<<30 {
 		t.Fatalf("reloaded build cache = %+v, want the default bound to have survived the round trip", loaded.Cache)
 	}
 }

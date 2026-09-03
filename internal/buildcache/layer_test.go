@@ -37,13 +37,26 @@ func prepared(t *testing.T) buildcache.Layer {
 }
 
 // store puts one output and fails the test if it could not.
+//
+// It writes through Layers rather than through the layer, because Layers is the
+// only way production reaches a layer at all: a test that stored an entry by
+// some other route would be holding a path no run takes.
 func store(t *testing.T, layer buildcache.Layer, action, output byte, content string, at time.Time) buildcache.Entry {
 	t.Helper()
-	entry, err := layer.Put(identifier(action), identifier(output), strings.NewReader(content), int64(len(content)), at)
+	entry, err := buildcache.Layers{Scratch: layer}.Put(
+		identifier(action), identifier(output), strings.NewReader(content), int64(len(content)), at)
 	if err != nil {
 		t.Fatalf("Put(%x, %x): %v", action, output, err)
 	}
 	return entry
+}
+
+// lookup resolves one cache key against a single layer, reported as the hit or
+// miss the layer-level assertions below are written in terms of.
+func lookup(t *testing.T, layer buildcache.Layer, actionID []byte, now time.Time) (buildcache.Entry, bool, error) {
+	t.Helper()
+	entry, source, err := buildcache.Layers{Scratch: layer}.Get(actionID, now)
+	return entry, source != buildcache.SourceNone, err
 }
 
 // files lists the paths below one half of a layer, relative and slash
@@ -114,7 +127,7 @@ func TestLayerStoresAndReturnsOutputsByteExact(t *testing.T) {
 	if stored.Size != int64(len(content)) || !filepath.IsAbs(stored.DiskPath) {
 		t.Fatalf("Put entry = %+v", stored)
 	}
-	entry, found, err := layer.Get(identifier(1), reference)
+	entry, found, err := lookup(t, layer, identifier(1), reference)
 	if err != nil || !found {
 		t.Fatalf("Get = (%+v, %t, %v)", entry, found, err)
 	}
@@ -178,7 +191,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 			t.Parallel()
 			layer := prepared(t)
 			testCase.prepare(t, layer)
-			entry, found, err := layer.Get(identifier(1), reference)
+			entry, found, err := lookup(t, layer, identifier(1), reference)
 			if err != nil || found {
 				t.Fatalf("Get = (%+v, %t, %v), want a miss and no error", entry, found, err)
 			}
@@ -214,7 +227,7 @@ func TestLayerPutIsIdempotent(t *testing.T) {
 	if stored := files(t, layer, "objects"); len(stored) != 1 {
 		t.Fatalf("objects on disk = %v, want exactly one", stored)
 	}
-	entry, found, err := layer.Get(identifier(1), later)
+	entry, found, err := lookup(t, layer, identifier(1), later)
 	if err != nil || !found || !entry.Time.Equal(later) {
 		t.Fatalf("Get after repeated Put = (%+v, %t, %v)", entry, found, err)
 	}
@@ -237,7 +250,7 @@ func TestLayerRefreshesAKeyOnlyOnceAnHour(t *testing.T) {
 			store(t, layer, 1, 2, "content", reference)
 			path := actionPath(layer, 1)
 			age(t, path, testCase.since)
-			if _, found, err := layer.Get(identifier(1), reference); err != nil || !found {
+			if _, found, err := lookup(t, layer, identifier(1), reference); err != nil || !found {
 				t.Fatalf("Get = (%t, %v)", found, err)
 			}
 			info, err := os.Stat(path)
@@ -303,7 +316,7 @@ func TestLayerCollectRemovesWhatThePolicyNames(t *testing.T) {
 			}
 			var survived []byte
 			for _, key := range []byte{1, 2, 3} {
-				if _, found, err := layer.Get(identifier(key), reference); err != nil {
+				if _, found, err := lookup(t, layer, identifier(key), reference); err != nil {
 					t.Fatalf("Get(%x): %v", key, err)
 				} else if found {
 					survived = append(survived, key)
@@ -339,7 +352,7 @@ func TestLayerCollectBreaksTiesByName(t *testing.T) {
 	}
 	var survived []byte
 	for _, key := range []byte{1, 2, 3} {
-		if _, found, _ := layer.Get(identifier(key), reference); found {
+		if _, found, _ := lookup(t, layer, identifier(key), reference); found {
 			survived = append(survived, key)
 		}
 	}
@@ -420,12 +433,22 @@ func TestLayerInspectReportsWhatTheLayerHolds(t *testing.T) {
 	}
 }
 
-func TestLayerPrepareLeavesANoteAndRefusesAnUnusableDirectory(t *testing.T) {
+func TestLayerPrepareLeavesItsMarkerAndRefusesAnUnusableDirectory(t *testing.T) {
 	t.Parallel()
 	layer := prepared(t)
-	note, err := os.ReadFile(filepath.Join(layer.Dir, "README"))
-	if err != nil || !strings.Contains(string(note), "goatest") {
-		t.Fatalf("README = %q (%v), want a note naming goatest", note, err)
+	marker, err := os.ReadFile(filepath.Join(layer.Dir, buildcache.MarkerName))
+	if err != nil || !strings.Contains(string(marker), "goatest") {
+		t.Fatalf("marker = %q (%v), want a note naming goatest", marker, err)
+	}
+	// The marker carries goatest's own name rather than being a README. A
+	// README is a file a project may already keep in a directory somebody
+	// pointed build_dir at, and the marker's whole job is to be a name nothing
+	// else writes.
+	if strings.EqualFold(buildcache.MarkerName, "README") || strings.EqualFold(buildcache.MarkerName, "README.md") {
+		t.Fatalf("marker name = %q, want a name only goatest writes", buildcache.MarkerName)
+	}
+	if !strings.Contains(buildcache.MarkerName, "goatest") {
+		t.Fatalf("marker name = %q, want it to name its owner", buildcache.MarkerName)
 	}
 	unnamed := buildcache.Layer{}
 	if err := unnamed.Prepare(); err == nil {
@@ -438,29 +461,120 @@ func TestLayerPrepareLeavesANoteAndRefusesAnUnusableDirectory(t *testing.T) {
 	if err := (buildcache.Layer{Dir: filepath.Join(file, "layer")}).Prepare(); err == nil {
 		t.Fatal("a layer below a regular file prepared successfully")
 	}
+	if err := (buildcache.Layer{Dir: file}).Prepare(); err == nil {
+		t.Fatal("a regular file prepared successfully as a layer")
+	}
+}
+
+// TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache is what stops a
+// mistyped build_dir from ever being collected.
+//
+// goatest collects and removes files below a layer, so it must never adopt a
+// directory somebody else owns. A directory that holds files and carries no
+// marker is refused; an empty one, an absent one, and one goatest prepared
+// before are accepted, because those are the three a run legally meets.
+func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name    string
+		prepare func(*testing.T, string)
+		wantErr bool
+	}{
+		{
+			name:    "an absent directory",
+			prepare: func(*testing.T, string) {},
+		},
+		{
+			name: "an empty directory",
+			prepare: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a layer goatest prepared before",
+			prepare: func(t *testing.T, dir string) {
+				if err := (buildcache.Layer{Dir: dir}).Prepare(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "somebody's home directory",
+			prepare: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "Documents"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".profile"), []byte("export PATH\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "a directory holding one unrelated file",
+			prepare: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "README"), []byte("my project\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), "layer")
+			testCase.prepare(t, dir)
+			err := (buildcache.Layer{Dir: dir}).Prepare()
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("Prepare adopted a directory goatest did not make")
+				}
+				if !strings.Contains(err.Error(), "not a goatest build cache") {
+					t.Fatalf("Prepare error = %v, want it to say the directory is not a goatest build cache", err)
+				}
+				// Refusing must leave the directory as it was: the point is not
+				// to touch what somebody else owns.
+				if _, statErr := os.Stat(filepath.Join(dir, buildcache.MarkerName)); statErr == nil {
+					t.Fatal("Prepare wrote its marker into a directory it refused")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, buildcache.MarkerName)); statErr != nil {
+				t.Fatalf("marker after Prepare = %v, want it written", statErr)
+			}
+		})
+	}
 }
 
 func TestLayerRefusesAPutItCannotAddress(t *testing.T) {
 	t.Parallel()
 	layer := prepared(t)
-	if _, err := layer.Put(nil, identifier(2), strings.NewReader("x"), 1, reference); err == nil {
+	layers := buildcache.Layers{Scratch: layer}
+	if _, err := layers.Put(nil, identifier(2), strings.NewReader("x"), 1, reference); err == nil {
 		t.Fatal("Put accepted an empty cache key")
 	}
-	if _, err := layer.Put(identifier(1), nil, strings.NewReader("x"), 1, reference); err == nil {
+	if _, err := layers.Put(identifier(1), nil, strings.NewReader("x"), 1, reference); err == nil {
 		t.Fatal("Put accepted an empty output identifier")
 	}
-	if _, err := layer.Put(identifier(1), identifier(2), strings.NewReader("x"), -1, reference); err == nil {
+	if _, err := layers.Put(identifier(1), identifier(2), strings.NewReader("x"), -1, reference); err == nil {
 		t.Fatal("Put accepted a negative size")
 	}
-	if _, err := layer.Put(identifier(1), identifier(2), strings.NewReader("xx"), 1, reference); err == nil {
+	if _, err := layers.Put(identifier(1), identifier(2), strings.NewReader("xx"), 1, reference); err == nil {
 		t.Fatal("Put accepted a body longer than the declared size")
 	}
-	if _, found, err := layer.Get(identifier(1), reference); found || err != nil {
+	if _, found, err := lookup(t, layer, identifier(1), reference); found || err != nil {
 		t.Fatalf("Get after a refused Put = (%t, %v), want a miss", found, err)
 	}
-	orphan := buildcache.Layer{}
-	if _, err := orphan.Put(identifier(1), identifier(2), strings.NewReader("x"), 1, reference); err == nil {
-		t.Fatal("a layer with no directory stored an output")
+	if _, err := (buildcache.Layers{}).Put(identifier(1), identifier(2), strings.NewReader("x"), 1, reference); err == nil {
+		t.Fatal("a store with no layer at all stored an output")
 	}
 }
 
@@ -468,7 +582,7 @@ func TestLayerStoresAnEmptyOutput(t *testing.T) {
 	t.Parallel()
 	layer := prepared(t)
 	store(t, layer, 1, 2, "", reference)
-	entry, found, err := layer.Get(identifier(1), reference)
+	entry, found, err := lookup(t, layer, identifier(1), reference)
 	if err != nil || !found || entry.Size != 0 {
 		t.Fatalf("Get = (%+v, %t, %v), want an empty output", entry, found, err)
 	}

@@ -16,7 +16,7 @@ func twoLayers(t *testing.T, persist bool) buildcache.Layers {
 	t.Helper()
 	root := t.TempDir()
 	layers := buildcache.Layers{
-		Scratch: buildcache.Layer{Dir: filepath.Join(root, "scratch")},
+		Scratch: buildcache.Layer{Dir: filepath.Join(root, "scratch"), Touch: buildcache.ScratchTouchInterval},
 		Base:    buildcache.Layer{Dir: filepath.Join(root, "base")},
 		Persist: persist,
 	}

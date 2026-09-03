@@ -5,6 +5,7 @@ package assure
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/buildcache"
 )
 
 // TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer pins the one rule the
@@ -52,6 +54,19 @@ func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 		{name: "a test binary named like a subcommand", argv: []string{"go", "test", "-args", "-c"}, want: false},
 		{name: "no command at all", argv: nil, want: false},
 		{name: "a bare go", argv: []string{"go"}, want: false},
+
+		// The go command accepts -C only as its first flag, and it changes the
+		// directory before reading the subcommand. A rule that read argv[1]
+		// blindly would classify every one of these as neither a compile nor a
+		// test run and quietly stop persisting.
+		{name: "a directory change before a build", argv: []string{"go", "-C", "sub", "build", "./..."}, want: true},
+		{name: "a joined directory change before a build", argv: []string{"go", "-C=sub", "build", "./..."}, want: true},
+		{name: "a directory change before a list", argv: []string{"go", "-C", "sub", "list", "-json", "./..."}, want: true},
+		{name: "a directory change before a compile", argv: []string{"go", "-C=sub", "test", "-c", "-o", "binary", "./pkg"}, want: true},
+		{name: "a directory change before a test run", argv: []string{"go", "-C", "sub", "test", "./..."}, want: false},
+		{name: "a directory change before test2json", argv: []string{"go", "-C=sub", "tool", "test2json", "binary"}, want: false},
+		{name: "a directory change and nothing after it", argv: []string{"go", "-C", "sub"}, want: false},
+		{name: "a joined directory change and nothing after it", argv: []string{"go", "-C=sub"}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -189,7 +204,7 @@ func TestOpenRunBuildCacheServesNothingWithoutAProgramOrABase(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			cache, err := openRunBuildCache(test.program, test.base, t.TempDir())
+			cache, err := openRunBuildCache(test.program, test.base, t.TempDir(), 2<<30)
 			if err != nil || cache.serves() || cache.environment() != nil || cache.persistingEnvironment() != nil {
 				t.Fatalf("openRunBuildCache = (%+v, %v), want a cache that serves nothing", cache, err)
 			}
@@ -207,7 +222,7 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	t.Parallel()
 	base := t.TempDir()
 	temporary := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, temporary)
+	cache, err := openRunBuildCache("/opt/goatest", base, temporary, 2<<30)
 	if err != nil || !cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v)", cache, err)
 	}
@@ -219,8 +234,13 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	}
 	// Preparing the base layer is the writability probe, so the layer exists
 	// before a single go command has been handed the program.
-	if _, err := os.Stat(filepath.Join(base, "README")); err != nil {
+	if _, err := os.Stat(filepath.Join(base, buildcache.MarkerName)); err != nil {
 		t.Fatalf("base layer = %v, want it prepared", err)
+	}
+	// The bound the run's scratch layer is pruned to travels to the served
+	// child on its command line, because the child reads no configuration.
+	if !strings.Contains(cache.plain, "--max-bytes") || !strings.Contains(cache.persisting, "--max-bytes") {
+		t.Fatalf("programs = plain %q persisting %q, want the bound on both", cache.plain, cache.persisting)
 	}
 	if err := releaseBuildCache(Options{}, cache); err != nil {
 		t.Fatal(err)
@@ -239,15 +259,138 @@ func TestOpenRunBuildCacheReportsABaseLayerItCannotPrepare(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := openRunBuildCache("/opt/goatest", blocked, t.TempDir())
+	cache, err := openRunBuildCache("/opt/goatest", blocked, t.TempDir(), 2<<30)
 	if err == nil || cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v), want the unusable layer reported", cache, err)
 	}
 }
 
+// TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor holds the
+// error path to the same cleanliness rule as the happy one. The scratch
+// directory is made before the two programs are rendered, so a program the go
+// command cannot be handed leaves a run with no cache — and must leave it with
+// no directory either.
+func TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor(t *testing.T) {
+	t.Parallel()
+	temporary := t.TempDir()
+	// A path holding both kinds of quote cannot be rendered as a GOCACHEPROG
+	// value at all, which is the one failure that falls between making the
+	// directory and returning the cache.
+	cache, err := openRunBuildCache(`/opt/o'say"what/goatest`, t.TempDir(), temporary, 2<<30)
+	if err == nil || cache.serves() {
+		t.Fatalf("openRunBuildCache = (%+v, %v), want the unrenderable program reported", cache, err)
+	}
+	left, readErr := os.ReadDir(temporary)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(left) != 0 {
+		names := make([]string, 0, len(left))
+		for _, entry := range left {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("temporary directory holds %v, want the scratch layer removed with the failure", names)
+	}
+}
+
+// TestCollectBaseBoundsTheLayerTheMachineKeeps is the cap actually being a cap.
+// A bound enforced only by a command a developer remembers to type is not a
+// bound, so a run collects the base layer when it ends.
+func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, t.TempDir(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layer := buildcache.Layer{Dir: base}
+	layers := buildcache.Layers{Base: layer, Persist: true}
+	moment := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	for _, key := range []byte{1, 2, 3} {
+		if _, err := layers.Put(buildCacheTestKey(key), buildCacheTestKey(key+0x10),
+			strings.NewReader("0123456789"), 10, moment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two entries were last read long ago; the third is one a build running
+	// beside this collection is reading, so MinIdle must spare it.
+	for _, key := range []byte{1, 2} {
+		aged := moment.Add(-90 * 24 * time.Hour)
+		if err := os.Chtimes(buildCacheActionPath(base, key), aged, aged); err != nil {
+			t.Fatal(err)
+		}
+	}
+	collected, ran, err := cache.collectBase(buildcache.Policy{
+		MaxBytes: 20, TTL: 30 * 24 * time.Hour, MinIdle: layer.MinIdle(),
+	}, moment)
+	if err != nil || !ran {
+		t.Fatalf("collectBase = (%+v, %t, %v), want a collection", collected, ran, err)
+	}
+	if collected.RemovedActions != 2 || collected.After.Entries != 1 {
+		t.Fatalf("collectBase = %+v, want the two stale entries gone and the live one spared", collected)
+	}
+	status, err := layer.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Entries != 1 || status.Bytes != 10 {
+		t.Fatalf("base layer after collection = %+v, want it inside its bound", status)
+	}
+}
+
+func TestCollectBaseSkipsWhatAnotherProcessIsAlreadyCollecting(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, t.TempDir(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The concurrent collector is a run of another repository, which shares
+	// this layer. Yielding to it costs this run nothing: the layer is bounded
+	// either way, and the next run collects whatever this one left.
+	release, held, err := (buildcache.Layer{Dir: base}).HoldCollection()
+	if err != nil || !held {
+		t.Fatalf("holding the collection lock = (%t, %v)", held, err)
+	}
+	collected, ran, err := cache.collectBase(buildcache.Policy{MaxBytes: 1}, time.Now())
+	if err != nil || ran || collected != (buildcache.Collected{}) {
+		t.Fatalf("collectBase against a held lock = (%+v, %t, %v), want it skipped without an error", collected, ran, err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ran, err := cache.collectBase(buildcache.Policy{MaxBytes: 1}, time.Now()); err != nil || !ran {
+		t.Fatalf("collectBase after the lock was released = (%t, %v), want a collection", ran, err)
+	}
+}
+
+func TestCollectBaseDoesNothingForARunWithoutACache(t *testing.T) {
+	t.Parallel()
+	collected, ran, err := runBuildCache{}.collectBase(buildcache.Policy{MaxBytes: 1}, time.Now())
+	if err != nil || ran || collected != (buildcache.Collected{}) {
+		t.Fatalf("collectBase without a cache = (%+v, %t, %v), want nothing", collected, ran, err)
+	}
+}
+
+// buildCacheTestKey renders an identifier of the length the go command uses.
+func buildCacheTestKey(value byte) []byte {
+	identifier := make([]byte, 32)
+	for index := range identifier {
+		identifier[index] = value
+	}
+	return identifier
+}
+
+// buildCacheActionPath is where a layer stores one cache key, as this test
+// knows the layout rather than as the package computes it.
+func buildCacheActionPath(dir string, key byte) string {
+	name := hex.EncodeToString(buildCacheTestKey(key))
+	return filepath.Join(dir, "actions", name[:2], name)
+}
+
 func TestReleaseBuildCacheKeepsAndNamesTheScratchItWasAskedToKeep(t *testing.T) {
 	t.Parallel()
-	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), t.TempDir())
+	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), t.TempDir(), 2<<30)
 	if err != nil {
 		t.Fatal(err)
 	}

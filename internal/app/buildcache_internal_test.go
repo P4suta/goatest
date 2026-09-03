@@ -18,6 +18,33 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
+// TestBuildCacheDirectoryIsResolvedWithoutAnExecutable is the split between the
+// two questions.
+//
+// Where the cache lives is a property of the machine and the project, and
+// `goatest cache status` and `goatest cache gc` need it whoever is asking. What
+// program serves it is a property of this process, and only a composition root
+// that knows the process is a goatest binary may answer that. Tying the first
+// to the second made maintenance silently report an empty cache.
+func TestBuildCacheDirectoryIsResolvedWithoutAnExecutable(t *testing.T) {
+	t.Parallel()
+	userCache := t.TempDir()
+	root := t.TempDir()
+	service := Service{userCacheDir: func() (string, error) { return userCache, nil }}
+	want := filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
+	if got := service.buildCacheDirectory(root); got != want {
+		t.Fatalf("buildCacheDirectory without an executable = %q, want %q", got, want)
+	}
+	if program, base := service.buildCacheLocation(root); program != "" || base != want {
+		t.Fatalf("buildCacheLocation without an executable = (%q, %q), want no program and the directory", program, base)
+	}
+	withExecutable := service
+	withExecutable.Executable = "/opt/bin/goatest"
+	if program, base := withExecutable.buildCacheLocation(root); program != "/opt/bin/goatest" || base != want {
+		t.Fatalf("buildCacheLocation = (%q, %q), want the program and the directory", program, base)
+	}
+}
+
 func TestBuildCacheLocationResolvesTheProgramAndTheLayerTheMachineKeeps(t *testing.T) {
 	t.Parallel()
 	userCache := t.TempDir()
@@ -115,7 +142,8 @@ func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := time.Now()
-	if _, err := layer.Put(buildCacheIdentifier(1), buildCacheIdentifier(2), strings.NewReader("compiled"), 8, stored); err != nil {
+	layers := buildcache.Layers{Base: layer, Persist: true}
+	if _, err := layers.Put(buildCacheIdentifier(1), buildCacheIdentifier(2), strings.NewReader("compiled"), 8, stored); err != nil {
 		t.Fatal(err)
 	}
 	service := Service{
@@ -152,7 +180,7 @@ func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
 	}
 }
 
-func TestCacheStatusSurvivesAMachineWithNoBuildCacheLocation(t *testing.T) {
+func TestCacheStatusSurvivesAMachineWithNowhereToKeepABuildCache(t *testing.T) {
 	service := Service{
 		Root: t.TempDir(), Progress: io.Discard,
 	}
