@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/P4suta/goatest/internal/advisorylock"
 )
 
 // collectionMarkerPath is the file whose time records the last collection of
@@ -33,7 +35,7 @@ func (layer Layer) HoldCollection() (func() error, bool, error) {
 	if err != nil {
 		return func() error { return nil }, false, fmt.Errorf("goatest: open build cache collection lock: %w", err)
 	}
-	locked, err := tryAdvisoryLock(file)
+	locked, err := advisorylock.Try(file)
 	if err != nil {
 		_ = file.Close()
 		return func() error { return nil }, false, fmt.Errorf("goatest: lock build cache collection: %w", err)
@@ -43,7 +45,7 @@ func (layer Layer) HoldCollection() (func() error, bool, error) {
 		return func() error { return nil }, false, nil
 	}
 	return func() error {
-		unlockErr := unlockAdvisory(file)
+		unlockErr := advisorylock.Release(file)
 		closeErr := file.Close()
 		if joined := errors.Join(unlockErr, closeErr); joined != nil {
 			return fmt.Errorf("goatest: release build cache collection lock: %w", joined)
