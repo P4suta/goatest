@@ -40,7 +40,10 @@ func abandonedRunScratch(t *testing.T, parent, name string, bytes int) string {
 	return directory
 }
 
-// keptDirectory makes a directory a --keep-temp run would have left behind.
+// keptDirectory makes a directory a --keep-temp run would have left behind:
+// claimed in the run's name and marked kept, which is what tells the collector
+// the directory is one of goatest's own and not whatever a corrupted ledger
+// happens to name.
 func keptDirectory(t *testing.T, parent, name string, bytes int) string {
 	t.Helper()
 	directory := filepath.Join(parent, name)
@@ -48,6 +51,13 @@ func keptDirectory(t *testing.T, parent, name string, bytes int) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "payload"), make([]byte, bytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: name}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Keep(); err != nil {
 		t.Fatal(err)
 	}
 	return directory
@@ -78,7 +88,7 @@ func TestCacheStatusReportsTheOrphansAndTheDirectoriesRunsKept(t *testing.T) {
 	}
 	// The size is the fixture's own, measured rather than assumed: an
 	// abandoned directory holds its owner pair as well as what the run wrote.
-	orphaned := fmt.Sprintf("abandoned=1 bytes=%d live=0 kept=0", tempowner.Size(orphan))
+	orphaned := fmt.Sprintf("abandoned=1 bytes=%d live=0 kept=1", tempowner.Size(orphan))
 	if !hasEvidenceDetail(status, "orphans", orphaned) {
 		t.Fatalf("cache status evidence = %+v, want %q", status.Evidence, orphaned)
 	}
@@ -122,7 +132,10 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 		Root: root, Progress: io.Discard, TempDirectory: temporary,
 		Now: func() time.Time { return moment.Add(time.Minute) },
 	}
-	reclaimed := fmt.Sprintf("removed=1 bytes=%d live=0 kept=0", tempowner.Size(orphan))
+	reclaimed := fmt.Sprintf("removed=1 bytes=%d live=0 kept=2", tempowner.Size(orphan))
+	// The keep is measured with its owner pair, because that is what is on the
+	// disk when the collection walks it.
+	expiredBytes := fmt.Sprintf("removed-entries=2 removed-bytes=%d remaining=1", tempowner.Size(expired))
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
 	if err != nil || collected.Verdict != report.VerdictCompleted {
 		t.Fatalf("cache gc = %+v, %v", collected, err)
@@ -136,7 +149,7 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 	// The expired directory goes with its entry; the one that was already gone
 	// takes only its entry; and a keep the TTL has not reached is left where
 	// the developer who asked for it expects to find it.
-	if !hasEvidenceDetail(collected, "kept-temp-gc", "removed-entries=2 removed-bytes=2048 remaining=1") {
+	if !hasEvidenceDetail(collected, "kept-temp-gc", expiredBytes) {
 		t.Fatalf("cache gc evidence = %+v, want the expired keep collected", collected.Evidence)
 	}
 	if _, err := os.Stat(expired); !os.IsNotExist(err) {
@@ -267,5 +280,84 @@ func TestAnEntryThatCannotBeStatedKeepsItsPlaceInTheLedger(t *testing.T) {
 	}
 	if len(ledger.Entries) != 1 || ledger.Entries[0].Path != unreadable {
 		t.Fatalf("ledger after a gc = %+v, want the entry nobody could judge still recorded", ledger.Entries)
+	}
+}
+
+// The ledger is a file in the repository, so a person can edit it and anything
+// can corrupt it — and what `cache gc` does with a path it reads there is
+// delete the directory whole. The directory itself has to say it was kept
+// before any of that happens.
+func TestCacheGCRemovesOnlyADirectoryThatSaysItWasKept(t *testing.T) {
+	t.Parallel()
+	root, temporary := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"),
+		[]byte("version = 1\ncontract = \"standard-v1\"\n[cache]\nttl = \"1h\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Somebody's work, named by a ledger entry that has no business naming it.
+	unrelated := filepath.Join(t.TempDir(), "important")
+	if err := os.MkdirAll(filepath.Join(unrelated, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kept := keptDirectory(t, temporary, "goatest-run-kept", 128)
+	// The mutation engine's own marker, which names no run of ours.
+	engine := filepath.Join(temporary, "go-mutants-snapshot")
+	if err := os.MkdirAll(engine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(engine, "owner.json"),
+		[]byte(`{"schema":"go-mutants-temp-owner-v1","pid":1,"started":"2026-09-04T12:00:00Z","kept":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moment := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	stale := moment.Add(-2 * time.Hour)
+	if err := keptledger.Append(keptledger.Path(root),
+		keptledger.Entry{Path: unrelated, RunID: "goatest-run-kept", KeptAt: stale, Bytes: 16},
+		keptledger.Entry{Path: kept, RunID: "goatest-run-kept", KeptAt: stale, Bytes: 128},
+		keptledger.Entry{Path: engine, RunID: "goatest-run-kept", KeptAt: stale, Bytes: 8},
+	); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{
+		Root: root, Progress: io.Discard, TempDirectory: temporary,
+		Now: func() time.Time { return moment },
+	}
+	status, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvidenceStatus(status, "goatest-run-kept", "unverified") {
+		t.Fatalf("cache status evidence = %+v, want the entry nothing vouches for reported as unverified", status.Evidence)
+	}
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil || collected.Verdict != report.VerdictCompleted {
+		t.Fatalf("cache gc = %+v, %v", collected, err)
+	}
+	// The two directories that say goatest kept them go; the one that says
+	// nothing stays, with its contents, and keeps its entry so a person can see
+	// what the ledger claims.
+	for _, gone := range []string{kept, engine} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("stat %s after a gc = %v, want it collected", gone, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(unrelated, "src", "main.go")); err != nil {
+		t.Fatalf("stat the file in the unrelated directory = %v, want it untouched", err)
+	}
+	if !hasEvidenceDetail(collected, "kept-temp-gc", "removed-entries=2 removed-bytes=") {
+		t.Fatalf("cache gc evidence = %+v, want the two vouched directories collected", collected.Evidence)
+	}
+	if !hasEvidenceDetail(collected, "kept-temp-gc", "remaining=1 errors=1") {
+		t.Fatalf("cache gc evidence = %+v, want the unvouched entry retained and counted", collected.Evidence)
+	}
+	ledger, err := keptledger.Load(keptledger.Path(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger.Entries) != 1 || ledger.Entries[0].Path != unrelated {
+		t.Fatalf("ledger after a gc = %+v, want the entry nothing vouched for still listed", ledger.Entries)
 	}
 }

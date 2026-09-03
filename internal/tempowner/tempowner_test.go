@@ -185,3 +185,93 @@ func TestTheMarkerIsTheDocumentTheSchemaPromises(t *testing.T) {
 		t.Fatalf("marker = %v, want exactly %d fields", document, len(want))
 	}
 }
+
+// writeMarkerDocument puts a marker of somebody's shape into a directory, which
+// is how the markers of another tool are made in these tests: goatest cannot
+// import go-mutants' internal package to write one properly.
+func writeMarkerDocument(t *testing.T, dir, document string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tempowner.MarkerPath(dir), []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// `goatest cache gc` removes the directories a ledger names, and the ledger is
+// a file in the repository that anybody can edit and anything can corrupt. What
+// makes a removal safe is the directory itself saying it was kept on purpose,
+// so this is the question the collector has to ask before it deletes anything.
+func TestKeptByAsksTheDirectoryWhetherSomebodyKeptIt(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	for _, test := range []struct {
+		name     string
+		document string
+		want     bool
+	}{
+		{
+			name:     "kept by the run that recorded it",
+			document: `{"schema":"goatest-temp-owner-v1","run_id":"goatest-run-a","pid":1,"started":"2026-09-04T12:00:00Z","root":"/repository","kept":true}`,
+			want:     true,
+		},
+		{
+			name:     "kept by another run",
+			document: `{"schema":"goatest-temp-owner-v1","run_id":"goatest-run-b","pid":1,"started":"2026-09-04T12:00:00Z","root":"/repository","kept":true}`,
+		},
+		{
+			name:     "owned by a run that never kept it",
+			document: `{"schema":"goatest-temp-owner-v1","run_id":"goatest-run-a","pid":1,"started":"2026-09-04T12:00:00Z","root":"/repository","kept":false}`,
+		},
+		{
+			// The mutation engine keeps its snapshot at a run's request and
+			// records only its own bookkeeping, so its marker names no run of
+			// ours. It is still a directory somebody kept on purpose.
+			name:     "kept by the mutation engine",
+			document: `{"schema":"go-mutants-temp-owner-v1","pid":1,"started":"2026-09-04T12:00:00Z","kept":true}`,
+			want:     true,
+		},
+		{
+			name:     "used by the mutation engine and not kept",
+			document: `{"schema":"go-mutants-temp-owner-v1","pid":1,"started":"2026-09-04T12:00:00Z","kept":false}`,
+		},
+		{
+			name:     "a marker of some other tool",
+			document: `{"schema":"somebody-elses-v1","kept":true}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dir := writeMarkerDocument(t, filepath.Join(parent, test.name), test.document)
+			kept, err := tempowner.KeptBy(dir, "goatest-run-a")
+			if err != nil || kept != test.want {
+				t.Fatalf("KeptBy = (%t, %v), want %t", kept, err, test.want)
+			}
+		})
+	}
+}
+
+func TestKeptByRefusesADirectoryThatSaysNothing(t *testing.T) {
+	t.Parallel()
+	// Somebody's home directory, somebody's project: the paths a corrupted or
+	// crafted ledger would name. None of them says it was kept, so none of them
+	// is the collector's to remove.
+	unrelated := t.TempDir()
+	if err := os.WriteFile(filepath.Join(unrelated, "notes.txt"), []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := tempowner.KeptBy(unrelated, "goatest-run-a"); err != nil || kept {
+		t.Fatalf("KeptBy of a directory with no marker = (%t, %v), want it refused without a failure", kept, err)
+	}
+	if kept, err := tempowner.KeptBy(filepath.Join(unrelated, "absent"), "goatest-run-a"); err != nil || kept {
+		t.Fatalf("KeptBy of a missing directory = (%t, %v), want it refused without a failure", kept, err)
+	}
+	// A marker nobody can decode is a question nobody can answer, which is not
+	// the same answer as no.
+	torn := writeMarkerDocument(t, filepath.Join(t.TempDir(), "torn"), `{"schema":"goatest-temp-`)
+	if kept, err := tempowner.KeptBy(torn, "goatest-run-a"); err == nil || kept {
+		t.Fatalf("KeptBy of a torn marker = (%t, %v), want the failure reported", kept, err)
+	}
+}
