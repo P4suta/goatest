@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
 // The variables the helper process is told where to serve from. The cache
@@ -35,8 +36,11 @@ const (
 // print afterwards would land in the middle of the protocol the go command is
 // reading.
 func TestCacheProgramHelper(t *testing.T) {
-	if os.Getenv(cacheProgramHelper) == "" {
-		t.Skip("not the cache program helper process")
+	// Returning rather than skipping is the convention every helper in this
+	// module follows: a skip is a finding to goatest's own baseline, and a
+	// helper that was not asked for has nothing to report.
+	if !testkit.HelperEnabled(cacheProgramHelper) {
+		return
 	}
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
 	if os.Getenv(cacheProgramPersist) != "" {
@@ -130,12 +134,15 @@ func TestTheSameTreeHitsAndACopiedOneMissesItsOwnPackages(t *testing.T) {
 		t.Fatalf("base layer holds %d entries after a cold build, want the standard library closure the fixture imports", cold)
 	}
 
-	// A second build of the same tree reaches one action the first never got
-	// far enough to compute — the go command derives it only once the packages
-	// below it are cached — so the layer settles on the build after the cold
-	// one rather than on the cold one itself.
+	// A second build of the same tree is what the layer is measured after, so
+	// that the assertions below are about rebuilds and not about whatever a
+	// cold build stores on its way; with the fixture aged (see ageCacheFixture)
+	// it stores nothing the cold build did not.
 	compileCacheFixture(t, goBinary, here, base, t.TempDir(), true)
 	warm := layerEntries(t, base)
+	if warm != cold {
+		t.Fatalf("base layer holds %d entries after a second build, want the %d the cold build stored: the fixture is aged so that every action is asked for on the first build", warm, cold)
+	}
 
 	// (a) The same directory, once the layer has settled: every action the
 	// build needs is in it under the identifier the build asks for, so a build
@@ -246,7 +253,34 @@ func copyCacheFixtureModule(t *testing.T, from string) string {
 			t.Fatal(err)
 		}
 	}
+	ageCacheFixture(t, to)
 	return to
+}
+
+// ageCacheFixture moves every file of a fixture module two seconds or more
+// into the past, which is what makes the set of actions a build asks for the
+// same on every build.
+//
+// The go command keeps an index of each package directory in the build cache,
+// but only once every file in the directory is older than two seconds
+// (modTimeCutoff in cmd/go/internal/modindex), because a write inside that
+// window may not move the file time. A fixture written moments ago is
+// therefore indexed on whichever build first runs after the window closes —
+// the first on a fast machine, the second or third on a loaded one — and the
+// count of entries the layer holds moves by one at a moment the test does not
+// control. Aged, the index is asked for on the cold build like everything else.
+func ageCacheFixture(t *testing.T, directory string) {
+	t.Helper()
+	aged := time.Now().Add(-time.Hour)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if err := os.Chtimes(filepath.Join(directory, entry.Name()), aged, aged); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // compileCacheFixture builds the fixture module with the cache program serving
@@ -263,6 +297,12 @@ func compileCacheFixture(t *testing.T, goBinary, fixture, base, scratch string, 
 		// into a hard failure for every go command below it.
 		"GOFLAGS=-buildvcs=false",
 		"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off",
+		// The helper is this test binary run again, and goatest's own baseline
+		// builds it with coverage. A covered binary that exits through os.Exit
+		// writes its counters to GOCOVERDIR and, given none, warns about it on
+		// stderr — which the go command relays, and which would fail the silent
+		// build asserted below. A binary built without coverage ignores it.
+		"GOCOVERDIR=" + t.TempDir(),
 		"GOCACHEPROG=" + program,
 		cacheProgramHelper + "=1",
 		cacheProgramBase + "=" + base,
@@ -300,6 +340,7 @@ func writeCacheFixtureModule(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
+	ageCacheFixture(t, directory)
 	return directory
 }
 
