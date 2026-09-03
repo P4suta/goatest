@@ -107,3 +107,55 @@ func (hooks graphHooks) resolved() graphHooks {
 	}
 	return hooks
 }
+
+// mutationHooks is the filesystem and the encoder a mutation evidence store is
+// loaded and stored through. Its zero value is the os and encoding/json
+// packages, with the same argument-passing contract as scanHooks: nothing here
+// is a package-level variable, so what one test installs is reachable only
+// from the call it passed it to.
+type mutationHooks struct {
+	// marshalStore encodes a canonical store.
+	marshalStore func(value any, prefix, indent string) ([]byte, error)
+	// unmarshalStore decodes stored bytes back into a value.
+	unmarshalStore func(data []byte, value any) error
+	// readStore reads a stored mutation evidence document.
+	readStore func(path string) ([]byte, error)
+	// mkdirAll creates the directory a store is written in.
+	mkdirAll func(path string, perm os.FileMode) error
+	// createTemporary opens the temporary file a store is written to before it
+	// replaces the stored one.
+	createTemporary func(directory, pattern string) (evidenceWritableFile, error)
+	// remove deletes a temporary file, or the destination a rename refused.
+	remove func(path string) error
+	// rename publishes a written temporary file as the stored document.
+	rename func(oldPath, newPath string) error
+}
+
+// resolved returns the hooks with every unset operation filled in from the os
+// and encoding/json packages.
+func (hooks mutationHooks) resolved() mutationHooks {
+	if hooks.marshalStore == nil {
+		hooks.marshalStore = json.MarshalIndent
+	}
+	if hooks.unmarshalStore == nil {
+		hooks.unmarshalStore = json.Unmarshal
+	}
+	if hooks.readStore == nil {
+		hooks.readStore = os.ReadFile
+	}
+	if hooks.mkdirAll == nil {
+		hooks.mkdirAll = os.MkdirAll
+	}
+	if hooks.createTemporary == nil {
+		hooks.createTemporary = func(directory, pattern string) (evidenceWritableFile, error) {
+			return os.CreateTemp(directory, pattern)
+		}
+	}
+	if hooks.remove == nil {
+		hooks.remove = os.Remove
+	}
+	if hooks.rename == nil {
+		hooks.rename = os.Rename
+	}
+	return hooks
+}
