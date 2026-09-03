@@ -2,12 +2,13 @@
 
 ## Status
 
-Accepted, 2026-09-03. Implemented by `internal/buildcache` (the two-layer store
-and the `GOCACHEPROG` server), the hidden `goatest cacheprog` subcommand in
+Accepted, 2026-09-03; revised 2026-09-04 after review (decisions 5 to 8).
+Implemented by `internal/buildcache` (the two-layer store, the `GOCACHEPROG`
+server, and the locked collection), the hidden `goatest cacheprog` subcommand in
 `cmd/goatest`, the run wiring and the persist rule in `internal/assure`
-(`buildCacheWorkspace`, `persistingCommand`), the `[cache] build_max_bytes` and
-`build_dir` settings in `internal/config`, and the build-cache reporting and
-collection in `goatest cache status|gc`.
+(`buildCacheWorkspace`, `persistingCommand`, `collectRunBuildCache`), the
+`[cache] build_max_bytes` and `build_dir` settings in `internal/config`, and the
+build-cache reporting and collection in `goatest cache status|gc`.
 
 ## Context
 
@@ -71,30 +72,85 @@ toolchain makes by TTL.
    argument-list builders the run uses, so a change to what goatest runs is a
    change that test sees.
 
-5. **The base layer is bounded and collected explicitly.** `[cache]
-   build_max_bytes` bounds it (10 GiB by default) and `[cache] build_dir` says
-   where it is (per machine by default, because a compiled standard library is
-   the same for every repository on the machine). `goatest cache status` reports
-   it and `goatest cache gc` collects it, oldest-read first, keeping anything
-   read within the last hour so a collection never takes a file a live build is
-   about to open. A run never collects the base layer: it is shared by every
-   repository on the machine, and a run that pruned it would be deciding for
-   repositories it knows nothing about.
+5. **Every run bounds the base layer, and the bound is small.** `[cache]
+   build_max_bytes` bounds it — 2 GiB by default, because the cache is one
+   directory on a disk shared with everything else the developer does — and
+   `[cache] build_dir` says where it is (per machine by default, because a
+   compiled standard library is the same for every repository on the machine).
+   A run collects the layer when it ends, oldest-read first, under a
+   non-blocking lock on the layer; `goatest cache status` reports it and
+   `goatest cache gc` runs the same collection on demand. A cap applied only by
+   a command a developer remembers to type is not a cap, which is what an
+   earlier draft of this decision got wrong.
 
-6. **The cache is never a reason to fail.** A layer that cannot be created or
+   That the layer is shared by every repository on the machine is what the lock
+   and the idle window are for, not a reason to leave it uncollected. A run
+   that finds another process collecting yields to it and says nothing: the
+   layer ends up bounded either way. What protects the builds of those other
+   repositories is `MinIdle`, which spares by construction everything read
+   inside the last touch interval. One consequence is worth stating plainly:
+   the layer is shared, so the smallest `build_max_bytes` among the
+   repositories that actually run on the machine is the one that wins.
+
+6. **`MinIdle` is at least two touch intervals, and the layer says so.** A
+   collection may only remove an entry whose last touch is older than
+   `MinIdle`, and a read refreshes an entry's file time at most once per touch
+   interval — otherwise every cache hit would be a write. So an entry a live
+   build is reading continuously already carries a file time up to one whole
+   interval stale; that is the first interval. The second is the window the go
+   command needs after the response: it opens the file a response named *after*
+   that response, so an entry served moments ago must still be there.
+
+   `Layer.MinIdle` derives it from the layer's own touch interval rather than
+   leaving each caller to restate it. The intervals are per layer — an hour for
+   the layer the machine keeps, a minute for a run's own scratch, whose whole
+   life is one run and whose go commands are bounded in minutes — and the
+   inequality holds for each.
+
+7. **A layer is a directory goatest made, and the marker proves it.**
+   `Prepare` refuses a directory that exists, holds files, and carries none of
+   goatest's own names, and refuses it without writing anything into it. The
+   marker is `goatest-build-cache-v1`, not a `README`: a `README` is a file a
+   project already keeps, and a `build_dir` typed as a home or project
+   directory is exactly the mistake that must not become a directory goatest
+   collects and removes files from. An absent directory, an empty one, and one
+   holding only goatest's own names are all claimed.
+
+   `Prepare` runs once per run, in the run. The served process creates only the
+   directories its own writes need: there is one of them per go command and a
+   run issues thousands, so a stat, a readdir and an fsynced marker apiece
+   would be pure cost. It never rewrites a marker and never claims a directory,
+   because adopting one is the run's decision and not a go command's.
+
+8. **The scratch layer is bounded by size, not by age, and not on every
+   close.** A run may compile a package in one phase and want it in a later
+   one, so removing an entry because nothing read it for a while only buys a
+   recompile; removing the least recently read once the layer is over
+   `build_max_bytes` is the cost the project agreed to. The collection runs at
+   most once per minute, gated by the same lock and by the file time of the
+   record inside the layer, because there is one served process per go command
+   and collecting on each close is work proportional to the square of the run.
+
+9. **The cache is never a reason to fail.** A layer that cannot be created or
    written is reported as a progress note and done without; a store that fails
    mid-protocol answers that one request with an error rather than ending the
    server. A build cache is an optimisation, and an optimisation that cannot
    start must not become a verdict.
 
-7. **Only the composition root names the program.** The `GOCACHEPROG` value
-   re-executes the goatest binary, and the go command will wait on whatever that
-   value names. `cmd/goatest` is the one layer that knows the running process is
-   a goatest binary; a service embedded anywhere else — a test binary running it
-   in-process, an application linking it — leaves the executable empty and gets
-   the toolchain's own cache. This is not a detail: resolving it one layer lower
-   made every in-process test hand the go command a test binary, which sat
-   printing `still waiting for GOCACHEPROG` until it failed.
+10. **Only the composition root names the program.** The `GOCACHEPROG` value
+    re-executes the goatest binary, and the go command will wait on whatever
+    that value names. `cmd/goatest` is the one layer that knows the running
+    process is a goatest binary; a service embedded anywhere else — a test
+    binary running it in-process, an application linking it — leaves the
+    executable empty and gets the toolchain's own cache. This is not a detail:
+    resolving it one layer lower made every in-process test hand the go command
+    a test binary, which sat printing `still waiting for GOCACHEPROG` until it
+    failed.
+
+    Where the cache *lives* is resolved separately, and does not need the
+    executable at all. It is a property of the machine and the project, and
+    `cache status` and `cache gc` need it whoever is asking; tying the two
+    together made maintenance silently report an empty cache.
 
 ## Consequences
 
@@ -107,13 +163,25 @@ toolchain makes by TTL.
   cache identity that changed every run would never hit.
 - A run's scratch layer is a temporary directory like the baseline scratch, so
   `--keep-temp` keeps it and records it as a `build-cache-scratch` artifact.
-- The layout is versioned in the directory name (`build-v1`). A later layout is
-  a new directory, not a migration of somebody's disk, and the old one ages out.
-- The go command opens the file a response named *after* that response, so an
-  entry read moments ago must survive: an hour is both the refresh interval of
-  the layer's LRU clock and the window a collection leaves alone. The bound is
-  therefore soft by at most one hour of writes.
+- The layout is versioned twice over: in the directory name (`build-v1`) and in
+  the marker name (`goatest-build-cache-v1`). A later layout is a new
+  directory, not a migration of somebody's disk, and the old one ages out.
+- The bound is soft by at most one `MinIdle` of writes, which is two touch
+  intervals: everything read inside that window is spared however far over the
+  cap the layer is, and the next collection takes the rest.
+- The base layer is per machine, so two repositories with different
+  `build_max_bytes` share one directory and the smaller cap wins. That is the
+  right trade — the layer is mostly compiled standard library, which is the
+  same for both — but it means a project cannot reserve space in it.
+- A build of the identical source at a different absolute path misses for the
+  project's own packages, because the go command hashes the package directory
+  into the action ID unless `-trimpath` is set. goatest does not set it: that
+  would change the binaries under verification, and a verdict has to be about
+  the build the project actually makes. The standard library closure — most of
+  the layer — is path independent and hits regardless, and the effort goes
+  instead into giving go-mutants a snapshot directory that is stable per
+  repository root, so successive runs of one repository hit each other.
 - What a run asked the cache for is reported as a `build-cache-summary` progress
-  note. A reader who sees goatest go faster can see how much of it was the
+  note, and what its final collection removed as `build-cache-collected`. A reader who sees goatest go faster can see how much of it was the
   cache, which is the same rule [0004](0004-proof-layers-not-budgets.md) asks of
   a proof layer: the answer is in the recording, never in a configuration file.

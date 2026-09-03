@@ -85,7 +85,17 @@ project's test binary under `go tool test2json`, and a test suite spawns go
 commands of its own; were a target run to persist, every throwaway package those
 fixtures compile would evict the standard library the base layer exists to hold.
 The rule lives in one function, is applied by one workspace decorator, and is
-pinned by a test that names every command goatest issues. See
+pinned by a test that names every command goatest issues.
+
+Both layers are bounded, and nobody has to remember to bound them. The run
+collects the base layer when it ends and the served processes keep the scratch
+layer inside the same cap as they go, each under a non-blocking lock on the
+layer so concurrent runs and `goatest cache gc` yield to one another instead of
+duplicating the walk. A collection spares everything read within two touch
+intervals, which is what makes it safe beside a live build: the go command opens
+a cached file after the response that named it. goatest never adopts a directory
+it did not make, so a `build_dir` pointing at anything that already holds other
+files is refused rather than collected. See
 [ADR 0005](adr/0005-build-cache-goatest-owns.md) and
 [configuration](configuration.md) for the bound and the location.
 
