@@ -238,6 +238,32 @@
           }
         },
         {
+          "if": { "required": ["discharged"] },
+          "then": {
+            "description": "A proof removes a target from a reaching set the blocks decided, so the route that records one was decided by block.",
+            "required": ["granularity"],
+            "properties": { "granularity": { "const": "block" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["discharged"],
+            "properties": {
+              "discharged": {
+                "contains": {
+                  "required": ["reason"],
+                  "properties": { "reason": { "const": "never-infected" } }
+                }
+              }
+            }
+          },
+          "then": {
+            "description": "The infection proof is the probe pass's measurement of this mutant, so the route that records one was probed.",
+            "required": ["probed"],
+            "properties": { "probed": { "const": true } }
+          }
+        },
+        {
           "if": {
             "anyOf": [
               { "required": ["column"] },

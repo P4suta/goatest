@@ -410,6 +410,12 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 // on both sides contradicts itself, and a target is removed by one proof, so a
 // route naming the same target twice would be counted twice. One route may
 // carry both proofs, because the reason is read per entry.
+//
+// It holds them to their prerequisites as well. The reaching set a proof
+// removes a target from is the one the blocks decided, so a route recording any
+// discharge was decided by block; and the infection proof is the probe pass's
+// measurement of this mutant, so a route recording that one was probed. Either
+// contradiction is a route the summary would otherwise count as a proof.
 func checkDischarges(record trace.RouteRecord) error {
 	if len(record.Discharged) == 0 {
 		return nil
@@ -426,6 +432,14 @@ func checkDischarges(record trace.RouteRecord) error {
 		if discharge.Reason != trace.DischargeBranchNeverTaken && discharge.Reason != trace.DischargeNeverInfected {
 			return fmt.Errorf("unknown route discharge reason %q, want %q or %q",
 				discharge.Reason, trace.DischargeBranchNeverTaken, trace.DischargeNeverInfected)
+		}
+		if record.Granularity != trace.GranularityBlock {
+			return fmt.Errorf("route discharged %q on granularity %q, want granularity %q: a proof removes a target from a reaching set the blocks decided",
+				discharge.Target, record.Granularity, trace.GranularityBlock)
+		}
+		if discharge.Reason == trace.DischargeNeverInfected && !record.Probed {
+			return fmt.Errorf("route discharged %q as never-infected without a probe marker: the infection proof is the probe pass's measurement, so the route it removes a target from was probed",
+				discharge.Target)
 		}
 		if _, reached := reaching[discharge.Target]; reached {
 			return fmt.Errorf("route discharged %q and reaches it: a discharged target is one the route no longer reaches",

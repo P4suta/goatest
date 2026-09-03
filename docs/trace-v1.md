@@ -245,12 +245,16 @@ while carrying some, and both the schema and the trace reader reject it.
 `discharged` are the targets whose covered blocks contain the mutated position:
 a proof removed the discharged ones, so a discharged target never appears in
 `reaching_targets` as well, and a route naming the same target on both sides is
-rejected. Each entry names the target and the proof that removed it, which is
-`branch-never-taken` or `never-infected`. `branch-never-taken` proves that the
-target never entered the body the mutated condition gates, so it took the same
-branch on both programs; `never-infected` proves that the probe pass measured
-the target and never saw the mutated site's value differ from the constant the
-mutant puts there, so both programs ran it through identical states. A target is
+rejected. That set is what a proof removes a target from, so a discharge is
+recorded on a route of `granularity: block` and on no other: a route recording
+one on any other granularity, or on none at all, is rejected by both the schema
+and the trace reader. Each entry names the target and the proof that removed
+it, which is `branch-never-taken` or `never-infected`. `branch-never-taken`
+proves that the target never entered the body the mutated condition gates, so it
+took the same branch on both programs; `never-infected` proves that the probe
+pass measured the target and never saw the mutated site's value differ from the
+constant the mutant puts there, so both programs ran it through identical
+states. A target is
 removed by one proof, so each target appears in `discharged` at most once; a
 route naming the same target twice is rejected as well, since a reader counting
 the entries would otherwise count that target twice. One route may carry both
@@ -274,11 +278,13 @@ empty plan would run the very tests the proofs ruled out.
 so the probe pass measured it. A measured target that does not name the mutant
 among the `infected` of its `probe-exec` event never made the mutant's site
 differ, and therefore can never observe it: routing discharges it from this
-mutant's reaching set with reason `never-infected`, so a route carrying such a
-discharge always carries `probed` as well. A mutant the engine has no probe
-form for carries no `probed`, and neither does a recording made before the pass
-existed: an absent marker is an absent measurement rather than a mutant nothing
-infected, and nothing is discharged by it.
+mutant's reaching set with reason `never-infected`. That discharge is the
+measurement itself, so a route carrying one carries `probed` as well, and both
+the schema and the trace reader reject a route that carries the discharge
+without it. A mutant the engine has no probe form for carries no `probed`, and
+neither does a recording made before the pass existed: an absent marker is an
+absent measurement rather than a mutant nothing infected, and nothing is
+discharged by it.
 
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.
