@@ -55,7 +55,13 @@ func TestKeepTempPreservesTheBaselineScratchAndSaysWhereItIs(t *testing.T) {
 			}
 			var want []trace.ArtifactRecord
 			if test.kept {
-				want = []trace.ArtifactRecord{{Kind: "baseline-scratch", Path: filepath.Join(temporary, "baseline-scratch")}}
+				// The round's scratch is named while the round runs, and the
+				// run scratch it was made below when the run has ended and
+				// there is nothing left to put in it.
+				want = []trace.ArtifactRecord{
+					{Kind: "baseline-scratch", Path: filepath.Join(harness.runScratch, "baseline-scratch")},
+					{Kind: "run-scratch", Path: harness.runScratch},
+				}
 			}
 			if got := recordedArtifacts(sink); !reflect.DeepEqual(got, want) {
 				t.Fatalf("recorded artifacts = %+v, want %+v", got, want)
