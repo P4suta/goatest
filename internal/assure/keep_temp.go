@@ -7,8 +7,9 @@ package assure
 // A kind names what the directory was for, because a developer reading a list
 // of preserved paths chooses between them rather than opening all of them.
 const (
-	artifactBaselineScratch = "baseline-scratch"
-	artifactCandidateTree   = "candidate-tree"
+	artifactBaselineScratch   = "baseline-scratch"
+	artifactCandidateTree     = "candidate-tree"
+	artifactBuildCacheScratch = "build-cache-scratch"
 )
 
 // releaseBaselineScratch removes the scratch directory a round collected its
@@ -24,6 +25,20 @@ func releaseBaselineScratch(options Options, remove func(string) error, director
 		return nil
 	}
 	return remove(directory)
+}
+
+// releaseBuildCache removes the scratch layer of the run's build cache, or
+// keeps it when the run was asked to keep its temporaries. It is kept and named
+// for the same reason the baseline scratch is: what a run compiled and where it
+// went is exactly what a developer investigating a slow run wants to open.
+func releaseBuildCache(options Options, cache runBuildCache) error {
+	if !cache.serves() {
+		return nil
+	}
+	if options.KeepTemp {
+		options.Trace.Artifact(artifactBuildCacheScratch, cache.scratch)
+	}
+	return cache.close(options.KeepTemp)
 }
 
 // releaseCandidate removes the isolated tree a candidate was validated in, or

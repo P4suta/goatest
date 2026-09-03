@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
@@ -41,7 +42,25 @@ type Service struct {
 	GoBinary      string
 	TempDirectory string
 	Environment   []string
-	Progress      io.Writer
+	// Executable is the goatest binary a go command started by a run
+	// re-executes to reach goatest's build cache. Only a composition root that
+	// knows this process is goatest may fill it in: the value is handed to the
+	// go command, which will wait on whatever it names, so a process that is
+	// not a goatest binary — a test binary running this service in-process,
+	// an application embedding it — must leave it empty and gets the
+	// toolchain's own cache.
+	Executable string
+	// UserCacheDir names the per-machine cache root goatest's build cache lives
+	// below unless a project configured another. Only a composition root that
+	// knows this process is the goatest CLI on a real machine may fill it in:
+	// the directory it names is inspected by `cache status` and collected by
+	// `cache gc` and by every run that ends, so a process that is not that CLI
+	// — a test binary running this service in-process, an application
+	// embedding it — must leave it nil and then never touches the machine's
+	// cache directory. Its zero value is a process with no per-machine cache
+	// root: the build cache is the one the project configured, or none.
+	UserCacheDir func() (string, error)
+	Progress     io.Writer
 	// Output is the stream the final report is rendered to. A jsonl UI streams
 	// its progress events there so that one pipe carries the whole stream; a
 	// service without one falls back to the plain progress stream.
@@ -381,6 +400,7 @@ func (service Service) selectNotes(request cli.Request) ui.Notes {
 }
 
 func (service Service) assureOptions(root string, request cli.Request) assure.Options {
+	program, base := service.buildCacheLocation(root)
 	return assure.Options{
 		Root: root, Contract: request.Contract, NoApply: true,
 		Changed: request.Changed, ChangedRef: request.ChangedRef,
@@ -388,8 +408,50 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		Packages: slices.Clone(request.Packages), PackageScope: explicitPackageScope(request.Packages),
 		TestArgs: slices.Clone(request.TestArgs),
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
-		KeepTemp: request.KeepTemp,
+		KeepTemp:          request.KeepTemp,
+		BuildCacheProgram: program, BuildCacheDir: base,
 	}
+}
+
+// buildCacheLocation resolves the executable a go command reaches goatest's
+// build cache through and the directory that cache lives in. This is the only
+// layer that may answer either question: below it, both are options.
+//
+// The two are resolved separately and on purpose. Where the cache lives is a
+// property of the machine and the project, and maintenance needs it whether or
+// not this process could serve the cache; what program serves it is a property
+// of this process. Tying the first to the second made `goatest cache status`
+// and `goatest cache gc` silently report an empty cache whenever nothing had
+// named an executable. Both halves are still named by a composition root, and
+// only there: see Executable and UserCacheDir.
+func (service Service) buildCacheLocation(root string) (string, string) {
+	return service.Executable, service.buildCacheDirectory(root)
+}
+
+// buildCacheDirectory resolves where the build cache lives, whether or not this
+// process can serve it.
+//
+// The per-machine default is only ever the one UserCacheDir names, and this
+// layer will not go looking: a service nobody handed a resolver is not the
+// goatest CLI, and inspecting or collecting the running developer's own cache
+// on its behalf is the one thing no embedded service may do.
+//
+// An empty answer is nowhere to keep a layer rather than a failure: no
+// per-machine cache root and none configured, or a configuration that will not
+// load — and that last one is reported by the run that loads the same file a
+// moment later, which is the layer that owns the failure.
+func (service Service) buildCacheDirectory(root string) string {
+	var fallback string
+	if service.UserCacheDir != nil {
+		if userCache, cacheErr := service.UserCacheDir(); cacheErr == nil && userCache != "" {
+			fallback = filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)
+		}
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		return ""
+	}
+	return buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
 }
 
 func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {

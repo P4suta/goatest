@@ -67,6 +67,90 @@ expires = "2026-12-31T00:00:00Z"
 	}
 }
 
+func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
+	defaults, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Cache.BuildMaxBytes != 2<<30 || defaults.Cache.BuildDir != "" {
+		t.Fatalf("build cache defaults = %+v, want 2 GiB below the per-machine directory", defaults.Cache)
+	}
+	for _, test := range []struct {
+		name          string
+		contents      string
+		wantMaxBytes  int64
+		wantDirectory string
+		wantError     string
+	}{
+		{
+			name:     "configured",
+			contents: "[cache]\nbuild_max_bytes = 2048\nbuild_dir = \".goatest/build\"\n",
+			// A bound and a directory a project asked for are taken exactly as
+			// written: an unresolved relative path, because only the run knows
+			// the repository it is read from.
+			wantMaxBytes: 2048, wantDirectory: ".goatest/build",
+		},
+		{
+			name:     "zero is the default rather than an unbounded cache",
+			contents: "[cache]\nbuild_max_bytes = 0\n",
+			// Zero cannot mean unbounded here: a cache nothing collects fills
+			// the disk, which is the failure this whole layer exists to avoid.
+			wantMaxBytes: 2 << 30,
+		},
+		{
+			name:      "negative",
+			contents:  "[cache]\nbuild_max_bytes = -1\n",
+			wantError: "goatest: cache build_max_bytes must not be negative",
+		},
+		{
+			name:      "padded directory",
+			contents:  "[cache]\nbuild_dir = \" build \"\n",
+			wantError: `goatest: cache build_dir " build " has surrounding whitespace`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := config.Load(root)
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("Load error = %v, want %s", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Cache.BuildMaxBytes != test.wantMaxBytes || loaded.Cache.BuildDir != test.wantDirectory {
+				t.Fatalf("build cache = %+v, want %d bytes at %q", loaded.Cache, test.wantMaxBytes, test.wantDirectory)
+			}
+		})
+	}
+}
+
+func TestInitRoundTripsTheBuildCacheBound(t *testing.T) {
+	root := t.TempDir()
+	if err := config.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, config.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "build_max_bytes") {
+		t.Fatalf("written config = %s, want the build cache bound in it", written)
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cache.BuildMaxBytes != 2<<30 {
+		t.Fatalf("reloaded build cache = %+v, want the default bound to have survived the round trip", loaded.Cache)
+	}
+}
+
 func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
 	root := t.TempDir()
 	contents := "version = 1\n[execution]\ntest_binary_args = [\"-short\", \"-custom=value\"]\n"

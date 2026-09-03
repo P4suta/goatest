@@ -444,8 +444,9 @@ audited by.
 
 A run emits one for each temporary directory `--keep-temp` asked it to keep:
 `baseline-scratch` for the scratch directory a round collected its baseline in,
-and `candidate-tree` for the isolated tree a generated candidate was validated
-in. Those paths are absolute and outside the repository, because that is where a
+`candidate-tree` for the isolated tree a generated candidate was validated in,
+and `build-cache-scratch` for the layer of the build cache that would otherwise
+die with the run. Those paths are absolute and outside the repository, because that is where a
 temporary directory is made, so a `path` is read as it was recorded rather than
 resolved against anything. Nothing else emits an `artifact` event yet. See
 [development](development.md) for what is kept and what is not.

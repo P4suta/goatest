@@ -22,7 +22,17 @@ line. Loading the untouched skeleton yields exactly the defaults.
 - `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
   applied independently to exact-input cache entries, trace run directories,
   and failure-diagnostics directories. Checkpoints live inside their
-  exact-input cache entry and are collected with it.
+  exact-input cache entry and are collected with it. `build_max_bytes`
+  (non-negative, 2 GiB by default) bounds the separate build cache goatest
+  serves its go commands from, and `build_dir` says where that cache lives — a
+  relative path is read from the repository root, and the default under the
+  `goatest` CLI is a per-machine directory below the user cache directory,
+  because a compiled standard library is the same for every repository on the
+  machine. The two
+  bounds are separate because the two stores hold different things at different
+  scales: verdicts of a few kilobytes, and object files measured in gigabytes.
+  Every run enforces `build_max_bytes` when it ends, so it is a bound and not
+  a suggestion; see [cache maintenance](#cache-maintenance) below.
 - `[resources.<capability>]`: provider `command`, positive `timeout`, one of
   `shared` or `exclusive`, and environment-name allowlist.
 - `[generation]`: provider `command`, `allowed_paths`, and environment-name
@@ -59,12 +69,32 @@ Protocol details are in [protocols](protocols.md).
 
 ## Cache maintenance
 
-`goatest cache status` reports the exact-input cache, `.goatest/trace`, and
-`.goatest/diagnostics`. `goatest cache gc` removes expired entries first and
-then the oldest entries until each store meets `max_bytes`. Verification and
-maintenance hold one OS advisory lock rooted at `.goatest/cache`; a contending
-process reports `cache-wait`, and interrupting that wait does not start work or
-run GC without the lock.
+`goatest cache status` reports the exact-input cache, `.goatest/trace`,
+`.goatest/diagnostics`, and the build cache. `goatest cache gc` removes expired
+entries first and then the oldest entries until each store meets its bound —
+`max_bytes` for the first three, `build_max_bytes` for the build cache.
+Verification and maintenance hold one OS advisory lock rooted at
+`.goatest/cache`; a contending process reports `cache-wait`, and interrupting
+that wait does not start work or run GC without the lock.
+
+The build cache is also collected at the end of every run, with the same
+policy, so `build_max_bytes` is a bound whether or not anybody types `cache gc`.
+Both collections take a non-blocking lock on the layer and skip if another
+process holds it, so a run and a maintenance command running side by side
+simply let each other finish. A collection keeps anything read within the last
+two touch intervals — two hours for the layer the machine keeps — because the
+go command opens a cached file after the response that named it and a
+continuously read entry's file time is refreshed only once per interval; the
+bound is therefore soft by at most that window of writes.
+
+The base layer is per machine, not per repository, because a compiled standard
+library is the same for every repository on it. Two projects that configure
+different `build_max_bytes` therefore share one directory and the smaller cap
+wins. Removing the directory whole is always safe: it costs the next run the
+work of compiling again, and the directory says so in the
+`goatest-build-cache-v1` marker beside its contents. goatest will not adopt a
+directory it did not make — a `build_dir` pointing at anything that already
+holds other files is refused rather than collected.
 
 The mutation evidence store, `.goatest/cache/mutation-evidence-v1.json`, is
 one file beside the exact-input cache rather than an entry in it: it is

@@ -51,6 +51,20 @@ type Execution struct {
 type Cache struct {
 	MaxBytes int64
 	TTL      time.Duration
+	// BuildMaxBytes bounds the build cache goatest serves its go commands
+	// from: the compiled standard library, dependencies, and packages that
+	// every run would otherwise compile again. It is separate from MaxBytes
+	// because the two hold different things at different scales — one holds
+	// verdicts of a few kilobytes, the other holds object files of gigabytes —
+	// and a single bound would let either starve the other.
+	BuildMaxBytes int64
+	// BuildDir is where that cache lives. An empty directory is, under the
+	// goatest CLI, the per-machine one below the user cache directory, which
+	// is the right default because the compiled standard library is the same
+	// for every repository on the machine; a process that names no such
+	// directory keeps no build cache then. A project whose disk cannot hold
+	// it says so here; a relative path is read from the repository root.
+	BuildDir string
 }
 
 type Acceptance struct {
@@ -97,8 +111,10 @@ type rawExecution struct {
 }
 
 type rawCache struct {
-	MaxBytes int64  `toml:"max_bytes"`
-	TTL      string `toml:"ttl"`
+	MaxBytes      int64  `toml:"max_bytes"`
+	TTL           string `toml:"ttl"`
+	BuildMaxBytes int64  `toml:"build_max_bytes"`
+	BuildDir      string `toml:"build_dir"`
 }
 
 type rawResource struct {
@@ -143,10 +159,21 @@ var (
 	renameConfigFile = os.Rename
 )
 
+// defaultBuildMaxBytes bounds the build cache by default.
+//
+// It is deliberately modest. The cache is one directory on one machine and a
+// developer's disk is shared with everything else they do, so the default has
+// to be a size nobody notices; two gigabytes holds a compiled standard library
+// and a normal dependency set with room to spare, and a project that wants more
+// says so. A larger default would buy a few seconds on a toolchain upgrade at
+// the price of most of a small disk.
+const defaultBuildMaxBytes int64 = 2 << 30
+
 func defaults() Config {
 	return Config{
 		Version: 1, Contract: "standard-v1", Project: Project{Packages: []string{"./..."}},
-		Execution: Execution{Timeout: 10 * time.Minute}, Cache: Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour},
+		Execution: Execution{Timeout: 10 * time.Minute},
+		Cache:     Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour, BuildMaxBytes: defaultBuildMaxBytes},
 		Resources: map[string]Resource{},
 	}
 }
@@ -210,6 +237,17 @@ func Load(root string) (Config, error) {
 	if cacheMaxBytes < 0 {
 		return Config{}, errors.New("goatest: cache max_bytes must not be negative")
 	}
+	buildMaxBytes := raw.Cache.BuildMaxBytes
+	if buildMaxBytes == 0 {
+		buildMaxBytes = defaultBuildMaxBytes
+	}
+	if buildMaxBytes < 0 {
+		return Config{}, errors.New("goatest: cache build_max_bytes must not be negative")
+	}
+	buildDir := strings.TrimSpace(raw.Cache.BuildDir)
+	if buildDir != raw.Cache.BuildDir {
+		return Config{}, fmt.Errorf("goatest: cache build_dir %q has surrounding whitespace", raw.Cache.BuildDir)
+	}
 	cacheTTL := 30 * 24 * time.Hour
 	if raw.Cache.TTL != "" {
 		parsed, parseErr := time.ParseDuration(raw.Cache.TTL)
@@ -226,7 +264,7 @@ func Load(root string) (Config, error) {
 			BuildTags: slices.Clone(raw.Execution.BuildTags), TestBinaryArgs: testBinaryArgs,
 			Environment: slices.Clone(raw.Execution.Environment), Timeout: executionTimeout, Jobs: raw.Execution.Jobs,
 		},
-		Cache:     Cache{MaxBytes: cacheMaxBytes, TTL: cacheTTL},
+		Cache:     Cache{MaxBytes: cacheMaxBytes, TTL: cacheTTL, BuildMaxBytes: buildMaxBytes, BuildDir: buildDir},
 		Resources: make(map[string]Resource, len(raw.Resources)),
 		Generation: Generation{
 			Command:      append([]string(nil), raw.Generation.Command...),
@@ -313,8 +351,10 @@ contract = "standard-v1"
 # jobs = 4                       # mutation workers (bounded at 4)
 
 # [cache]
-# max_bytes = 5368709120 # 5 GiB evidence cache budget
-# ttl = "720h"           # entries older than this are collected
+# max_bytes = 5368709120        # 5 GiB evidence cache budget
+# ttl = "720h"                  # entries older than this are collected
+# build_max_bytes = 2147483648  # 2 GiB build cache budget, collected at the end of every run
+# build_dir = ".goatest/build"  # where the build cache lives; the default is per machine
 
 # One table per managed test resource; docs/protocols.md defines the provider
 # contract. Tests declare a capability with goatest.Integration("postgres") or
@@ -401,7 +441,10 @@ func save(root string, input Config) error {
 			BuildTags: slices.Clone(input.Execution.BuildTags), TestBinaryArgs: slices.Clone(input.Execution.TestBinaryArgs),
 			Environment: slices.Clone(input.Execution.Environment), Timeout: input.Execution.Timeout.String(), Jobs: input.Execution.Jobs,
 		},
-		Cache:     rawCache{MaxBytes: input.Cache.MaxBytes, TTL: input.Cache.TTL.String()},
+		Cache: rawCache{
+			MaxBytes: input.Cache.MaxBytes, TTL: input.Cache.TTL.String(),
+			BuildMaxBytes: input.Cache.BuildMaxBytes, BuildDir: input.Cache.BuildDir,
+		},
 		Resources: make(map[string]rawResource, len(input.Resources)),
 		Generation: rawGeneration{
 			Command: slices.Clone(input.Generation.Command), AllowedPaths: slices.Clone(input.Generation.AllowedPaths),

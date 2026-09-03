@@ -43,20 +43,33 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		return report.Report{}, err
 	}
 	options.TestArgs = normalizedTestArgs
+	buildCache, err := openRunBuildCache(
+		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
+	if err != nil {
+		emit(options, "build-cache-unavailable", err.Error())
+	}
+	defer func() {
+		// A plan compiles too — the mutation catalog is built from compiled
+		// packages — so it bounds the layer on the way out like a run does.
+		collectRunBuildCache(options, loaded, buildCache, planMoment(options))
+		resultErr = errors.Join(resultErr, releaseBuildCache(options, buildCache))
+	}()
 	workspace, err := mutationbridge.Open(ctx, root, mutationbridge.Options{
 		GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
-		ReportDirectory: ".goatest", Environment: mutationEnvironment(options.Environment, options.BuildTags),
+		ReportDirectory: ".goatest",
+		Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
 	})
 	if err != nil {
 		return report.Report{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, workspace.Close()) }()
-	metadata, err := inspectWorkspace(ctx, workspace)
+	commands := withBuildCache(workspace, buildCache)
+	metadata, err := inspectWorkspace(ctx, commands)
 	if err != nil {
 		return report.Report{}, err
 	}
 	if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
-		metadata.model, err = inspectSelectedPackages(ctx, workspace, options.Packages, options.BuildTags, options.CommandTimeout)
+		metadata.model, err = inspectSelectedPackages(ctx, commands, options.Packages, options.BuildTags, options.CommandTimeout)
 		if err != nil {
 			return report.Report{}, err
 		}

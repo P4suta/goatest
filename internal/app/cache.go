@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/report"
@@ -34,7 +35,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
 		Evidence: []report.Evidence{{
 			Kind: "cache", ID: "policy", Status: "configured",
-			Detail: fmt.Sprintf("max-bytes=%d ttl=%s", loaded.Cache.MaxBytes, loaded.Cache.TTL),
+			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d", loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes),
 		}},
 	}
 	switch action {
@@ -53,6 +54,11 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		}
 		result.Evidence = append(result.Evidence, cacheStatusEvidence("status", status),
 			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus))
+		buildStatus, err := service.buildCacheLayer(root).Inspect()
+		if err != nil {
+			return report.Report{}, err
+		}
+		result.Evidence = append(result.Evidence, buildCacheStatusEvidence("build-status", buildStatus))
 		return result, nil
 	case "gc":
 		now := time.Now
@@ -79,10 +85,66 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			retentionGCStatusEvidence("trace", traceCollected),
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
 		)
+		// Every run already collects the build cache when it ends, so this is
+		// the same collection on demand rather than the only one there is. It
+		// takes the layer's own lock, so it yields to a run collecting beside
+		// it, and MinIdle comes from the layer rather than from a constant
+		// here: the window a collection must leave alone is two of the layer's
+		// touch intervals, and only the layer knows what its interval is.
+		buildLayer := service.buildCacheLayer(root)
+		buildCollected, ran, err := buildLayer.CollectLocked(buildcache.Policy{
+			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildLayer.MinIdle(),
+		}, 0, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
+		result.Evidence = append(result.Evidence,
+			buildCacheStatusEvidence("build-before", buildCollected.Before),
+			buildCacheGCEvidence(buildCollected, ran),
+			buildCacheStatusEvidence("build-after", buildCollected.After))
 		return result, nil
 	default:
 		return report.Report{}, fmt.Errorf("goatest: cache action %q is unsupported", action)
 	}
+}
+
+// buildCacheLayer names the build cache this repository's configuration points
+// at. A directory nothing could resolve is the zero layer, which holds nothing
+// and collects nothing, so status and gc report an empty cache rather than
+// refusing to run.
+//
+// It asks for the directory alone. Maintenance never serves the cache, so
+// whether this process could be re-executed as the cache program has nothing
+// to do with whether it can report on the layer or collect it.
+func (service Service) buildCacheLayer(root string) buildcache.Layer {
+	return buildcache.Layer{Dir: service.buildCacheDirectory(root)}
+}
+
+// buildCacheGCEvidence reports what the collection of the build cache did, and
+// a collection that did not run is not one that removed nothing.
+//
+// The layer the machine keeps is shared by every repository on it, so the
+// collection yields when another process already holds it, and a layer no
+// machine has built yet has nothing to hold at all. Both are ordinary answers
+// rather than failures, and both leave the bound unapplied for now — so a
+// reader who saw "completed, removed nothing" would draw the opposite
+// conclusion from the true one.
+func buildCacheGCEvidence(collected buildcache.Collected, ran bool) report.Evidence {
+	if !ran {
+		return report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "skipped",
+			Detail: "not collected: another process holds the layer, or it has not been built yet"}
+	}
+	return report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "completed",
+		Detail: fmt.Sprintf("removed-actions=%d removed-objects=%d removed-bytes=%d",
+			collected.RemovedActions, collected.RemovedObjects, collected.RemovedBytes)}
+}
+
+func buildCacheStatusEvidence(id string, status buildcache.Status) report.Evidence {
+	detail := fmt.Sprintf("entries=%d bytes=%d", status.Entries, status.Bytes)
+	if !status.Oldest.IsZero() {
+		detail += " oldest=" + status.Oldest.UTC().Format(time.RFC3339Nano)
+	}
+	return report.Evidence{Kind: "build-cache", ID: id, Status: "ready", Detail: detail}
 }
 
 func retentionStatusEvidence(id string, status retention.Status) report.Evidence {
