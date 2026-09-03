@@ -92,7 +92,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		// here: the window a collection must leave alone is two of the layer's
 		// touch intervals, and only the layer knows what its interval is.
 		buildLayer := service.buildCacheLayer(root)
-		buildCollected, _, err := buildLayer.CollectLocked(buildcache.Policy{
+		buildCollected, ran, err := buildLayer.CollectLocked(buildcache.Policy{
 			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildLayer.MinIdle(),
 		}, 0, moment)
 		if err != nil {
@@ -100,9 +100,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		}
 		result.Evidence = append(result.Evidence,
 			buildCacheStatusEvidence("build-before", buildCollected.Before),
-			report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "completed",
-				Detail: fmt.Sprintf("removed-actions=%d removed-objects=%d removed-bytes=%d",
-					buildCollected.RemovedActions, buildCollected.RemovedObjects, buildCollected.RemovedBytes)},
+			buildCacheGCEvidence(buildCollected, ran),
 			buildCacheStatusEvidence("build-after", buildCollected.After))
 		return result, nil
 	default:
@@ -120,6 +118,25 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 // to do with whether it can report on the layer or collect it.
 func (service Service) buildCacheLayer(root string) buildcache.Layer {
 	return buildcache.Layer{Dir: service.buildCacheDirectory(root)}
+}
+
+// buildCacheGCEvidence reports what the collection of the build cache did, and
+// a collection that did not run is not one that removed nothing.
+//
+// The layer the machine keeps is shared by every repository on it, so the
+// collection yields when another process already holds it, and a layer no
+// machine has built yet has nothing to hold at all. Both are ordinary answers
+// rather than failures, and both leave the bound unapplied for now — so a
+// reader who saw "completed, removed nothing" would draw the opposite
+// conclusion from the true one.
+func buildCacheGCEvidence(collected buildcache.Collected, ran bool) report.Evidence {
+	if !ran {
+		return report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "skipped",
+			Detail: "not collected: another process holds the layer, or it has not been built yet"}
+	}
+	return report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "completed",
+		Detail: fmt.Sprintf("removed-actions=%d removed-objects=%d removed-bytes=%d",
+			collected.RemovedActions, collected.RemovedObjects, collected.RemovedBytes)}
 }
 
 func buildCacheStatusEvidence(id string, status buildcache.Status) report.Evidence {
