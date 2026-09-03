@@ -35,6 +35,7 @@ import (
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
+	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/testargs"
 	"github.com/P4suta/goatest/internal/trace"
 )
@@ -215,6 +216,9 @@ type runDependencies struct {
 	discoverTargets        func(string, []goanalysis.Package) ([]goanalysis.Target, error)
 	selectImpact           func(context.Context, string, goanalysis.Model, []goanalysis.Target, Options) impactSelection
 	acquireResources       func(context.Context, config.Config, []goanalysis.Target, []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error)
+	makeRunScratch         func(string, string) (string, error)
+	removeRunScratch       func(string) error
+	sweepTemporary         func(string, []string, time.Time) (tempowner.Result, error)
 	makeBaselineScratch    func(string, string) (string, error)
 	removeBaselineScratch  func(string) error
 	collectBaseline        func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error)
@@ -267,11 +271,24 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	accepted := activeAcceptance(loaded, now())
 	acceptances := activeAcceptanceMetadata(loaded, now())
 	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"), loaded.Cache)
+	// Before this run writes a byte outside the repository, so that a machine
+	// holding the leftovers of a killed run has the disk back before this one
+	// asks for hundreds of megabytes of it.
+	sweepRunTemporaries(options, dependencies.sweepTemporary, now())
+	// One directory for everything this run writes outside the repository, and
+	// an owner on it, so that what a run leaves behind when it is killed is
+	// attributable to it and collectable by the next one. A run that could not
+	// make or claim one says so and carries on: this is housekeeping, and
+	// housekeeping never decides a verdict.
+	scratch, err := openRunScratch(dependencies.makeRunScratch, options.TempDirectory, root, now())
+	if err != nil {
+		emit(options, "temp-unavailable", err.Error())
+	}
 	// A build cache that cannot be opened is reported and then done without. It
 	// makes a run faster and decides nothing, so a disk that refuses it costs
 	// time and never a verdict.
 	buildCache, err := openRunBuildCache(
-		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
+		options.BuildCacheProgram, options.BuildCacheDir, scratch, loaded.Cache.BuildMaxBytes)
 	if err != nil {
 		emit(options, "build-cache-unavailable", err.Error())
 	}
@@ -283,6 +300,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		if closeErr := releaseBuildCache(options, buildCache); closeErr != nil {
 			emit(options, "build-cache-unavailable", closeErr.Error())
 		}
+		// Last, because the build cache layer is inside it: removing that
+		// layer first keeps the peak smaller, and this removal covers whatever
+		// is left.
+		releaseRunScratch(options, dependencies.removeRunScratch, scratch)
 	}()
 	var appliedRepairs []report.Repair
 	phases := runPhases{recorder: options.Trace}
@@ -411,7 +432,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				}
 				controlWorkspace = opened
 			}
-			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags)
+			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags, scratch)
 		}
 		closeControl := func() error {
 			controlMutex.Lock()
@@ -426,7 +447,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 
 		phases.enter(phaseBaseline)
-		artifactDirectory, err := dependencies.makeBaselineScratch(options.TempDirectory, "goatest-baseline-")
+		baselineParent, baselinePrefix := scratch.subdirectory(baselineScratchName)
+		artifactDirectory, err := dependencies.makeBaselineScratch(baselineParent, baselinePrefix)
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, fmt.Errorf("goatest: create baseline scratch: %w", err)
@@ -670,6 +692,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 
 		phases.enter(phaseRepair)
 		generated := GenerationEvaluation{Findings: slices.Clone(mutation.Findings)}
+		candidateParent, candidatePrefix := scratch.subdirectory(candidateTreeName)
 		if !mutation.Applied {
 			generated, err = dependencies.attemptRepairs(ctx, root, mutation.Findings, GenerationOptions{
 				Snapshot: digest, NoApply: options.NoApply, Generate: options.Generate,
@@ -678,7 +701,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				AllowedPaths:        generationPaths(options, loaded), Validator: options.Validator,
 				RepositoryValidator: RepositoryValidatorOptions{
 					Root: root, Contract: contract, GoBinary: options.GoBinary,
-					TempDirectory: options.TempDirectory, Environment: validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
+					TempDirectory: candidateParent, TempPrefix: candidatePrefix,
+					Environment:       validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
 					MutationOperators: options.MutationOperators, Packages: options.Packages,
 					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
 					Trace: options.Trace, KeepTemp: options.KeepTemp,
@@ -751,7 +775,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	}
 }
 
-func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string) (gomutants.CommandResult, error) {
+func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string, scratch runScratch) (gomutants.CommandResult, error) {
 	argv := []string{"go", "test", "-count=1"}
 	if len(buildTags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(buildTags, ","))
@@ -763,7 +787,7 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 	}
 	arguments := slices.Clone(request.Args)
 	if hasTestArgument(arguments, "-test.fuzz") && !hasTestArgument(arguments, "-test.fuzzcachedir") {
-		cacheDirectory, err := os.MkdirTemp("", "goatest-control-fuzz-")
+		cacheDirectory, err := os.MkdirTemp(scratch.subdirectory(controlFuzzName))
 		if err != nil {
 			return gomutants.CommandResult{}, fmt.Errorf("goatest: create original-control fuzz cache: %w", err)
 		}

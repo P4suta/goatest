@@ -50,14 +50,14 @@ type runBuildCache struct {
 // layer that cannot be created or written is discovered by the run, which can
 // carry on without a cache, instead of by a go command, which would fail the
 // build it was in the middle of.
-func openRunBuildCache(program, base, temporaryRoot string, maxBytes int64) (runBuildCache, error) {
+func openRunBuildCache(program, base string, runScratch runScratch, maxBytes int64) (runBuildCache, error) {
 	if program == "" || base == "" {
 		return runBuildCache{}, nil
 	}
 	if err := (buildcache.Layer{Dir: base}).Prepare(); err != nil {
 		return runBuildCache{}, err
 	}
-	scratch, err := os.MkdirTemp(temporaryRoot, "goatest-build-cache-")
+	scratch, err := runScratch.buildCacheLayer()
 	if err != nil {
 		return runBuildCache{}, fmt.Errorf("goatest: create build cache scratch: %w", err)
 	}

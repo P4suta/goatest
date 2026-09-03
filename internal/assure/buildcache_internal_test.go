@@ -204,7 +204,7 @@ func TestOpenRunBuildCacheServesNothingWithoutAProgramOrABase(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			cache, err := openRunBuildCache(test.program, test.base, t.TempDir(), 2<<30)
+			cache, err := openRunBuildCache(test.program, test.base, runScratch{fallback: t.TempDir()}, 2<<30)
 			if err != nil || cache.serves() || cache.environment() != nil || cache.persistingEnvironment() != nil {
 				t.Fatalf("openRunBuildCache = (%+v, %v), want a cache that serves nothing", cache, err)
 			}
@@ -222,7 +222,7 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	t.Parallel()
 	base := t.TempDir()
 	temporary := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, temporary, 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: temporary}, 2<<30)
 	if err != nil || !cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v)", cache, err)
 	}
@@ -259,7 +259,7 @@ func TestOpenRunBuildCacheReportsABaseLayerItCannotPrepare(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := openRunBuildCache("/opt/goatest", blocked, t.TempDir(), 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", blocked, runScratch{fallback: t.TempDir()}, 2<<30)
 	if err == nil || cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v), want the unusable layer reported", cache, err)
 	}
@@ -276,7 +276,7 @@ func TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor(t *testing.
 	// A path holding both kinds of quote cannot be rendered as a GOCACHEPROG
 	// value at all, which is the one failure that falls between making the
 	// directory and returning the cache.
-	cache, err := openRunBuildCache(`/opt/o'say"what/goatest`, t.TempDir(), temporary, 2<<30)
+	cache, err := openRunBuildCache(`/opt/o'say"what/goatest`, t.TempDir(), runScratch{fallback: temporary}, 2<<30)
 	if err == nil || cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v), want the unrenderable program reported", cache, err)
 	}
@@ -299,7 +299,7 @@ func TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor(t *testing.
 func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, t.TempDir(), 20)
+	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: t.TempDir()}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 func TestCollectBaseSkipsWhatAnotherProcessIsAlreadyCollecting(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, t.TempDir(), 20)
+	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: t.TempDir()}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func buildCacheActionPath(dir string, key byte) string {
 
 func TestReleaseBuildCacheKeepsAndNamesTheScratchItWasAskedToKeep(t *testing.T) {
 	t.Parallel()
-	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), t.TempDir(), 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), runScratch{fallback: t.TempDir()}, 2<<30)
 	if err != nil {
 		t.Fatal(err)
 	}

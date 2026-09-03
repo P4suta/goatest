@@ -10,7 +10,38 @@ const (
 	artifactBaselineScratch   = "baseline-scratch"
 	artifactCandidateTree     = "candidate-tree"
 	artifactBuildCacheScratch = "build-cache-scratch"
+	artifactRunScratch        = "run-scratch"
 )
+
+// releaseRunScratch removes the directory a run made everything else below, or
+// keeps it when the run was asked to keep its temporaries.
+//
+// Nothing here can fail a run. The run has ended, and a directory that could
+// not be removed costs the disk and never the verdict — which is also why what
+// went wrong is reported through the progress stream rather than returned: the
+// only caller is a deferred close with nowhere to put an error.
+func releaseRunScratch(options Options, remove func(string) error, scratch runScratch) {
+	if scratch.dir == "" {
+		return
+	}
+	if options.KeepTemp {
+		// Marked before it is named, so that the next sweep reads a directory
+		// somebody kept on purpose rather than one whose lock nobody holds.
+		if err := scratch.owner.Keep(); err != nil {
+			emit(options, "temp-unavailable", err.Error())
+		}
+		options.Trace.Artifact(artifactRunScratch, scratch.dir)
+		return
+	}
+	// The lock is closed before the removal and not after it: on Windows an
+	// open handle inside a directory is what makes the removal fail.
+	if err := scratch.owner.Release(); err != nil {
+		emit(options, "temp-unavailable", err.Error())
+	}
+	if err := remove(scratch.dir); err != nil {
+		emit(options, "temp-unavailable", err.Error())
+	}
+}
 
 // releaseBaselineScratch removes the scratch directory a round collected its
 // baseline in, or keeps it when the run was asked to keep its temporaries.
