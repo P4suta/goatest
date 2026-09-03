@@ -158,12 +158,15 @@ var (
 	renameConfigFile = os.Rename
 )
 
-// defaultBuildMaxBytes bounds the build cache by default. It is the size of a
-// compiled standard library and a normal dependency set several toolchains
-// over, because the cache is per machine and a developer who upgrades Go keeps
-// the old entries until they age out rather than recompiling on the first run
-// after every upgrade.
-const defaultBuildMaxBytes int64 = 10 << 30
+// defaultBuildMaxBytes bounds the build cache by default.
+//
+// It is deliberately modest. The cache is one directory on one machine and a
+// developer's disk is shared with everything else they do, so the default has
+// to be a size nobody notices; two gigabytes holds a compiled standard library
+// and a normal dependency set with room to spare, and a project that wants more
+// says so. A larger default would buy a few seconds on a toolchain upgrade at
+// the price of most of a small disk.
+const defaultBuildMaxBytes int64 = 2 << 30
 
 func defaults() Config {
 	return Config{
@@ -349,7 +352,7 @@ contract = "standard-v1"
 # [cache]
 # max_bytes = 5368709120        # 5 GiB evidence cache budget
 # ttl = "720h"                  # entries older than this are collected
-# build_max_bytes = 10737418240 # 10 GiB build cache budget, collected by 'goatest cache gc'
+# build_max_bytes = 2147483648  # 2 GiB build cache budget, collected at the end of every run
 # build_dir = ".goatest/build"  # where the build cache lives; the default is per machine
 
 # One table per managed test resource; docs/protocols.md defines the provider

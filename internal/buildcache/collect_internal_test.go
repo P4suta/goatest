@@ -75,9 +75,10 @@ func TestAnEntryStaleByOneTouchIntervalSurvivesItsOwnCollection(t *testing.T) {
 		if err := os.Chtimes(layer.actionPath(collectKey(1)), stale, stale); err != nil {
 			t.Fatal(err)
 		}
-		collected, err := layer.Collect(Policy{MaxBytes: 1, TTL: time.Nanosecond, MinIdle: layer.MinIdle()}, collectMoment)
-		if err != nil {
-			t.Fatal(err)
+		collected, ran, err := layer.CollectLocked(
+			Policy{MaxBytes: 1, TTL: time.Nanosecond, MinIdle: layer.MinIdle()}, 0, collectMoment)
+		if err != nil || !ran {
+			t.Fatalf("collection = (%t, %v)", ran, err)
 		}
 		if collected.RemovedActions != 0 || collected.After.Entries != 1 {
 			t.Fatalf("collection of a layer with touch=%s = %+v, want the entry a live build is reading spared",

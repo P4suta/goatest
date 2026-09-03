@@ -407,20 +407,26 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 }
 
 // buildCacheLocation resolves the executable a go command reaches goatest's
-// build cache through and the layer that cache keeps between runs. This is the
-// only layer that may answer either question: below it, both are options.
+// build cache through and the directory that cache lives in. This is the only
+// layer that may answer either question: below it, both are options.
 //
-// Either answer may be empty, and an empty answer is a run without a build
-// cache rather than a failure. A service given no executable has no cache
-// program to name; a machine with no user cache directory and no configured
-// one has nowhere to keep a layer; and a configuration that will not load is
-// reported by the run that loads it a moment later, which is the layer that
-// owns that failure.
+// The two are resolved separately and on purpose. Where the cache lives is a
+// property of the machine and the project, and maintenance needs it whoever is
+// asking; what program serves it is a property of this process. Tying the first
+// to the second made `goatest cache status` and `goatest cache gc` silently
+// report an empty cache whenever nothing had named an executable.
 func (service Service) buildCacheLocation(root string) (string, string) {
-	program := service.Executable
-	if program == "" {
-		return "", ""
-	}
+	return service.Executable, service.buildCacheDirectory(root)
+}
+
+// buildCacheDirectory resolves where the build cache lives, whether or not this
+// process can serve it.
+//
+// An empty answer is a machine with nowhere to keep a layer rather than a
+// failure: no user cache directory and none configured, or a configuration that
+// will not load — and that last one is reported by the run that loads the same
+// file a moment later, which is the layer that owns the failure.
+func (service Service) buildCacheDirectory(root string) string {
 	resolveUserCacheDir := service.userCacheDir
 	if resolveUserCacheDir == nil {
 		resolveUserCacheDir = os.UserCacheDir
@@ -431,13 +437,9 @@ func (service Service) buildCacheLocation(root string) (string, string) {
 	}
 	loaded, err := config.Load(root)
 	if err != nil {
-		return "", ""
+		return ""
 	}
-	base := buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
-	if base == "" {
-		return "", ""
-	}
-	return program, base
+	return buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
 }
 
 func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {

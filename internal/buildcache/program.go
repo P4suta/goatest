@@ -9,13 +9,14 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 )
 
 // usage is what a mistyped invocation prints. The command is not in goatest's
 // help: a go command starts it, a person never does.
-const usage = `Usage: goatest cacheprog --scratch DIR [--base DIR] [--persist]
+const usage = `Usage: goatest cacheprog --scratch DIR [--base DIR] [--persist] [--max-bytes N]
 
 Serves the GOCACHEPROG protocol from goatest's own build cache. The go command
 starts this; it is not a command to run by hand.`
@@ -34,6 +35,7 @@ func Main(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	base := flags.String("base", "", "the persistent layer this machine keeps")
 	scratch := flags.String("scratch", "", "the layer this run removes when it ends")
 	persist := flags.Bool("persist", false, "write to the base layer instead of the scratch layer")
+	maxBytes := flags.Int64("max-bytes", 0, "bound the scratch layer at this many bytes; zero is unbounded")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -52,7 +54,12 @@ func Main(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		flags.Usage()
 		return 2
 	}
-	layers, err := openLayers(*base, *scratch, *persist)
+	if *maxBytes < 0 {
+		fmt.Fprintf(stderr, "goatest: cacheprog --max-bytes %d must not be negative\n", *maxBytes)
+		flags.Usage()
+		return 2
+	}
+	layers, err := openLayers(*base, *scratch, *persist, *maxBytes)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
@@ -65,16 +72,27 @@ func Main(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// openLayers resolves and prepares the two layers. The paths are made absolute
-// here because a response names a file the go command opens from its own
-// working directory, which is not this process's.
-func openLayers(base, scratch string, persist bool) (Layers, error) {
+// openLayers resolves the two layers and creates the directories this process
+// writes into. The paths are made absolute here because a response names a file
+// the go command opens from its own working directory, which is not this
+// process's.
+//
+// It creates and nothing more. Claiming a directory, probing that it is
+// writable, and leaving the marker are the run's job, done once before any go
+// command was handed this program: there is one of these processes per go
+// command, and a run issues thousands. The base layer is only created when this
+// process may write to it, so a build that merely reads never brings a base
+// directory into existence.
+func openLayers(base, scratch string, persist bool, maxBytes int64) (Layers, error) {
 	scratchPath, err := filepath.Abs(scratch)
 	if err != nil {
 		return Layers{}, fmt.Errorf("goatest: resolve build cache scratch: %w", err)
 	}
-	layers := Layers{Scratch: Layer{Dir: scratchPath}, Persist: persist}
-	if err := layers.Scratch.Prepare(); err != nil {
+	layers := Layers{
+		Scratch: Layer{Dir: scratchPath, Touch: ScratchTouchInterval},
+		Persist: persist, MaxBytes: maxBytes,
+	}
+	if err := layers.Scratch.ensureWithHooks(layerHooks{}); err != nil {
 		return Layers{}, err
 	}
 	if base == "" {
@@ -85,8 +103,10 @@ func openLayers(base, scratch string, persist bool) (Layers, error) {
 		return Layers{}, fmt.Errorf("goatest: resolve build cache base: %w", err)
 	}
 	layers.Base = Layer{Dir: basePath}
-	if err := layers.Base.Prepare(); err != nil {
-		return Layers{}, err
+	if persist {
+		if err := layers.Base.ensureWithHooks(layerHooks{}); err != nil {
+			return Layers{}, err
+		}
 	}
 	return layers, nil
 }
@@ -97,10 +117,13 @@ func openLayers(base, scratch string, persist bool) (Layers, error) {
 // has to be that package's: a path with a space in it is a path a developer
 // has, and one this rendering would otherwise hand to the go command as two
 // arguments.
-func Program(program, base, scratch string, persist bool) (string, error) {
+func Program(program, base, scratch string, persist bool, maxBytes int64) (string, error) {
 	arguments := []string{program, "cacheprog", "--base", base, "--scratch", scratch}
 	if persist {
 		arguments = append(arguments, "--persist")
+	}
+	if maxBytes > 0 {
+		arguments = append(arguments, "--max-bytes", strconv.FormatInt(maxBytes, 10))
 	}
 	return joinQuoted(arguments)
 }

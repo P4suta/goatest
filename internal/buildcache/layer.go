@@ -25,20 +25,52 @@ const (
 	objectsDirectory = "objects"
 	// statsDirectory holds what each served go process asked for.
 	statsDirectory = "stats"
-	// readmeName is the note left for whoever finds this directory.
-	readmeName = "README"
-	// readmeText is that note. It has to say who made the directory and that
-	// removing it is safe, because a user who found it while hunting for disk
-	// space is exactly the reader it has.
-	readmeText = "This is goatest's build cache. goatest writes, reads, and collects every" +
+	// MarkerName is the file that says a directory is goatest's build cache.
+	//
+	// It carries goatest's own name rather than being a README because it is
+	// load bearing, not decorative: goatest collects and removes files below a
+	// layer, so it adopts a directory that already holds files only when this
+	// marker is in it. A README is a file a project may already keep in a
+	// directory somebody pointed build_dir at, which is exactly the mistake
+	// this name exists to catch.
+	MarkerName = "goatest-build-cache-v1"
+	// collectedName is the file whose time records when this layer was last
+	// collected and whose lock keeps two processes from collecting it at once.
+	collectedName = "goatest-build-cache-collected"
+	// markerText is the note the marker carries. It has to say who made the
+	// directory and that removing it is safe, because a user who found it while
+	// hunting for disk space is exactly the reader it has.
+	markerText = "This is goatest's build cache. goatest writes, reads, and collects every" +
 		" file below this directory, and nothing else does; removing it whole is safe" +
 		" and only costs the next run the work of compiling again.\n"
-	// touchInterval is how stale an action's file time may become before a
-	// read refreshes it, and the window a collection leaves untouched. It is
-	// the go command's own mtime granularity, and it is the safety margin the
-	// protocol needs: the go command opens the file a response named after
-	// that response, so an entry a live process just read must survive.
-	touchInterval = time.Hour
+
+	// BaseTouchInterval is how stale an action's file time may become in the
+	// layer the machine keeps before a read refreshes it. It is the go
+	// command's own mtime granularity.
+	BaseTouchInterval = time.Hour
+	// ScratchTouchInterval is the same for the layer one run keeps. It is
+	// shorter because the whole life of the layer is the life of one run, and a
+	// go command inside it is bounded in minutes rather than hours.
+	ScratchTouchInterval = time.Minute
+	// MinIdleTouchIntervals is how many touch intervals a collection must leave
+	// alone, and it may not be less than two.
+	//
+	// The inequality it states is what the LRU rests on. A collection may only
+	// remove an entry whose last touch is older than MinIdle, and a read
+	// refreshes an entry at most once per touch interval, so an entry a live
+	// build is reading continuously carries a file time that is already up to
+	// one whole touch interval stale. One interval covers that staleness. The
+	// second covers the window the go command needs after the response: it
+	// opens the file a response named *after* that response, so an entry served
+	// moments ago must still be there.
+	MinIdleTouchIntervals = 2
+	// ScratchCollectInterval is how often one run's scratch layer is collected.
+	//
+	// A run starts one served process per go command and issues thousands of
+	// them, and each one closes. Collecting on every close would walk the whole
+	// layer once per go command, which is work proportional to the square of
+	// the run; collecting once per interval is what makes the bound affordable.
+	ScratchCollectInterval = time.Minute
 )
 
 // Entry is one stored output: what the action produced, how long it is, when
@@ -95,7 +127,30 @@ type Collected struct {
 // Layer is one directory of the build cache. Its zero value names no
 // directory, which is a layer that stores nothing and answers every read with
 // a miss.
-type Layer struct{ Dir string }
+type Layer struct {
+	// Dir is where the layer lives.
+	Dir string
+	// Touch is how stale an action's file time may become before a read
+	// refreshes it. Zero is BaseTouchInterval, so a caller that says nothing
+	// gets the interval of the layer the machine keeps.
+	Touch time.Duration
+}
+
+// touchInterval is the rate a read of this layer refreshes an entry at.
+func (layer Layer) touchInterval() time.Duration {
+	if layer.Touch > 0 {
+		return layer.Touch
+	}
+	return BaseTouchInterval
+}
+
+// MinIdle is the shortest window a collection of this layer may leave alone.
+// It is the layer's own touch interval times MinIdleTouchIntervals, which is
+// the inequality documented there: a caller that asks the layer can never get
+// the arithmetic wrong, and a caller that invents its own can.
+func (layer Layer) MinIdle() time.Duration {
+	return MinIdleTouchIntervals * layer.touchInterval()
+}
 
 // actionRecord is the one JSON line an action file holds.
 type actionRecord struct {
@@ -104,13 +159,76 @@ type actionRecord struct {
 	Time   time.Time `json:"time"`
 }
 
-// Prepare creates the layer and proves it is writable, so that a run learns a
-// cache it cannot use before it hands the program to a go command that would
-// fail on it.
+// Prepare claims the directory as goatest's, creates the layer, and proves it
+// is writable, so that a run learns a cache it cannot use before it hands the
+// program to a go command that would fail on it.
+//
+// It runs once per run, in the run itself. The served processes a run starts do
+// not prepare: there is one per go command and a run issues thousands, so a
+// stat, a readdir, and an fsynced marker apiece would be pure cost.
 func (layer Layer) Prepare() error { return layer.prepareWithHooks(layerHooks{}) }
 
 // prepareWithHooks is Prepare against a filesystem the caller supplies.
 func (layer Layer) prepareWithHooks(hooks layerHooks) error {
+	hooks = hooks.resolved()
+	if layer.Dir == "" {
+		return errors.New("goatest: build cache layer has no directory")
+	}
+	if err := layer.claim(hooks); err != nil {
+		return err
+	}
+	if err := layer.ensureWithHooks(hooks); err != nil {
+		return err
+	}
+	// Writing the marker is also the writability probe: it is the one write
+	// every layer takes, and a layer that cannot take it cannot serve.
+	if err := writeFile(filepath.Join(layer.Dir, MarkerName), []byte(markerText), ".marker-*.tmp", hooks); err != nil {
+		return fmt.Errorf("goatest: prepare build cache layer: %w", err)
+	}
+	return nil
+}
+
+// claim refuses a directory that already holds something goatest did not put
+// there. It is what stops a mistyped build_dir — a home directory, a project
+// directory — from becoming a cache goatest then collects and removes files
+// from. A directory that does not exist, one that is empty, and one holding
+// only goatest's own names are all claimable; anything else is somebody's, and
+// the refusal writes nothing into it.
+func (layer Layer) claim(hooks layerHooks) error {
+	entries, err := hooks.readDir(layer.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("goatest: read build cache layer: %w", err)
+	}
+	for _, entry := range entries {
+		if !ownedLayerName(entry.Name()) {
+			return fmt.Errorf(
+				"goatest: %s is not a goatest build cache: it holds %q, which goatest did not write,"+
+					" so goatest will not store in it, collect it, or remove anything from it",
+				layer.Dir, entry.Name())
+		}
+	}
+	return nil
+}
+
+// ownedLayerName reports whether a name at the root of a layer is one goatest
+// writes. A layer whose marker a user deleted still holds only these, so it is
+// still claimable: the refusal is for directories that hold somebody else's
+// files, not for ones goatest made and somebody tidied.
+func ownedLayerName(name string) bool {
+	switch name {
+	case MarkerName, collectedName, actionsDirectory, objectsDirectory, statsDirectory:
+		return true
+	}
+	return false
+}
+
+// ensureWithHooks creates the directories this layer's own writes need, and
+// nothing else. It claims nothing and probes nothing, which is why it is what
+// a served go command runs.
+func (layer Layer) ensureWithHooks(hooks layerHooks) error {
 	hooks = hooks.resolved()
 	if layer.Dir == "" {
 		return errors.New("goatest: build cache layer has no directory")
@@ -124,39 +242,7 @@ func (layer Layer) prepareWithHooks(hooks layerHooks) error {
 			return fmt.Errorf("goatest: create build cache layer: %w", err)
 		}
 	}
-	// Writing the note is also the writability probe: it is the one write
-	// every layer takes, and a layer that cannot take it cannot serve.
-	if err := writeFile(filepath.Join(layer.Dir, readmeName), []byte(readmeText), ".readme-*.tmp", hooks); err != nil {
-		return fmt.Errorf("goatest: prepare build cache layer: %w", err)
-	}
 	return nil
-}
-
-// Get resolves one cache key against this layer alone. A key nothing stored, a
-// line nothing can parse, and an output whose bytes are gone are all misses
-// rather than errors: a cache that fails a build because it lost a file would
-// be worse than no cache at all.
-func (layer Layer) Get(actionID []byte, now time.Time) (Entry, bool, error) {
-	return layer.getWithHooks(actionID, now, layerHooks{})
-}
-
-// getWithHooks is Get against a filesystem the caller supplies.
-func (layer Layer) getWithHooks(actionID []byte, now time.Time, hooks layerHooks) (Entry, bool, error) {
-	hooks = hooks.resolved()
-	record, modified, found, err := layer.readAction(actionID, hooks)
-	if err != nil || !found {
-		return Entry{}, false, err
-	}
-	outputID, err := hex.DecodeString(record.Output)
-	if err != nil || len(outputID) == 0 {
-		return Entry{}, false, nil
-	}
-	path, size, found, err := layer.object(outputID, hooks)
-	if err != nil || !found || size != record.Size {
-		return Entry{}, false, err
-	}
-	layer.touch(actionID, modified, now, hooks)
-	return Entry{OutputID: outputID, Size: size, Time: record.Time, DiskPath: path}, true, nil
 }
 
 // readAction reads the line stored under one cache key, with the file time
@@ -206,7 +292,7 @@ func (layer Layer) object(outputID []byte, hooks layerHooks) (string, int64, boo
 // touch refreshes an action's file time when it has gone stale, which is what
 // makes the file time a usable LRU clock without a write on every read.
 func (layer Layer) touch(actionID []byte, modified, now time.Time, hooks layerHooks) {
-	if now.IsZero() || now.Sub(modified) < touchInterval {
+	if now.IsZero() || now.Sub(modified) < layer.touchInterval() {
 		return
 	}
 	// A refresh that fails costs the entry its place in the queue and nothing
@@ -214,14 +300,13 @@ func (layer Layer) touch(actionID []byte, modified, now time.Time, hooks layerHo
 	_ = hooks.chtimes(layer.actionPath(actionID), now, now)
 }
 
-// Put stores one output and the cache key that produced it. Storing an output
-// this layer already holds writes the key alone: the content is addressed by
-// its own identity, so two keys that produced the same bytes share them.
-func (layer Layer) Put(actionID, outputID []byte, body io.Reader, size int64, now time.Time) (Entry, error) {
-	return layer.putWithHooks(actionID, outputID, body, size, now, layerHooks{})
-}
-
-// putWithHooks is Put against a filesystem the caller supplies.
+// putWithHooks stores one output and the cache key that produced it. Storing an
+// output this layer already holds writes the key alone: the content is
+// addressed by its own identity, so two keys that produced the same bytes share
+// them.
+//
+// Every caller reaches it through Layers, which is the only thing that decides
+// which layer a write lands in.
 func (layer Layer) putWithHooks(actionID, outputID []byte, body io.Reader, size int64, now time.Time, hooks layerHooks) (Entry, error) {
 	hooks = hooks.resolved()
 	if layer.Dir == "" {
@@ -336,24 +421,31 @@ type storedFile struct {
 	removed bool
 }
 
-// Collect bounds the layer. It removes what has expired, then the least
-// recently read entries until the layer is within its size, then every object
-// no remaining action names. Nothing read within MinIdle is removed, and
+// validate refuses a policy that cannot be meant. A negative bound is a
+// configuration mistake, and a cache that silently did something else with one
+// would be a cache nobody could reason about.
+func (policy Policy) validate() error {
+	if policy.MaxBytes < 0 || policy.TTL < 0 || policy.MinIdle < 0 {
+		return errors.New("goatest: build cache policy must not be negative")
+	}
+	return nil
+}
+
+// collectWithHooks bounds the layer. It removes what has expired, then the
+// least recently read entries until the layer is within its size, then every
+// object no remaining action names. Nothing read within MinIdle is removed, and
 // neither is an unreferenced object written within it, because the go command
 // opens the file a response named after the response.
 //
 // Every removal is an unlink of a file nothing rewrites in place, so a
-// collection needs no coordination with the go processes reading the layer
-// beside it: the worst a concurrent process observes is a miss.
-func (layer Layer) Collect(policy Policy, now time.Time) (Collected, error) {
-	return layer.collectWithHooks(policy, now, layerHooks{})
-}
-
-// collectWithHooks is Collect against a filesystem the caller supplies.
+// collection needs no coordination with the go processes *reading* the layer
+// beside it: the worst a concurrent process observes is a miss. Two collections
+// of one layer would only duplicate each other's walk, which is what
+// CollectLocked — the entry point every caller uses — serializes.
 func (layer Layer) collectWithHooks(policy Policy, now time.Time, hooks layerHooks) (Collected, error) {
 	hooks = hooks.resolved()
-	if policy.MaxBytes < 0 || policy.TTL < 0 || policy.MinIdle < 0 {
-		return Collected{}, errors.New("goatest: build cache policy must not be negative")
+	if err := policy.validate(); err != nil {
+		return Collected{}, err
 	}
 	actions, objects, err := layer.list(hooks)
 	if err != nil {

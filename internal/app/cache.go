@@ -85,13 +85,16 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			retentionGCStatusEvidence("trace", traceCollected),
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
 		)
-		// The build cache is collected here and only here. A run never collects
-		// it: the layer is shared by every repository on the machine, and a run
-		// that pruned it would be deciding for repositories it knows nothing
-		// about, in the middle of the work the layer exists to make fast.
-		buildCollected, err := service.buildCacheLayer(root).Collect(buildcache.Policy{
-			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildCacheMinIdle,
-		}, moment)
+		// Every run already collects the build cache when it ends, so this is
+		// the same collection on demand rather than the only one there is. It
+		// takes the layer's own lock, so it yields to a run collecting beside
+		// it, and MinIdle comes from the layer rather than from a constant
+		// here: the window a collection must leave alone is two of the layer's
+		// touch intervals, and only the layer knows what its interval is.
+		buildLayer := service.buildCacheLayer(root)
+		buildCollected, _, err := buildLayer.CollectLocked(buildcache.Policy{
+			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildLayer.MinIdle(),
+		}, 0, moment)
 		if err != nil {
 			return report.Report{}, err
 		}
@@ -107,21 +110,16 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 	}
 }
 
-// buildCacheMinIdle protects an entry a live run read or wrote moments ago from
-// a collection running beside it. It is the go command's own file-time
-// granularity, which is the window the cache refreshes an entry within: an
-// entry read inside it may have no fresher file time to prove it, and a
-// collection that removed it would take a file a running build is about to
-// open.
-const buildCacheMinIdle = time.Hour
-
 // buildCacheLayer names the build cache this repository's configuration points
-// at. A location the composition root could not resolve is the zero layer,
-// which holds nothing and collects nothing, so status and gc report an empty
-// cache rather than refusing to run.
+// at. A directory nothing could resolve is the zero layer, which holds nothing
+// and collects nothing, so status and gc report an empty cache rather than
+// refusing to run.
+//
+// It asks for the directory alone. Maintenance never serves the cache, so
+// whether this process could be re-executed as the cache program has nothing
+// to do with whether it can report on the layer or collect it.
 func (service Service) buildCacheLayer(root string) buildcache.Layer {
-	_, base := service.buildCacheLocation(root)
-	return buildcache.Layer{Dir: base}
+	return buildcache.Layer{Dir: service.buildCacheDirectory(root)}
 }
 
 func buildCacheStatusEvidence(id string, status buildcache.Status) report.Evidence {

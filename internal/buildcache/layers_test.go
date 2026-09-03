@@ -137,9 +137,11 @@ func TestLayersKeepBaseSelfContained(t *testing.T) {
 	if objects := files(t, layers.Base, "objects"); len(objects) != 1 {
 		t.Fatalf("base objects = %v, want its own copy: the scratch layer is removed with the run", objects)
 	}
-	entry, found, err := layers.Base.Get(identifier(9), reference)
-	if err != nil || !found || !strings.HasPrefix(entry.DiskPath, layers.Base.Dir) {
-		t.Fatalf("base Get = (%+v, %t, %v), want an object inside base", entry, found, err)
+	// Read through a store that has only the base layer, which is what every
+	// later run of this machine sees once this run's scratch is gone.
+	entry, source, err := (buildcache.Layers{Base: layers.Base}).Get(identifier(9), reference)
+	if err != nil || source != buildcache.SourceBase || !strings.HasPrefix(entry.DiskPath, layers.Base.Dir) {
+		t.Fatalf("base Get = (%+v, %s, %v), want an object inside base", entry, source, err)
 	}
 }
 

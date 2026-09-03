@@ -45,6 +45,11 @@ type Layers struct {
 	Base    Layer
 	// Persist sends writes to the base layer instead of the scratch layer.
 	Persist bool
+	// MaxBytes bounds the scratch layer, which the served process prunes as the
+	// run goes. It travels on that process's command line because the process
+	// reads no configuration: the run that started it is the only thing that
+	// knows what the project allowed. Zero is unbounded.
+	MaxBytes int64
 }
 
 // Get resolves one cache key. The key is looked for in scratch and then in

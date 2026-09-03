@@ -223,6 +223,7 @@ func TestCollectAndInspectPropagateTheStagesTheyRunThrough(t *testing.T) {
 	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
 		t.Fatal(err)
 	}
+	ageFaultsEntry(t, layer)
 	if _, err := layer.collectWithHooks(Policy{TTL: time.Hour}, faultsMoment, layerHooks{
 		readDir: func(string) ([]os.DirEntry, error) { return nil, failure },
 	}); !errors.Is(err, failure) {
@@ -254,6 +255,7 @@ func TestCollectIgnoresWhatWasAlreadyGone(t *testing.T) {
 	if _, err := (Layers{Scratch: layer}).Put(key(1), key(2), strings.NewReader("content"), 7, faultsMoment); err != nil {
 		t.Fatal(err)
 	}
+	ageFaultsEntry(t, layer)
 	collected, err := layer.collectWithHooks(Policy{TTL: time.Nanosecond}, faultsMoment.Add(time.Hour), layerHooks{
 		remove: func(string) error { return os.ErrNotExist },
 	})
@@ -342,6 +344,19 @@ func TestServeReportsAResponseItCannotWrite(t *testing.T) {
 	err := Serve(t.Context(), strings.NewReader(""), failingWriter{err: failure}, layers, &stats)
 	if !errors.Is(err, failure) {
 		t.Fatalf("Serve error = %v, want %v", err, failure)
+	}
+}
+
+// ageFaultsEntry sets the file times of the one entry these tests store to the
+// moment they are written against. A stored file carries the wall clock, and an
+// assertion about age has to be about the clock the test states rather than
+// about how close today happens to be to the fixed moment.
+func ageFaultsEntry(t *testing.T, layer Layer) {
+	t.Helper()
+	for _, path := range []string{layer.actionPath(key(1)), layer.objectPath(key(2))} {
+		if err := os.Chtimes(path, faultsMoment, faultsMoment); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

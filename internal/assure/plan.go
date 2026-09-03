@@ -43,11 +43,17 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		return report.Report{}, err
 	}
 	options.TestArgs = normalizedTestArgs
-	buildCache, err := openRunBuildCache(options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory)
+	buildCache, err := openRunBuildCache(
+		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
 	if err != nil {
 		emit(options, "build-cache-unavailable", err.Error())
 	}
-	defer func() { resultErr = errors.Join(resultErr, releaseBuildCache(options, buildCache)) }()
+	defer func() {
+		// A plan compiles too — the mutation catalog is built from compiled
+		// packages — so it bounds the layer on the way out like a run does.
+		collectRunBuildCache(options, loaded, buildCache, planMoment(options))
+		resultErr = errors.Join(resultErr, releaseBuildCache(options, buildCache))
+	}()
 	workspace, err := mutationbridge.Open(ctx, root, mutationbridge.Options{
 		GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 		ReportDirectory: ".goatest",

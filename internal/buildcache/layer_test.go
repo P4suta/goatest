@@ -86,6 +86,21 @@ func files(t *testing.T, layer buildcache.Layer, half string) []string {
 	return found
 }
 
+// collect bounds a layer through the entry point production uses, which takes
+// the layer's collection lock and records that it ran. There is no unlocked
+// collection to test against: every caller goes through this one.
+func collect(t *testing.T, layer buildcache.Layer, policy buildcache.Policy, now time.Time) buildcache.Collected {
+	t.Helper()
+	collected, ran, err := layer.CollectLocked(policy, 0, now)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if !ran {
+		t.Fatal("Collect did not run, and nothing else holds this layer's lock")
+	}
+	return collected
+}
+
 // age sets an entry's file time to a moment before the reference, which is how
 // a test says how long ago something was read.
 func age(t *testing.T, path string, before time.Duration) {
@@ -307,10 +322,7 @@ func TestLayerCollectRemovesWhatThePolicyNames(t *testing.T) {
 				age(t, actionPath(layer, key), testCase.ages[key])
 				age(t, objectPath(layer, key+0x10), testCase.ages[key])
 			}
-			collected, err := layer.Collect(testCase.policy, reference)
-			if err != nil {
-				t.Fatalf("Collect: %v", err)
-			}
+			collected := collect(t, layer, testCase.policy, reference)
 			if collected.Before.Entries != 3 || collected.Before.Bytes != 30 {
 				t.Fatalf("Collect before = %+v, want 3 entries of 30 bytes", collected.Before)
 			}
@@ -347,9 +359,7 @@ func TestLayerCollectBreaksTiesByName(t *testing.T) {
 		age(t, actionPath(layer, key), 48*time.Hour)
 		age(t, objectPath(layer, key+0x10), 48*time.Hour)
 	}
-	if _, err := layer.Collect(buildcache.Policy{MaxBytes: 20, MinIdle: time.Hour}, reference); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
+	collect(t, layer, buildcache.Policy{MaxBytes: 20, MinIdle: time.Hour}, reference)
 	var survived []byte
 	for _, key := range []byte{1, 2, 3} {
 		if _, found, _ := lookup(t, layer, identifier(key), reference); found {
@@ -369,10 +379,7 @@ func TestLayerCollectRemovesObjectsNoKeyNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	age(t, objectPath(layer, 2), 48*time.Hour)
-	collected, err := layer.Collect(buildcache.Policy{MinIdle: time.Hour}, reference)
-	if err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
+	collected := collect(t, layer, buildcache.Policy{MinIdle: time.Hour}, reference)
 	if collected.RemovedObjects != 1 || collected.RemovedBytes != 10 || collected.After.Bytes != 0 {
 		t.Fatalf("Collect = %+v, want the orphaned object removed", collected)
 	}
@@ -389,10 +396,7 @@ func TestLayerCollectKeepsAnOrphanedObjectInsideTheIdleWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	age(t, objectPath(layer, 2), time.Minute)
-	collected, err := layer.Collect(buildcache.Policy{MinIdle: time.Hour}, reference)
-	if err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
+	collected := collect(t, layer, buildcache.Policy{MinIdle: time.Hour}, reference)
 	if collected.RemovedObjects != 0 || collected.After.Bytes != 10 {
 		t.Fatalf("Collect = %+v, want an object written a minute ago left alone", collected)
 	}
@@ -405,11 +409,13 @@ func TestLayerInspectAndCollectAnswerForALayerThatHoldsNothing(t *testing.T) {
 	if err != nil || status != (buildcache.Status{}) {
 		t.Fatalf("Inspect = (%+v, %v), want the zero status", status, err)
 	}
-	collected, err := empty.Collect(buildcache.Policy{MaxBytes: 1, TTL: time.Hour, MinIdle: time.Hour}, reference)
-	if err != nil || collected != (buildcache.Collected{}) {
-		t.Fatalf("Collect = (%+v, %v), want nothing collected", collected, err)
+	// A layer no machine has built yet is nothing to collect rather than a
+	// failure, which is what a first ever run and a first ever cache gc meet.
+	collected, ran, err := empty.CollectLocked(buildcache.Policy{MaxBytes: 1, TTL: time.Hour, MinIdle: time.Hour}, 0, reference)
+	if err != nil || ran || collected != (buildcache.Collected{}) {
+		t.Fatalf("Collect = (%+v, %t, %v), want nothing collected", collected, ran, err)
 	}
-	if _, err := empty.Collect(buildcache.Policy{MaxBytes: -1}, reference); err == nil {
+	if _, _, err := empty.CollectLocked(buildcache.Policy{MaxBytes: -1}, 0, reference); err == nil {
 		t.Fatal("Collect accepted a negative bound")
 	}
 }

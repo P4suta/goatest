@@ -86,24 +86,30 @@ func TestBuildCacheLocationResolvesTheProgramAndTheLayerTheMachineKeeps(t *testi
 			executable: "/opt/bin/goatest",
 			// A machine that cannot name a cache root has nowhere to keep a
 			// layer, which is a run without a build cache and not a failure.
+			// The program is still resolved: the two answers are independent.
 			userCacheDir: func() (string, error) { return "", errors.New("no cache directory") },
+			wantProgram:  "/opt/bin/goatest",
 		},
 		{
 			// A service nobody named an executable for is a process that is not
 			// a goatest binary: a test binary running the service in-process,
 			// or an application that embedded it. Handing the go command such a
 			// path would leave it waiting on a program that never speaks the
-			// protocol.
+			// protocol. The directory is still resolved, because maintenance
+			// needs it and maintenance never serves the cache.
 			name:         "a service that was given no executable",
 			userCacheDir: func() (string, error) { return userCache, nil },
+			wantBase:     perMachine,
 		},
 		{
 			name:         "a configuration that will not load",
 			executable:   "/opt/bin/goatest",
 			userCacheDir: func() (string, error) { return userCache, nil },
 			// The run loads the same file a moment later and reports it there,
-			// which is the layer that owns the failure.
-			contents: "version = 2\n",
+			// which is the layer that owns the failure. Nothing here can say
+			// where the cache lives, so nothing here says.
+			contents:    "version = 2\n",
+			wantProgram: "/opt/bin/goatest",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

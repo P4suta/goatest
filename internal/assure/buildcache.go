@@ -5,14 +5,17 @@ package assure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/config"
 )
 
 // cacheProgramVariable is the environment variable the go command reads the
@@ -37,6 +40,8 @@ type runBuildCache struct {
 	plain string
 	// persisting is the GOCACHEPROG value whose writes land in base.
 	persisting string
+	// maxBytes is the bound both layers are collected to.
+	maxBytes int64
 }
 
 // openRunBuildCache prepares both layers and renders the two cache programs one
@@ -47,7 +52,7 @@ type runBuildCache struct {
 // layer that cannot be created or written is discovered by the run, which can
 // carry on without a cache, instead of by a go command, which would fail the
 // build it was in the middle of.
-func openRunBuildCache(program, base, temporaryRoot string) (runBuildCache, error) {
+func openRunBuildCache(program, base, temporaryRoot string, maxBytes int64) (runBuildCache, error) {
 	if program == "" || base == "" {
 		return runBuildCache{}, nil
 	}
@@ -58,14 +63,77 @@ func openRunBuildCache(program, base, temporaryRoot string) (runBuildCache, erro
 	if err != nil {
 		return runBuildCache{}, fmt.Errorf("goatest: create build cache scratch: %w", err)
 	}
-	cache := runBuildCache{scratch: scratch, base: base}
-	if cache.plain, err = buildcache.Program(program, base, scratch, false); err != nil {
-		return runBuildCache{}, err
+	// Everything from here on may fail, and the directory above already exists,
+	// so every exit removes it. A run that ends without a cache must also end
+	// without the empty layer it made on the way to not having one.
+	discard := func(err error) (runBuildCache, error) {
+		return runBuildCache{}, errors.Join(err, removeBuildCacheScratch(scratch))
 	}
-	if cache.persisting, err = buildcache.Program(program, base, scratch, true); err != nil {
-		return runBuildCache{}, err
+	if err := (buildcache.Layer{Dir: scratch, Touch: buildcache.ScratchTouchInterval}).Prepare(); err != nil {
+		return discard(err)
+	}
+	cache := runBuildCache{scratch: scratch, base: base, maxBytes: maxBytes}
+	if cache.plain, err = buildcache.Program(program, base, scratch, false, maxBytes); err != nil {
+		return discard(err)
+	}
+	if cache.persisting, err = buildcache.Program(program, base, scratch, true, maxBytes); err != nil {
+		return discard(err)
 	}
 	return cache, nil
+}
+
+// removeBuildCacheScratch removes a scratch layer, naming what it could not.
+func removeBuildCacheScratch(scratch string) error {
+	if err := os.RemoveAll(scratch); err != nil {
+		return fmt.Errorf("goatest: remove build cache scratch: %w", err)
+	}
+	return nil
+}
+
+// collectBase bounds the layer this machine keeps, and reports whether it ran.
+//
+// A run collects it once, when the run ends. A bound that only a command a
+// developer remembers to type applies is not a bound, and this is the moment
+// the run knows it has stopped compiling. It yields to another process already
+// collecting — the layer is shared by every repository on the machine — and
+// what makes that safe for the builds of those other repositories is MinIdle:
+// anything read within the last touch interval is spared by construction.
+func (cache runBuildCache) collectBase(policy buildcache.Policy, now time.Time) (buildcache.Collected, bool, error) {
+	if !cache.serves() {
+		return buildcache.Collected{}, false, nil
+	}
+	return buildcache.Layer{Dir: cache.base}.CollectLocked(policy, 0, now)
+}
+
+// collectRunBuildCache bounds the layer this machine keeps and reports what it
+// did, at the end of one run. It is the only enforcement of build_max_bytes a
+// developer never has to remember, which is what makes the setting a bound
+// rather than a suggestion.
+//
+// Nothing here can fail a run: the run has finished, and a layer that could not
+// be collected costs the disk and never the verdict.
+func collectRunBuildCache(options Options, loaded config.Config, cache runBuildCache, now time.Time) {
+	base := buildcache.Layer{Dir: cache.base}
+	collected, ran, err := cache.collectBase(buildcache.Policy{
+		MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: base.MinIdle(),
+	}, now)
+	switch {
+	case err != nil:
+		emit(options, "build-cache-unavailable", err.Error())
+	case ran && collected.RemovedActions+collected.RemovedObjects > 0:
+		emit(options, "build-cache-collected", fmt.Sprintf(
+			"removed-actions=%d removed-objects=%d removed-bytes=%d remaining-bytes=%d",
+			collected.RemovedActions, collected.RemovedObjects, collected.RemovedBytes, collected.After.Bytes))
+	}
+}
+
+// planMoment is the clock a plan collects against. A plan has no round to
+// timestamp, so it reads the one the caller supplied or the wall clock.
+func planMoment(options Options) time.Time {
+	if options.Now != nil {
+		return options.Now()
+	}
+	return time.Now()
 }
 
 // serves reports whether this cache answers anything at all.
@@ -113,10 +181,7 @@ func (cache runBuildCache) close(keep bool) error {
 	if !cache.serves() || keep {
 		return nil
 	}
-	if err := os.RemoveAll(cache.scratch); err != nil {
-		return fmt.Errorf("goatest: remove build cache scratch: %w", err)
-	}
-	return nil
+	return removeBuildCacheScratch(cache.scratch)
 }
 
 // buildCacheWorkspace attaches the build cache to every command a run issues.
@@ -180,7 +245,22 @@ func persistingCommand(argv []string) bool {
 	if len(argv) < 2 || !goExecutable(argv[0]) {
 		return false
 	}
-	switch argv[1] {
+	// -C changes the directory before the subcommand is read, and the go
+	// command accepts it only as its first flag. A rule that read argv[1]
+	// blindly would see "-C" and classify every such command as neither a
+	// compile nor a test run, which fails silently: nothing would persist.
+	first := 1
+	switch {
+	case argv[first] == "-C":
+		first += 2
+	case strings.HasPrefix(argv[first], "-C="):
+		first++
+	}
+	if first >= len(argv) {
+		return false
+	}
+	argv = argv[first:]
+	switch argv[0] {
 	case "vet", "build", "list", "version":
 		return true
 	case "test":
@@ -190,7 +270,7 @@ func persistingCommand(argv []string) bool {
 		//
 		// Everything after -args belongs to the test binary, so a -c there is
 		// an argument of the suite and not an instruction to the go command.
-		return slices.Contains(argv[2:argumentSeparator(argv)], "-c")
+		return slices.Contains(argv[1:argumentSeparator(argv)], "-c")
 	default:
 		return false
 	}

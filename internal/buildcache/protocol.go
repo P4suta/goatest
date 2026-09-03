@@ -211,16 +211,27 @@ func putResponse(message request, entry Entry, err error, size int64, stats *Sta
 	return response{ID: message.ID, DiskPath: entry.DiskPath}
 }
 
-// serveClose records what this process asked for and prunes the run's scratch
-// layer of everything an hour of the run has not read.
+// serveClose records what this process asked for and keeps the run's scratch
+// layer inside its bound.
+//
+// The pruning is bounded by size and not by age. A run may compile a package in
+// one phase and want it again in a later one, so removing an entry because
+// nothing read it for a while would just buy a recompile; removing the least
+// recently read entries once the layer is over its bound is the cost the run
+// actually agreed to. Nothing read inside the layer's own MinIdle is touched.
+//
+// It runs at most once per ScratchCollectInterval and skips whatever another
+// served process is already collecting, because there is one of these processes
+// per go command and a run issues thousands of them.
 //
 // Only scratch is pruned here. The base layer belongs to the machine rather
-// than to one go process, and it is collected once, under a lock, by the run
-// that owns it.
+// than to one go process, and it is collected once, under the same kind of
+// lock, by the run that owns it.
 func serveClose(layers Layers, stats *Stats, hooks serveHooks) {
-	collected, err := layers.Scratch.collectWithHooks(
-		Policy{TTL: touchInterval, MinIdle: touchInterval}, hooks.now(), hooks.layer)
-	if err == nil {
+	collected, ran, err := layers.Scratch.collectLockedWithHooks(
+		Policy{MaxBytes: layers.MaxBytes, MinIdle: layers.Scratch.MinIdle()},
+		ScratchCollectInterval, hooks.now(), hooks.layer)
+	if err == nil && ran {
 		stats.PrunedBytes += collected.RemovedBytes
 	}
 	// Neither the pruning nor the record is worth failing a build over: the go

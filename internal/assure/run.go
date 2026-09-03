@@ -270,7 +270,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	// A build cache that cannot be opened is reported and then done without. It
 	// makes a run faster and decides nothing, so a disk that refuses it costs
 	// time and never a verdict.
-	buildCache, err := openRunBuildCache(options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory)
+	buildCache, err := openRunBuildCache(
+		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
 	if err != nil {
 		emit(options, "build-cache-unavailable", err.Error())
 	}
@@ -278,6 +279,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		if detail := buildCache.summarize(); detail != "" {
 			emit(options, "build-cache-summary", detail)
 		}
+		collectRunBuildCache(options, loaded, buildCache, now())
 		if closeErr := releaseBuildCache(options, buildCache); closeErr != nil {
 			emit(options, "build-cache-unavailable", closeErr.Error())
 		}
