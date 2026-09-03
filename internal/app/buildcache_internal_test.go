@@ -232,6 +232,66 @@ func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
 	}
 }
 
+// TestCacheGCReportsABuildLayerAnotherProcessIsCollecting is the difference
+// between a collection that removed nothing and a collection that did not
+// happen.
+//
+// The layer the machine keeps is shared by every repository on it, so a run
+// ending beside this command may already hold its collection lock, and yielding
+// is the correct answer rather than a failure. Reporting that as a completed
+// collection of zero entries would tell a developer looking at the report that
+// the bound had just been applied, when it had not been, so the evidence says
+// it was skipped and why.
+func TestCacheGCReportsABuildLayerAnotherProcessIsCollecting(t *testing.T) {
+	root := t.TempDir()
+	// The same one-byte bound the collection above is written against: the entry
+	// is over budget, so the only reason it survives is that nothing collected.
+	if err := os.WriteFile(filepath.Join(root, config.FileName),
+		[]byte("version = 1\n[cache]\nbuild_max_bytes = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userCache := t.TempDir()
+	layer := buildcache.Layer{Dir: filepath.Join(userCache, "goatest", buildcache.DefaultBaseName)}
+	if err := layer.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	stored := time.Now()
+	layers := buildcache.Layers{Base: layer, Persist: true}
+	if _, err := layers.Put(buildCacheIdentifier(1), buildCacheIdentifier(2), strings.NewReader("compiled"), 8, stored); err != nil {
+		t.Fatal(err)
+	}
+	// Holding the lock here is what another process collecting this layer looks
+	// like from the inside of this one.
+	release, held, err := layer.HoldCollection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("HoldCollection did not take the lock of a layer nothing else is collecting")
+	}
+	defer func() { _ = release() }()
+	service := Service{
+		Root: root, Progress: io.Discard,
+		Executable:   "/opt/bin/goatest",
+		UserCacheDir: func() (string, error) { return userCache, nil },
+		Now:          func() time.Time { return stored.Add(24 * time.Hour) },
+	}
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil || collected.Verdict != report.VerdictCompleted {
+		t.Fatalf("cache gc = %+v, %v", collected, err)
+	}
+	if !hasEvidenceStatus(collected, "build-gc", "skipped") {
+		t.Fatalf("cache gc evidence = %+v, want the build collection reported as skipped", collected.Evidence)
+	}
+	after, err := layer.Inspect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Entries != 1 {
+		t.Fatalf("build cache after a skipped gc = %+v, want the entry still there", after)
+	}
+}
+
 func TestCacheStatusSurvivesAMachineWithNowhereToKeepABuildCache(t *testing.T) {
 	service := Service{
 		Root: t.TempDir(), Progress: io.Discard,
@@ -248,6 +308,15 @@ func TestCacheStatusSurvivesAMachineWithNowhereToKeepABuildCache(t *testing.T) {
 func hasEvidenceDetail(result report.Report, id, detail string) bool {
 	for _, item := range result.Evidence {
 		if item.ID == id && strings.Contains(item.Detail, detail) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEvidenceStatus(result report.Report, id, status string) bool {
+	for _, item := range result.Evidence {
+		if item.ID == id && item.Status == status {
 			return true
 		}
 	}
