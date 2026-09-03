@@ -58,6 +58,22 @@ test files add, each in-module test import expanded through the same `go list`
 listing, so a change to a helper a target reaches only from a `_test.go` file
 still re-selects that target.
 
+Every go command a run starts is served by goatest's own build cache rather than
+the toolchain's, through `GOCACHEPROG` and the hidden `goatest cacheprog`
+subcommand. The cache has two layers: a base layer the machine keeps between
+runs, and a scratch layer removed when the run ends. Reads resolve scratch and
+then base. Writes are where the rule is: **only a command that compiles or lists
+writes to the base layer** — `go vet`, `go build`, `go list`, `go version`, and
+a `go test -c` — and everything that runs the project's tests writes to scratch.
+That second half is what keeps the cache useful. A baseline target is the
+project's test binary under `go tool test2json`, and a test suite spawns go
+commands of its own; were a target run to persist, every throwaway package those
+fixtures compile would evict the standard library the base layer exists to hold.
+The rule lives in one function, is applied by one workspace decorator, and is
+pinned by a test that names every command goatest issues. See
+[ADR 0005](adr/0005-build-cache-goatest-owns.md) and
+[configuration](configuration.md) for the bound and the location.
+
 Verification is read-only. A killing fuzz artifact or generated test is stored
 through `internal/repair` as an isolated candidate. The separate `fix --apply`
 operation validates candidates against a copied repository and performs the

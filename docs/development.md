@@ -437,6 +437,7 @@ release points:
 | --- | --- | --- |
 | the baseline scratch of a round, `goatest-baseline-*` | once per round, under `TempDirectory` or the system temporary directory | `artifact` event `baseline-scratch` |
 | the tree a generated candidate is validated in, `goatest-candidate-*` | once per `OriginalStable`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
+| the scratch layer of the run's build cache, `goatest-build-cache-*` | once per run, under `TempDirectory` or the system temporary directory | `artifact` event `build-cache-scratch` |
 
 Keeping is the whole of the change: the directory stays where it was made, and
 the `artifact` event is the run's account of having left it there. That account
