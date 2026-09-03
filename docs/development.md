@@ -430,31 +430,70 @@ variable is read in `cmd/goatest` alone, where it becomes the flag the command
 layer parses, on the same terms as `GOATEST_TRACE`.
 
 The flag becomes `assure.Options.KeepTemp`, which the run passes on to
-`RepositoryValidatorOptions.KeepTemp`. `internal/assure/keep_temp.go` holds both
-release points:
+`RepositoryValidatorOptions.KeepTemp` and to `mutationbridge.Options.KeepTemp`.
+`internal/assure/keep_temp.go` holds every release point:
 
 | Directory | Made | Kept as |
 | --- | --- | --- |
-| the baseline scratch of a round, `goatest-baseline-*` | once per round, under `TempDirectory` or the system temporary directory | `artifact` event `baseline-scratch` |
-| the tree a generated candidate is validated in, `goatest-candidate-*` | once per `OriginalStable`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
-| the scratch layer of the run's build cache, `goatest-build-cache-*` | once per run, under `TempDirectory` or the system temporary directory | `artifact` event `build-cache-scratch` |
+| the run scratch, `goatest-run-*` | once per run, under `TempDirectory` or the system temporary directory | `artifact` event `run-scratch` |
+| the scratch layer of the run's build cache, `build/` | once per run, below the run scratch | `artifact` event `build-cache-scratch` |
+| the scratch a round collects its baseline in, `baseline-*` | once per round, below the run scratch | `artifact` event `baseline-scratch` |
+| the tree a generated candidate is validated in, `candidate-*` | once per `OriginalStable`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
+| the snapshot, probe tree and scratch of the mutation engine, `go-mutants-*` | by go-mutants, once per opened workspace | `artifact` event `mutation-workspace` |
 
-Keeping is the whole of the change: the directory stays where it was made, and
-the `artifact` event is the run's account of having left it there. That account
-is also the only place a kept path is named. With `--trace` it is in the
-recording; on a failure it reaches `preserved-paths.txt` through the recording
-in memory. A successful, untraced `--keep-temp` run therefore leaves directories
-only the temporary directory itself lists, and nothing removes any of them
-afterwards.
+Only the first and the last of those are the run's to remove at the end. The
+three in between are removed as the run finishes with them — a round releases
+its baseline scratch, a validation releases its candidate tree, the build cache
+layer is dropped before the run scratch that holds it — because removing them
+early is what keeps the peak footprint of a run small. The removal of the run
+scratch at the end covers whatever is left, including the fuzz cache an
+original-control execution makes for a `-test.fuzz` argument (`control-fuzz-*`,
+also removed when that command returns) and anything a killed step never got to.
 
-Three things are not kept. The mutation workspace's snapshot belongs to
-go-mutants, which creates and removes it; see [limitations](limitations.md). The
-fuzz cache an original-control execution makes for a `-test.fuzz` argument is
-removed when that command returns. And a test's own fixtures are removed by
-`t.TempDir()` when the test ends, because `--keep-temp` is an option of the tool
-rather than of the suite: a test that drives a real one points `TempDirectory`
-at a `t.TempDir()`, so the framework still removes what the run kept, and
-asserts on the recording and on the directory it names instead.
+A run that could not make its scratch directory makes all of them beside it
+instead, under the `goatest-` names the sweep knows, and says so with a
+`temp-unavailable` note. Nothing in this area can fail a run: a scratch that cannot be made,
+claimed or removed, a sweep that fails, and a ledger that cannot be written are
+all progress notes, and the run reaches its verdict either way.
+
+### Who owns a temporary directory
+
+Every run scratch holds an owner pair written the moment it is made:
+`owner.lock`, an exclusive advisory lock held open for the whole run, and
+`owner.json`, a `goatest-temp-owner-v1` marker naming the run, the process, the
+start time, the repository, and whether the directory was kept on purpose.
+`internal/tempowner` writes both and reads them back.
+
+The lock is the liveness signal and the only one. A lock that can be taken
+means the process that held it is gone, whatever its pid has been reused for
+since. `tempowner.Sweep` collects every direct child of the temporary root whose
+name begins with one of goatest's prefixes — `goatest-run-`, and the pre-scratch
+names `goatest-baseline-`, `goatest-candidate-`, `goatest-control-fuzz-`,
+`goatest-build-cache-` — whose lock is free and whose marker does not say kept,
+or which carries no marker at all and has been untouched for 24 hours. It never
+follows a symbolic link, and one entry it cannot judge never stops the others.
+A run sweeps before it writes anything; `goatest cache gc` sweeps on demand and
+`goatest cache status` inspects without removing. go-mutants' own directories
+are not in that list: they carry owner files of their own and its `Open` sweeps
+them, which is what the `mutation-temp-sweep` progress note reports.
+
+### What a kept directory costs, and who collects it
+
+Keeping is the whole of the change to the run: the directory stays where it was
+made, its marker records that it was kept on purpose so no later sweep takes it,
+and the run writes down where it left it. It writes it down twice. The
+`artifact` event is the account in the recording, which reaches a trace
+directory and, on a failure, `preserved-paths.txt` in the diagnostics bundle.
+`.goatest/kept-temp-v1.json` is the record that outlives the run: one entry per
+directory with its path, the run that kept it, when, and how big it was.
+`goatest cache status` lists them, and `goatest cache gc` removes the ones older
+than `[cache] ttl` and drops the entries of directories that are already gone.
+`internal/keptledger` owns that file.
+
+A test's own fixtures are not kept, because `--keep-temp` is an option of the
+tool rather than of the suite: a test that drives a real one points
+`TempDirectory` at a `t.TempDir()`, so the framework still removes what the run
+kept, and asserts on the recording and on the directory it names instead.
 `TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid` is the
 reference for that, and `TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle`
 for the path from a kept directory to `preserved-paths.txt`.
@@ -462,7 +501,11 @@ for the path from a kept directory to `preserved-paths.txt`.
 `--keep-temp` takes no part in `modeIdentity`, in the assurance inputs, or in
 the evidence digest, and `TestKeepTempTakesNoPartInCacheIdentity` pins that
 beside the same test for `--trace`. A debugging aid that changed what a run
-decides would be worse than no aid at all.
+decides would be worse than no aid at all. Neither does where the run scratch
+was made nor what its sweep found:
+`TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity` pins that for the
+assurance digest and for the behaviour key of every target, because both are
+facts about the machine and never about the code under test.
 
 ## Seam policy
 

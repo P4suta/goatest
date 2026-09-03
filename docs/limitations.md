@@ -87,23 +87,29 @@ self-dogfood is not external compatibility evidence.
   `fix --apply` validation runs untraced.
 - The `artifact` trace event names the temporary directories `--keep-temp` kept
   and nothing else yet. Nothing else in the schema is unimplemented.
-- `--keep-temp` keeps the baseline scratch of each round and the tree each
-  generated candidate was validated in. It cannot keep the mutation workspace's
-  snapshot: go-mutants creates, owns, and removes that tree behind
-  `mutationbridge.Open` and `Workspace.Close`, goatest never holds its path, and
-  the pinned API exposes no retention option. The fuzz cache an original-control
-  execution makes for a `-test.fuzz` argument is removed regardless.
-- A kept directory is reported only as an `artifact` event of the recording, so
-  it reaches a trace directory, and the `preserved-paths.txt` of a failed run's
-  diagnostics bundle, but never the progress stream: a successful, untraced
-  `--keep-temp` run leaves directories only the temporary directory itself
-  lists. Like `--trace`, `--keep-temp` is accepted by `verify` and `replay`
-  alone, so a `fix --apply` validation removes its candidate trees.
+- `--keep-temp` keeps the run scratch and everything still below it, and asks
+  the mutation engine to keep its snapshot, probe tree and scratch. Like
+  `--trace`, it is accepted by `verify` and `replay` alone, so a `fix --apply`
+  validation removes its candidate trees. The fuzz cache an original-control
+  execution makes for a `-test.fuzz` argument is removed when that command
+  returns regardless.
+- A kept directory is named as an `artifact` event of the recording and in
+  `.goatest/kept-temp-v1.json`, so a successful untraced run still leaves a
+  record of what it left behind. `goatest cache status` lists the entries and
+  `goatest cache gc` removes the ones older than `[cache] ttl`; a directory
+  removed by hand leaves an entry that the next `gc` drops.
+- The sweep that collects the leftovers of killed runs judges a directory with
+  no owner marker by age alone, and spares one younger than 24 hours: it may be
+  a run in progress under a binary from before the marker existed. Such a
+  directory therefore survives one day longer than it needs to. The sweep never
+  follows a symbolic link and never touches a name goatest did not make.
 - Trace and diagnostics directories use the cache TTL and byte budget, each as
-  an independent retention store. Directories kept with `--keep-temp` remain
-  outside that GC and require manual removal. A preserved command output is
-  capped at 1 MiB per file, so a long capture is truncated with a marker even
-  though its event digests the whole of it.
+  an independent retention store. Directories kept with `--keep-temp` are bound
+  by the same TTL through the ledger, but by no byte budget: a keep is a
+  deliberate request, and the only bound on how much disk it may cost is how
+  long it lasts. A preserved command output is capped at 1 MiB per file, so a
+  long capture is truncated with a marker even though its event digests the
+  whole of it.
 - Only the directory sink is reachable from the command line; the in-memory and
   fan-out sinks remain in-process. `trace summary` and `trace diff` are bounded
   readers, not a query language over individual execution records. See

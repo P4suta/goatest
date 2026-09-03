@@ -99,6 +99,23 @@ files is refused rather than collected. See
 [ADR 0005](adr/0005-build-cache-goatest-owns.md) and
 [configuration](configuration.md) for the bound and the location.
 
+Every byte a run writes outside the repository goes below one scratch directory
+it makes for itself and removes when it ends: `goatest-run-*` under the
+configured temporary root, holding `build/` for the build cache layer,
+`baseline-*` per round, `candidate-*` per validated candidate, and
+`control-fuzz-*` for a fuzzing original control. The directory carries an owner
+pair — an advisory lock held open for the whole run, and a
+`goatest-temp-owner-v1` marker naming the run, the process, the repository and
+whether it was kept on purpose. The lock is the liveness signal, because a pid
+wraps and is reused; a lock that can be taken means its holder is gone. Each run
+sweeps the temporary root before it writes anything and collects what runs that
+were killed left behind, and `goatest cache gc` does the same on demand. A
+directory kept with `--keep-temp` is marked kept, so no sweep takes it, and is
+recorded in `.goatest/kept-temp-v1.json`, which `cache status` lists and
+`cache gc` collects once it is older than the cache TTL. None of this can fail
+a run: it is housekeeping, and a run that could not do it still produces its
+verdict. See [ADR 0006](adr/0006-every-temporary-directory-has-an-owner.md).
+
 Verification is read-only. A killing fuzz artifact or generated test is stored
 through `internal/repair` as an isolated candidate. The separate `fix --apply`
 operation validates candidates against a copied repository and performs the

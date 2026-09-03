@@ -426,6 +426,13 @@ These are the same notes the run reports to the progress stream, forwarded into
 the recording so that a trace is a complete account of one run rather than a
 half of one.
 
+Housekeeping reports itself here and nowhere else. `temp-sweep` says what the
+run reclaimed from the temporary directory before it wrote anything, and
+`mutation-temp-sweep` says the same for the mutation engine's own directories;
+both are silent on a machine with nothing to reclaim. `temp-unavailable` and
+`kept-temp-unrecorded` say what could not be made, removed or written down.
+None of them can change a verdict.
+
 A `--ui=jsonl` run streams the same notes to stdout as
 `{"type":"progress","kind":...,"detail":...,"elapsed_ms":...}` lines: same
 `kind`, same `detail`, so a note reads the same wherever it is watched. The two
@@ -443,13 +450,17 @@ audited by.
 | `path` | where it is, as the run recorded it |
 
 A run emits one for each temporary directory `--keep-temp` asked it to keep:
-`baseline-scratch` for the scratch directory a round collected its baseline in,
-`candidate-tree` for the isolated tree a generated candidate was validated in,
-and `build-cache-scratch` for the layer of the build cache that would otherwise
-die with the run. Those paths are absolute and outside the repository, because that is where a
-temporary directory is made, so a `path` is read as it was recorded rather than
-resolved against anything. Nothing else emits an `artifact` event yet. See
-[development](development.md) for what is kept and what is not.
+`run-scratch` for the one directory the run made everything else below,
+`build-cache-scratch` for the layer of the build cache that would otherwise die
+with the run, `baseline-scratch` for the scratch directory a round collected its
+baseline in, `candidate-tree` for the isolated tree a generated candidate was
+validated in, and `mutation-workspace` for each directory the mutation engine
+preserved — its snapshot, its probe tree, its scratch. Those paths are absolute
+and outside the repository, because that is where a temporary directory is made,
+so a `path` is read as it was recorded rather than resolved against anything.
+Nothing else emits an `artifact` event yet. The same paths are written to
+`.goatest/kept-temp-v1.json`, which is what a successful untraced run leaves
+behind; see [development](development.md) for what is kept and what is not.
 
 ### `run`
 

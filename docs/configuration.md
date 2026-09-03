@@ -21,7 +21,11 @@ line. Loading the untouched skeleton yields exactly the defaults.
   note.
 - `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
   applied independently to exact-input cache entries, trace run directories,
-  and failure-diagnostics directories. Checkpoints live inside their
+  and failure-diagnostics directories. `ttl` alone also bounds the temporary
+  directories a `--keep-temp` run kept: they are recorded in
+  `.goatest/kept-temp-v1.json` and collected by `goatest cache gc` once they are
+  older than it. No byte budget applies to those, because a keep is a request
+  somebody made on purpose and the only sensible bound on it is time. Checkpoints live inside their
   exact-input cache entry and are collected with it. `build_max_bytes`
   (non-negative, 2 GiB by default) bounds the separate build cache goatest
   serves its go commands from, and `build_dir` says where that cache lives — a
@@ -70,9 +74,12 @@ Protocol details are in [protocols](protocols.md).
 ## Cache maintenance
 
 `goatest cache status` reports the exact-input cache, `.goatest/trace`,
-`.goatest/diagnostics`, and the build cache. `goatest cache gc` removes expired
-entries first and then the oldest entries until each store meets its bound —
-`max_bytes` for the first three, `build_max_bytes` for the build cache.
+`.goatest/diagnostics`, the build cache, and the temporary directory: the
+leftovers of runs that were killed, and each directory a `--keep-temp` run kept.
+`goatest cache gc` removes expired entries first and then the oldest entries
+until each store meets its bound — `max_bytes` for the first three,
+`build_max_bytes` for the build cache — and then collects those leftovers and
+the keeps `ttl` has expired.
 Verification and maintenance hold one OS advisory lock rooted at
 `.goatest/cache`; a contending process reports `cache-wait`, and interrupting
 that wait does not start work or run GC without the lock.
