@@ -20,9 +20,26 @@ import (
 // reason `status` never collects a cache: a person asking what is on their disk
 // has not asked for any of it to be removed.
 
+// unnamedTemporaryDirectory is what both maintenance commands report when
+// nobody named a temporary directory.
+//
+// Guessing the machine's own would be the obvious convenience and is exactly
+// the mistake that once collected the scratch directory of a run that was
+// working in it: a service that names none has named nothing, and the one
+// layer allowed to say where the machine keeps its temporary files is the CLI.
+func unnamedTemporaryDirectory(id string) report.Evidence {
+	return report.Evidence{
+		Kind: "temp", ID: id, Status: "skipped",
+		Detail: "no temporary directory was named",
+	}
+}
+
 // temporaryStatus reports what a `gc` would reclaim from the temporary
 // directory without reclaiming any of it.
 func (service Service) temporaryStatus(moment time.Time) report.Evidence {
+	if service.TempDirectory == "" {
+		return unnamedTemporaryDirectory("orphans")
+	}
 	result, err := tempowner.Inspect(service.TempDirectory, assure.TemporaryPrefixes(), moment)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
@@ -38,6 +55,9 @@ func (service Service) temporaryStatus(moment time.Time) report.Evidence {
 // stores it can read because of the one it cannot is worse than an incomplete
 // answer.
 func (service Service) temporarySweep(moment time.Time) report.Evidence {
+	if service.TempDirectory == "" {
+		return unnamedTemporaryDirectory("sweep")
+	}
 	result, err := tempowner.Sweep(service.TempDirectory, assure.TemporaryPrefixes(), moment)
 	if err != nil {
 		result.Errors = append(result.Errors, err)

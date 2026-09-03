@@ -57,12 +57,15 @@ func (result Result) Detail(removed string) string {
 	return detail
 }
 
-// Sweep collects every abandoned goatest directory directly under parent. An
-// empty parent is the operating system's temporary directory, which is where
-// os.MkdirTemp puts a directory nobody named a parent for.
+// Sweep collects every abandoned goatest directory directly under parent.
 //
-// A parent that does not exist is not a failure: it is a machine on which
-// nothing has run yet.
+// An empty parent collects nothing, deliberately. Reading it as the operating
+// system's temporary directory would be the obvious convenience and is the one
+// mistake this package must not make: a caller that named no directory has not
+// asked for the machine's own, and sweeping there on nobody's instruction
+// reaches every goatest directory on it, including the ones live runs are
+// working in. A parent that does not exist is not a failure either: it is a
+// machine on which nothing has run yet.
 func Sweep(parent string, prefixes []string, now time.Time) (Result, error) {
 	return sweeper{now: now, remove: os.RemoveAll}.sweep(parent, prefixes)
 }
@@ -83,7 +86,7 @@ type sweeper struct {
 
 func (sweep sweeper) sweep(parent string, prefixes []string) (Result, error) {
 	if parent == "" {
-		parent = os.TempDir()
+		return Result{}, nil
 	}
 	entries, err := os.ReadDir(parent)
 	if err != nil {

@@ -151,6 +151,15 @@ func (scratch runScratch) buildCacheLayer() (string, error) {
 // would be in the progress stream of every run of every repository that never
 // crashes, and a reader learns to skip exactly that kind of line.
 func sweepRunTemporaries(options Options, sweep func(string, []string, time.Time) (tempowner.Result, error), now time.Time) {
+	// Only where the caller named a directory. A run whose temporary root is
+	// empty still makes its scratch where the operating system puts one —
+	// creating a directory there is what every temporary directory has always
+	// done — but collecting there is another thing entirely: it would reach the
+	// directories of every goatest on the machine, live runs included, on the
+	// strength of a value nobody set.
+	if options.TempDirectory == "" {
+		return
+	}
 	result, err := sweep(options.TempDirectory, TemporaryPrefixes(), now)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
