@@ -24,6 +24,15 @@ type Options struct {
 	// workspace that runs untraced, which is what every caller that does not
 	// ask for a trace gets.
 	Trace *trace.Recorder
+	// KeepTemp asks the engine to keep the snapshot, the probe tree and the
+	// scratch directory it would otherwise remove when the workspace closes.
+	// The tree a mutant actually ran in is the one place the question of what
+	// it looked like can be answered, and a run asked to keep its temporary
+	// directories has to be able to keep that one too.
+	//
+	// Each kept directory is marked kept, so the sweep of the next Open leaves
+	// it where it is rather than collecting it as an orphan.
+	KeepTemp bool
 }
 
 type PrepareOptions struct {
@@ -50,6 +59,8 @@ type mutationWorkspace interface {
 	Exec(context.Context, gomutants.Command) (gomutants.CommandResult, error)
 	Prepare(context.Context, gomutants.PrepareOptions) (*gomutants.Session, error)
 	Close() error
+	Swept() gomutants.SweepResult
+	Preserved() []string
 }
 
 type Workspace struct {
@@ -77,6 +88,7 @@ func Open(ctx context.Context, root string, options Options) (*Workspace, error)
 		GoBinary:        options.GoBinary,
 		TempDirectory:   options.TempDirectory,
 		ReportDirectory: options.ReportDirectory,
+		KeepTemp:        options.KeepTemp,
 		Env:             append([]string(nil), options.Environment...),
 	})
 	if err != nil {
@@ -166,6 +178,28 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 		return nil, fmt.Errorf("goatest: prepare mutation session: %w", err)
 	}
 	return session, nil
+}
+
+// Swept is what the engine collected before it copied anything: the temporary
+// directories of go-mutants runs that were killed before they could remove
+// their own. It is a fact about the machine rather than about this workspace,
+// which is why it is passed through for the run to report and never folded
+// into anything the run decides.
+func (workspace *Workspace) Swept() gomutants.SweepResult {
+	if workspace == nil || workspace.inner == nil {
+		return gomutants.SweepResult{}
+	}
+	return workspace.inner.Swept()
+}
+
+// Preserved names the directories a KeepTemp workspace left on disk. The engine
+// fills it in as it closes, so a caller reads it after Close and gets nothing
+// from a workspace that kept nothing.
+func (workspace *Workspace) Preserved() []string {
+	if workspace == nil || workspace.inner == nil {
+		return nil
+	}
+	return workspace.inner.Preserved()
 }
 
 func (workspace *Workspace) Close() error {
