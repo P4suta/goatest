@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -208,5 +209,63 @@ func TestCacheStatusOfAMachineThatHasKeptNothingReportsNothing(t *testing.T) {
 	}
 	if !hasEvidenceDetail(status, "kept-temp-status", "entries=0 bytes=0 missing=0") {
 		t.Fatalf("cache status evidence = %+v, want an empty ledger reported", status.Evidence)
+	}
+}
+
+// A directory that cannot be stat'ed is not a directory that is gone. Treating
+// every stat failure as "missing" drops the entry while the directory stays on
+// the disk, which is the one outcome this ledger exists to prevent: a kept
+// directory nothing tracks any more and nothing will ever collect.
+func TestAnEntryThatCannotBeStatedKeepsItsPlaceInTheLedger(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		// A path below a regular file reports "not exist" there, so the case
+		// this test is about cannot be produced the same way.
+		t.Skip("this platform reports a path below a file as not existing")
+	}
+	root, temporary := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(temporary, "file"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Below a regular file: the stat fails with ENOTDIR, which says nothing
+	// about whether anything is there.
+	unreadable := filepath.Join(temporary, "file", "child")
+	moment := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	if err := keptledger.Append(keptledger.Path(root),
+		keptledger.Entry{Path: unreadable, RunID: "goatest-run-unreadable", KeptAt: moment, Bytes: 64},
+	); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{
+		Root: root, Progress: io.Discard, TempDirectory: temporary,
+		Now: func() time.Time { return moment.Add(48 * time.Hour) },
+	}
+	status, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvidenceStatus(status, "goatest-run-unreadable", "unreadable") {
+		t.Fatalf("cache status evidence = %+v, want the entry reported as unreadable", status.Evidence)
+	}
+	if !hasEvidenceDetail(status, "kept-temp-status", "missing=0") {
+		t.Fatalf("cache status evidence = %+v, want an entry nobody could stat counted as present", status.Evidence)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"),
+		[]byte("version = 1\ncontract = \"standard-v1\"\n[cache]\nttl = \"1h\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvidenceDetail(collected, "kept-temp-gc", "removed-entries=0 removed-bytes=0 remaining=1 errors=1") {
+		t.Fatalf("cache gc evidence = %+v, want the entry retained and the failure counted", collected.Evidence)
+	}
+	ledger, err := keptledger.Load(keptledger.Path(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger.Entries) != 1 || ledger.Entries[0].Path != unreadable {
+		t.Fatalf("ledger after a gc = %+v, want the entry nobody could judge still recorded", ledger.Entries)
 	}
 }
