@@ -146,6 +146,65 @@ func TestKeepRefusesAChildThatIsNotADirectory(t *testing.T) {
 	}
 }
 
+// retainedFile makes one regular child of root, which is the shape of a stored
+// repair candidate or patch artifact.
+func retainedFile(t *testing.T, root, name, contents string, moment time.Time) {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, moment, moment); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectFilesExpiresThenBoundsFlatEntriesDeterministically(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	retainedFile(t, root, "old.json", "1234567890", base)
+	retainedFile(t, root, "middle.json", "1234567890", base.Add(time.Hour))
+	retainedFile(t, root, "new.json", "1234567890", base.Add(2*time.Hour))
+	status, err := InspectFiles(root)
+	if err != nil || status.Entries != 3 || status.Bytes != 30 || !status.Oldest.Equal(base) {
+		t.Fatalf("inspect files = (%+v, %v)", status, err)
+	}
+	result, err := CollectFiles(root, 10, 90*time.Minute, base.Add(3*time.Hour))
+	if err != nil || result.Before.Entries != 3 || result.RemovedEntries != 2 || result.After.Entries != 1 || result.After.Bytes != 10 {
+		t.Fatalf("collect files = (%+v, %v)", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "new.json")); err != nil {
+		t.Fatalf("newest artifact was not retained: %v", err)
+	}
+}
+
+func TestFileAndDirectoryModesRefuseEachOthersRoots(t *testing.T) {
+	files := t.TempDir()
+	retainedFile(t, files, "candidate.json", "{}", time.Now())
+	if _, err := Inspect(files); err == nil {
+		t.Fatal("the directory mode accepted a root of regular files")
+	}
+	directories := t.TempDir()
+	retainedDirectory(t, directories, "run-a", time.Now())
+	if _, err := InspectFiles(directories); err == nil {
+		t.Fatal("the file mode accepted a root of directories")
+	}
+}
+
+func TestInspectFilesRefusesASymlinkedEntry(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "linked.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := InspectFiles(root); err == nil {
+		t.Fatal("the file mode followed a symbolic link")
+	}
+}
+
 func TestRetentionRefusesSymlinkedEntries(t *testing.T) {
 	root := t.TempDir()
 	target := t.TempDir()
