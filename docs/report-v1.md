@@ -67,6 +67,12 @@ respectively, so their sum never exceeds `executed`. All four are optional and
 omitted when zero, so a report written before evidence was ever reused still
 validates.
 
+A reused mutant that reports as `inconclusive` is a timeout an earlier run
+recorded, which no counter sums: reusing one keeps a finding rather than
+resolving anything. A reused mutant that reports as `accepted` is one whose
+regenerated finding this run's acceptances silenced; it is outside `executed`,
+so it moves no reuse counter either, while the flag and the provenance stay.
+
 An interrupted checkpoint is not a partial report and cannot advance any
 latest-report index. Its separate strict contract and deletion rules are in
 [checkpoint v1](checkpoint-v1.md).

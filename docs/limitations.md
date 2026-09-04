@@ -117,6 +117,23 @@ self-dogfood is not external compatibility evidence.
   fan-out sinks remain in-process. `trace summary` and `trace diff` are bounded
   readers, not a query language over individual execution records. See
   [trace v1](trace-v1.md).
+- Reusing a survived verdict across runs rests on a behaviour key built from
+  what a test binary links and reads, so a test that reads files that key does
+  not name could change its verdict without changing its key. The answer is an
+  over-approximation, not an exclusion: a package whose own or test sources call
+  `os.ReadDir`, `os.DirFS`, `os.OpenRoot`, `filepath.Walk`, `filepath.WalkDir`,
+  `filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or `fs.Sub` is keyed
+  on every file of the snapshot, so its verdicts survive an identical tree and
+  nothing else. Detection is syntactic, over the call's selector and the import
+  path it belongs to. A test that reads the repository some other way — through
+  a helper in a package the list does not name, a subprocess, or a path handed
+  to it at run time — is not caught, and its recorded verdicts can outlive the
+  files they depended on. The list is deliberately conservative and may only
+  grow; nothing is ever excluded from testing or from reuse by name.
+- A reused timeout keeps its finding rather than resolving anything, so it can
+  only ever cost a run work it did not need to do, never assurance. It is also
+  never re-derived on its own: `goatest replay <finding-id>` bypasses evidence
+  entirely and is the way to run one again.
 - Checkpoint I/O, evidence digesting, mutant accounting, and report rendering
   have local Go benchmarks. They establish a self-application baseline, not a
   cross-repository compatibility or performance contract.

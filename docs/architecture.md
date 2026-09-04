@@ -51,20 +51,27 @@ recorded in the trace so the layer stays auditable offline against a full run's
 kills. Replaying one mutant skips the pass entirely and routes as it did before
 the pass existed, which only executes more.
 
-Across runs, the mutation phase keeps a store of the kills it confirmed through
-one named target, `.goatest/cache/mutation-evidence-v1.json`, read once before
-the phase and written once after it. A full run — the whole project, in a
-first round — resolves a mutant from that store when the recorded killer still
-reaches the mutant, has the same behaviour key — an allowlist over the digests
-the run already computed for its snapshot: the test binary's package closure,
-the data and embedded files beside it, manifests, dependencies, toolchain,
-platform, environment, contract, arguments, tags, timeouts, versions — and
-passed in this run's own baseline, which is the fresh control. Every other
-record executes, and a record about a mutant the catalogue no longer names is
-pruned when the store is written back. The report marks each reused
-disposition with its provenance and the trace records the reuse as a route
-with no execution beside it. The rule is in
-[the assurance contract](assurance-contract.md).
+Across runs, the mutation phase keeps a store of what it established about each
+mutant, `.goatest/cache/mutation-evidence-v1.json`, read once before the phase
+and written once after it. A full run — the whole project, in a first round —
+resolves a mutant from that store on a condition of the shape its verdict has.
+A kill is existential and is reused when the recorded killer still reaches the
+mutant, has the same behaviour key, and passed in this run's own baseline,
+which is the fresh control. A survival is universal, so it is reused only when
+every target that reaches the mutant now is one the recording run ran against
+it under the same key; a mutant no target reaches is reused against the key of
+its package suite, and a timeout, which settles nothing, is reused fail-closed
+under the same conditions and keeps its finding. The behaviour key is an
+allowlist over the digests the run already computed for its snapshot: the test
+binary's package closure, the data and embedded files beside it, manifests,
+dependencies, toolchain, platform, environment, contract, arguments, tags,
+timeouts, versions — or, for a package whose sources read a directory they
+compute rather than a file they name, the whole tree. Every other record
+executes, and a record about a mutant the catalogue no longer names is pruned
+when the store is written back. The report marks each reused disposition with
+its provenance and the trace records the reuse as a route with no execution
+beside it. The rule is in [the assurance contract](assurance-contract.md) and
+the reasoning in [ADR 0007](adr/0007-survived-evidence-is-universal.md).
 
 Changeset routing reads two things about each top-level target: the files its
 baseline run covered, and the import closure its test binary links. That

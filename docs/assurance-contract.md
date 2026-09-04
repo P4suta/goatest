@@ -183,12 +183,23 @@ selected   = executed + compile-rejected + accepted + unknown
 The aggregate counts must exactly match the ID-level mutant inventory. Any
 `unknown` disposition requires `ERROR`.
 
-### Reusing a kill an earlier run confirmed
+### Reusing a verdict an earlier run reached
+
+The reasoning behind every rule in this section, and the alternatives it
+rejects, is [ADR 0007](adr/0007-survived-evidence-is-universal.md).
 
 A full run — the whole project, in a first round no repair has modified —
-records every kill it confirmed through one named test or example target, and
-the next such run resolves a mutant from that record instead of executing it
-when all of the following hold:
+records what it established about every mutant it can state a checkable claim
+for, and the next such run resolves those mutants from the records instead of
+executing them. A kill is an existential claim — this named target kills this
+mutant — and a survival is the universal one — no test that reaches this mutant
+kills it. The two are reused under conditions of the same shape, over one
+target and over every target respectively.
+
+#### A kill
+
+The record names the target that confirmed the kill, and a later run resolves
+the mutant from it when all of the following hold:
 
 1. the mutant has the same identity, which is content-addressed, so the
    mutated file is byte-for-byte what it was;
@@ -204,6 +215,50 @@ original pass, and the mutant fail again; this run supplies fresh evidence that
 the original still passes, and the report names the run that supplied the
 rest.
 
+#### A survival
+
+The record names every target the recording run executed against the mutant,
+each with the behaviour key it had, and a later run resolves the mutant from it
+when the mutant has the same identity and **every** target this run's coverage
+routes to it, after every discharge above, is one of them: the same package,
+name, and kind, the same behaviour key, and seen to pass by this run's own
+baseline.
+
+A reaching set smaller than the recorded one is still covered — a test that no
+longer reaches the mutant cannot kill it — so the current set need only be a
+subset. A target that entered it is a test nothing was ever run against, so the
+universal claim is simply not about this run and the mutant executes. Two kinds
+of target disqualify a survival in both directions: a fuzz target, because
+exploring one budget without finding an input says nothing about the next, and
+a target restored from a checkpoint, which carries no coverage blocks and is
+therefore routed for the whole file, so the set it belongs to is wider than the
+one any run measured. A survivor whose whole reaching set the proofs discharged
+is not recorded either: nothing ran to exhaust, and the proofs re-derive the
+verdict on the next run without running anything.
+
+#### A mutant no target reaches
+
+Such a mutant is settled by running the package suite, so the verdict is a
+statement about that suite. Its key is the conjunction of every target of the
+package — all kinds, fuzz targets included, because the suite runs them as
+ordinary unit tests — each with its own behaviour key, and of what the
+package-level run itself reads. A recorded verdict is reused when the suite
+still has that key and nothing has come to reach the mutant; a package this run
+could not measure whole, because a target of it was restored from a checkpoint
+or did not pass, names no key at all and neither records nor reuses anything.
+
+#### A timeout
+
+A timeout is not a proof about the mutant: it says the run could not settle it.
+Reusing one therefore keeps a finding and never removes one, which is the only
+direction in which a question nobody answered may be carried forward. It has
+the two shapes its verdict does — time ran out under one of the reaching
+targets, or under the package suite — and is reused under the condition of the
+one it has. `goatest replay <finding-id>` bypasses evidence entirely, which is
+how a timeout is deliberately re-run.
+
+#### The behaviour key
+
 The behaviour key is an allowlist over what the run already digested for its
 own snapshot identity: every Go file of the packages the target's test binary
 links, the `testdata` and embedded files beside those packages, the module
@@ -214,6 +269,17 @@ dependency's own `_test.go` files are outside the key, because they are never
 compiled into the binary; the target's own package's test files are always in
 it. Diagnostics — tracing, kept temporaries — and parallelism are outside
 every key, because neither changes what a test observes.
+
+One kind of target is keyed on the whole tree instead. A test that reads the
+repository as data — one whose package's own or test sources call `os.ReadDir`,
+`os.DirFS`, `os.OpenRoot`, `filepath.Walk`, `filepath.WalkDir`,
+`filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or `fs.Sub` — reads
+files no closure names, so its verdict can change while a key built from its
+closure does not. Every target of such a package is keyed on every file of the
+snapshot, so it keeps a recorded verdict across an identical tree and across
+nothing else. The list is a deliberate over-approximation and may only grow; a
+package whose directory cannot be listed or whose sources cannot be parsed
+counts as one of them. Nothing is excluded from testing or from reuse by name.
 
 Two kinds of kill are neither recorded nor believed. A kill fuzzing found is a
 claim about one budget, not the next. A kill by a batch or a package suite
@@ -232,10 +298,21 @@ reproduction. A store that cannot be read is discarded with a progress note and
 the round executes everything; a store that cannot be written is a note and
 nothing more.
 
+Nothing expires a record and nothing decides one is old. A stale record is
+removed by being contradicted: every mutant a run executes writes a fresh
+record, and this run's record replaces the one it was read from, so a kill the
+tests no longer make and a survival they now contradict each replace the other.
+
 A reused verdict is one of the executed dispositions, not something beside
 them: `reused_killed + reused_survived <= executed`, each reused disposition
 carries the `provenance` of the run that observed it, and its route in the
-trace records the reuse with no execution beside it.
+trace records the reuse with no execution beside it. A reused verdict raises
+its finding again through the acceptances of the run reading it, never through
+the recording run's, so an acceptance that has since expired resurrects the
+finding and one that still holds silences it — which is the one disposition
+outside the executed three a reuse reaches. A reused mutant that is then
+checkpointed carries its provenance through the checkpoint, so a run resuming
+it reports the reuse rather than claiming it observed the verdict.
 
 ## Acceptances
 
