@@ -563,10 +563,67 @@ func TestTargetBehaviorKeyIgnoresTheDiagnosticsAndTheParallelism(t *testing.T) {
 	_, recorder := newTraceRecording()
 	plain := Options{CommandTimeout: 7 * time.Minute}
 	loud := Options{CommandTimeout: 7 * time.Minute, MutationJobs: 9, Trace: recorder, KeepTemp: true}
-	quiet := newTargetKeySources(inputs, model, "standard-v1", plain)
-	noisy := newTargetKeySources(inputs, model, "standard-v1", loud)
+	quiet := newTargetKeySources(inputs, model, "standard-v1", plain, nil)
+	noisy := newTargetKeySources(inputs, model, "standard-v1", loud, nil)
 	if evidence.TargetBehaviorKey(quiet.inputsFor(target)) != evidence.TargetBehaviorKey(noisy.inputsFor(target)) {
 		t.Fatal("a diagnostic or the parallelism entered a behaviour key")
+	}
+}
+
+// TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree pins the one
+// target whose closure is not the answer. A test that reads the repository as
+// data can change its verdict when a file no closure of its own names changes,
+// and no key built from a closure would notice; the key of such a target is
+// therefore built from the whole snapshot, so that it survives only an
+// identical tree. Every other target keys its closure exactly as before.
+func TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree(t *testing.T) {
+	t.Parallel()
+	target := goanalysis.Target{
+		ID: "target-TestValue", Name: "TestValue", Kind: goanalysis.KindTest, Package: evidenceModule,
+		RelativeDir: ".", Path: "value_test.go", Line: 5,
+		Dependencies: []string{evidenceModule + "/internal/helper", "fmt"},
+	}
+	key := func(sources targetKeySources) string { return evidence.TargetBehaviorKey(sources.inputsFor(target)) }
+	readers := map[string]bool{evidenceModule: true}
+
+	for _, test := range []struct {
+		name   string
+		change func(*targetKeySources)
+	}{
+		{name: "a documentation file outside every closure", change: func(sources *targetKeySources) {
+			sources.inputs.Files["docs/notes.md"] = digestText("edited")
+		}},
+		{name: "a Go file of a package the target never links", change: func(sources *targetKeySources) {
+			sources.inputs.Files["other/other.go"] = digestText("edited")
+		}},
+		{name: "the test file of another package", change: func(sources *targetKeySources) {
+			sources.inputs.Files["internal/helper/helper_test.go"] = digestText("edited")
+		}},
+		{name: "a fuzz corpus entry the target never reads", change: func(sources *targetKeySources) {
+			sources.inputs.Corpus["testdata/fuzz/FuzzValue/seed-a"] = digestText("edited")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := repositoryReaderKeyFixture(readers)
+			changed := repositoryReaderKeyFixture(readers)
+			test.change(&changed)
+			if key(changed) == key(reader) {
+				t.Errorf("changing %s left a repository reader's key alone", test.name)
+			}
+			closed := targetKeyFixture()
+			narrowed := targetKeyFixture()
+			test.change(&narrowed)
+			if key(narrowed) != key(closed) {
+				t.Errorf("changing %s invalidated the key of a package that reads no directory", test.name)
+			}
+		})
+	}
+	if key(repositoryReaderKeyFixture(readers)) == key(targetKeyFixture()) {
+		t.Fatal("a repository reader keys the same inputs as a package that reads no directory")
+	}
+	if key(repositoryReaderKeyFixture(readers)) != key(repositoryReaderKeyFixture(readers)) {
+		t.Fatal("the builder is not deterministic for a repository reader")
 	}
 }
 
@@ -603,5 +660,13 @@ func targetKeyFixture() targetKeySources {
 		},
 		{ImportPath: evidenceModule + "/other", RelativeDir: "other"},
 	}}
-	return newTargetKeySources(inputs, model, "standard-v1", Options{CommandTimeout: 7 * time.Minute, TargetTimeout: 3 * time.Minute})
+	return newTargetKeySources(inputs, model, "standard-v1", Options{CommandTimeout: 7 * time.Minute, TargetTimeout: 3 * time.Minute}, nil)
+}
+
+// repositoryReaderKeyFixture is that same module read by a run that found the
+// named packages reading directories they compute rather than files they name.
+func repositoryReaderKeyFixture(readers map[string]bool) targetKeySources {
+	sources := targetKeyFixture()
+	return newTargetKeySources(sources.inputs, sources.model, sources.contract,
+		Options{CommandTimeout: 7 * time.Minute, TargetTimeout: 3 * time.Minute}, readers)
 }

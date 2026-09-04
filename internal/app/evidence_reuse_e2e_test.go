@@ -167,6 +167,127 @@ func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *test
 	}
 }
 
+// TestARepositoryReadingTestReusesOnlyOnAnIdenticalTree pins the one target
+// whose closure is not the answer, against a real toolchain. Two packages of
+// one module record the same kills; only one of them lists a directory it
+// computes, and a change to a documentation file neither package names leaves
+// the reuse of the package that reads no directory alone while forcing every
+// mutant of the package that does to run again.
+func TestARepositoryReadingTestReusesOnlyOnAnIdenticalTree(t *testing.T) {
+	t.Parallel()
+	repository := testkit.NewRepo(t).BoundaryFixture().
+		File("reader/reader.go", repositoryReaderSource).
+		File("reader/reader_test.go", repositoryReaderTestSource).
+		File("docs/notes.md", "first\n").Git()
+	service := app.Service{
+		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
+		Environment: os.Environ(),
+	}
+	readerPackage := testkit.BoundaryModule + "/reader"
+
+	first := verifyRecording(t, service)
+	if first.report.Verdict != report.VerdictAssured || len(reusedMutants(first.report)) != 0 {
+		t.Fatalf("first run = %+v", first.report.Accounting.Mutants)
+	}
+	if len(mutantsOfPackage(first.report, readerPackage)) == 0 {
+		t.Fatal("the reading package contributed no mutant to reuse evidence about")
+	}
+
+	// Only a documentation file changes. Nothing the boundary package's test
+	// binary reads has changed, and everything the reading package's test
+	// binary may read has.
+	repository.File("docs/notes.md", "second\n")
+	second := verifyRecording(t, service)
+	reused := reusedMutants(second.report)
+	if len(reused) == 0 {
+		t.Fatalf("the second run reused nothing: %+v", second.report.Accounting.Mutants)
+	}
+	executed := executedMutants(second.events)
+	for _, mutant := range second.report.Mutants {
+		if mutant.Package != readerPackage {
+			continue
+		}
+		if mutant.Reused {
+			t.Errorf("mutant %s of the reading package was reused across a changed tree", mutant.ID)
+		}
+		if !executed[mutant.ID] {
+			t.Errorf("mutant %s of the reading package was neither reused nor executed", mutant.ID)
+		}
+	}
+	if !slices.Equal(reused, reusedRoutes(second.events)) {
+		t.Fatalf("report reused %v, recording reused %v", reused, reusedRoutes(second.events))
+	}
+	if second.report.Verdict != first.report.Verdict ||
+		!maps.Equal(mutantStatuses(second.report), mutantStatuses(first.report)) {
+		t.Fatalf("reuse changed the verdict: %+v against %+v", second.report, first.report)
+	}
+}
+
+// mutantsOfPackage names the mutants one package of the fixture contributed.
+func mutantsOfPackage(result report.Report, path string) []string {
+	var mutants []string
+	for _, mutant := range result.Mutants {
+		if mutant.Package == path {
+			mutants = append(mutants, mutant.ID)
+		}
+	}
+	slices.Sort(mutants)
+	return mutants
+}
+
+// repositoryReaderSource is a second guarded behaviour, in a package of its
+// own, so that the module has mutants on both sides of the reading rule.
+const repositoryReaderSource = `package reader
+
+// Threshold clamps value to the largest accepted input, the single guarded
+// behaviour this package's tests and mutants argue about.
+func Threshold(value int) int {
+	if value < 4 {
+		return value
+	}
+	return 3
+}
+`
+
+// repositoryReaderTestSource kills every mutant of that behaviour and lists a
+// directory it computes rather than a file it names, which is what makes the
+// whole tree an input of this test binary.
+const repositoryReaderTestSource = `package reader
+
+import (
+	"os"
+	"testing"
+)
+
+func TestThreshold(t *testing.T) {
+	for _, value := range []int{1, 4} {
+		want := value
+		if value >= 4 {
+			want = 3
+		}
+		if got := Threshold(value); got != want {
+			t.Fatalf("Threshold(%d) = %d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestThresholdAtZero(t *testing.T) {
+	if got := Threshold(0); got != 0 {
+		t.Fatalf("Threshold(0) = %d, want 0", got)
+	}
+}
+
+func TestTheDirectoryIsReadable(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the package directory is empty")
+	}
+}
+`
+
 // changedBoundaryTestSource is the fixture's test with one more case, so that
 // the test binary is a different one while still killing what it killed.
 const changedBoundaryTestSource = `package assured
