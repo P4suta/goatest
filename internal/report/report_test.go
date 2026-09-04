@@ -600,6 +600,24 @@ func TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition(t *testing.T)
 	}
 }
 
+// TestValidateAcceptsAReusedMutantThisRunAccepted pins the one disposition a
+// reuse reaches without an execution of its own. A reused verdict raises its
+// finding again here, so this run's acceptances decide it, and an acceptance
+// that still holds silences the finding: the mutant was reused and reports as
+// accepted. It is outside the executed counts, which is why the reuse counters
+// stay empty while the flag and its provenance stay.
+func TestValidateAcceptsAReusedMutantThisRunAccepted(t *testing.T) {
+	t.Parallel()
+	accepted := reusedFixture()
+	accepted.Mutants[0].Status = report.MutantAccepted
+	accepted.Accounting.Mutants = report.MutantAccounting{
+		Discovered: 3, Selected: 3, Executed: 2, Killed: 2, Accepted: 1,
+	}
+	if err := report.Validate(accepted); err != nil {
+		t.Fatalf("a reused acceptance = %v", err)
+	}
+}
+
 // TestValidateRejectsReusedCountsExceedingExecuted pins the inequality that
 // holds however the counters were produced: a run cannot have reused more
 // verdicts than it has mutants with a verdict.

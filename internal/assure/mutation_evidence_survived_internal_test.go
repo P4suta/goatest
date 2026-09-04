@@ -1,0 +1,366 @@
+// SPDX-FileCopyrightText: 2026 goatest contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+package assure
+
+import (
+	"reflect"
+	"slices"
+	"testing"
+	"time"
+
+	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/evidence"
+	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/report"
+)
+
+// exhaustedKey names one target of an exhausted set the way a record names it.
+func exhaustedKey(identity targetIdentity, key string) evidence.TargetKey {
+	return evidence.TargetKey{Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key}
+}
+
+// survivedEvidenceRecord is an earlier run's record of a mutant every test
+// that reached it was run against, and that none of them killed.
+func survivedEvidenceRecord(mutant gomutants.Mutant, exhausted ...evidence.TargetKey) evidence.MutationRecord {
+	return evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeSurvived, Provenance: "snapshot=" + digestText("earlier-run"),
+		Exhausted: exhausted,
+		Finding:   &evidence.FindingSeed{Kind: "surviving-mutant", Summary: mutationSurvivedSummary},
+	}
+}
+
+// TestEvaluateMutationsReusesASurvivorWhoseReachingSetIsFullyExhausted pins the
+// universal half of the claim. A survived verdict says that no test reaching
+// the mutant kills it, so it is this run's verdict exactly when every test that
+// reaches the mutant now was already run against it under the same behaviour
+// key and passed its baseline here.
+func TestEvaluateMutationsReusesASurvivorWhoseReachingSetIsFullyExhausted(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	record := survivedEvidenceRecord(mutant, exhaustedKey(early, key))
+	index := evidenceIndex([]evidence.MutationRecord{record},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 {
+		t.Fatalf("executions = %+v, want none", session.requests)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "surviving-mutant" ||
+		evaluation.Findings[0].Summary != mutationSurvivedSummary || len(evaluation.Evidence) != 0 {
+		t.Fatalf("evaluation = %+v, want the recorded survivor finding", evaluation)
+	}
+	want := report.MutantDisposition{
+		ID: mutant.ID, Status: report.MutantSurvived, Path: mutant.Path, Line: mutant.Line,
+		Package: mutant.Package, Rule: mutant.Rule, Detail: mutationSurvivedSummary,
+		Reused: true, Provenance: record.Provenance,
+	}
+	if len(evaluation.Mutants) != 1 || !reflect.DeepEqual(evaluation.Mutants[0], want) {
+		t.Fatalf("dispositions = %+v, want [%+v]", evaluation.Mutants, want)
+	}
+	accounting := report.MutantAccounting{Discovered: 1, Selected: 1, Executed: 1, Survived: 1, ReusedSurvived: 1}
+	if !reflect.DeepEqual(evaluation.Accounting, accounting) {
+		t.Fatalf("accounting = %+v, want %+v", evaluation.Accounting, accounting)
+	}
+}
+
+// TestEvaluateMutationsExecutesASurvivorWhenANewTargetEntersTheReachingSet pins
+// the direction that would cost assurance. A test the recording run never ran
+// against the mutant is a test that may kill it, so the universal claim is
+// simply not about this run's reaching set and the mutant is executed.
+func TestEvaluateMutationsExecutesASurvivorWhenANewTargetEntersTheReachingSet(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	late := evidenceIdentity("TestLate", goanalysis.KindTest)
+	keys := map[targetIdentity]string{early: digestText("early-key"), late: digestText("late-key")}
+	index := evidenceIndex([]evidence.MutationRecord{survivedEvidenceRecord(mutant, exhaustedKey(early, keys[early]))},
+		keys, map[targetIdentity]bool{early: true, late: true})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+		evidenceTarget("TestLate", goanalysis.KindTest, 5*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 2 || evaluation.Mutants[0].Reused || evaluation.Accounting.ReusedSurvived != 0 {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+}
+
+// TestEvaluateMutationsReusesASurvivorWhenATargetLeftTheReachingSet pins the
+// direction that is sound. A test that no longer reaches the mutant cannot
+// kill it, so a reaching set that is a subset of the exhausted one is still
+// covered by the recorded claim.
+func TestEvaluateMutationsReusesASurvivorWhenATargetLeftTheReachingSet(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	gone := evidenceIdentity("TestGone", goanalysis.KindTest)
+	key := digestText("early-key")
+	index := evidenceIndex([]evidence.MutationRecord{survivedEvidenceRecord(mutant,
+		exhaustedKey(early, key), exhaustedKey(gone, digestText("gone-key")))},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 || !evaluation.Mutants[0].Reused || evaluation.Accounting.ReusedSurvived != 1 {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+}
+
+// TestEvaluateMutationsExecutesASurvivorWhoseReachingTargetKeyChanged pins the
+// other half of "the same test": a target whose binary reads something that
+// changed is, for the purpose of a recorded verdict, a different target, and
+// the universal claim was never made about it.
+func TestEvaluateMutationsExecutesASurvivorWhoseReachingTargetKeyChanged(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	index := evidenceIndex(
+		[]evidence.MutationRecord{survivedEvidenceRecord(mutant, exhaustedKey(early, digestText("recorded-key")))},
+		map[targetIdentity]string{early: digestText("current-key")}, map[targetIdentity]bool{early: true})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || evaluation.Mutants[0].Reused || evaluation.Accounting.ReusedSurvived != 0 {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+}
+
+// TestEvaluateMutationsExecutesASurvivorWhoseReachingTargetDidNotPass pins the
+// control a reused survivor stands on, exactly as a reused kill does: this run
+// has to have seen the target pass on the original tree, or there is nothing
+// saying the target still runs at all.
+func TestEvaluateMutationsExecutesASurvivorWhoseReachingTargetDidNotPass(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	index := evidenceIndex([]evidence.MutationRecord{survivedEvidenceRecord(mutant, exhaustedKey(early, key))},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || evaluation.Mutants[0].Reused {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+}
+
+// TestEvaluateMutationsNeverReusesASurvivorReachedByAFuzzTarget pins both
+// directions of the one target a survived verdict is never about. Fuzzing
+// explores past the corpus a run measured it on, so "this budget found
+// nothing" is not "no input kills it", and a survivor a fuzz target reaches is
+// neither recorded nor believed.
+func TestEvaluateMutationsNeverReusesASurvivorReachedByAFuzzTarget(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	fuzzer := evidenceIdentity("FuzzValue", goanalysis.KindFuzz)
+	keys := map[targetIdentity]string{early: digestText("early-key"), fuzzer: digestText("fuzz-key")}
+	loaded := survivedEvidenceRecord(mutant, exhaustedKey(early, keys[early]), exhaustedKey(fuzzer, keys[fuzzer]))
+	index := evidenceIndex([]evidence.MutationRecord{loaded}, keys,
+		map[targetIdentity]bool{early: true, fuzzer: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := &mutationUnitSession{catalog: catalog}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+		evidenceTarget("FuzzValue", goanalysis.KindFuzz, 5*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) == 0 || evaluation.Mutants[0].Reused {
+		t.Fatalf("a survivor a fuzz target reaches was reused: %+v", evaluation.Mutants)
+	}
+	// The run reached the same verdict by executing everything, and left the
+	// store exactly as it found it: nothing about this mutant is a claim a
+	// later run could make again.
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 || !reflect.DeepEqual(records[0], loaded) {
+		t.Fatalf("store = %+v, want only the record it was given", records)
+	}
+}
+
+// TestEvaluateMutationsExecutesAMutantWhoseReachingTargetCameFromACheckpoint
+// pins the boundary between the two layers. A target restored from a
+// checkpoint carries no coverage blocks, so routing keeps it for the whole
+// file: the reaching set it belongs to is wider than the one this run measured,
+// and a claim about the measured set is not a claim about that.
+func TestEvaluateMutationsExecutesAMutantWhoseReachingTargetCameFromACheckpoint(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	resumed := evidenceIdentity("TestResumed", goanalysis.KindTest)
+	keys := map[targetIdentity]string{early: digestText("early-key"), resumed: digestText("resumed-key")}
+	passed := map[targetIdentity]bool{early: true, resumed: true}
+	index := evidenceIndex([]evidence.MutationRecord{survivedEvidenceRecord(mutant,
+		exhaustedKey(early, keys[early]), exhaustedKey(resumed, keys[resumed]))}, keys, passed)
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := &mutationUnitSession{catalog: catalog}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+		resumedBlockTarget("TestResumed", 5*time.Millisecond),
+	}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+		Instrumented: blockRoutingInstrumentation(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) == 0 || evaluation.Mutants[0].Reused {
+		t.Fatalf("a mutant a resumed target reaches was reused: %+v", evaluation.Mutants)
+	}
+	// Nor is anything recorded about it: what this run exhausted is not the set
+	// its own measurement names.
+	if records := index.store(catalog, evidenceModule).Records; len(records) != 1 ||
+		records[0].Provenance != "snapshot="+digestText("earlier-run") {
+		t.Fatalf("store = %+v, want the record it was given", records)
+	}
+}
+
+// TestEvaluateMutationsRecordsTheSurvivorsItExhausted pins what a run leaves
+// for the next one. A survivor every reaching target ran against and none
+// killed is a universal claim over exactly those targets, so each of them is
+// named with the behaviour key it had, beside the finding the verdict raised.
+func TestEvaluateMutationsRecordsTheSurvivorsItExhausted(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	late := evidenceIdentity("TestLate", goanalysis.KindTest)
+	keys := map[targetIdentity]string{early: digestText("early-key"), late: digestText("late-key")}
+	index := evidenceIndex(nil, keys, map[targetIdentity]bool{early: true, late: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := &mutationUnitSession{catalog: catalog}
+
+	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+		evidenceTarget("TestLate", goanalysis.KindTest, 5*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index}); err != nil {
+		t.Fatal(err)
+	}
+	want := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeSurvived, Provenance: "snapshot=" + digestText("this-run"),
+		Exhausted: []evidence.TargetKey{exhaustedKey(early, keys[early]), exhaustedKey(late, keys[late])},
+		Finding:   &evidence.FindingSeed{Kind: "surviving-mutant", Summary: mutationSurvivedSummary},
+	}
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want one survived record", records)
+	}
+	slices.SortFunc(records[0].Exhausted, func(first, second evidence.TargetKey) int {
+		return slices.Compare([]string{first.Name}, []string{second.Name})
+	})
+	if !reflect.DeepEqual(records[0], want) {
+		t.Fatalf("record = %+v, want %+v", records[0], want)
+	}
+}
+
+// TestEvaluateMutationsDoesNotRecordASurvivorNoTestWasRunFor pins the one
+// survivor that is left alone. A mutant whose whole reaching set a proof
+// discharged was settled without executing anything, so re-deriving it costs
+// nothing and the proofs are their own evidence; recording it would store a
+// claim about tests that never ran.
+func TestEvaluateMutationsDoesNotRecordASurvivorNoTestWasRunFor(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	mutant.Probed, mutant.Index = true, 4
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	index := evidenceIndex(nil, map[targetIdentity]string{early: digestText("early-key")},
+		map[targetIdentity]bool{early: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
+	target.Probed = true
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+		Instrumented: blockRoutingInstrumentation(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "surviving-mutant" {
+		t.Fatalf("evaluation = %+v, want a discharged survivor", evaluation.Findings)
+	}
+	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
+		t.Fatalf("recorded %+v, want nothing for a survivor no test was run for", records)
+	}
+}
+
+// TestReusedFindingsAreRegeneratedThroughThisRunsAcceptance pins that a reused
+// verdict never carries an old acceptance with it. A record holds the kind and
+// the summary of the finding and nothing else, so the finding is raised again
+// here and this run's acceptances decide it: an acceptance that has since
+// expired resurrects the finding, and a live one still silences it.
+func TestReusedFindingsAreRegeneratedThroughThisRunsAcceptance(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	findingID := report.FindingID("mutation", mutant.ID)
+	for _, test := range []struct {
+		name     string
+		accepted map[string]bool
+		findings int
+		evidence int
+	}{
+		{name: "an acceptance this run still holds", accepted: map[string]bool{findingID: true}, evidence: 1},
+		{name: "an acceptance that has expired", findings: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			index := evidenceIndex([]evidence.MutationRecord{survivedEvidenceRecord(mutant, exhaustedKey(early, key))},
+				map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := refusingSession(t, catalog)
+
+			evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+				evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+			}, MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Evidence: index, Accepted: test.accepted,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(evaluation.Findings) != test.findings || len(evaluation.Evidence) != test.evidence {
+				t.Fatalf("evaluation = %+v, want %d findings and %d evidence entries",
+					evaluation, test.findings, test.evidence)
+			}
+			if !evaluation.Mutants[0].Reused {
+				t.Fatalf("dispositions = %+v, want the reuse either way", evaluation.Mutants)
+			}
+		})
+	}
+}
