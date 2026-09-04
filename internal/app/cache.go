@@ -35,7 +35,8 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
 		Evidence: []report.Evidence{{
 			Kind: "cache", ID: "policy", Status: "configured",
-			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d", loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes),
+			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d reports-keep=%d",
+				loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes, loaded.Reports.Keep),
 		}},
 	}
 	switch action {
@@ -52,8 +53,18 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		history, err := reportsStatus(root, loaded.Reports.Keep)
+		if err != nil {
+			return report.Report{}, err
+		}
+		repair, err := repairStatus(root)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence, cacheStatusEvidence("status", status),
-			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus))
+			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus),
+			history)
+		result.Evidence = append(result.Evidence, repair...)
 		buildStatus, err := service.buildCacheLayer(root).Inspect()
 		if err != nil {
 			return report.Report{}, err
@@ -66,11 +77,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		result.Evidence = append(result.Evidence, keptTemporaryStatus(root)...)
 		return result, nil
 	case "gc":
-		now := time.Now
-		if service.Now != nil {
-			now = service.Now
-		}
-		moment := now().UTC()
+		moment := service.clock()().UTC()
 		collected, err := cache.Collect(cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, moment)
 		if err != nil {
 			return report.Report{}, err
@@ -83,13 +90,23 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		history, err := collectReports(root, loaded.Reports.Keep, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
+		repair, err := collectRepair(root, cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence,
 			cacheStatusEvidence("before", collected.Before),
 			report.Evidence{Kind: "cache", ID: "gc", Status: "completed", Detail: fmt.Sprintf("removed-entries=%d removed-bytes=%d", collected.RemovedEntries, collected.RemovedBytes)},
 			cacheStatusEvidence("after", collected.After),
 			retentionGCStatusEvidence("trace", traceCollected),
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
+			reportsGCEvidence(history),
 		)
+		result.Evidence = append(result.Evidence, repair...)
 		// Every run already collects the build cache when it ends, so this is
 		// the same collection on demand rather than the only one there is. It
 		// takes the layer's own lock, so it yields to a run collecting beside
@@ -155,6 +172,12 @@ func buildCacheStatusEvidence(id string, status buildcache.Status) report.Eviden
 }
 
 func retentionStatusEvidence(id string, status retention.Status) report.Evidence {
+	return report.Evidence{Kind: "diagnostic-retention", ID: id, Status: "ready", Detail: retentionDetail(status)}
+}
+
+// retentionDetail is how every retained store describes itself, so that a
+// reader comparing two of them is comparing the same measurements.
+func retentionDetail(status retention.Status) string {
 	detail := fmt.Sprintf("entries=%d bytes=%d", status.Entries, status.Bytes)
 	if !status.Oldest.IsZero() {
 		detail += " oldest=" + status.Oldest.UTC().Format(time.RFC3339Nano)
@@ -162,7 +185,7 @@ func retentionStatusEvidence(id string, status retention.Status) report.Evidence
 	if !status.Newest.IsZero() {
 		detail += " newest=" + status.Newest.UTC().Format(time.RFC3339Nano)
 	}
-	return report.Evidence{Kind: "diagnostic-retention", ID: id, Status: "ready", Detail: detail}
+	return detail
 }
 
 func retentionGCStatusEvidence(id string, result retention.Result) report.Evidence {
@@ -176,15 +199,31 @@ func (service Service) collectDiagnosticRetention(root string) {
 		service.note("diagnostic-gc-unavailable", err.Error())
 		return
 	}
-	now := time.Now
-	if service.Now != nil {
-		now = service.Now
-	}
-	moment := now().UTC()
+	moment := service.clock()().UTC()
 	for _, directory := range []string{"trace", "diagnostics"} {
 		if _, err := retention.Collect(filepath.Join(root, ".goatest", directory), loaded.Cache.MaxBytes, loaded.Cache.TTL, moment); err != nil {
 			service.note("diagnostic-gc-unavailable", directory+": "+err.Error())
 		}
+	}
+}
+
+// collectVerdictCache applies the cache policy to the store that policy is
+// named after, at the end of the run that just read and wrote it.
+//
+// It belongs beside the diagnostic collection rather than after the report is
+// published, because the entry a run adds is written during the run: by the
+// time this runs the cache already holds it, and it is the newest, so the
+// budget falls on older entries. A failure is a note for the same reason every
+// collection here reports one — the run has already produced its verdict.
+func (service Service) collectVerdictCache(root string) {
+	loaded, err := config.Load(root)
+	if err != nil {
+		service.note("cache-gc-unavailable", err.Error())
+		return
+	}
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	if _, err := cache.Collect(cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, service.clock()().UTC()); err != nil {
+		service.note("cache-gc-unavailable", err.Error())
 	}
 }
 

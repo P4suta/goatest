@@ -358,3 +358,38 @@ func digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// TestACollectedCandidateLeavesTheRestListableAndNamesTheMissingID pins what the
+// callers of this store may assume once a retention policy collects from it.
+//
+// Eviction removes whole files, so a listing never meets a half-written record —
+// which matters, because one malformed record fails the whole listing on purpose
+// so that fix never silently omits a candidate. Loading an ID that is gone is an
+// error naming it, which is what lets a caller treat it as never stored.
+func TestACollectedCandidateLeavesTheRestListableAndNamesTheMissingID(t *testing.T) {
+	root := t.TempDir()
+	stored := make([]string, 0, 2)
+	for _, id := range []string{"0123456789abcdef", "fedcba9876543210"} {
+		record := repair.CandidateRecord{
+			Version: repair.CandidateVersion, ID: id, Snapshot: "snapshot-a",
+			Finding:   report.Finding{ID: "finding-" + id, Kind: "surviving-mutant", Summary: "survived"},
+			Candidate: provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")},
+		}
+		if _, err := repair.StoreCandidate(root, record); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, id)
+	}
+	collected := stored[0]
+	if err := os.Remove(filepath.Join(root, ".goatest", "candidates", collected+".json")); err != nil {
+		t.Fatal(err)
+	}
+	records, err := repair.ListCandidates(root)
+	if err != nil || len(records) != 1 || records[0].ID != stored[1] {
+		t.Fatalf("listing after a collection = (%+v, %v)", records, err)
+	}
+	_, err = repair.LoadCandidate(root, collected)
+	if err == nil || !strings.Contains(err.Error(), collected) {
+		t.Fatalf("load of a collected candidate = %v, want an error naming %s", err, collected)
+	}
+}
