@@ -365,6 +365,117 @@ func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route muta
 	return route.reaching[index], true
 }
 
+// reuseVerdict reports the finding an earlier run recorded for a mutant it
+// watched survive, when every condition under which that verdict is still this
+// run's holds.
+//
+// A survived verdict is a universal proposition: no test that reaches this
+// mutant kills it. The recording run established it of the targets it ran, so
+// it is a claim about this run exactly when every target this run's coverage
+// routes to the mutant is one of those — the same target, under the same
+// behaviour key, and seen to pass by this run's own baseline, which is the
+// same fresh control a reused kill stands on. A reaching set that shrank is
+// still covered, because a target that no longer reaches the mutant cannot
+// kill it; one that grew is not covered at all, because the target that
+// entered is one nothing was ever run against.
+func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route mutationRoute) (evidence.FindingSeed, bool) {
+	if collected == nil {
+		return evidence.FindingSeed{}, false
+	}
+	record, known := collected.records[mutant.ID]
+	if !known || record.Finding == nil || record.Outcome != evidence.MutationOutcomeSurvived {
+		return evidence.FindingSeed{}, false
+	}
+	if !collected.exhausts(record.Exhausted, route.reaching) {
+		return evidence.FindingSeed{}, false
+	}
+	collected.mutex.Lock()
+	collected.reused[mutant.ID] = record.Provenance
+	collected.mutex.Unlock()
+	return *record.Finding, true
+}
+
+// exhausts reports whether a recorded set of executed targets covers every
+// target this run routes to a mutant.
+//
+// The conditions on each of them are the conditions of the whole claim, so one
+// target failing any of them ends it. A fuzz target is refused for the reason
+// a fuzz kill is refused: exploring one budget without finding an input says
+// nothing about the next. A target restored from a checkpoint carries no
+// coverage blocks, so routing keeps it for the whole file and the reaching set
+// it belongs to is wider than the one any run measured; a claim about a
+// measured set is not a claim about that. And a reaching set that is empty
+// exhausts nothing: a mutant nothing reaches is a statement about a package
+// suite instead.
+func (collected *MutationEvidence) exhausts(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
+	if len(reaching) == 0 {
+		return false
+	}
+	for _, target := range reaching {
+		identity := identify(target.Target)
+		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
+			return false
+		}
+		key := collected.keys[identity]
+		if key == "" {
+			return false
+		}
+		if !slices.ContainsFunc(exhausted, func(candidate evidence.TargetKey) bool {
+			return candidate.Package == identity.pkg && candidate.Name == identity.name &&
+				candidate.Kind == identity.kind && candidate.Key == key
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// recordSurvived remembers that every test reaching a mutant was run against it
+// and none of them killed it, so a later run can reuse the universal claim.
+//
+// A survivor a proof discharged the whole reaching set of is not one of these:
+// nothing ran, so there is no set of executed targets to name, and the proofs
+// re-derive the verdict for free on the next run anyway.
+func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route mutationRoute, kind, summary string) {
+	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, route.reaching, kind, summary)
+}
+
+// recordExhausted writes down a verdict a set of executed targets established,
+// with the behaviour key each of them had, and the finding a later run has to
+// be able to raise again from it.
+//
+// Every condition reuse will check is checked here too, so that a record that
+// could never be reused is never written: a fuzz target or a target restored
+// from a checkpoint among them, a target this run's baseline did not see pass,
+// or a target with no behaviour key leaves the store as it found it.
+func (collected *MutationEvidence) recordExhausted(mutant gomutants.Mutant, outcome string, targets []TargetEvidence, kind, summary string) {
+	if collected == nil || len(targets) == 0 || kind == "" || summary == "" {
+		return
+	}
+	exhausted := make([]evidence.TargetKey, 0, len(targets))
+	for _, target := range targets {
+		identity := identify(target.Target)
+		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
+			return
+		}
+		key := collected.keys[identity]
+		if key == "" {
+			return
+		}
+		exhausted = append(exhausted, evidence.TargetKey{
+			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key,
+		})
+	}
+	record := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: filepath.ToSlash(mutant.Path), Package: mutant.Package,
+		Outcome: outcome, Provenance: collected.provenance, Exhausted: exhausted,
+		Finding: &evidence.FindingSeed{Kind: kind, Summary: summary},
+	}
+	collected.mutex.Lock()
+	defer collected.mutex.Unlock()
+	collected.recorded[mutant.ID] = record
+}
+
 // recordKill remembers that one target confirmed a kill, so a later run can
 // reuse it.
 //

@@ -270,22 +270,24 @@ func TestEvaluateMutationsRecordsAReusedRouteInTheTrace(t *testing.T) {
 	}
 }
 
-// TestEvaluateMutationsRecordsAConfirmedKillAndNothingElse pins what this run
-// is willing to write down. Only a kill one named target confirmed is a claim
-// a later run can check: a survivor, an inconclusive outcome, a kill that did
-// not reproduce, a control that failed, and a kill by a batch of targets each
-// leave the store as they found it.
-func TestEvaluateMutationsRecordsAConfirmedKillAndNothingElse(t *testing.T) {
+// TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse pins what this
+// run is willing to write down. A kill one named target confirmed and a
+// survivor every reaching target was run against are both claims a later run
+// can check; an inconclusive outcome, a kill that did not reproduce, a control
+// that failed, and a kill by a batch of targets — which names no target a
+// later run could check the key of — each leave the store as they found it.
+func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 	t.Parallel()
 	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
 		return gomutants.CommandResult{}, nil
 	}
 	for _, test := range []struct {
-		name    string
-		targets []TargetEvidence
-		exec    func(gomutants.ExecRequest) (gomutants.MutantResult, error)
-		control func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
-		killer  string
+		name     string
+		targets  []TargetEvidence
+		exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
+		control  func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+		killer   string
+		survivor bool
 	}{
 		{
 			name: "a kill one target confirmed", killer: "TestEarly",
@@ -293,7 +295,7 @@ func TestEvaluateMutationsRecordsAConfirmedKillAndNothingElse(t *testing.T) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 			},
 		},
-		{name: "a survivor"},
+		{name: "a survivor every reaching target ran", survivor: true},
 		{
 			name: "an inconclusive outcome",
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -354,6 +356,12 @@ func TestEvaluateMutationsRecordsAConfirmedKillAndNothingElse(t *testing.T) {
 				t.Fatal(err)
 			}
 			records := index.store(catalog, evidenceModule).Records
+			if test.survivor {
+				if len(records) != 1 || records[0].Outcome != evidence.MutationOutcomeSurvived {
+					t.Fatalf("recorded %+v, want one survived record", records)
+				}
+				return
+			}
 			if test.killer == "" {
 				if len(records) != 0 {
 					t.Fatalf("recorded %+v, want nothing", records)

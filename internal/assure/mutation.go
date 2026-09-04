@@ -458,6 +458,9 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 		case report.MutantSurvived:
 			accounting.Survived++
 			accounting.Executed++
+			if reused {
+				accounting.ReusedSurvived++
+			}
 		case report.MutantInconclusive:
 			accounting.Inconclusive++
 			accounting.Executed++
@@ -548,6 +551,17 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		// and what is reported is what executing it would have reported.
 		options.Trace.Route(reusedMutationRoute(mutant, route))
 		seed.evaluation.addKill(mutant, mutationKillDetail(killer.Target.Name, options))
+		seed.resolved = true
+		return seed
+	}
+	if finding, reused := options.Evidence.reuseVerdict(mutant, route); reused {
+		// An earlier run ran every test this run's coverage routes to the
+		// mutant against it and watched none of them kill it, and each of them
+		// is still the same test. Nothing is executed, and the finding is
+		// raised again here so that this run's acceptances decide it rather
+		// than the acceptances of the run that recorded it.
+		options.Trace.Route(reusedMutationRoute(mutant, route))
+		seed.evaluation.addFinding(mutant, finding.Kind, finding.Summary, options.Accepted)
 		seed.resolved = true
 		return seed
 	}
@@ -642,7 +656,13 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	// the serial pass would mean the survivors — the mutants that cost the
 	// most to execute again — are exactly the results a dying run loses.
 	if !reachedByFuzz(seed.reaching) {
-		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
+		summary := mutationSurvivalSummary(seed.discharged)
+		seed.evaluation.addFinding(mutant, "surviving-mutant", summary, options.Accepted)
+		// Every reaching target ran and none killed it, which is the universal
+		// claim a later run can reuse. It is recorded whatever this run's
+		// acceptances made of the finding, because an acceptance is what a run
+		// does with a verdict and not the verdict itself.
+		options.Evidence.recordSurvived(mutant, route, "surviving-mutant", summary)
 		seed.resolved = true
 	}
 	return seed

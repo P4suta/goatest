@@ -342,9 +342,16 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 // beside the run that did observe it, so the flag and the provenance are
 // required of each other in both directions. Possible, because evidence is
 // only ever recorded about a mutant that reached a terminal execution
-// disposition: nothing was ever executed for a compile rejection, an
-// acceptance, or a mutant outside the scope, so there is nothing about one of
-// those that could have been reused.
+// disposition: nothing was ever executed for a compile rejection or for a
+// mutant outside the scope, so there is nothing about one of those that could
+// have been reused.
+//
+// An acceptance is the one disposition beside the three executed ones a reuse
+// reaches. A reused verdict raises its finding again rather than carrying the
+// recording run's answer to it, so the acceptances of the run reading the
+// record decide it, and one that still holds leaves a mutant that was reused
+// and reports as accepted. It is outside the executed counts, which is why no
+// reuse counter moves for it while the flag and its provenance stay.
 func validateReuse(disposition MutantDisposition) error {
 	if disposition.Reused != (disposition.Provenance != "") {
 		return fmt.Errorf("goatest: mutant %s reuse and provenance disagree: reused=%t provenance=%q",
@@ -354,7 +361,7 @@ func validateReuse(disposition MutantDisposition) error {
 		return nil
 	}
 	switch disposition.Status {
-	case MutantKilled, MutantSurvived, MutantInconclusive:
+	case MutantKilled, MutantSurvived, MutantInconclusive, MutantAccepted:
 		return nil
 	default:
 		return fmt.Errorf("goatest: mutant %s reused a %q disposition, which no run executes", disposition.ID, disposition.Status)

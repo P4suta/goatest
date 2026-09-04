@@ -610,6 +610,10 @@ func TestValidateAcceptsAReusedMutantThisRunAccepted(t *testing.T) {
 	t.Parallel()
 	accepted := reusedFixture()
 	accepted.Mutants[0].Status = report.MutantAccepted
+	accepted.Mutants[0].Detail = "finding-01"
+	accepted.Acceptances = []report.Acceptance{
+		{ID: "finding-01", Reason: "tracked elsewhere", Expires: "2099-01-01T00:00:00Z"},
+	}
 	accepted.Accounting.Mutants = report.MutantAccounting{
 		Discovered: 3, Selected: 3, Executed: 2, Killed: 2, Accepted: 1,
 	}
