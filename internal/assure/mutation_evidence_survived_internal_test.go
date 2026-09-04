@@ -5,6 +5,7 @@ package assure
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -575,6 +576,64 @@ func TestEvaluateMutationsReusesATimedOutMutantAsAnInconclusiveDisposition(t *te
 	accounting := report.MutantAccounting{Discovered: 1, Selected: 1, Executed: 1, Inconclusive: 1}
 	if !reflect.DeepEqual(evaluation.Accounting, accounting) {
 		t.Fatalf("accounting = %+v, want %+v", evaluation.Accounting, accounting)
+	}
+}
+
+// batchedEvidenceTargets is more reaching targets than routing runs one at a
+// time, all of one package and one environment, so the ones past the
+// individual prefix are selected together under a single -test.run pattern.
+func batchedEvidenceTargets(count int) []TargetEvidence {
+	targets := make([]TargetEvidence, 0, count)
+	for index := range count {
+		targets = append(targets, evidenceTarget(
+			fmt.Sprintf("TestValue%02d", index), goanalysis.KindTest, time.Duration(index+1)*time.Millisecond))
+	}
+	return targets
+}
+
+// TestEvaluateMutationsRecordsNoTimeoutForABatchOfTargets pins the refusal a
+// batched timeout gets, which is the refusal a batched kill already gets and
+// for the same reason.
+//
+// A batch runs several targets under one selector, and the engine reports that
+// the selection ran out of time without saying which of them was still
+// running. The later targets of the selection may never have started, so the
+// record's last entry — the target a later run checks — would be a target that
+// possibly never ran against this mutant. A vague record is worse than none,
+// so nothing is written and the next run runs the batch again.
+func TestEvaluateMutationsRecordsNoTimeoutForABatchOfTargets(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	targets := batchedEvidenceTargets(10)
+	keys := make(map[targetIdentity]string, len(targets))
+	passed := make(map[targetIdentity]bool, len(targets))
+	for _, target := range targets {
+		identity := identify(target.Target)
+		keys[identity] = digestText(target.Target.Name)
+		passed[identity] = true
+	}
+	index := evidenceIndex(nil, keys, passed)
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	// Every target run on its own passes; time runs out under the selection of
+	// the two the individual prefix left behind.
+	session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		if slices.ContainsFunc(request.Args, func(argument string) bool { return strings.Contains(argument, "|") }) {
+			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-timeout" {
+		t.Fatalf("findings = %+v, want the timeout the batch ran into", evaluation.Findings)
+	}
+	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
+		t.Fatalf("recorded %+v, want nothing for a timeout no single target ran into", records)
 	}
 }
 
