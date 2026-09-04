@@ -16,6 +16,8 @@ import (
 
 	"github.com/P4suta/goatest/internal/app"
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/cache"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -55,6 +57,153 @@ func findEvidence(t *testing.T, result report.Report, kind, id string) (report.E
 	}
 	t.Fatalf("evidence %s/%s is absent from %+v", kind, id, result.Evidence)
 	return report.Evidence{}, -1
+}
+
+// storedArtifact writes one file into a .goatest store, stamped so that the
+// tests below know which of them is oldest.
+func storedArtifact(t *testing.T, root, store, name string, moment time.Time) {
+	t.Helper()
+	directory := filepath.Join(root, ".goatest", store)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, []byte("1234567890"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, moment, moment); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCacheMaintenanceBoundsStoredCandidatesAndPatches(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
+	storedArtifact(t, root, "candidates", "0000000000000002.json", base.Add(time.Hour))
+	storedArtifact(t, root, "patches", "0000000000000003.json", base)
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\n[cache]\nmax_bytes = 10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The clock is injected so that the byte budget is the only thing deciding
+	// what goes: with a real one the fixtures would be older than the TTL and
+	// the test would pass without a bound ever being applied.
+	moment := base.Add(2 * time.Hour)
+	service := app.Service{Root: root, TempDirectory: t.TempDir(), Now: func() time.Time { return moment }}
+
+	status, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, index := findEvidence(t, status, "repair-retention", "candidates-status")
+	patches, patchIndex := findEvidence(t, status, "repair-retention", "patches-status")
+	// The two stores the repair path writes are reported after the run history
+	// and before the machine's build cache: everything a reader sees up to here
+	// is what this .goatest holds.
+	if index != 5 || patchIndex != 6 || status.Evidence[7].Kind != "build-cache" {
+		t.Fatalf("repair stores reported at %d and %d in %+v", index, patchIndex, status.Evidence)
+	}
+	if candidates.Status != "ready" || !strings.Contains(candidates.Detail, "entries=2 bytes=20") ||
+		!strings.Contains(candidates.Detail, "oldest=2026-01-01T00:00:00Z") {
+		t.Fatalf("candidates status = %+v", candidates)
+	}
+	if patches.Status != "ready" || !strings.Contains(patches.Detail, "entries=1 bytes=10") {
+		t.Fatalf("patches status = %+v", patches)
+	}
+
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatesGC, gcIndex := findEvidence(t, collected, "repair-retention", "candidates-gc")
+	patchesGC, patchGCIndex := findEvidence(t, collected, "repair-retention", "patches-gc")
+	if gcIndex != 7 || patchGCIndex != 8 || collected.Evidence[9].Kind != "build-cache" {
+		t.Fatalf("repair collections reported at %d and %d in %+v", gcIndex, patchGCIndex, collected.Evidence)
+	}
+	if candidatesGC.Status != "completed" || !strings.Contains(candidatesGC.Detail, "removed-entries=1 removed-bytes=10") {
+		t.Fatalf("candidates gc = %+v", candidatesGC)
+	}
+	if patchesGC.Status != "completed" || !strings.Contains(patchesGC.Detail, "removed-entries=0") {
+		t.Fatalf("patches gc = %+v", patchesGC)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".goatest", "candidates", "0000000000000002.json")); err != nil {
+		t.Fatalf("the newest candidate was collected: %v", err)
+	}
+}
+
+func TestStoredCandidatesSurviveWhileACheckpointCouldStillResume(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
+	storedArtifact(t, root, "candidates", "0000000000000002.json", base.Add(time.Hour))
+	storedArtifact(t, root, "patches", "0000000000000003.json", base)
+	// A budget the candidate store is over and the verdict cache is not, so
+	// that the checkpoint below survives its own store's collection and the
+	// only thing standing between the candidates and removal is the guard.
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\n[cache]\nmax_bytes = 4096\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted run left state behind. It re-validates the candidates it
+	// checkpointed by ID when it resumes, so collecting one now would turn a
+	// resumable run into a cold one.
+	digest := strings.Repeat("a", 64)
+	store := cache.New(filepath.Join(root, ".goatest", "cache"))
+	if err := store.PutCheckpoint(digest, checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+	moment := base.Add(2 * time.Hour)
+	service := app.Service{Root: root, TempDirectory: t.TempDir(), Now: func() time.Time { return moment }}
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatesGC, _ := findEvidence(t, collected, "repair-retention", "candidates-gc")
+	if candidatesGC.Status != "skipped" || candidatesGC.Detail != "a checkpoint is in progress" {
+		t.Fatalf("candidates gc under a checkpoint = %+v", candidatesGC)
+	}
+	for _, name := range []string{"0000000000000001.json", "0000000000000002.json"} {
+		if _, err := os.Stat(filepath.Join(root, ".goatest", "candidates", name)); err != nil {
+			t.Fatalf("candidate %s was collected while a run could resume: %v", name, err)
+		}
+	}
+	// Nothing reads a stored patch artifact, so no checkpoint has a claim on it.
+	patchesGC, _ := findEvidence(t, collected, "repair-retention", "patches-gc")
+	if patchesGC.Status != "completed" {
+		t.Fatalf("patches gc under a checkpoint = %+v", patchesGC)
+	}
+}
+
+func TestEveryRunBoundsTheRepairStoresAndNotesWhatItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
+	storedArtifact(t, root, "candidates", "0000000000000002.json", base.Add(time.Hour))
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\n[cache]\nmax_bytes = 10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := historyService(t, root)
+	historyRun(t, service, nil)
+	if _, err := os.Stat(filepath.Join(root, ".goatest", "candidates", "0000000000000001.json")); !os.IsNotExist(err) {
+		t.Fatalf("the run did not bound the candidate store: %v", err)
+	}
+
+	// A store holding something it cannot be: a note, and a run that still ends
+	// exactly as it would have.
+	if err := os.Mkdir(filepath.Join(root, ".goatest", "patches"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".goatest", "patches", "unexpected"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var progress bytes.Buffer
+	noted := historyService(t, root)
+	noted.Progress = &progress
+	if _, err := noted.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err != nil {
+		t.Fatalf("a store that cannot be read failed a run: %v", err)
+	}
+	if !strings.Contains(progress.String(), "repair-gc-unavailable") {
+		t.Fatalf("progress = %q, want the unusable store reported as a note", progress.String())
+	}
 }
 
 // boundedHistoryRoot is a repository whose history holds one run.
