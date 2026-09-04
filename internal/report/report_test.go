@@ -622,6 +622,30 @@ func TestValidateAcceptsAReusedMutantThisRunAccepted(t *testing.T) {
 	}
 }
 
+// TestValidateAcceptsAReusedInconclusiveMutantInsideTheExecutedCounts pins
+// where a reused timeout lands. Reusing one keeps a finding rather than
+// resolving anything, but it is still a mutant with a terminal execution
+// disposition, so it counts in `executed` and in `inconclusive` like any
+// other: the identity holds however a disposition was reached. The reuse
+// counters are parts of `killed` and `survived` and of nothing else, so
+// claiming it in either contradicts the inventory.
+func TestValidateAcceptsAReusedInconclusiveMutantInsideTheExecutedCounts(t *testing.T) {
+	t.Parallel()
+	inconclusive := reusedFixture()
+	inconclusive.Mutants[0].Status = report.MutantInconclusive
+	inconclusive.Accounting.Mutants = report.MutantAccounting{
+		Discovered: 3, Selected: 3, Executed: 3, Killed: 2, Inconclusive: 1,
+	}
+	if err := report.Validate(inconclusive); err != nil {
+		t.Fatalf("a reused inconclusive disposition = %v", err)
+	}
+	claimed := inconclusive
+	claimed.Accounting.Mutants.ReusedKilled = 1
+	if err := report.Validate(claimed); err == nil {
+		t.Fatal("a reused inconclusive disposition counted as a reused kill passed validation")
+	}
+}
+
 // TestValidateRejectsReusedCountsExceedingExecuted pins the inequality that
 // holds however the counters were produced: a run cannot have reused more
 // verdicts than it has mutants with a verdict.
