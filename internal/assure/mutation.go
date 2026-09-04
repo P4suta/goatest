@@ -79,6 +79,19 @@ const (
 	mutationPartlyDischargedSummary = mutationPartlyDischargedOpening + mutationBranchDischargeClause
 )
 
+// The summaries a mutant no measured target reached is reported through: the
+// one its package suite survived, and the two the suite could not settle. Each
+// is a constant because a later run raises the same finding again from a
+// record that carries the summary, and a summary that drifted would make two
+// runs report the same verdict differently.
+const (
+	mutationUnreachedSummary          = "no measured top-level target reached this mutation; its package suite survived"
+	mutationSuiteTimeoutSummary       = "package suite timed out while confirming an unreached mutation"
+	mutationSuiteInconclusiveSummary  = "package suite could not establish an outcome for an unreached mutation"
+	mutationTargetTimeoutSummary      = "target timed out while this mutation was active"
+	mutationTargetInconclusiveSummary = "target could not establish a deterministic mutation outcome"
+)
+
 // MutationSession is the narrow reusable part of the go-mutants bridge used
 // by the assurance evaluator. Exec and Probe must permit concurrent calls,
 // matching the go-mutants Session contract. The interface also keeps scheduler
@@ -599,11 +612,15 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
 		case gomutants.OutcomeSurvived:
-			seed.evaluation.addFinding(mutant, "unreached-mutant", "no measured top-level target reached this mutation; its package suite survived", options.Accepted)
+			seed.evaluation.addFinding(mutant, "unreached-mutant", mutationUnreachedSummary, options.Accepted)
+			// Nothing reached the mutation and the suite that ran everything
+			// did not kill it, which is a claim about the suite a later run
+			// can check against the suite it would run.
+			options.Evidence.recordUnreached(mutant, "unreached-mutant", mutationUnreachedSummary)
 		case gomutants.OutcomeTimedOut:
-			seed.evaluation.addFinding(mutant, "mutation-timeout", "package suite timed out while confirming an unreached mutation", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationSuiteTimeoutSummary, options.Accepted)
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "package suite could not establish an outcome for an unreached mutation", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationSuiteInconclusiveSummary, options.Accepted)
 		default:
 			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
 		}
@@ -637,10 +654,10 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		case gomutants.OutcomeSurvived:
 			// Continue through every demonstrably relevant target.
 		case gomutants.OutcomeTimedOut:
-			seed.evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationTargetTimeoutSummary, options.Accepted)
 			seed.resolved = true
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationTargetInconclusiveSummary, options.Accepted)
 			seed.resolved = true
 		default:
 			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)

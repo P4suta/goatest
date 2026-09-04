@@ -365,6 +365,17 @@ func TestReusedFindingsAreRegeneratedThroughThisRunsAcceptance(t *testing.T) {
 	}
 }
 
+// suiteEvidenceIndex indexes the given records for a run that knows what each
+// named package's suite does, beside what each named target does.
+func suiteEvidenceIndex(records []evidence.MutationRecord, keys map[targetIdentity]string,
+	passed map[targetIdentity]bool, suites map[string]string,
+) *MutationEvidence {
+	return newMutationEvidence(
+		evidence.MutationStore{Schema: evidence.MutationSchemaV1, ModulePath: evidenceModule, Records: records},
+		keys, passed, suites, "snapshot="+digestText("this-run"),
+	)
+}
+
 // unreachedEvidenceRecord is an earlier run's record of a mutant no measured
 // target reached, and whose package suite did not kill it.
 func unreachedEvidenceRecord(mutant gomutants.Mutant, key string) evidence.MutationRecord {

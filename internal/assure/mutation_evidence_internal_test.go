@@ -59,7 +59,7 @@ func killedEvidenceRecord(mutant gomutants.Mutant, killer targetIdentity, key st
 func evidenceIndex(records []evidence.MutationRecord, keys map[targetIdentity]string, passed map[targetIdentity]bool) *MutationEvidence {
 	return newMutationEvidence(
 		evidence.MutationStore{Schema: evidence.MutationSchemaV1, ModulePath: evidenceModule, Records: records},
-		keys, passed, "snapshot="+digestText("this-run"),
+		keys, passed, nil, "snapshot="+digestText("this-run"),
 	)
 }
 
