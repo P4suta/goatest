@@ -44,6 +44,37 @@ func TestCheckpointStoreIsAtomicStrictAndIndependentOfCompletedReport(t *testing
 	}
 }
 
+func TestPendingCheckpointAnswersForTheWholeCacheRatherThanOneDigest(t *testing.T) {
+	root := t.TempDir()
+	store := New(root)
+	// A cache nothing has written yet holds no interrupted run, and saying so is
+	// not a failure: it is what every fresh repository looks like.
+	if pending, err := store.PendingCheckpoint(); err != nil || pending {
+		t.Fatalf("empty cache pending = (%t, %v)", pending, err)
+	}
+	digest := strings.Repeat("c", 64)
+	if err := store.Put(digest, report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Snapshot: digest}); err != nil {
+		t.Fatal(err)
+	}
+	// A completed report is a run that finished. Only a checkpoint says a run
+	// could still come back and ask for what it left outside the cache.
+	if pending, err := store.PendingCheckpoint(); err != nil || pending {
+		t.Fatalf("completed report pending = (%t, %v)", pending, err)
+	}
+	if err := store.PutCheckpoint(digest, checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.PendingCheckpoint(); err != nil || !pending {
+		t.Fatalf("checkpointed cache pending = (%t, %v)", pending, err)
+	}
+	if err := store.DeleteCheckpoint(digest); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.PendingCheckpoint(); err != nil || pending {
+		t.Fatalf("cleared cache pending = (%t, %v)", pending, err)
+	}
+}
+
 func TestCheckpointStoreTreatsCorruptFinalAndInterruptedTemporarySafely(t *testing.T) {
 	root := t.TempDir()
 	digest := strings.Repeat("b", 64)
