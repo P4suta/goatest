@@ -386,9 +386,14 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 }
 
 func TestHistoricalReportLoadErrorsIdentifyTheRequestedRun(t *testing.T) {
+	// A run that is not in the history is now the ordinary outcome of asking for
+	// an old one, because the history is bounded. The message has to name the
+	// run and say which of the two things happened, so that a missing directory
+	// does not read as a broken installation.
 	_, err := (app.Service{Root: t.TempDir()}).Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: "missing-run"}, "")
-	if err == nil || !strings.Contains(err.Error(), `read report run "missing-run"`) || strings.Contains(err.Error(), "latest report") {
-		t.Fatalf("historical report error = %v", err)
+	want := `goatest: report run "missing-run" is not in reports/runs: it was collected or never written`
+	if err == nil || err.Error() != want {
+		t.Fatalf("historical report error = %v, want %s", err, want)
 	}
 }
 

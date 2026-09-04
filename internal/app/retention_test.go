@@ -54,6 +54,45 @@ func findEvidence(t *testing.T, result report.Report, kind, id string) (report.E
 	return report.Evidence{}, -1
 }
 
+func TestACollectedRunIsNamedByReportAndLeavesEveryLatestCommandWorking(t *testing.T) {
+	root := t.TempDir()
+	finding := report.Finding{ID: "finding-a", Kind: "survivor", Path: "value.go", Line: 3, Summary: "survived", MutantID: "mutant-a"}
+	service := app.Service{
+		Root: root, TempDirectory: t.TempDir(),
+		Run: func(context.Context, assure.Options) (report.Report, error) {
+			return report.Report{
+				Schema: report.SchemaV1, Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot-a",
+				Findings: []report.Finding{finding},
+			}, nil
+		},
+	}
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\n[reports]\nkeep = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	older := historyRun(t, service, nil)
+	newest := historyRun(t, service, nil)
+	if _, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: older}, "")
+	want := `goatest: report run "` + older + `" is not in reports/runs: it was collected or never written`
+	if err == nil || err.Error() != want {
+		t.Fatalf("collected report error = %v, want %s", err, want)
+	}
+	if kept, err := service.Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: newest}, ""); err != nil || kept.RunID != newest {
+		t.Fatalf("newest report = %+v, %v", kept, err)
+	}
+	// explain, accept and replay read .goatest/latest-any.json rather than the
+	// history, so a bound of one leaves every one of them working.
+	if explained, err := service.Execute(t.Context(), cli.CommandExplain, cli.Request{}, finding.ID); err != nil || len(explained.Findings) != 1 {
+		t.Fatalf("explain after a bound of one = %+v, %v", explained, err)
+	}
+	if replayed, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, finding.ID); err != nil || replayed.RunKind != report.RunReplay {
+		t.Fatalf("replay after a bound of one = %+v, %v", replayed, err)
+	}
+}
+
 func TestCacheMaintenanceBoundsTheRunHistoryAndSparesReferencedRuns(t *testing.T) {
 	root := t.TempDir()
 	service := historyService(t, root)
