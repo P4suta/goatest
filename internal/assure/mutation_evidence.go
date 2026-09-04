@@ -585,7 +585,9 @@ func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome,
 //
 // The target is the last entry of the recorded list, which is where the writer
 // puts the one time ran out under, and the store preserves that order for a
-// timed-out record for exactly this reason.
+// timed-out record for exactly this reason. The writer only ever puts a target
+// there that an execution of one target ran out of time under, so the entry
+// names a target that demonstrably ran against this mutant.
 func (collected *MutationEvidence) stillTimesOut(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
 	if len(exhausted) == 0 {
 		return false
@@ -614,17 +616,31 @@ func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route
 	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, route.reaching, kind, summary)
 }
 
-// recordTimedOut remembers that time ran out under one of the targets that
-// reach a mutant, and which targets had run when it did.
+// recordTimedOut remembers that time ran out under one named target that
+// reaches a mutant, and which targets had run when it did.
+//
+// Only a timeout one named target ran into is recorded. A batch selects
+// several targets under one pattern and the engine reports that the selection
+// ran out of time without saying which of them was still running, so the
+// targets behind the one that hung may never have started; the same refusal
+// recordKill gives a batched kill applies here, and timedOutUnder is the zero
+// identity that states it.
 //
 // The executed targets are given in the order they ran, so the last of them is
 // the target time ran out under: it is the one the observation is about, and
-// the only one a later run checks. The order is the whole of how the record
-// names it. A field of its own would say the same thing twice — and would have
-// to be kept consistent with a list that already contains the target — so the
-// store preserves the order of a timed-out record instead, and the assurance
-// contract states the ordering as the contract it is.
-func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, executed []TargetEvidence, kind, summary string) {
+// the only one a later run checks. Because the recorder writes this only from
+// an execution of one target, that last entry is that target by construction,
+// and the check below holds the two to each other rather than trusting the
+// caller. The order is the whole of how the record names it. A field of its
+// own would say the same thing twice — and would have to be kept consistent
+// with a list that already contains the target — so the store preserves the
+// order of a timed-out record instead, and the assurance contract states the
+// ordering as the contract it is.
+func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, executed []TargetEvidence, timedOutUnder targetIdentity, kind, summary string) {
+	if timedOutUnder == (targetIdentity{}) || len(executed) == 0 ||
+		identify(executed[len(executed)-1].Target) != timedOutUnder {
+		return
+	}
 	collected.recordExhausted(mutant, evidence.MutationOutcomeTimedOut, executed, kind, summary)
 }
 
@@ -635,7 +651,8 @@ func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, execu
 // The targets are written in the order they were executed, because the two
 // outcomes that use this read the list differently: a survival is a claim
 // about all of them, in any order, while a timeout is a claim about the last
-// of them alone.
+// of them alone — which is why only recordTimedOut, and only from an execution
+// that selected one target, ever writes a timed-out record.
 //
 // Every condition reuse will check is checked here too, so that a record that
 // could never be reused is never written: a fuzz target or a target restored

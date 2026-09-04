@@ -525,11 +525,13 @@ type mutationSeed struct {
 // runs it, the detail that names it in the evidence, the plan entry that names
 // it in a trace, and the targets it selects.
 //
-// A batch selects several targets at once, and the two kinds of verdict read
-// that differently. A kill is not attributable to any of them — the engine
-// reports that the selection failed without saying which target failed, and a
-// vague record is worse than none — while a survival and a timeout are about
-// every target the selector ran, because all of them ran.
+// A batch selects several targets at once, and the three kinds of verdict read
+// that differently. A survival is about every target the selector ran, because
+// the selection ran to completion and all of them passed. A kill and a timeout
+// are about one target each, and the engine names neither: it reports that the
+// selection failed, or that it ran out of time, without saying which target
+// did. Both are therefore attributable only to a selection of one, and a vague
+// record is worse than none.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
@@ -537,9 +539,11 @@ type mutationSeedExecution struct {
 	targets []TargetEvidence
 }
 
-// killer names the target a kill by this execution is attributable to, and the
-// zero identity when several targets ran under one selector.
-func (execution mutationSeedExecution) killer() targetIdentity {
+// soleTarget names the one target this execution selected, and the zero
+// identity when several targets ran under one selector. It is what a kill and
+// a timeout are attributable to, and what neither is attributable to when the
+// engine reports one outcome for a selection of several.
+func (execution mutationSeedExecution) soleTarget() targetIdentity {
 	if len(execution.targets) != 1 {
 		return targetIdentity{}
 	}
@@ -686,7 +690,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addKill(mutant, mutationKillDetail(execution.detail, options))
 				// Only an execution of one named target is a kill a later run
 				// could check: recordKill refuses everything else.
-				options.Evidence.recordKill(mutant, execution.killer())
+				options.Evidence.recordKill(mutant, execution.soleTarget())
 			} else {
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
@@ -696,10 +700,12 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		case gomutants.OutcomeTimedOut:
 			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationTargetTimeoutSummary, options.Accepted)
 			// A timeout is not a verdict about the mutant, so what is recorded
-			// is what the run did: these targets ran, time ran out under the
-			// last of them, and a later run that reaches the same reaching set
-			// keeps the finding rather than dropping it.
-			options.Evidence.recordTimedOut(mutant, executed, "mutation-timeout", mutationTargetTimeoutSummary)
+			// is what the run did: these targets ran, and time ran out under
+			// the last of them — which is why only an execution that selected
+			// one target is recorded, and a batch that ran out of time leaves
+			// the store alone.
+			options.Evidence.recordTimedOut(mutant, executed, execution.soleTarget(),
+				"mutation-timeout", mutationTargetTimeoutSummary)
 			seed.resolved = true
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
 			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationTargetInconclusiveSummary, options.Accepted)
