@@ -50,6 +50,13 @@ func TestTheCLIServiceNamesWhatBelongsToTheMachine(t *testing.T) {
 	if service.UserCacheDir == nil {
 		t.Fatal("cliService named no user cache directory, want the machine's")
 	}
+	// Where the machine keeps its temporary files is the third such property,
+	// and it is the one that bites hardest when it is resolved lower down: a
+	// run makes its scratch under it and `cache gc` collects there, so a value
+	// nobody set must never become the machine's own temporary directory.
+	if service.TempDirectory == "" {
+		t.Fatal("cliService named no temporary directory, want the machine's")
+	}
 }
 
 func TestRealMainHandlesOnlyTheExactVersionFlagAndDelegatesHelp(t *testing.T) {

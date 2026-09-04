@@ -202,6 +202,11 @@ func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
 		Root: root, Progress: io.Discard,
 		Executable:   "/opt/bin/goatest",
 		UserCacheDir: func() (string, error) { return userCache, nil },
+		// A temporary directory of this test's own. The clock below is a day
+		// ahead, and a maintenance command sweeps the temporary directory it is
+		// given: pointed at the machine's, this test would collect the working
+		// directories of every goatest run on it.
+		TempDirectory: t.TempDir(),
 		// The collection runs a day after the entry was written, so the window
 		// that protects an entry a live build just read has passed.
 		Now: func() time.Time { return stored.Add(24 * time.Hour) },
@@ -272,9 +277,10 @@ func TestCacheGCReportsABuildLayerAnotherProcessIsCollecting(t *testing.T) {
 	defer func() { _ = release() }()
 	service := Service{
 		Root: root, Progress: io.Discard,
-		Executable:   "/opt/bin/goatest",
-		UserCacheDir: func() (string, error) { return userCache, nil },
-		Now:          func() time.Time { return stored.Add(24 * time.Hour) },
+		Executable:    "/opt/bin/goatest",
+		UserCacheDir:  func() (string, error) { return userCache, nil },
+		TempDirectory: t.TempDir(),
+		Now:           func() time.Time { return stored.Add(24 * time.Hour) },
 	}
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
 	if err != nil || collected.Verdict != report.VerdictCompleted {
@@ -294,7 +300,7 @@ func TestCacheGCReportsABuildLayerAnotherProcessIsCollecting(t *testing.T) {
 
 func TestCacheStatusSurvivesAMachineWithNowhereToKeepABuildCache(t *testing.T) {
 	service := Service{
-		Root: t.TempDir(), Progress: io.Discard,
+		Root: t.TempDir(), Progress: io.Discard, TempDirectory: t.TempDir(),
 	}
 	status, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
 	if err != nil || status.Verdict != report.VerdictCompleted {

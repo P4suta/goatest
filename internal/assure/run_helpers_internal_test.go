@@ -653,3 +653,40 @@ func containsEnvironment(environment []string, key, value string) bool {
 	}
 	return false
 }
+
+// Where a run put its temporary directories, and what its sweep found there,
+// are facts about the machine and never about the code under test. A run on a
+// full disk that collected a gigabyte of somebody else's leftovers has to
+// answer from the same cache entry as a run on a clean one: ADR 0002 keeps
+// diagnostics out of identity, and housekeeping is diagnostics.
+func TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeRunHelperFile(t, root, "value.go", "package fixture\n")
+	loaded := config.Config{}
+	metadata := roundMetadata{toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"}}
+	here := Options{TempDirectory: filepath.Join(root, "here"), CommandTimeout: time.Minute}
+	elsewhere := here
+	elsewhere.TempDirectory = filepath.Join(root, "elsewhere")
+	if modeIdentity(elsewhere) != modeIdentity(here) {
+		t.Fatalf("mode identity = %q, want %q", modeIdentity(elsewhere), modeIdentity(here))
+	}
+	hereInputs, hereDigest, err := assuranceInputs(root, "standard-v1", here, loaded, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhereInputs, elsewhereDigest, err := assuranceInputs(root, "standard-v1", elsewhere, loaded, metadata)
+	if err != nil || elsewhereDigest != hereDigest || !reflect.DeepEqual(elsewhereInputs, hereInputs) {
+		t.Fatalf("assurance inputs elsewhere = (%+v, %q, %v), want (%+v, %q)",
+			elsewhereInputs, elsewhereDigest, err, hereInputs, hereDigest)
+	}
+	// The behaviour key of a target is the second identity a run reuses
+	// evidence through, and it reads the same options.
+	target := goanalysis.Target{ID: "target-a", Name: "TestValue", Kind: goanalysis.KindTest, Package: "fixture.example/module"}
+	model := goanalysis.Model{ModulePath: "fixture.example/module"}
+	hereKey := newTargetKeySources(hereInputs, model, "standard-v1", here).inputsFor(target)
+	elsewhereKey := newTargetKeySources(elsewhereInputs, model, "standard-v1", elsewhere).inputsFor(target)
+	if !reflect.DeepEqual(elsewhereKey, hereKey) {
+		t.Fatalf("target key inputs elsewhere = %+v, want %+v", elsewhereKey, hereKey)
+	}
+}

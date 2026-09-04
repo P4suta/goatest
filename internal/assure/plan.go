@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/testargs"
 )
 
@@ -43,8 +45,20 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		return report.Report{}, err
 	}
 	options.TestArgs = normalizedTestArgs
+	// A plan keeps nothing. It has no --keep-temp of its own, and a directory a
+	// plan made answers no question once the plan has printed what it found.
+	options.KeepTemp = false
+	// Before the plan writes anything, exactly as a run does: a plan makes the
+	// same temporary directories, so it leaves the same leftovers when it is
+	// interrupted and collects them on the same terms. It has no dependency
+	// struct to reach the sweep through, so it names it directly.
+	sweepRunTemporaries(options, tempowner.Sweep, planMoment(options))
+	scratch, err := openRunScratch(os.MkdirTemp, os.RemoveAll, options.TempDirectory, root, planMoment(options))
+	if err != nil {
+		emit(options, "temp-unavailable", err.Error())
+	}
 	buildCache, err := openRunBuildCache(
-		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
+		options.BuildCacheProgram, options.BuildCacheDir, scratch, loaded.Cache.BuildMaxBytes)
 	if err != nil {
 		emit(options, "build-cache-unavailable", err.Error())
 	}
@@ -53,15 +67,18 @@ func Plan(ctx context.Context, options Options) (result report.Report, resultErr
 		// packages — so it bounds the layer on the way out like a run does.
 		collectRunBuildCache(options, loaded, buildCache, planMoment(options))
 		resultErr = errors.Join(resultErr, releaseBuildCache(options, buildCache))
+		releaseRunScratch(options, os.RemoveAll, scratch, planMoment(options))
 	}()
 	workspace, err := mutationbridge.Open(ctx, root, mutationbridge.Options{
 		GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 		ReportDirectory: ".goatest",
 		Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
+		KeepTemp:        options.KeepTemp,
 	})
 	if err != nil {
 		return report.Report{}, err
 	}
+	reportMutationSweep(options, workspace.Swept())
 	defer func() { resultErr = errors.Join(resultErr, workspace.Close()) }()
 	commands := withBuildCache(workspace, buildCache)
 	metadata, err := inspectWorkspace(ctx, commands)

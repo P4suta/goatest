@@ -94,7 +94,7 @@ const help = `Usage:
 Every command accepts --ui=auto|plain|jsonl and --json for its output; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
 Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
-Keeping temporaries: --keep-temp leaves the baseline scratch and candidate trees on disk and records each kept path in the trace; GOATEST_KEEP_TEMP=1 asks for the same. Nothing removes them afterwards.
+Keeping temporaries: --keep-temp leaves the run's temporary directories on disk and records each kept path in the trace and in .goatest/kept-temp-v1.json; GOATEST_KEEP_TEMP=1 asks for the same. 'cache status' lists them and 'cache gc' removes them once they are older than the [cache] ttl.
 `
 
 // commandHelp is the help text of one command, and the fact that the command
@@ -114,7 +114,7 @@ Flags:
 	--ui=auto|plain|jsonl	select progress and report rendering
 	--json	print the final report as formatted JSON
 	--trace[=DIR]	record diagnostic exhaust; GOATEST_TRACE=1|DIR asks for the same
-	--keep-temp	leave temporary trees on disk; GOATEST_KEEP_TEMP=1 asks for the same
+	--keep-temp	leave the run's temporary trees on disk, recorded in .goatest/kept-temp-v1.json; GOATEST_KEEP_TEMP=1 asks for the same
 Arguments after -- reach the test binaries; only -short and -test.parallel are accepted, every other -test.* flag is owned by the assurance run.
 `, true
 	case CommandPlan:

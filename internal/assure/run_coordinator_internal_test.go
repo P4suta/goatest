@@ -6,6 +6,7 @@ package assure
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
@@ -96,6 +98,23 @@ type runCoordinatorHarness struct {
 	recorder     *trace.Recorder
 	scratch      string
 
+	// temporary is where the harness lets a run make its directories, whatever
+	// the run was told, so that a test driving a real creation and a real
+	// removal still leaves the machine as the framework found it.
+	temporary          string
+	runScratch         string
+	runScratchParent   string
+	runScratchPattern  string
+	runScratchErr      error
+	runScratchRemovals int
+	removeScratchErr   error
+	baselineParent     string
+	baselinePattern    string
+	sweepParents       []string
+	sweptPrefixes      []string
+	sweepResult        tempowner.Result
+	sweepErr           error
+
 	openCalls       int
 	workspaceCloses int
 	inputCalls      int
@@ -140,11 +159,12 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 	root := t.TempDir()
 	target := goanalysis.Target{ID: "target-a", Name: "TestValue", Kind: goanalysis.KindTest, Package: "fixture.example/module", RelativeDir: "."}
 	harness := &runCoordinatorHarness{
-		t:       t,
-		root:    root,
-		loaded:  config.Config{Contract: "standard-v1"},
-		cache:   &coordinatorCache{},
-		manager: &coordinatorCloser{},
+		t:         t,
+		root:      root,
+		temporary: t.TempDir(),
+		loaded:    config.Config{Contract: "standard-v1"},
+		cache:     &coordinatorCache{},
+		manager:   &coordinatorCloser{},
 		metadata: roundMetadata{model: goanalysis.Model{
 			ModulePath: "fixture.example/module",
 			Packages: []goanalysis.Package{
@@ -227,10 +247,32 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			}
 			return harness.manager, baselineTargets, []report.Evidence{{Kind: "resource", ID: "db", Status: "ready"}}, []string{"DB=ready"}, nil
 		},
-		makeBaselineScratch: func(parent, pattern string) (string, error) {
-			if pattern != "goatest-baseline-" {
-				t.Fatalf("scratch pattern = %q", pattern)
+		makeRunScratch: func(parent, pattern string) (string, error) {
+			harness.runScratchParent, harness.runScratchPattern = parent, pattern
+			if harness.runScratchErr != nil {
+				return "", harness.runScratchErr
 			}
+			directory, err := os.MkdirTemp(harness.temporary, pattern)
+			harness.runScratch = directory
+			return directory, err
+		},
+		removeRunScratch: func(directory string) error {
+			harness.runScratchRemovals++
+			if directory != harness.runScratch {
+				t.Fatalf("removed run scratch = %q, want %q", directory, harness.runScratch)
+			}
+			if harness.removeScratchErr != nil {
+				return harness.removeScratchErr
+			}
+			return os.RemoveAll(directory)
+		},
+		sweepTemporary: func(parent string, prefixes []string, _ time.Time) (tempowner.Result, error) {
+			harness.sweepParents = append(harness.sweepParents, parent)
+			harness.sweptPrefixes = slices.Clone(prefixes)
+			return harness.sweepResult, harness.sweepErr
+		},
+		makeBaselineScratch: func(parent, pattern string) (string, error) {
+			harness.baselineParent, harness.baselinePattern = parent, pattern
 			harness.scratch = filepath.Join(parent, "baseline-scratch")
 			return harness.scratch, nil
 		},

@@ -75,6 +75,9 @@ func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
 	planCalls, runCalls := 0, 0
 	service := app.Service{
 		Root: root,
+		// The cache commands below sweep the temporary directory they are
+		// given, so this test gives them one of its own.
+		TempDirectory: t.TempDir(),
 		Plan: func(_ context.Context, options assure.Options) (report.Report, error) {
 			planCalls++
 			if !options.NoApply || !options.PackageScope || len(options.Packages) != 1 {

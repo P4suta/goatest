@@ -154,6 +154,8 @@ func TestWorkspaceCloseIsIdempotentAndClearsEngineOnFailure(t *testing.T) {
 }
 
 type fakeMutationWorkspace struct {
+	swept        gomutants.SweepResult
+	preserved    []string
 	command      gomutants.Command
 	execResult   gomutants.CommandResult
 	execErr      error
@@ -180,3 +182,7 @@ func (workspace *fakeMutationWorkspace) Close() error {
 	workspace.closeCalls++
 	return workspace.closeErr
 }
+
+func (workspace *fakeMutationWorkspace) Swept() gomutants.SweepResult { return workspace.swept }
+
+func (workspace *fakeMutationWorkspace) Preserved() []string { return workspace.preserved }

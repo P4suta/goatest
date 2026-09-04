@@ -35,6 +35,7 @@ import (
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
+	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/testargs"
 	"github.com/P4suta/goatest/internal/trace"
 )
@@ -215,6 +216,9 @@ type runDependencies struct {
 	discoverTargets        func(string, []goanalysis.Package) ([]goanalysis.Target, error)
 	selectImpact           func(context.Context, string, goanalysis.Model, []goanalysis.Target, Options) impactSelection
 	acquireResources       func(context.Context, config.Config, []goanalysis.Target, []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error)
+	makeRunScratch         func(string, string) (string, error)
+	removeRunScratch       func(string) error
+	sweepTemporary         func(string, []string, time.Time) (tempowner.Result, error)
 	makeBaselineScratch    func(string, string) (string, error)
 	removeBaselineScratch  func(string) error
 	collectBaseline        func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error)
@@ -267,11 +271,33 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	accepted := activeAcceptance(loaded, now())
 	acceptances := activeAcceptanceMetadata(loaded, now())
 	cacheStore := dependencies.newCache(filepath.Join(root, ".goatest", "cache"), loaded.Cache)
+	// Before this run writes a byte outside the repository, so that a machine
+	// holding the leftovers of a killed run has the disk back before this one
+	// asks for hundreds of megabytes of it.
+	sweepRunTemporaries(options, dependencies.sweepTemporary, now())
+	// One directory for everything this run writes outside the repository, and
+	// an owner on it, so that what a run leaves behind when it is killed is
+	// attributable to it and collectable by the next one. A run that could not
+	// make or claim one says so and carries on: this is housekeeping, and
+	// housekeeping never decides a verdict.
+	scratch, err := openRunScratch(
+		dependencies.makeRunScratch, dependencies.removeRunScratch, options.TempDirectory, root, now())
+	if err != nil {
+		emit(options, "temp-unavailable", err.Error())
+	}
+	// Every workspace of this run is closed through here. Closing is where the
+	// engine names the directories a keeping run asked it to keep, and a path
+	// nobody wrote down is litter rather than something a developer can find.
+	closeWorkspace := func(workspace *mutationbridge.Workspace) error {
+		err := dependencies.closeWorkspace(workspace)
+		recordKept(options, scratch, artifactMutationWorkspace, workspace.Preserved(), now())
+		return err
+	}
 	// A build cache that cannot be opened is reported and then done without. It
 	// makes a run faster and decides nothing, so a disk that refuses it costs
 	// time and never a verdict.
 	buildCache, err := openRunBuildCache(
-		options.BuildCacheProgram, options.BuildCacheDir, options.TempDirectory, loaded.Cache.BuildMaxBytes)
+		options.BuildCacheProgram, options.BuildCacheDir, scratch, loaded.Cache.BuildMaxBytes)
 	if err != nil {
 		emit(options, "build-cache-unavailable", err.Error())
 	}
@@ -283,6 +309,10 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		if closeErr := releaseBuildCache(options, buildCache); closeErr != nil {
 			emit(options, "build-cache-unavailable", closeErr.Error())
 		}
+		// Last, because the build cache layer is inside it: removing that
+		// layer first keeps the peak smaller, and this removal covers whatever
+		// is left.
+		releaseRunScratch(options, dependencies.removeRunScratch, scratch, now())
 	}()
 	var appliedRepairs []report.Repair
 	phases := runPhases{recorder: options.Trace}
@@ -295,43 +325,44 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 			ReportDirectory: ".goatest",
 			Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
-			Trace:           options.Trace,
+			Trace:           options.Trace, KeepTemp: options.KeepTemp,
 		})
 		if err != nil {
 			return report.Report{}, err
 		}
+		reportMutationSweep(options, workspace.Swept())
 		// Every command below reaches the workspace through this wrapper, which
 		// is the one place that decides which layer of the build cache a
 		// command's writes land in.
 		commands := withBuildCache(workspace, buildCache)
 		metadata, err := dependencies.inspectWorkspace(ctx, commands)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		if !defaultPackagePatterns(options.Packages) || len(options.BuildTags) != 0 {
 			selectedModel, selectErr := inspectSelectedPackages(ctx, commands, options.Packages, options.BuildTags, options.CommandTimeout)
 			if selectErr != nil {
-				_ = dependencies.closeWorkspace(workspace)
+				_ = closeWorkspace(workspace)
 				return report.Report{}, selectErr
 			}
 			metadata.model = selectedModel
 		}
 		inputs, digest, err := dependencies.assuranceInputs(root, contract, options, loaded, metadata)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		phases.enter(phaseCacheCheck)
 		if round == 0 && len(loaded.Resources) == 0 {
 			cached, found, cacheErr := cacheStore.Get(digest)
 			if cacheErr != nil {
-				_ = dependencies.closeWorkspace(workspace)
+				_ = closeWorkspace(workspace)
 				return report.Report{}, cacheErr
 			}
 			if found && cachedAcceptanceValid(cached, accepted) {
 				emit(options, "cache-hit", digest)
-				if closeErr := dependencies.closeWorkspace(workspace); closeErr != nil {
+				if closeErr := closeWorkspace(workspace); closeErr != nil {
 					return report.Report{}, closeErr
 				}
 				return cached, nil
@@ -341,7 +372,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		phases.enter(phaseDiscover)
 		targets, err := dependencies.discoverTargets(root, metadata.model.Packages)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		allTargets := slices.Clone(targets)
@@ -371,7 +402,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Acceptances: slices.Clone(acceptances),
 				Limitations: projectExcludeLimitations(loaded.Project.Exclude),
 			}
-			if closeErr := dependencies.closeWorkspace(workspace); closeErr != nil {
+			if closeErr := closeWorkspace(workspace); closeErr != nil {
 				return report.Report{}, closeErr
 			}
 			if err := cacheStore.Put(digest, result); err != nil {
@@ -387,7 +418,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		phases.enter(phaseResources)
 		manager, baselineTargets, resourceEvidence, resourceEnv, err := dependencies.acquireResources(ctx, loaded, targets, options.Environment)
 		if err != nil {
-			_ = dependencies.closeWorkspace(workspace)
+			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
 		var controlMutex sync.Mutex
@@ -404,14 +435,15 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					GoBinary: options.GoBinary, TempDirectory: options.TempDirectory,
 					ReportDirectory: ".goatest",
 					Environment:     append(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()...),
-					Trace:           options.Trace,
+					Trace:           options.Trace, KeepTemp: options.KeepTemp,
 				})
 				if openErr != nil {
 					return gomutants.CommandResult{}, openErr
 				}
+				reportMutationSweep(options, opened.Swept())
 				controlWorkspace = opened
 			}
-			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags)
+			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags, scratch)
 		}
 		closeControl := func() error {
 			controlMutex.Lock()
@@ -419,14 +451,15 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			if controlWorkspace == nil {
 				return nil
 			}
-			return dependencies.closeWorkspace(controlWorkspace)
+			return closeWorkspace(controlWorkspace)
 		}
 		closeRound := func() error {
-			return errors.Join(closeControl(), manager.Close(), dependencies.closeWorkspace(workspace))
+			return errors.Join(closeControl(), manager.Close(), closeWorkspace(workspace))
 		}
 
 		phases.enter(phaseBaseline)
-		artifactDirectory, err := dependencies.makeBaselineScratch(options.TempDirectory, "goatest-baseline-")
+		baselineParent, baselinePrefix := scratch.subdirectory(baselineScratchName)
+		artifactDirectory, err := dependencies.makeBaselineScratch(baselineParent, baselinePrefix)
 		if err != nil {
 			_ = closeRound()
 			return report.Report{}, fmt.Errorf("goatest: create baseline scratch: %w", err)
@@ -670,6 +703,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 
 		phases.enter(phaseRepair)
 		generated := GenerationEvaluation{Findings: slices.Clone(mutation.Findings)}
+		candidateParent, candidatePrefix := scratch.subdirectory(candidateTreeName)
 		if !mutation.Applied {
 			generated, err = dependencies.attemptRepairs(ctx, root, mutation.Findings, GenerationOptions{
 				Snapshot: digest, NoApply: options.NoApply, Generate: options.Generate,
@@ -678,7 +712,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				AllowedPaths:        generationPaths(options, loaded), Validator: options.Validator,
 				RepositoryValidator: RepositoryValidatorOptions{
 					Root: root, Contract: contract, GoBinary: options.GoBinary,
-					TempDirectory: options.TempDirectory, Environment: validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
+					TempDirectory: candidateParent, TempPrefix: candidatePrefix,
+					Environment:       validationEnvironment(executionEnvironment(options.Environment), resourceEnv),
 					MutationOperators: options.MutationOperators, Packages: options.Packages,
 					BuildTags: options.BuildTags, TestArgs: options.TestArgs, Timeout: options.CommandTimeout,
 					Trace: options.Trace, KeepTemp: options.KeepTemp,
@@ -751,7 +786,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	}
 }
 
-func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string) (gomutants.CommandResult, error) {
+func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string, scratch runScratch) (gomutants.CommandResult, error) {
 	argv := []string{"go", "test", "-count=1"}
 	if len(buildTags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(buildTags, ","))
@@ -763,7 +798,7 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 	}
 	arguments := slices.Clone(request.Args)
 	if hasTestArgument(arguments, "-test.fuzz") && !hasTestArgument(arguments, "-test.fuzzcachedir") {
-		cacheDirectory, err := os.MkdirTemp("", "goatest-control-fuzz-")
+		cacheDirectory, err := os.MkdirTemp(scratch.subdirectory(controlFuzzName))
 		if err != nil {
 			return gomutants.CommandResult{}, fmt.Errorf("goatest: create original-control fuzz cache: %w", err)
 		}

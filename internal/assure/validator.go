@@ -27,10 +27,19 @@ import (
 )
 
 type RepositoryValidatorOptions struct {
-	Root              string
-	Contract          string
-	GoBinary          string
-	TempDirectory     string
+	Root     string
+	Contract string
+	GoBinary string
+	// TempDirectory is the parent of the isolated tree each candidate is
+	// validated in: the scratch directory of the run that asked for the
+	// validation, or the configured temporary root for a validation outside
+	// any run.
+	TempDirectory string
+	// TempPrefix names those trees. An empty prefix is a validation outside a
+	// run, whose trees stand among everybody else's temporary directories and
+	// therefore carry the tool's name, which is how the next run's sweep
+	// recognizes one that was left behind.
+	TempPrefix        string
 	Environment       []string
 	MutationOperators []string
 	Packages          []string
@@ -220,6 +229,7 @@ func (validator *repositoryValidator) open(ctx context.Context, root string) (va
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
 		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
 		ReportDirectory: ".goatest", Environment: environment, Trace: validator.options.Trace,
+		KeepTemp: validator.options.KeepTemp,
 	})
 }
 
@@ -274,7 +284,7 @@ func runPassing(ctx context.Context, workspace CommandWorkspace, argv []string, 
 }
 
 func (validator *repositoryValidator) withCandidate(ctx context.Context, candidate provider.Candidate, action func(context.Context, string) error) error {
-	root, err := makeCandidateTemp(validator.options.TempDirectory, "goatest-candidate-")
+	root, err := makeCandidateTemp(validator.options.TempDirectory, validator.candidatePrefix())
 	if err != nil {
 		return err
 	}
@@ -286,6 +296,16 @@ func (validator *repositoryValidator) withCandidate(ctx context.Context, candida
 		return err
 	}
 	return action(ctx, root)
+}
+
+// candidatePrefix names the trees this validator makes. A validation that was
+// given no prefix is one outside any run, and its trees are made where nothing
+// else names them, so they carry the name the sweep of the next run knows.
+func (validator *repositoryValidator) candidatePrefix() string {
+	if validator.options.TempPrefix == "" {
+		return legacyPrefix + candidateTreeName
+	}
+	return validator.options.TempPrefix
 }
 
 func copyRepository(source, destination string) error {

@@ -39,13 +39,20 @@ func realMain(arguments []string) int {
 
 // cliService is the service the goatest CLI runs on. It is the one layer that
 // may name what belongs to the machine this process runs on: the binary a go
-// command re-executes to reach the build cache, and the per-machine directory
-// that cache lives in. Below it both are options, and both are left empty by
-// every process that is not this CLI.
+// command re-executes to reach the build cache, the per-machine directory that
+// cache lives in, and where the machine keeps its temporary files. Below it all
+// three are options, and all three are left empty by every process that is not
+// this CLI.
+//
+// The temporary directory is named here rather than resolved below because a
+// value nobody set must never become the machine's own: a run makes its scratch
+// under it, and `cache gc` collects there. An embedded service or a test that
+// names none therefore gets a run that still works and a maintenance command
+// that sweeps nothing, instead of a sweep of everybody's temporary files.
 func cliService() app.Service {
 	return app.Service{
 		Root: ".", Progress: os.Stderr, Output: os.Stdout, Interactive: interactiveTerminal,
-		Executable: goatestExecutable(), UserCacheDir: os.UserCacheDir,
+		Executable: goatestExecutable(), UserCacheDir: os.UserCacheDir, TempDirectory: os.TempDir(),
 	}
 }
 

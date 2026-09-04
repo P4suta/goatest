@@ -59,6 +59,11 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			return report.Report{}, err
 		}
 		result.Evidence = append(result.Evidence, buildCacheStatusEvidence("build-status", buildStatus))
+		// The temporary directory last, because it is the one store that is not
+		// the repository's: what is reported before it is what this .goatest
+		// holds, and what is reported here is what runs left on the machine.
+		result.Evidence = append(result.Evidence, service.temporaryStatus(service.clock()().UTC()))
+		result.Evidence = append(result.Evidence, keptTemporaryStatus(root)...)
 		return result, nil
 	case "gc":
 		now := time.Now
@@ -101,7 +106,9 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		result.Evidence = append(result.Evidence,
 			buildCacheStatusEvidence("build-before", buildCollected.Before),
 			buildCacheGCEvidence(buildCollected, ran),
-			buildCacheStatusEvidence("build-after", buildCollected.After))
+			buildCacheStatusEvidence("build-after", buildCollected.After),
+			service.temporarySweep(moment),
+			collectKeptTemporaries(root, loaded.Cache.TTL, moment))
 		return result, nil
 	default:
 		return report.Report{}, fmt.Errorf("goatest: cache action %q is unsupported", action)

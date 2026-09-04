@@ -14,6 +14,7 @@ import (
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
+	"github.com/P4suta/goatest/internal/tempowner"
 )
 
 type productionRunResourceManager struct{ manager *resource.Manager }
@@ -61,6 +62,9 @@ func productionRunDependencies() runDependencies {
 			manager, baseline, evidenceItems, environment, err := acquireResources(ctx, loaded, targets, baseEnvironment)
 			return manager, baseline, evidenceItems, environment, err
 		},
+		makeRunScratch:         os.MkdirTemp,
+		removeRunScratch:       os.RemoveAll,
+		sweepTemporary:         tempowner.Sweep,
 		makeBaselineScratch:    os.MkdirTemp,
 		removeBaselineScratch:  os.RemoveAll,
 		collectBaseline:        CollectBaseline,
