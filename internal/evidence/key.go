@@ -132,3 +132,31 @@ func writeList(h hash.Hash, domain string, values []string) {
 		write(h, value)
 	}
 }
+
+// SuiteBehaviorKey identifies the behaviour of a package's whole test suite,
+// so a later run can tell whether a verdict the suite reached still applies.
+//
+// A package suite is what settles a mutant no measured target reaches: it runs
+// every target of the package, fuzz targets among them as ordinary unit tests,
+// as one command. What it observes is therefore the conjunction of what its
+// targets observe and of what the package-level run itself reads, and the key
+// is built from exactly those two: every target with the behaviour key it had,
+// and the package-level run's own inputs. A target whose key moved, one that
+// entered, and one that left each change the suite; the order they are counted
+// in does not, because a suite is a set.
+//
+// The key opens with its own domain, so a suite key can never be mistaken for
+// the behaviour key of one target: the two answer different questions about
+// different things.
+func SuiteBehaviorKey(inputs TargetInputs, targets []TargetKey) string {
+	ordered := slices.Clone(targets)
+	slices.SortFunc(ordered, compareTargetKeys)
+	h := sha256.New()
+	write(h, "goatest-mutation-evidence-suite-key-v1")
+	write(h, "targets", strconv.Itoa(len(ordered)))
+	for _, target := range ordered {
+		write(h, target.Package, target.Name, target.Kind, target.Key)
+	}
+	write(h, "package", TargetBehaviorKey(inputs))
+	return hex.EncodeToString(h.Sum(nil))
+}

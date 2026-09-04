@@ -76,9 +76,14 @@ type targetKeySources struct {
 	buildTags      []string
 	commandTimeout time.Duration
 	targetTimeout  time.Duration
-	// extraFiles are module-relative paths declared as inputs of every target
-	// beyond what the closure names. Nothing declares any yet; the field is
-	// where the configured list will arrive.
+	// repositoryReaders are the packages goanalysis found reading a directory
+	// they compute rather than a file they name, by import path. A target of
+	// one of them is keyed on extraFiles instead of on its closure alone.
+	repositoryReaders map[string]bool
+	// extraFiles are the module-relative paths a target keys beyond what its
+	// closure names: every file of the snapshot, in sorted order, for the
+	// targets whose verdict any of them could change. It is empty when the run
+	// found no repository reader, because nothing else declares one.
 	extraFiles []string
 
 	packages  map[string]goanalysis.Package
@@ -91,15 +96,30 @@ type targetKeySources struct {
 // of them: what lies in a package's directory, what lies under its testdata,
 // and what a fuzz target's corpus holds. The indexes are built once, because
 // every target of the run asks the same questions of the same scan.
-func newTargetKeySources(inputs evidence.Inputs, model goanalysis.Model, contract string, options Options) targetKeySources {
+//
+// The whole-tree list is built once too, and only when the run found a package
+// that reads one: it is every file the snapshot holds, so a target keyed on it
+// keeps a verdict only across a tree that did not change at all.
+func newTargetKeySources(inputs evidence.Inputs, model goanalysis.Model, contract string, options Options, readers map[string]bool) targetKeySources {
 	sources := targetKeySources{
 		inputs: inputs, model: model, contract: contract,
 		testArgs: options.TestArgs, buildTags: options.BuildTags,
 		commandTimeout: options.CommandTimeout, targetTimeout: options.TargetTimeout,
-		packages:  make(map[string]goanalysis.Package, len(model.Packages)),
-		directory: make(map[string][]string, len(model.Packages)),
-		testdata:  make(map[string][]string),
-		corpus:    make(map[string][]string),
+		repositoryReaders: readers,
+		packages:          make(map[string]goanalysis.Package, len(model.Packages)),
+		directory:         make(map[string][]string, len(model.Packages)),
+		testdata:          make(map[string][]string),
+		corpus:            make(map[string][]string),
+	}
+	if len(readers) != 0 {
+		sources.extraFiles = make([]string, 0, len(inputs.Files)+len(inputs.Corpus))
+		for name := range inputs.Files {
+			sources.extraFiles = append(sources.extraFiles, name)
+		}
+		for name := range inputs.Corpus {
+			sources.extraFiles = append(sources.extraFiles, name)
+		}
+		slices.Sort(sources.extraFiles)
 	}
 	for _, pkg := range model.Packages {
 		sources.packages[pkg.ImportPath] = pkg
@@ -166,18 +186,32 @@ func corpusOwner(name string) (string, string, bool) {
 // because a dependency's tests are never compiled into this binary — but the
 // target's package's test files are, and they are the file most likely to
 // change.
+//
+// A target of a package that reads a directory it computes is the exception,
+// and it is a conservative one: its closure is not what decides its verdict,
+// because the files it will read are not named anywhere, so every file of the
+// snapshot is an input of it. Such a target keeps a recorded verdict across an
+// identical tree and across nothing else. Nothing is excluded from testing or
+// from reuse by name; the key simply stops claiming to know what the test
+// reads.
 func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.TargetInputs {
 	files := make(map[string]string)
 	include := func(name string) {
 		if digest, known := sources.inputs.Files[name]; known {
+			files[name] = digest
+			return
+		}
+		if digest, known := sources.inputs.Corpus[name]; known {
 			files[name] = digest
 		}
 	}
 	for _, name := range moduleManifestFiles {
 		include(name)
 	}
-	for _, name := range sources.extraFiles {
-		include(name)
+	if sources.repositoryReaders[target.Package] {
+		for _, name := range sources.extraFiles {
+			include(name)
+		}
 	}
 	for _, pkg := range sources.closure(target) {
 		for _, name := range sources.directory[pkg.RelativeDir] {
@@ -208,6 +242,28 @@ func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.Tar
 		}
 	}
 	return inputs
+}
+
+// suiteKey identifies what one package's whole test suite does, which is what
+// a mutant no measured target reaches is settled by and what a verdict about
+// such a mutant is a statement about.
+//
+// The package-level run is described exactly as a target of the package would
+// be — the same closure, the same data beside it, the same arguments, tags,
+// timeouts, and versions — because it builds the same test binary; what makes
+// it the suite rather than a target is that no selector narrows it, so every
+// target of the package runs. Both halves are therefore in the key: the
+// package-level run's own inputs, and each target with the behaviour key it
+// has here. A package this run knows nothing about names no key, and a run
+// that cannot name a key neither records a suite verdict nor believes one.
+func (sources targetKeySources) suiteKey(pkg string, targets []evidence.TargetKey) string {
+	owner, known := sources.packages[pkg]
+	if !known {
+		return ""
+	}
+	return evidence.SuiteBehaviorKey(sources.inputsFor(goanalysis.Target{
+		Package: pkg, RelativeDir: owner.RelativeDir, Dependencies: owner.Dependencies,
+	}), targets)
 }
 
 // closure is the packages of this module whose sources the target's test
@@ -247,6 +303,12 @@ type MutationEvidence struct {
 	// passed is the targets this run's baseline ran on the original tree and
 	// saw pass. It is the fresh control a reused kill stands on.
 	passed map[targetIdentity]bool
+	// suites is what each package's whole test suite does in this run, by
+	// import path. A package is here only when this run can describe its suite
+	// at all: every target of it was measured by this run rather than restored
+	// from a checkpoint, and every one of them passed the baseline. A package
+	// that is absent is one no suite verdict is written about or read for.
+	suites map[string]string
 
 	mutex    sync.Mutex
 	recorded map[string]evidence.MutationRecord
@@ -257,13 +319,13 @@ type MutationEvidence struct {
 // its own targets. A store that could not be read is simply an empty one: the
 // run then executes everything and records what it finds, which is the only
 // direction that cannot cost assurance.
-func newMutationEvidence(store evidence.MutationStore, keys map[targetIdentity]string, passed map[targetIdentity]bool, provenance string) *MutationEvidence {
+func newMutationEvidence(store evidence.MutationStore, keys map[targetIdentity]string, passed map[targetIdentity]bool, suites map[string]string, provenance string) *MutationEvidence {
 	records := make(map[string]evidence.MutationRecord, len(store.Records))
 	for _, record := range store.Records {
 		records[record.MutantID] = record
 	}
 	return &MutationEvidence{
-		provenance: provenance, records: records, keys: keys, passed: passed,
+		provenance: provenance, records: records, keys: keys, passed: passed, suites: suites,
 		recorded: make(map[string]evidence.MutationRecord),
 		reused:   make(map[string]string),
 	}
@@ -272,6 +334,10 @@ func newMutationEvidence(store evidence.MutationStore, keys map[targetIdentity]s
 // newRunMutationEvidence builds the index from what the round has: the store,
 // the targets the mutation phase will route between, and the inventory the
 // baseline produced.
+//
+// The suite keys are built here, once, for the same reason the target keys
+// are: every worker asks the same question of the same run, and a package's
+// suite key is the conjunction of the target keys this loop already computed.
 func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySources, targets []TargetEvidence, inventory []report.TargetDisposition, snapshot string) *MutationEvidence {
 	keys := make(map[targetIdentity]string, len(targets))
 	for _, target := range targets {
@@ -283,7 +349,41 @@ func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySourc
 			passed[targetIdentity{pkg: item.Package, name: item.Name, kind: item.Kind}] = true
 		}
 	}
-	return newMutationEvidence(store, keys, passed, "snapshot="+snapshot)
+	return newMutationEvidence(store, keys, passed, suiteKeys(sources, targets, keys, passed), "snapshot="+snapshot)
+}
+
+// suiteKeys is what every package's test suite does in this run.
+//
+// A package is described only when this run measured all of it: a target
+// restored from a checkpoint carries no coverage of its own, and a target the
+// baseline did not see pass leaves the suite's own outcome unaccounted for, so
+// either one makes the package one this run cannot speak for. Every other
+// package of the model is keyed, including one with no targets at all, whose
+// suite runs nothing and says so.
+func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targetIdentity]string, passed map[targetIdentity]bool) map[string]string {
+	byPackage := make(map[string][]evidence.TargetKey, len(sources.packages))
+	unmeasured := make(map[string]bool, len(sources.packages))
+	for _, target := range targets {
+		identity := identify(target.Target)
+		key := keys[identity]
+		if target.Covered == nil || !passed[identity] || key == "" {
+			unmeasured[identity.pkg] = true
+			continue
+		}
+		byPackage[identity.pkg] = append(byPackage[identity.pkg], evidence.TargetKey{
+			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key,
+		})
+	}
+	suites := make(map[string]string, len(sources.packages))
+	for path := range sources.packages {
+		if unmeasured[path] {
+			continue
+		}
+		if key := sources.suiteKey(path, byPackage[path]); key != "" {
+			suites[path] = key
+		}
+	}
+	return suites
 }
 
 // reuseKill reports the target of this run that answers for a mutant an
@@ -301,34 +401,289 @@ func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySourc
 //
 // A kill fuzzing found is never believed, because finding an input inside one
 // budget is not a claim that the next budget finds one.
-func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route mutationRoute) (TargetEvidence, bool) {
+func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route mutationRoute) (TargetEvidence, string, bool) {
 	if collected == nil {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	record, known := collected.records[mutant.ID]
 	if !known || record.Outcome != evidence.MutationOutcomeKilled || record.KilledBy == nil {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	killer := targetIdentity{pkg: record.KilledBy.Package, name: record.KilledBy.Name, kind: record.KilledBy.Kind}
 	if killer.kind == string(goanalysis.KindFuzz) {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	index := slices.IndexFunc(route.reaching, func(target TargetEvidence) bool {
 		return identify(target.Target) == killer
 	})
 	if index < 0 {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	if key := collected.keys[killer]; key == "" || key != record.KilledBy.Key {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	if !collected.passed[killer] {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	collected.mutex.Lock()
 	collected.reused[mutant.ID] = record.Provenance
 	collected.mutex.Unlock()
-	return route.reaching[index], true
+	return route.reaching[index], record.Provenance, true
+}
+
+// reuseVerdict reports the finding an earlier run recorded for a mutant it
+// watched survive, when every condition under which that verdict is still this
+// run's holds.
+//
+// A survived verdict is a universal proposition: no test that reaches this
+// mutant kills it. The recording run established it of the targets it ran, so
+// it is a claim about this run exactly when every target this run's coverage
+// routes to the mutant is one of those — the same target, under the same
+// behaviour key, and seen to pass by this run's own baseline, which is the
+// same fresh control a reused kill stands on. A reaching set that shrank is
+// still covered, because a target that no longer reaches the mutant cannot
+// kill it; one that grew is not covered at all, because the target that
+// entered is one nothing was ever run against.
+func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route mutationRoute) (evidence.FindingSeed, string, bool) {
+	if collected == nil {
+		return evidence.FindingSeed{}, "", false
+	}
+	record, known := collected.records[mutant.ID]
+	if !known || record.Finding == nil {
+		return evidence.FindingSeed{}, "", false
+	}
+	switch record.Outcome {
+	case evidence.MutationOutcomeSurvived:
+		if !collected.exhausts(record.Exhausted, route.reaching) {
+			return evidence.FindingSeed{}, "", false
+		}
+	case evidence.MutationOutcomeUnreached:
+		if !collected.suiteAnswers(mutant, record.Suite, route) {
+			return evidence.FindingSeed{}, "", false
+		}
+	case evidence.MutationOutcomeTimedOut:
+		// Time ran out in one of two places, and the record has the shape of
+		// the place it ran out in, so it is checked against the condition of
+		// that place. Reusing it keeps a finding and never removes one, which
+		// is the only direction an unsettled question may be carried in.
+		if record.Suite != nil {
+			if !collected.suiteAnswers(mutant, record.Suite, route) {
+				return evidence.FindingSeed{}, "", false
+			}
+		} else if !collected.stillTimesOut(record.Exhausted, route.reaching) {
+			return evidence.FindingSeed{}, "", false
+		}
+	default:
+		return evidence.FindingSeed{}, "", false
+	}
+	collected.mutex.Lock()
+	collected.reused[mutant.ID] = record.Provenance
+	collected.mutex.Unlock()
+	return *record.Finding, record.Provenance, true
+}
+
+// exhausts reports whether a recorded set of executed targets covers every
+// target this run routes to a mutant.
+//
+// The conditions on each of them are the conditions of the whole claim, so one
+// target failing any of them ends it. A fuzz target is refused for the reason
+// a fuzz kill is refused: exploring one budget without finding an input says
+// nothing about the next. A target restored from a checkpoint carries no
+// coverage blocks, so routing keeps it for the whole file and the reaching set
+// it belongs to is wider than the one any run measured; a claim about a
+// measured set is not a claim about that. And a reaching set that is empty
+// exhausts nothing: a mutant nothing reaches is a statement about a package
+// suite instead.
+func (collected *MutationEvidence) exhausts(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
+	if len(reaching) == 0 {
+		return false
+	}
+	for _, target := range reaching {
+		identity := identify(target.Target)
+		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
+			return false
+		}
+		key := collected.keys[identity]
+		if key == "" {
+			return false
+		}
+		if !slices.ContainsFunc(exhausted, func(candidate evidence.TargetKey) bool {
+			return candidate.Package == identity.pkg && candidate.Name == identity.name &&
+				candidate.Kind == identity.kind && candidate.Key == key
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// suiteAnswers reports whether a recorded statement about a package suite is
+// still this run's statement about the same mutant.
+//
+// The recorded verdict was reached by running the suite, because nothing else
+// could reach the mutation, so it applies here only while that is still true:
+// a mutant a target now reaches, or one a proof discharged the reaching set
+// of, has coverage to route by and is no longer the suite's business at all.
+// The suite itself must also still be the suite that ran, which its key says,
+// and this run must be able to name that key: a package it could not measure
+// whole is one it cannot compare against anything.
+func (collected *MutationEvidence) suiteAnswers(mutant gomutants.Mutant, suite *evidence.SuiteKey, route mutationRoute) bool {
+	if suite == nil || len(route.reaching) != 0 || len(route.discharged) != 0 {
+		return false
+	}
+	key := collected.suites[mutant.Package]
+	return key != "" && key == suite.Key && suite.Package == mutant.Package
+}
+
+// recordUnreached remembers that a mutant no measured target reached was left
+// to its package suite, which did not kill it.
+func (collected *MutationEvidence) recordUnreached(mutant gomutants.Mutant, kind, summary string) {
+	collected.recordSuite(mutant, evidence.MutationOutcomeUnreached, kind, summary)
+}
+
+// recordSuiteTimedOut remembers that the package suite of a mutant no measured
+// target reached ran out of time before it could settle it.
+func (collected *MutationEvidence) recordSuiteTimedOut(mutant gomutants.Mutant, kind, summary string) {
+	collected.recordSuite(mutant, evidence.MutationOutcomeTimedOut, kind, summary)
+}
+
+// recordSuite writes down a verdict the package suite reached, with the key
+// that suite had. A package this run cannot describe leaves the store as it
+// found it, exactly as an unusable target key does.
+func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome, kind, summary string) {
+	if collected == nil || kind == "" || summary == "" {
+		return
+	}
+	key := collected.suites[mutant.Package]
+	if key == "" {
+		return
+	}
+	record := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: filepath.ToSlash(mutant.Path), Package: mutant.Package,
+		Outcome: outcome, Provenance: collected.provenance,
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Finding: &evidence.FindingSeed{Kind: kind, Summary: summary},
+	}
+	collected.mutex.Lock()
+	defer collected.mutex.Unlock()
+	collected.recorded[mutant.ID] = record
+}
+
+// stillTimesOut reports whether the target a recorded timeout was observed
+// under is still a target of this run that would run the mutant.
+//
+// A timeout is not a claim about a set. It is one observation about one
+// target: this target did not finish in the time it was given. The targets
+// that ran before it neither caused that nor say anything about whether it
+// finishes now, so the condition is existential where a survival's is
+// universal, and a target that has since joined the reaching set changes
+// nothing about it. What must still hold is that the observation is about a
+// target of this run: it still reaches the mutant, it is still the same target
+// under the same behaviour key, this run's baseline saw it pass, and it is
+// neither a fuzz target nor one restored from a checkpoint — refused for the
+// reasons every other reuse refuses them.
+//
+// The target is the last entry of the recorded list, which is where the writer
+// puts the one time ran out under, and the store preserves that order for a
+// timed-out record for exactly this reason. The writer only ever puts a target
+// there that an execution of one target ran out of time under, so the entry
+// names a target that demonstrably ran against this mutant.
+func (collected *MutationEvidence) stillTimesOut(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
+	if len(exhausted) == 0 {
+		return false
+	}
+	recorded := exhausted[len(exhausted)-1]
+	identity := targetIdentity{pkg: recorded.Package, name: recorded.Name, kind: recorded.Kind}
+	if identity.kind == string(goanalysis.KindFuzz) || !collected.passed[identity] {
+		return false
+	}
+	if key := collected.keys[identity]; key == "" || key != recorded.Key {
+		return false
+	}
+	index := slices.IndexFunc(reaching, func(target TargetEvidence) bool {
+		return identify(target.Target) == identity
+	})
+	return index >= 0 && reaching[index].Covered != nil
+}
+
+// recordSurvived remembers that every test reaching a mutant was run against it
+// and none of them killed it, so a later run can reuse the universal claim.
+//
+// A survivor a proof discharged the whole reaching set of is not one of these:
+// nothing ran, so there is no set of executed targets to name, and the proofs
+// re-derive the verdict for free on the next run anyway.
+func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route mutationRoute, kind, summary string) {
+	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, route.reaching, kind, summary)
+}
+
+// recordTimedOut remembers that time ran out under one named target that
+// reaches a mutant, and which targets had run when it did.
+//
+// Only a timeout one named target ran into is recorded. A batch selects
+// several targets under one pattern and the engine reports that the selection
+// ran out of time without saying which of them was still running, so the
+// targets behind the one that hung may never have started; the same refusal
+// recordKill gives a batched kill applies here, and timedOutUnder is the zero
+// identity that states it.
+//
+// The executed targets are given in the order they ran, so the last of them is
+// the target time ran out under: it is the one the observation is about, and
+// the only one a later run checks. Because the recorder writes this only from
+// an execution of one target, that last entry is that target by construction,
+// and the check below holds the two to each other rather than trusting the
+// caller. The order is the whole of how the record names it. A field of its
+// own would say the same thing twice — and would have to be kept consistent
+// with a list that already contains the target — so the store preserves the
+// order of a timed-out record instead, and the assurance contract states the
+// ordering as the contract it is.
+func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, executed []TargetEvidence, timedOutUnder targetIdentity, kind, summary string) {
+	if timedOutUnder == (targetIdentity{}) || len(executed) == 0 ||
+		identify(executed[len(executed)-1].Target) != timedOutUnder {
+		return
+	}
+	collected.recordExhausted(mutant, evidence.MutationOutcomeTimedOut, executed, kind, summary)
+}
+
+// recordExhausted writes down a verdict a set of executed targets established,
+// with the behaviour key each of them had, and the finding a later run has to
+// be able to raise again from it.
+//
+// The targets are written in the order they were executed, because the two
+// outcomes that use this read the list differently: a survival is a claim
+// about all of them, in any order, while a timeout is a claim about the last
+// of them alone — which is why only recordTimedOut, and only from an execution
+// that selected one target, ever writes a timed-out record.
+//
+// Every condition reuse will check is checked here too, so that a record that
+// could never be reused is never written: a fuzz target or a target restored
+// from a checkpoint among them, a target this run's baseline did not see pass,
+// or a target with no behaviour key leaves the store as it found it.
+func (collected *MutationEvidence) recordExhausted(mutant gomutants.Mutant, outcome string, targets []TargetEvidence, kind, summary string) {
+	if collected == nil || len(targets) == 0 || kind == "" || summary == "" {
+		return
+	}
+	exhausted := make([]evidence.TargetKey, 0, len(targets))
+	for _, target := range targets {
+		identity := identify(target.Target)
+		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
+			return
+		}
+		key := collected.keys[identity]
+		if key == "" {
+			return
+		}
+		exhausted = append(exhausted, evidence.TargetKey{
+			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key,
+		})
+	}
+	record := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: filepath.ToSlash(mutant.Path), Package: mutant.Package,
+		Outcome: outcome, Provenance: collected.provenance, Exhausted: exhausted,
+		Finding: &evidence.FindingSeed{Kind: kind, Summary: summary},
+	}
+	collected.mutex.Lock()
+	defer collected.mutex.Unlock()
+	collected.recorded[mutant.ID] = record
 }
 
 // recordKill remembers that one target confirmed a kill, so a later run can

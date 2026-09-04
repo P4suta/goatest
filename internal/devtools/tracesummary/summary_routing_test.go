@@ -338,3 +338,40 @@ func TestMutantBlockChargesEveryExecutionToADisposition(t *testing.T) {
 		t.Errorf("the table carries a second row %q; a revisited mutant is disposed of once", lines[heading+3])
 	}
 }
+
+// reusedRouteEvent is one route whose verdict the run took from an earlier
+// run's evidence. Nothing ran, so the plan is the reuse itself and the
+// recording holds no execution of the mutant.
+func reusedRouteEvent(mutantID string, reaching int) trace.Event {
+	event := routeEvent(mutantID, reaching, trace.ReasonCoverageReaching, trace.GranularityBlock, "", reaching)
+	event.Route.Plan, event.Route.Reused = []string{"reused"}, true
+	return event
+}
+
+// TestRoutingBlockCountsReusedRoutes pins the one number that says how much of
+// a run was answered without running anything. It is a share of the routes,
+// because that is what a route event can say on its own.
+func TestRoutingBlockCountsReusedRoutes(t *testing.T) {
+	t.Parallel()
+	lines := strings.Join(routingBlock([]trace.Event{
+		reusedRouteEvent("mutant-a", 2),
+		reusedRouteEvent("mutant-b", 1),
+		routeEvent("mutant-c", 2, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 4),
+	}), "\n")
+	if want := "reused: 2 routes of 3"; !strings.Contains(lines, want) {
+		t.Errorf("the block does not carry %q:\n%s", want, lines)
+	}
+}
+
+// TestRoutingBlockOmitsTheReuseLineWhenNothingWasReused keeps a recording made
+// before evidence was reused reading as it did then: an absent line rather
+// than a count of zero, exactly as the discharge and probe lines do.
+func TestRoutingBlockOmitsTheReuseLineWhenNothingWasReused(t *testing.T) {
+	t.Parallel()
+	lines := strings.Join(routingBlock([]trace.Event{
+		routeEvent("mutant-a", 2, trace.ReasonCoverageReaching, trace.GranularityBlock, "", 4),
+	}), "\n")
+	if strings.Contains(lines, "reused") {
+		t.Errorf("the block names a reuse no route recorded:\n%s", lines)
+	}
+}

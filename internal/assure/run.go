@@ -661,9 +661,13 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				emit(options, "mutation-evidence-rejected", evidenceErr.Error())
 				mutationStore = evidence.MutationStore{}
 			}
+			// Which packages read a directory they compute rather than a file
+			// they name is a question about the sources alone, so it is asked
+			// once, here, and answers every key the phase goes on to build.
 			mutationEvidence = newRunMutationEvidence(
 				mutationStore,
-				newTargetKeySources(inputs, metadata.model, contract, options),
+				newTargetKeySources(inputs, metadata.model, contract, options,
+					goanalysis.RepositoryReaders(root, metadata.model.Packages)),
 				baseline.Targets, baseline.Inventory, digest,
 			)
 		}

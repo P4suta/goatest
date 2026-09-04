@@ -345,6 +345,13 @@ type routeTotal struct {
 	// recording made before the probe pass carries none, which is the absence
 	// the block reports rather than a count of zero.
 	probed int
+	// reused counts the routes whose verdict the run took from an earlier
+	// run's evidence instead of executing anything. It is a count of routes
+	// rather than of the kills and survivals behind them, because a route is
+	// all a recording says about a mutant nothing ran for. A recording made
+	// before evidence was reused carries none, and the block says nothing
+	// rather than a count of zero.
+	reused int
 	// fanOut counts the routes by how many targets they reached, one entry
 	// per bucket of fanOutBucketLabels.
 	fanOut []int
@@ -418,6 +425,10 @@ func routingBlock(events []trace.Event) []string {
 			formatLabelCounts(total.discharges)))
 	}
 	lines = append(lines, probedLines(total.probed)...)
+	if total.reused > 0 {
+		lines = append(lines, fmt.Sprintf("reused: %s of %d",
+			plural(total.reused, "route", "routes"), total.routes))
+	}
 	lines = append(lines,
 		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
 		"", "reaching targets per route")
@@ -467,6 +478,9 @@ func routeTotals(events []trace.Event) routeTotal {
 		}
 		if record.Probed {
 			total.probed++
+		}
+		if record.Reused {
+			total.reused++
 		}
 		if record.Granularity == "" {
 			continue

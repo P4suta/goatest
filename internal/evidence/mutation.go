@@ -59,11 +59,18 @@ type MutationRecord struct {
 	Outcome    string     `json:"outcome"`
 	Provenance string     `json:"provenance"`
 	KilledBy   *TargetKey `json:"killed_by,omitempty"`
-	// Exhausted is the set of targets the recording run actually executed
-	// against the mutant and that passed. A target the run discharged by proof
-	// without executing it is never listed here: a later run has to be able to
-	// read this as "these targets ran and did not kill it", because that is the
-	// claim it reuses.
+	// Exhausted is the targets the recording run actually executed against the
+	// mutant. A target the run discharged by proof without executing it is
+	// never listed here: a later run has to be able to read this as "these
+	// targets ran", because that is the claim it reuses.
+	//
+	// What the list means depends on the outcome, and so does whether its order
+	// matters. On a survived record every one of them ran and passed, in any
+	// order, and the claim is about the set: a later run reuses it only when
+	// every target it now routes to the mutant is in it. On a timed-out record
+	// the last entry is the target time ran out under, and the ones before it
+	// are the targets that had already run; the claim is about that last target
+	// alone, so the order is the evidence and is preserved as written.
 	Exhausted []TargetKey  `json:"exhausted,omitempty"`
 	Suite     *SuiteKey    `json:"suite,omitempty"`
 	Finding   *FindingSeed `json:"finding,omitempty"`
@@ -177,6 +184,14 @@ func saveMutationWithHooks(path string, store MutationStore, hooks mutationHooks
 // name, and kind. Two runs that recorded the same evidence then produce the
 // same bytes, so a diff of the store reads as the evidence that changed.
 //
+// A timed-out record is the exception, because its order is not a rendering of
+// a set: the last of its targets is the one time ran out under, which is the
+// only part of the record a later run reads. Sorting it would leave the record
+// naming an arbitrary target as the one that did not finish. It is written as
+// it was executed, which is equally canonical — two runs that executed the
+// same targets in the same order produce the same bytes — and it is the shape
+// the assurance contract states.
+//
 // The record list is always allocated, so an empty store is written as an
 // empty array rather than null and every stored document satisfies the array
 // contract the schema states.
@@ -186,7 +201,9 @@ func (store MutationStore) canonical() MutationStore {
 	copy(result.Records, store.Records)
 	for index := range result.Records {
 		exhausted := slices.Clone(result.Records[index].Exhausted)
-		slices.SortFunc(exhausted, compareTargetKeys)
+		if result.Records[index].Outcome != MutationOutcomeTimedOut {
+			slices.SortFunc(exhausted, compareTargetKeys)
+		}
 		result.Records[index].Exhausted = exhausted
 	}
 	slices.SortFunc(result.Records, func(first, second MutationRecord) int {
@@ -286,19 +303,30 @@ func (record MutationRecord) validateKeys() error {
 
 // validateShape checks that the record carries exactly what its outcome means.
 // The shape is the claim: a killed mutant names its killer and nothing else, a
-// survived or timed-out mutant names the targets that ran without killing it,
-// and an unreached mutant names the suite that never reached it. A record
-// whose shape does not match its outcome states something the recording run
-// cannot have observed.
+// survived mutant names the targets that ran without killing it, and an
+// unreached mutant names the suite that never reached it. A record whose shape
+// does not match its outcome states something the recording run cannot have
+// observed.
+//
+// A timed-out mutant is the one outcome with two shapes, because time can run
+// out in either place: under one of the targets that reach it, which names the
+// targets the run did execute, or under the package suite of a mutant no
+// target reached, which names the suite. It carries one or the other and never
+// both — a record naming both would claim the run did the two things it does
+// instead of each other.
 func (record MutationRecord) validateShape() error {
 	switch record.Outcome {
 	case MutationOutcomeKilled:
 		if record.KilledBy == nil || len(record.Exhausted) > 0 || record.Suite != nil || record.Finding != nil {
 			return fmt.Errorf("goatest: mutation evidence killed record %s requires a killer and nothing else", record.MutantID)
 		}
-	case MutationOutcomeSurvived, MutationOutcomeTimedOut:
+	case MutationOutcomeSurvived:
 		if record.KilledBy != nil || len(record.Exhausted) == 0 || record.Suite != nil || record.Finding == nil {
 			return fmt.Errorf("goatest: mutation evidence %s record %s requires exhausted targets and a finding", record.Outcome, record.MutantID)
+		}
+	case MutationOutcomeTimedOut:
+		if record.KilledBy != nil || record.Finding == nil || (len(record.Exhausted) == 0) == (record.Suite == nil) {
+			return fmt.Errorf("goatest: mutation evidence timed-out record %s requires either exhausted targets or a suite, and a finding", record.MutantID)
 		}
 	case MutationOutcomeUnreached:
 		if record.KilledBy != nil || len(record.Exhausted) > 0 || record.Suite == nil || record.Finding == nil {

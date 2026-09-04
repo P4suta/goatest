@@ -75,10 +75,14 @@ func headerBlock(tracePath, profilesPath, modulePath string) []string {
 
 // countBlock says how much of the recording was audited, and how much of it
 // was not. The kills no single target can be attributed are counted beside the
-// pairs so that the audited number is read as the share of the run it is.
+// pairs so that the audited number is read as the share of the run it is, and
+// the routes whose verdict the run resolved from an earlier run's evidence are
+// counted beside the routes for the same reason: nothing ran for one, so it is
+// the part of the run this audit had nothing to measure.
 func countBlock(result auditResult) []string {
 	rows := [][]string{
 		{"routes", strconv.Itoa(result.routes)},
+		{"reused routes", strconv.Itoa(result.reusedRoutes)},
 		{"targets with profiles", strconv.Itoa(result.targets)},
 		{"probe executions", strconv.Itoa(result.probeExecutions)},
 		{"targets the probe measured", strconv.Itoa(result.probeMeasured)},

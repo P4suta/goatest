@@ -79,6 +79,19 @@ const (
 	mutationPartlyDischargedSummary = mutationPartlyDischargedOpening + mutationBranchDischargeClause
 )
 
+// The summaries a mutant no measured target reached is reported through: the
+// one its package suite survived, and the two the suite could not settle. Each
+// is a constant because a later run raises the same finding again from a
+// record that carries the summary, and a summary that drifted would make two
+// runs report the same verdict differently.
+const (
+	mutationUnreachedSummary          = "no measured top-level target reached this mutation; its package suite survived"
+	mutationSuiteTimeoutSummary       = "package suite timed out while confirming an unreached mutation"
+	mutationSuiteInconclusiveSummary  = "package suite could not establish an outcome for an unreached mutation"
+	mutationTargetTimeoutSummary      = "target timed out while this mutation was active"
+	mutationTargetInconclusiveSummary = "target could not establish a deterministic mutation outcome"
+)
+
 // MutationSession is the narrow reusable part of the go-mutants bridge used
 // by the assurance evaluator. Exec and Probe must permit concurrent calls,
 // matching the go-mutants Session contract. The interface also keeps scheduler
@@ -167,6 +180,12 @@ type MutationEvaluation struct {
 	Accounting report.MutantAccounting
 	Mutants    []report.MutantDisposition
 	Applied    bool
+	// Provenance names the run that observed one mutant's verdict, when this
+	// unit is one mutant's and the verdict was resolved from that run's
+	// evidence rather than executed here. It belongs to a single mutant, so
+	// append leaves it behind: an evaluation of many mutants has no one run
+	// that established all of it.
+	Provenance string
 }
 
 // EvaluateMutations selects only targets that baseline coverage proves can
@@ -188,6 +207,11 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	var evaluation MutationEvaluation
 	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
 	resumed := make(map[string]bool, len(options.Resume))
+	// A mutant restored from a checkpoint was evaluated by the run that was
+	// interrupted, and that run may have resolved it from an earlier run's
+	// evidence. This round's collector never saw the mutant, so the provenance
+	// the checkpoint carried is what its disposition is read from.
+	resumedProvenance := make(map[string]string, len(options.Resume))
 	replayPresent := options.ReplayMutantID == ""
 	for _, mutant := range catalog.Mutants {
 		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
@@ -197,6 +221,9 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		if saved, ok := options.Resume[mutant.ID]; ok {
 			evaluation.append(saved)
 			resumed[mutant.ID] = true
+			if saved.Provenance != "" {
+				resumedProvenance[mutant.ID] = saved.Provenance
+			}
 			continue
 		}
 		mutants = append(mutants, mutant)
@@ -304,7 +331,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		evaluation.append(unit)
 		checkpointMutation(options, seed.mutant.ID, unit)
 	}
-	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation, options.Evidence)
+	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation, options.Evidence, resumedProvenance)
 	return evaluation, nil
 }
 
@@ -389,7 +416,7 @@ func validateMutationCatalog(catalog gomutants.Catalog) error {
 	return nil
 }
 
-func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation, collected *MutationEvidence) (report.MutantAccounting, []report.MutantDisposition) {
+func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation, collected *MutationEvidence, resumedProvenance map[string]string) (report.MutantAccounting, []report.MutantDisposition) {
 	accounting := report.MutantAccounting{Discovered: len(catalog.Mutants)}
 	selected := make(map[string]bool)
 	for _, mutant := range catalog.Mutants {
@@ -441,8 +468,14 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 		}
 		// Only a selected mutant is ever evaluated, so only a selected mutant
 		// can carry a reuse; the provenance travels with the flag, because
-		// each is what makes the other auditable.
+		// each is what makes the other auditable. A mutant restored from a
+		// checkpoint is read from what that checkpoint saved: this round did
+		// not evaluate it, so its collector has nothing to say about it.
 		reused, provenance := collected.disposition(mutant.ID)
+		if !reused {
+			provenance = resumedProvenance[mutant.ID]
+			reused = provenance != ""
+		}
 		dispositions = append(dispositions, report.MutantDisposition{
 			ID: mutant.ID, Status: status, Path: mutant.Path, Line: mutant.Line,
 			Package: mutant.Package, Rule: mutant.Rule, Detail: detail,
@@ -458,6 +491,9 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 		case report.MutantSurvived:
 			accounting.Survived++
 			accounting.Executed++
+			if reused {
+				accounting.ReusedSurvived++
+			}
 		case report.MutantInconclusive:
 			accounting.Inconclusive++
 			accounting.Executed++
@@ -487,17 +523,31 @@ type mutationSeed struct {
 
 // mutationSeedExecution is one planned execution of a mutant: the request that
 // runs it, the detail that names it in the evidence, the plan entry that names
-// it in a trace, and the target a kill it confirms is attributable to.
+// it in a trace, and the targets it selects.
 //
-// The killer is zero on a batch, which selects several targets at once: the
-// engine reports that the selection failed, and a later run would need to know
-// which target of it to check the recorded kill against. A vague record is
-// worse than none, so a batched kill records nothing.
+// A batch selects several targets at once, and the three kinds of verdict read
+// that differently. A survival is about every target the selector ran, because
+// the selection ran to completion and all of them passed. A kill and a timeout
+// are about one target each, and the engine names neither: it reports that the
+// selection failed, or that it ran out of time, without saying which target
+// did. Both are therefore attributable only to a selection of one, and a vague
+// record is worse than none.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
 	plan    string
-	killer  targetIdentity
+	targets []TargetEvidence
+}
+
+// soleTarget names the one target this execution selected, and the zero
+// identity when several targets ran under one selector. It is what a kill and
+// a timeout are attributable to, and what neither is attributable to when the
+// engine reports one outcome for a selection of several.
+func (execution mutationSeedExecution) soleTarget() targetIdentity {
+	if len(execution.targets) != 1 {
+		return targetIdentity{}
+	}
+	return identify(execution.targets[0].Target)
 }
 
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
@@ -542,12 +592,25 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
 	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: route.discharged}
-	if killer, reused := options.Evidence.reuseKill(mutant, route); reused {
+	if killer, provenance, reused := options.Evidence.reuseKill(mutant, route); reused {
 		// An earlier run watched this target kill this mutant, and every
 		// condition under which that is still true holds. Nothing is executed,
 		// and what is reported is what executing it would have reported.
 		options.Trace.Route(reusedMutationRoute(mutant, route))
 		seed.evaluation.addKill(mutant, mutationKillDetail(killer.Target.Name, options))
+		seed.evaluation.Provenance = provenance
+		seed.resolved = true
+		return seed
+	}
+	if finding, provenance, reused := options.Evidence.reuseVerdict(mutant, route); reused {
+		// An earlier run ran every test this run's coverage routes to the
+		// mutant against it and watched none of them kill it, and each of them
+		// is still the same test. Nothing is executed, and the finding is
+		// raised again here so that this run's acceptances decide it rather
+		// than the acceptances of the run that recorded it.
+		options.Trace.Route(reusedMutationRoute(mutant, route))
+		seed.evaluation.addFinding(mutant, finding.Kind, finding.Summary, options.Accepted)
+		seed.evaluation.Provenance = provenance
 		seed.resolved = true
 		return seed
 	}
@@ -585,11 +648,18 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
 		case gomutants.OutcomeSurvived:
-			seed.evaluation.addFinding(mutant, "unreached-mutant", "no measured top-level target reached this mutation; its package suite survived", options.Accepted)
+			seed.evaluation.addFinding(mutant, "unreached-mutant", mutationUnreachedSummary, options.Accepted)
+			// Nothing reached the mutation and the suite that ran everything
+			// did not kill it, which is a claim about the suite a later run
+			// can check against the suite it would run.
+			options.Evidence.recordUnreached(mutant, "unreached-mutant", mutationUnreachedSummary)
 		case gomutants.OutcomeTimedOut:
-			seed.evaluation.addFinding(mutant, "mutation-timeout", "package suite timed out while confirming an unreached mutation", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationSuiteTimeoutSummary, options.Accepted)
+			// Time ran out in the suite, so the record names the suite for the
+			// same reason an unreached verdict does.
+			options.Evidence.recordSuiteTimedOut(mutant, "mutation-timeout", mutationSuiteTimeoutSummary)
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "package suite could not establish an outcome for an unreached mutation", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationSuiteInconclusiveSummary, options.Accepted)
 		default:
 			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
 		}
@@ -598,12 +668,17 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	}
 	executions := mutationSeedExecutions(mutant, seed.reaching, options)
 	options.Trace.Route(mutationSeedRoute(mutant, route, executions))
+	// The targets that have run, in the order they ran. A verdict this loop
+	// reaches without exhausting the whole reaching set is a verdict about
+	// exactly these, so a record of one names them and no more.
+	executed := make([]TargetEvidence, 0, len(seed.reaching))
 	for _, execution := range executions {
 		result, err := session.Exec(ctx, execution.request)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
 		}
+		executed = append(executed, execution.targets...)
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
 			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
@@ -615,7 +690,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addKill(mutant, mutationKillDetail(execution.detail, options))
 				// Only an execution of one named target is a kill a later run
 				// could check: recordKill refuses everything else.
-				options.Evidence.recordKill(mutant, execution.killer)
+				options.Evidence.recordKill(mutant, execution.soleTarget())
 			} else {
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
@@ -623,10 +698,17 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		case gomutants.OutcomeSurvived:
 			// Continue through every demonstrably relevant target.
 		case gomutants.OutcomeTimedOut:
-			seed.evaluation.addFinding(mutant, "mutation-timeout", "target timed out while this mutation was active", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationTargetTimeoutSummary, options.Accepted)
+			// A timeout is not a verdict about the mutant, so what is recorded
+			// is what the run did: these targets ran, and time ran out under
+			// the last of them — which is why only an execution that selected
+			// one target is recorded, and a batch that ran out of time leaves
+			// the store alone.
+			options.Evidence.recordTimedOut(mutant, executed, execution.soleTarget(),
+				"mutation-timeout", mutationTargetTimeoutSummary)
 			seed.resolved = true
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
-			seed.evaluation.addFinding(mutant, "mutation-inconclusive", "target could not establish a deterministic mutation outcome", options.Accepted)
+			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationTargetInconclusiveSummary, options.Accepted)
 			seed.resolved = true
 		default:
 			seed.err = fmt.Errorf("goatest: mutant %s returned unknown outcome %q", mutant.DisplayID, result.Outcome)
@@ -642,7 +724,13 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	// the serial pass would mean the survivors — the mutants that cost the
 	// most to execute again — are exactly the results a dying run loses.
 	if !reachedByFuzz(seed.reaching) {
-		seed.evaluation.addFinding(mutant, "surviving-mutant", mutationSurvivalSummary(seed.discharged), options.Accepted)
+		summary := mutationSurvivalSummary(seed.discharged)
+		seed.evaluation.addFinding(mutant, "surviving-mutant", summary, options.Accepted)
+		// Every reaching target ran and none killed it, which is the universal
+		// claim a later run can reuse. It is recorded whatever this run's
+		// acceptances made of the finding, because an acceptance is what a run
+		// does with a verdict and not the verdict itself.
+		options.Evidence.recordSurvived(mutant, route, "surviving-mutant", summary)
 		seed.resolved = true
 	}
 	return seed
@@ -802,22 +890,19 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 			request: request,
 			detail:  target.Target.Name,
 			plan:    mutationPlanIndividual + target.Target.Name,
-			killer:  identify(target.Target),
+			targets: []TargetEvidence{target},
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
 		duration := batchMutationDuration(batch)
 		request := batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout))
 		request.Args = append(request.Args, options.TestArgs...)
-		execution := mutationSeedExecution{
+		executions = append(executions, mutationSeedExecution{
 			request: request,
 			detail:  batchMutationDetail(batch),
 			plan:    batchMutationPlan(batch),
-		}
-		if len(batch) == 1 {
-			execution.killer = identify(batch[0].Target)
-		}
-		executions = append(executions, execution)
+			targets: batch,
+		})
 	}
 	return executions
 }

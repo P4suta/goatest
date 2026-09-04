@@ -73,6 +73,13 @@ one a fuzz target reaches waits, for the fuzzing that may still kill it.
 Survivors are the mutants a resumed run pays the most to execute again, so a
 checkpoint written only at the end of the phase would lose exactly them.
 
+A saved mutant carries the `provenance` of the run that observed its verdict
+when this round resolved it from an earlier run's evidence rather than
+executing anything. The run that resumes the unit did not observe the verdict
+either, so it reports the reuse the interrupted run reported; the field is
+optional and absent from every mutant a run executed and from every checkpoint
+written before evidence was reused.
+
 An unfinished target or mutant is absent and therefore implicitly pending. It
 is never converted to report-v1 `unknown`. At completion, mutant accounting and
 the disposition inventory are rebuilt from the current catalog plus all saved

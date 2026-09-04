@@ -79,6 +79,30 @@ func timedOutMutationRecord() evidence.MutationRecord {
 	}
 }
 
+// orderedTimedOutMutationRecord is a timeout under the second of two targets:
+// the recording run executed TestZ, then TestSlow, and time ran out under
+// TestSlow. The two are deliberately in an order sorting by identity would
+// undo, because for a timeout the order is the evidence: the last entry is the
+// target time ran out under, and it is the only one a later run checks.
+func orderedTimedOutMutationRecord() evidence.MutationRecord {
+	record := timedOutMutationRecord()
+	record.Exhausted = []evidence.TargetKey{
+		{Package: mutationModulePath + "/pkg", Name: "TestZ", Kind: "test", Key: mutationDigest("2")},
+		{Package: mutationModulePath + "/pkg", Name: "TestSlow", Kind: "test", Key: mutationDigest("4")},
+	}
+	return record
+}
+
+// suiteTimedOutMutationRecord is the other shape a timeout takes: the package
+// suite of a mutant no target reached ran out of time, so there is a suite to
+// name and no set of executed targets.
+func suiteTimedOutMutationRecord() evidence.MutationRecord {
+	record := timedOutMutationRecord()
+	record.Exhausted = nil
+	record.Suite = &evidence.SuiteKey{Package: mutationModulePath + "/pkg", Key: mutationDigest("6")}
+	return record
+}
+
 func unreachedMutationRecord() evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: mutationDigest("d"), Path: "value.go", Package: mutationModulePath + "/pkg",
@@ -402,11 +426,32 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 			want: "requires a suite and a finding",
 		},
 		{
-			name: "timed-out-without-exhausted-targets",
+			name: "timed-out-naming-neither-targets-nor-a-suite",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
 				store.Records[2].Exhausted = nil
 			}),
-			want: "requires exhausted targets and a finding",
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-naming-both-targets-and-a-suite",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].Suite = unreachedMutationRecord().Suite
+			}),
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-with-a-killer",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].KilledBy = killedMutationRecord().KilledBy
+			}),
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-without-a-finding",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].Finding = nil
+			}),
+			want: "requires either exhausted targets or a suite",
 		},
 		{
 			name: "finding-without-a-kind",
@@ -582,6 +627,40 @@ func TestMutationEvidenceSchemaRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 	}
 }
 
+// TestMutationEvidenceKeepsATimedOutRecordsExecutionOrder pins the one place
+// where the order of a record's exhausted targets is evidence rather than a
+// rendering of a set. A survived record says that these targets all ran and
+// none killed the mutant, which is true in any order, so it is written sorted
+// and two runs that observed it produce the same bytes. A timed-out record
+// says that these targets ran and time ran out under the last of them, so
+// sorting it would destroy the only part of it a later run reads.
+func TestMutationEvidenceKeepsATimedOutRecordsExecutionOrder(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mutation.json")
+	if err := evidence.SaveMutation(path, evidence.MutationStore{
+		ModulePath: mutationModulePath,
+		Records:    []evidence.MutationRecord{orderedTimedOutMutationRecord(), survivedMutationRecord()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := evidence.LoadMutation(path, mutationModulePath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMutation = ok %v, err %v", ok, err)
+	}
+	for _, record := range got.Records {
+		switch record.Outcome {
+		case evidence.MutationOutcomeTimedOut:
+			if !reflect.DeepEqual(record.Exhausted, orderedTimedOutMutationRecord().Exhausted) {
+				t.Errorf("timed-out exhausted = %+v, want the order it was executed in", record.Exhausted)
+			}
+		case evidence.MutationOutcomeSurvived:
+			if !reflect.DeepEqual(record.Exhausted, canonicalSurvivedMutationRecord().Exhausted) {
+				t.Errorf("survived exhausted = %+v, want the canonical order", record.Exhausted)
+			}
+		}
+	}
+}
+
 func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 	t.Parallel()
 	compiled := compileMutationSchema(t)
@@ -593,6 +672,8 @@ func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 		{name: evidence.MutationOutcomeSurvived, record: canonicalSurvivedMutationRecord()},
 		{name: evidence.MutationOutcomeUnreached, record: unreachedMutationRecord()},
 		{name: evidence.MutationOutcomeTimedOut, record: timedOutMutationRecord()},
+		{name: evidence.MutationOutcomeTimedOut + "-by-the-package-suite", record: suiteTimedOutMutationRecord()},
+		{name: evidence.MutationOutcomeTimedOut + "-under-the-last-of-several-targets", record: orderedTimedOutMutationRecord()},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
