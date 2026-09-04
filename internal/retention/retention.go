@@ -52,18 +52,7 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Res
 		return Result{}, err
 	}
 	result := Result{Before: before}
-	slices.SortFunc(entries, func(a, b entry) int {
-		if a.expired != b.expired {
-			if a.expired {
-				return -1
-			}
-			return 1
-		}
-		if compared := a.modified.Compare(b.modified); compared != 0 {
-			return compared
-		}
-		return strings.Compare(a.name, b.name)
-	})
+	order(entries)
 	remaining := before.Bytes
 	for _, candidate := range entries {
 		if !candidate.expired && (maxBytes <= 0 || remaining <= maxBytes) {
@@ -78,6 +67,66 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Res
 	}
 	result.After, _, err = inspect(root, 0, time.Time{})
 	return result, err
+}
+
+// Keep bounds a root by how many entries it holds rather than by how many bytes
+// they occupy, removing the oldest until at most keep remain and never removing
+// one protected names.
+//
+// A count is the bound for a store of product evidence: what somebody asks of a
+// run history is "the last few runs", and a byte budget would answer a question
+// nobody asked by collecting a large run and sparing a small older one. Expiry
+// does not apply for the same reason — a report does not go stale — so now is
+// carried only to date the listing, and keep <= 0 is no bound at all, exactly as
+// maxBytes <= 0 is for Collect.
+//
+// Protection adds to the bound instead of consuming it: the newest keep entries
+// survive, and a protected entry older than every one of them survives beside
+// them, because the reason to protect a run is that something still reads it.
+func Keep(root string, keep int, protected func(name string) bool, now time.Time) (Result, error) {
+	before, entries, err := inspect(root, 0, now)
+	if err != nil {
+		return Result{}, err
+	}
+	result := Result{Before: before}
+	order(entries)
+	surplus := 0
+	if keep > 0 {
+		surplus = max(0, len(entries)-keep)
+	}
+	for index, candidate := range entries {
+		if index >= surplus {
+			break
+		}
+		if protected != nil && protected(candidate.name) {
+			continue
+		}
+		if err := remove(root, candidate.path); err != nil {
+			return Result{}, err
+		}
+		result.RemovedEntries++
+		result.RemovedBytes += candidate.size
+	}
+	result.After, _, err = inspect(root, 0, time.Time{})
+	return result, err
+}
+
+// order sorts entries into the sequence a collection removes them in: expired
+// first, then oldest, then by name so that two entries of the same age still
+// have a total order.
+func order(entries []entry) {
+	slices.SortFunc(entries, func(a, b entry) int {
+		if a.expired != b.expired {
+			if a.expired {
+				return -1
+			}
+			return 1
+		}
+		if compared := a.modified.Compare(b.modified); compared != 0 {
+			return compared
+		}
+		return strings.Compare(a.name, b.name)
+	})
 }
 
 func inspect(root string, ttl time.Duration, now time.Time) (Status, []entry, error) {
