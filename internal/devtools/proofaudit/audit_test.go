@@ -1260,3 +1260,38 @@ func TestAuditCountsAKillNoMeasurementNames(t *testing.T) {
 		})
 	}
 }
+
+func TestAuditCountsAReusedRouteAsAClassOfItsOwn(t *testing.T) {
+	t.Parallel()
+	// A mutant the run resolved from an earlier run's evidence has a route and
+	// no execution beside it. Nothing was measured for it here, so it is
+	// neither a kill this audit can hold to the layers nor a mutant the
+	// recording lost: it is its own class, counted so that the audited share of
+	// a run is read against the part of it that ran.
+	recorded := recordedEvidence(t, map[string][]string{
+		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
+	})
+	reused := blockRoute(2, firstMutant, 21, 4, killerTarget)
+	reused.Route.Plan, reused.Route.Reused = []string{"reused"}, true
+	stream := recordedRun(t, []string{killerTarget},
+		reused,
+		blockRoute(3, secondMutant, 21, 4, killerTarget),
+		mutantEvent(4, trace.MutantRecord{
+			ID: secondMutant, DisplayID: secondDisplay, Package: fixtureModule + "/pkg",
+			Args: []string{"-test.run=^" + testNameOf(killerTarget) + "$"}, Outcome: outcomeKilled,
+		}),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if result.reusedRoutes != 1 {
+		t.Errorf("counted %d reused routes, want 1", result.reusedRoutes)
+	}
+	if result.routes != 2 || result.killedExecutions != 1 || result.pairs != 1 {
+		t.Errorf("a reused route changed what the audit measured: %d routes, %d kills, %d pairs",
+			result.routes, result.killedExecutions, result.pairs)
+	}
+	if len(result.violations) != 0 || len(result.unverifiable) != 0 {
+		t.Errorf("a reused route was audited: %d violations, %d unverifiable",
+			len(result.violations), len(result.unverifiable))
+	}
+}

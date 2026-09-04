@@ -227,19 +227,23 @@ func TestCompareReportsAccountingDeltasInAFixedOrder(t *testing.T) {
 	t.Parallel()
 	before := report.Report{Accounting: report.Accounting{
 		Targets: report.CountAccounting{Discovered: 10, Selected: 9, Executed: 8, Skipped: 1, Excluded: 1},
-		Mutants: report.MutantAccounting{Discovered: 100, Selected: 90, Executed: 80, Killed: 70, Survived: 10},
-		Race:    report.CountAccounting{Discovered: 5, Selected: 5, Executed: 5},
+		Mutants: report.MutantAccounting{
+			Discovered: 100, Selected: 90, Executed: 80, Killed: 70, Survived: 10,
+			ReusedKilled: 40, ReusedSurvived: 5,
+		},
+		Race: report.CountAccounting{Discovered: 5, Selected: 5, Executed: 5},
 	}}
 	after := before
 	after.Accounting.Mutants.Killed = 71
 	after.Accounting.Mutants.Survived = 9
+	after.Accounting.Mutants.ReusedKilled = 60
 
 	result := compare(before, after)
 	want := []string{
 		"targets.discovered", "targets.selected", "targets.executed", "targets.skipped", "targets.excluded",
 		"mutants.discovered", "mutants.selected", "mutants.executed", "mutants.killed", "mutants.survived",
 		"mutants.inconclusive", "mutants.compile_rejected", "mutants.accepted", "mutants.out_of_scope",
-		"mutants.unknown",
+		"mutants.unknown", "mutants.reused_killed", "mutants.reused_survived",
 		"race.discovered", "race.selected", "race.executed", "race.skipped", "race.excluded",
 	}
 	var got []string
@@ -254,6 +258,13 @@ func TestCompareReportsAccountingDeltasInAFixedOrder(t *testing.T) {
 		case "mutants.killed":
 			if delta.before != 70 || delta.after != 71 {
 				t.Errorf("%s = %d -> %d, want 70 -> 71", delta.name, delta.before, delta.after)
+			}
+		case "mutants.reused_killed":
+			// How much of a run was answered without running anything is the
+			// number a comparison of two runs is read against, so it is a
+			// delta of its own rather than something hidden inside killed.
+			if delta.before != 40 || delta.after != 60 {
+				t.Errorf("%s = %d -> %d, want 40 -> 60", delta.name, delta.before, delta.after)
 			}
 		case "mutants.discovered":
 			if delta.before != 100 || delta.after != 100 {

@@ -726,3 +726,49 @@ func TestReadEventsAcceptsALineLongerThanAScannerBuffer(t *testing.T) {
 		t.Fatalf("read %d events, want the run-start and a route carrying 4096 targets", len(events))
 	}
 }
+
+// TestCheckRouteHoldsTheReuseAndItsPlanToEachOther pins the biconditional the
+// contract states: nothing ran for a reused mutant, so the plan of a reused
+// route is the reuse and nothing else, and a plan that is the reuse belongs to
+// a route that says so. A reader told by one field and not the other is
+// reading a recording that contradicts itself.
+func TestCheckRouteHoldsTheReuseAndItsPlanToEachOther(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "a reused route whose plan is the reuse",
+			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
+				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["reused"],"reused":true}}`,
+		},
+		{
+			name: "a reused route that also planned an execution",
+			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
+				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["individual:TestValue"],"reused":true}}`,
+			want: "reused",
+		},
+		{
+			name: "a route planning the reuse without saying it was reused",
+			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
+				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["reused"]}}`,
+			want: "reused",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := readEvents(strings.NewReader(stream(runStart, test.line)))
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("a consistent reused route = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("an inconsistent reused route = %v, want an error naming %q", err, test.want)
+			}
+		})
+	}
+}
