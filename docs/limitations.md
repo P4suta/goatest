@@ -144,9 +144,15 @@ self-dogfood is not external compatibility evidence.
   files they depended on. The list is deliberately conservative and may only
   grow; nothing is ever excluded from testing or from reuse by name.
 - A reused timeout keeps its finding rather than resolving anything, so it can
-  only ever cost a run work it did not need to do, never assurance. It is also
-  never re-derived on its own: `goatest replay <finding-id>` bypasses evidence
-  entirely and is the way to run one again.
+  only ever cost a run work it did not need to do, never assurance. Its
+  condition is existential — the target time ran out under still reaches the
+  mutant unchanged — so a run reuses a timeout even when other targets have
+  since joined the reaching set, and a mutant one of those new targets would
+  now kill keeps its `mutation-timeout` finding until something re-runs it.
+  That is the fail-closed direction, and it is deliberate: nothing is resolved
+  by a reuse that never resolved anything. It is also never re-derived on its
+  own: `goatest replay <finding-id>` bypasses evidence entirely and is the way
+  to run one again.
 - Checkpoint I/O, evidence digesting, mutant accounting, and report rendering
   have local Go benchmarks. They establish a self-application baseline, not a
   cross-repository compatibility or performance contract.

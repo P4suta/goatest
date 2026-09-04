@@ -73,13 +73,33 @@ survive.
    behaviour key of one target. A package this run could not measure whole
    names no suite key, and neither records nor reuses anything.
 
-5. **A timeout is reused fail-closed.** A timeout establishes nothing about the
-   mutant: it says the run ran out of time. Reusing one keeps a finding and can
-   never remove one, so the worst it can cost is work a run did not need to do.
-   It has the two shapes its verdict has — under a reaching target, or under
-   the package suite — and is checked against the condition of the shape it
-   has. `goatest replay <finding-id>` bypasses evidence entirely, which is the
+5. **A timeout is reused fail-closed, under an existential condition.** A
+   timeout establishes nothing about the mutant: it says the run ran out of
+   time under one target. That is one observation about one target, not a claim
+   about a set, so the condition has the shape a kill's has and not the shape a
+   survival's has — the target time ran out under still reaches the mutant, has
+   the same behaviour key, passed this run's baseline, and is neither a fuzz
+   target nor one restored from a checkpoint. The targets that ran before it
+   neither caused the timeout nor say anything about whether it recurs, and a
+   target that has since joined the reaching set says nothing about it either.
+   Applying the survival's universal condition here would be wrong twice over:
+   it would refuse the reuse whenever anything joined the reaching set or the
+   timeout was not under the last target in order, spending the whole timeout
+   budget again on the same non-answer, and it would accept the reuse when the
+   target time ran out under had left the reaching set, keeping a finding about
+   a test no longer run. Reusing a timeout keeps its finding and can never
+   remove one, so the worst the rule can cost is work a run did not need to do.
+   `goatest replay <finding-id>` bypasses evidence entirely, which is the
    documented way to run a timeout again.
+
+   The record names that target as the last of its executed targets. A
+   timed-out record is therefore stored in execution order, while a survived
+   record's targets are stored sorted: there the set is the claim and sorting is
+   what makes two runs produce the same bytes, here the order is the evidence
+   and sorting would leave the record naming an arbitrary target as the one
+   that did not finish. No separate field names it, because the list already
+   contains it and a second place to say so would be a second place to keep
+   consistent; the store's schema stays additive.
 
 6. **A test that reads the repository keys the whole tree, rather than being
    excluded.** A behaviour key is built from the target's build closure, so a
@@ -150,3 +170,11 @@ and compare verdicts.
 - **Reusing a timeout as a resolution.** A timeout resolves nothing, so a
   reuse that removed the finding would be inventing an answer. Keeping the
   finding is the only direction that cannot cost assurance.
+- **Reusing a timeout under the survival's universal condition.** A timeout is
+  not a claim about the reaching set, and treating it as one both refuses
+  almost every reuse it should allow and allows the one it should refuse. See
+  decision 5.
+- **A separate `timed_out_under` field on the record.** The executed list
+  already ends with that target, and two statements of one fact are two
+  statements to keep consistent. The ordering is stated in the assurance
+  contract and preserved by the store.

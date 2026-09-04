@@ -251,11 +251,24 @@ or did not pass, names no key at all and neither records nor reuses anything.
 
 A timeout is not a proof about the mutant: it says the run could not settle it.
 Reusing one therefore keeps a finding and never removes one, which is the only
-direction in which a question nobody answered may be carried forward. It has
-the two shapes its verdict does — time ran out under one of the reaching
-targets, or under the package suite — and is reused under the condition of the
-one it has. `goatest replay <finding-id>` bypasses evidence entirely, which is
-how a timeout is deliberately re-run.
+direction in which a question nobody answered may be carried forward.
+
+Its condition is existential, not universal, because a timeout is one
+observation about one target: this target did not finish in the time it was
+given. The targets that ran before it neither caused that nor say anything
+about whether it finishes now, and a target that has since joined the reaching
+set says nothing about it either. A recorded timeout is reused when the target
+time ran out under still reaches the mutant, has the same behaviour key, passed
+this run's baseline, and is neither a fuzz target nor one restored from a
+checkpoint. The record names that target as the **last** of its executed
+targets — a timed-out record is stored in execution order for exactly that
+reason, where a survived record's targets are stored sorted, because there the
+set is the claim.
+
+A timeout under the package suite of a mutant no target reached names the suite
+instead, and is reused under the suite key like any other statement about a
+suite. `goatest replay <finding-id>` bypasses evidence entirely, which is how a
+timeout is deliberately re-run.
 
 #### The behaviour key
 
