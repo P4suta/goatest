@@ -470,7 +470,7 @@ func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route m
 			if !collected.suiteAnswers(mutant, record.Suite, route) {
 				return evidence.FindingSeed{}, "", false
 			}
-		} else if !collected.exhausts(record.Exhausted, route.reaching) {
+		} else if !collected.stillTimesOut(record.Exhausted, route.reaching) {
 			return evidence.FindingSeed{}, "", false
 		}
 	default:
@@ -569,6 +569,41 @@ func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome,
 	collected.recorded[mutant.ID] = record
 }
 
+// stillTimesOut reports whether the target a recorded timeout was observed
+// under is still a target of this run that would run the mutant.
+//
+// A timeout is not a claim about a set. It is one observation about one
+// target: this target did not finish in the time it was given. The targets
+// that ran before it neither caused that nor say anything about whether it
+// finishes now, so the condition is existential where a survival's is
+// universal, and a target that has since joined the reaching set changes
+// nothing about it. What must still hold is that the observation is about a
+// target of this run: it still reaches the mutant, it is still the same target
+// under the same behaviour key, this run's baseline saw it pass, and it is
+// neither a fuzz target nor one restored from a checkpoint — refused for the
+// reasons every other reuse refuses them.
+//
+// The target is the last entry of the recorded list, which is where the writer
+// puts the one time ran out under, and the store preserves that order for a
+// timed-out record for exactly this reason.
+func (collected *MutationEvidence) stillTimesOut(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
+	if len(exhausted) == 0 {
+		return false
+	}
+	recorded := exhausted[len(exhausted)-1]
+	identity := targetIdentity{pkg: recorded.Package, name: recorded.Name, kind: recorded.Kind}
+	if identity.kind == string(goanalysis.KindFuzz) || !collected.passed[identity] {
+		return false
+	}
+	if key := collected.keys[identity]; key == "" || key != recorded.Key {
+		return false
+	}
+	index := slices.IndexFunc(reaching, func(target TargetEvidence) bool {
+		return identify(target.Target) == identity
+	})
+	return index >= 0 && reaching[index].Covered != nil
+}
+
 // recordSurvived remembers that every test reaching a mutant was run against it
 // and none of them killed it, so a later run can reuse the universal claim.
 //
@@ -582,10 +617,13 @@ func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route
 // recordTimedOut remembers that time ran out under one of the targets that
 // reach a mutant, and which targets had run when it did.
 //
-// The target time ran out under is among them, because it did run: what the
-// record says is that these targets were executed and the mutant was still not
-// settled, which is exactly the state a later run with the same reaching set
-// would find itself in.
+// The executed targets are given in the order they ran, so the last of them is
+// the target time ran out under: it is the one the observation is about, and
+// the only one a later run checks. The order is the whole of how the record
+// names it. A field of its own would say the same thing twice — and would have
+// to be kept consistent with a list that already contains the target — so the
+// store preserves the order of a timed-out record instead, and the assurance
+// contract states the ordering as the contract it is.
 func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, executed []TargetEvidence, kind, summary string) {
 	collected.recordExhausted(mutant, evidence.MutationOutcomeTimedOut, executed, kind, summary)
 }
@@ -593,6 +631,11 @@ func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, execu
 // recordExhausted writes down a verdict a set of executed targets established,
 // with the behaviour key each of them had, and the finding a later run has to
 // be able to raise again from it.
+//
+// The targets are written in the order they were executed, because the two
+// outcomes that use this read the list differently: a survival is a claim
+// about all of them, in any order, while a timeout is a claim about the last
+// of them alone.
 //
 // Every condition reuse will check is checked here too, so that a record that
 // could never be reused is never written: a fuzz target or a target restored
