@@ -286,19 +286,30 @@ func (record MutationRecord) validateKeys() error {
 
 // validateShape checks that the record carries exactly what its outcome means.
 // The shape is the claim: a killed mutant names its killer and nothing else, a
-// survived or timed-out mutant names the targets that ran without killing it,
-// and an unreached mutant names the suite that never reached it. A record
-// whose shape does not match its outcome states something the recording run
-// cannot have observed.
+// survived mutant names the targets that ran without killing it, and an
+// unreached mutant names the suite that never reached it. A record whose shape
+// does not match its outcome states something the recording run cannot have
+// observed.
+//
+// A timed-out mutant is the one outcome with two shapes, because time can run
+// out in either place: under one of the targets that reach it, which names the
+// targets the run did execute, or under the package suite of a mutant no
+// target reached, which names the suite. It carries one or the other and never
+// both — a record naming both would claim the run did the two things it does
+// instead of each other.
 func (record MutationRecord) validateShape() error {
 	switch record.Outcome {
 	case MutationOutcomeKilled:
 		if record.KilledBy == nil || len(record.Exhausted) > 0 || record.Suite != nil || record.Finding != nil {
 			return fmt.Errorf("goatest: mutation evidence killed record %s requires a killer and nothing else", record.MutantID)
 		}
-	case MutationOutcomeSurvived, MutationOutcomeTimedOut:
+	case MutationOutcomeSurvived:
 		if record.KilledBy != nil || len(record.Exhausted) == 0 || record.Suite != nil || record.Finding == nil {
 			return fmt.Errorf("goatest: mutation evidence %s record %s requires exhausted targets and a finding", record.Outcome, record.MutantID)
+		}
+	case MutationOutcomeTimedOut:
+		if record.KilledBy != nil || record.Finding == nil || (len(record.Exhausted) == 0) == (record.Suite == nil) {
+			return fmt.Errorf("goatest: mutation evidence timed-out record %s requires either exhausted targets or a suite, and a finding", record.MutantID)
 		}
 	case MutationOutcomeUnreached:
 		if record.KilledBy != nil || len(record.Exhausted) > 0 || record.Suite == nil || record.Finding == nil {

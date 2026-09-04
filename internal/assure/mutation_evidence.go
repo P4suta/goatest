@@ -461,6 +461,18 @@ func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route m
 		if !collected.suiteAnswers(mutant, record.Suite, route) {
 			return evidence.FindingSeed{}, false
 		}
+	case evidence.MutationOutcomeTimedOut:
+		// Time ran out in one of two places, and the record has the shape of
+		// the place it ran out in, so it is checked against the condition of
+		// that place. Reusing it keeps a finding and never removes one, which
+		// is the only direction an unsettled question may be carried in.
+		if record.Suite != nil {
+			if !collected.suiteAnswers(mutant, record.Suite, route) {
+				return evidence.FindingSeed{}, false
+			}
+		} else if !collected.exhausts(record.Exhausted, route.reaching) {
+			return evidence.FindingSeed{}, false
+		}
 	default:
 		return evidence.FindingSeed{}, false
 	}
@@ -529,6 +541,12 @@ func (collected *MutationEvidence) recordUnreached(mutant gomutants.Mutant, kind
 	collected.recordSuite(mutant, evidence.MutationOutcomeUnreached, kind, summary)
 }
 
+// recordSuiteTimedOut remembers that the package suite of a mutant no measured
+// target reached ran out of time before it could settle it.
+func (collected *MutationEvidence) recordSuiteTimedOut(mutant gomutants.Mutant, kind, summary string) {
+	collected.recordSuite(mutant, evidence.MutationOutcomeTimedOut, kind, summary)
+}
+
 // recordSuite writes down a verdict the package suite reached, with the key
 // that suite had. A package this run cannot describe leaves the store as it
 // found it, exactly as an unusable target key does.
@@ -559,6 +577,17 @@ func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome,
 // re-derive the verdict for free on the next run anyway.
 func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route mutationRoute, kind, summary string) {
 	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, route.reaching, kind, summary)
+}
+
+// recordTimedOut remembers that time ran out under one of the targets that
+// reach a mutant, and which targets had run when it did.
+//
+// The target time ran out under is among them, because it did run: what the
+// record says is that these targets were executed and the mutant was still not
+// settled, which is exactly the state a later run with the same reaching set
+// would find itself in.
+func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, executed []TargetEvidence, kind, summary string) {
+	collected.recordExhausted(mutant, evidence.MutationOutcomeTimedOut, executed, kind, summary)
 }
 
 // recordExhausted writes down a verdict a set of executed targets established,

@@ -503,17 +503,27 @@ type mutationSeed struct {
 
 // mutationSeedExecution is one planned execution of a mutant: the request that
 // runs it, the detail that names it in the evidence, the plan entry that names
-// it in a trace, and the target a kill it confirms is attributable to.
+// it in a trace, and the targets it selects.
 //
-// The killer is zero on a batch, which selects several targets at once: the
-// engine reports that the selection failed, and a later run would need to know
-// which target of it to check the recorded kill against. A vague record is
-// worse than none, so a batched kill records nothing.
+// A batch selects several targets at once, and the two kinds of verdict read
+// that differently. A kill is not attributable to any of them — the engine
+// reports that the selection failed without saying which target failed, and a
+// vague record is worse than none — while a survival and a timeout are about
+// every target the selector ran, because all of them ran.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
 	plan    string
-	killer  targetIdentity
+	targets []TargetEvidence
+}
+
+// killer names the target a kill by this execution is attributable to, and the
+// zero identity when several targets ran under one selector.
+func (execution mutationSeedExecution) killer() targetIdentity {
+	if len(execution.targets) != 1 {
+		return targetIdentity{}
+	}
+	return identify(execution.targets[0].Target)
 }
 
 func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants []gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeed {
@@ -619,6 +629,9 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			options.Evidence.recordUnreached(mutant, "unreached-mutant", mutationUnreachedSummary)
 		case gomutants.OutcomeTimedOut:
 			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationSuiteTimeoutSummary, options.Accepted)
+			// Time ran out in the suite, so the record names the suite for the
+			// same reason an unreached verdict does.
+			options.Evidence.recordSuiteTimedOut(mutant, "mutation-timeout", mutationSuiteTimeoutSummary)
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
 			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationSuiteInconclusiveSummary, options.Accepted)
 		default:
@@ -629,12 +642,17 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	}
 	executions := mutationSeedExecutions(mutant, seed.reaching, options)
 	options.Trace.Route(mutationSeedRoute(mutant, route, executions))
+	// The targets that have run, in the order they ran. A verdict this loop
+	// reaches without exhausting the whole reaching set is a verdict about
+	// exactly these, so a record of one names them and no more.
+	executed := make([]TargetEvidence, 0, len(seed.reaching))
 	for _, execution := range executions {
 		result, err := session.Exec(ctx, execution.request)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
 		}
+		executed = append(executed, execution.targets...)
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
 			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
@@ -646,7 +664,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addKill(mutant, mutationKillDetail(execution.detail, options))
 				// Only an execution of one named target is a kill a later run
 				// could check: recordKill refuses everything else.
-				options.Evidence.recordKill(mutant, execution.killer)
+				options.Evidence.recordKill(mutant, execution.killer())
 			} else {
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
@@ -655,6 +673,11 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			// Continue through every demonstrably relevant target.
 		case gomutants.OutcomeTimedOut:
 			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationTargetTimeoutSummary, options.Accepted)
+			// A timeout is not a verdict about the mutant, so what is recorded
+			// is what the run did: these targets ran, time ran out under the
+			// last of them, and a later run that reaches the same reaching set
+			// keeps the finding rather than dropping it.
+			options.Evidence.recordTimedOut(mutant, executed, "mutation-timeout", mutationTargetTimeoutSummary)
 			seed.resolved = true
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
 			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationTargetInconclusiveSummary, options.Accepted)
@@ -839,22 +862,19 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 			request: request,
 			detail:  target.Target.Name,
 			plan:    mutationPlanIndividual + target.Target.Name,
-			killer:  identify(target.Target),
+			targets: []TargetEvidence{target},
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
 		duration := batchMutationDuration(batch)
 		request := batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout))
 		request.Args = append(request.Args, options.TestArgs...)
-		execution := mutationSeedExecution{
+		executions = append(executions, mutationSeedExecution{
 			request: request,
 			detail:  batchMutationDetail(batch),
 			plan:    batchMutationPlan(batch),
-		}
-		if len(batch) == 1 {
-			execution.killer = identify(batch[0].Target)
-		}
-		executions = append(executions, execution)
+			targets: batch,
+		})
 	}
 	return executions
 }
