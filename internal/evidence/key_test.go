@@ -5,6 +5,8 @@ package evidence_test
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,5 +170,77 @@ func TestTargetInputsCloneIsEqualAndOwnsEveryMutableCollection(t *testing.T) {
 		original.Environment[0] != "B=2" || original.TestArgs[0] != "-run" ||
 		original.BuildTags[0] != "integration" || original.Corpus["testdata/fuzz/FuzzValue/seed"] != "ccc" {
 		t.Fatalf("mutating clone changed original: %+v", original)
+	}
+}
+
+// suiteTargetsFixture is what a package's suite runs: two targets of the same
+// package, each with the behaviour key it had.
+func suiteTargetsFixture() []evidence.TargetKey {
+	return []evidence.TargetKey{
+		{Package: "example.com/module", Name: "TestValue", Kind: "test", Key: strings.Repeat("a", 64)},
+		{Package: "example.com/module", Name: "FuzzValue", Kind: "fuzz", Key: strings.Repeat("b", 64)},
+	}
+}
+
+// TestSuiteBehaviorKeyIsTheConjunctionOfItsTargetsAndItsOwnInputs pins what an
+// unreached mutant's verdict is a statement about. The package suite runs every
+// target of the package, fuzz targets included, as one command: it observes
+// what all of them observe, so a change to any one of them, to which targets
+// there are, or to what the package-level run itself reads is a change to the
+// suite. The order the targets arrive in is not, because a suite is a set.
+func TestSuiteBehaviorKeyIsTheConjunctionOfItsTargetsAndItsOwnInputs(t *testing.T) {
+	t.Parallel()
+	inputs := targetInputsFixture()
+	base := evidence.SuiteBehaviorKey(inputs, suiteTargetsFixture())
+	if !isBehaviorKey(base) {
+		t.Fatalf("suite key = %q, want a sha256 digest", base)
+	}
+	if base == evidence.TargetBehaviorKey(inputs) {
+		t.Fatal("the suite key of a package equals the behaviour key of one of its targets")
+	}
+
+	reordered := suiteTargetsFixture()
+	slices.Reverse(reordered)
+	if evidence.SuiteBehaviorKey(inputs, reordered) != base {
+		t.Fatal("the order the targets arrive in changed the suite key")
+	}
+	for _, test := range []struct {
+		name    string
+		targets []evidence.TargetKey
+		inputs  evidence.TargetInputs
+	}{
+		{name: "a target whose behaviour key moved", targets: func() []evidence.TargetKey {
+			changed := suiteTargetsFixture()
+			changed[0].Key = strings.Repeat("c", 64)
+			return changed
+		}()},
+		{name: "a target that entered the package", targets: append(suiteTargetsFixture(),
+			evidence.TargetKey{Package: "example.com/module", Name: "TestLate", Kind: "test", Key: strings.Repeat("d", 64)})},
+		{name: "a target that left the package", targets: suiteTargetsFixture()[:1]},
+		{name: "a target renamed to another kind", targets: func() []evidence.TargetKey {
+			changed := suiteTargetsFixture()
+			changed[1].Kind = "test"
+			return changed
+		}()},
+		{name: "what the package-level run itself reads", inputs: func() evidence.TargetInputs {
+			changed := targetInputsFixture()
+			changed.Files["value.go"] = "edited"
+			return changed
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			targets := test.targets
+			if targets == nil {
+				targets = suiteTargetsFixture()
+			}
+			changed := test.inputs
+			if changed.Toolchain == "" {
+				changed = inputs
+			}
+			if evidence.SuiteBehaviorKey(changed, targets) == base {
+				t.Fatalf("changing %s left the suite key alone", test.name)
+			}
+		})
 	}
 }

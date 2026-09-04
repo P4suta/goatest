@@ -364,3 +364,143 @@ func TestReusedFindingsAreRegeneratedThroughThisRunsAcceptance(t *testing.T) {
 		})
 	}
 }
+
+// unreachedEvidenceRecord is an earlier run's record of a mutant no measured
+// target reached, and whose package suite did not kill it.
+func unreachedEvidenceRecord(mutant gomutants.Mutant, key string) evidence.MutationRecord {
+	return evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeUnreached, Provenance: "snapshot=" + digestText("earlier-run"),
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Finding: &evidence.FindingSeed{Kind: "unreached-mutant", Summary: mutationUnreachedSummary},
+	}
+}
+
+// TestEvaluateMutationsReusesAnUnreachedMutantOnlyWhenThePackageSuiteKeyMatches
+// pins what an unreached verdict is a statement about. No target reached the
+// mutation, so the claim is the package suite's and not any one target's: it is
+// this run's claim exactly when the suite still does what it did, which is the
+// conjunction of every target of the package and of what the package-level run
+// itself reads.
+func TestEvaluateMutationsReusesAnUnreachedMutantOnlyWhenThePackageSuiteKeyMatches(t *testing.T) {
+	t.Parallel()
+	recorded := digestText("suite-key")
+	for _, test := range []struct {
+		name     string
+		suite    string
+		executed int
+		reused   bool
+	}{
+		{name: "the suite this run would run", suite: recorded, reused: true},
+		{name: "a suite whose targets changed", suite: digestText("other-suite-key"), executed: 1},
+		{name: "a suite this run cannot name", executed: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := evidenceMutant("mutant-a")
+			suites := map[string]string{}
+			if test.suite != "" {
+				suites[evidenceModule] = test.suite
+			}
+			index := suiteEvidenceIndex([]evidence.MutationRecord{unreachedEvidenceRecord(mutant, recorded)},
+				nil, nil, suites)
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := &mutationUnitSession{catalog: catalog}
+
+			evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(session.requests) != test.executed || evaluation.Mutants[0].Reused != test.reused {
+				t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+			}
+			if !test.reused {
+				return
+			}
+			if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "unreached-mutant" ||
+				evaluation.Accounting.ReusedSurvived != 1 || evaluation.Accounting.Survived != 1 {
+				t.Fatalf("evaluation = %+v, accounting = %+v", evaluation.Findings, evaluation.Accounting)
+			}
+		})
+	}
+}
+
+// TestEvaluateMutationsExecutesAnUnreachedMutantATargetNowReaches pins the
+// direction the widened claim falls in. A mutant a target now reaches is no
+// longer a statement about the package suite at all, so the recorded one says
+// nothing about it and the reaching targets run.
+func TestEvaluateMutationsExecutesAnUnreachedMutantATargetNowReaches(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	index := suiteEvidenceIndex([]evidence.MutationRecord{unreachedEvidenceRecord(mutant, digestText("suite-key"))},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true},
+		map[string]string{evidenceModule: digestText("suite-key")})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || evaluation.Mutants[0].Reused {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+	if request := session.requests[0]; len(request.Args) == 0 || request.Args[0] != "-test.run=^TestEarly$" {
+		t.Fatalf("request = %+v, want the reaching target and not the package suite", request)
+	}
+}
+
+// TestEvaluateMutationsRecordsAnUnreachedMutantAgainstItsPackageSuite pins what
+// a run leaves for the next one about a mutant nothing reached: the suite that
+// ran it and the key that suite had, so that a later run can tell the same
+// suite from one whose targets changed.
+func TestEvaluateMutationsRecordsAnUnreachedMutantAgainstItsPackageSuite(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	key := digestText("suite-key")
+	index := suiteEvidenceIndex(nil, nil, nil, map[string]string{evidenceModule: key})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := &mutationUnitSession{catalog: catalog}
+
+	if _, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeUnreached, Provenance: "snapshot=" + digestText("this-run"),
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Finding: &evidence.FindingSeed{Kind: "unreached-mutant", Summary: mutationUnreachedSummary},
+	}
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 || !reflect.DeepEqual(records[0], want) {
+		t.Fatalf("records = %+v, want [%+v]", records, want)
+	}
+}
+
+// TestEvaluateMutationsRecordsNoSuiteVerdictForAPackageThisRunDidNotMeasure
+// pins the fail-closed side of the suite key. A package with a target this run
+// restored from a checkpoint or never saw pass is a package whose suite this
+// run cannot describe, so it names no key and nothing about it is written down.
+func TestEvaluateMutationsRecordsNoSuiteVerdictForAPackageThisRunDidNotMeasure(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	index := suiteEvidenceIndex(nil, nil, nil, nil)
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := &mutationUnitSession{catalog: catalog}
+
+	if _, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
+		t.Fatalf("recorded %+v, want nothing about a suite this run cannot name", records)
+	}
+}
