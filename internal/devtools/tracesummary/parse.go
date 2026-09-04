@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,10 @@ import (
 // bounded by it: a route event naming every target that reaches a mutant can
 // be far larger than any fixed buffer, so lines are read whole rather than
 // through a scanner that would refuse the long ones.
+// routePlanReused is the whole plan of a route the run resolved from an
+// earlier run's evidence: the reuse itself, and nothing that ran.
+const routePlanReused = "reused"
+
 const readBufferSize = 1 << 16
 
 // firstSequence is the number a recording gives its first event.
@@ -380,6 +385,9 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	if err := checkDischarges(record); err != nil {
 		return err
 	}
+	if err := checkReuse(record); err != nil {
+		return err
+	}
 	if err := checkNotNegative("route.line", int64(record.Line)); err != nil {
 		return err
 	}
@@ -401,6 +409,25 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 		}
 	}
 	return nil
+}
+
+// checkReuse holds a reused route to the biconditional the contract states.
+// Nothing ran for a mutant the run resolved from an earlier run's evidence, so
+// the plan of a reused route is the reuse and nothing else, and a plan that is
+// the reuse belongs to a route that says it was reused. A reader told by one
+// field and not the other is reading a recording that contradicts itself, and
+// would count an execution that never happened or miss one that did.
+func checkReuse(record trace.RouteRecord) error {
+	planned := slices.Equal(record.Plan, []string{routePlanReused})
+	if record.Reused == planned {
+		return nil
+	}
+	if record.Reused {
+		return fmt.Errorf("route reused with plan %v, want the plan %q alone: nothing runs for a reused mutant",
+			record.Plan, routePlanReused)
+	}
+	return fmt.Errorf("route plans %q without saying it was reused: the reuse is one fact, stated in both fields",
+		routePlanReused)
 }
 
 // checkDischarges holds the proofs that removed a target from a reaching set to

@@ -21,12 +21,14 @@ mutants.compile_rejected       1      1      0
 mutants.accepted               0      0      0
 mutants.out_of_scope           0      0      0
 mutants.unknown                0      0      0
+mutants.reused_killed          0      0      0
+mutants.reused_survived        0      0      0
 race.discovered                3      3      0
 race.selected                  3      3      0
 race.executed                  3      3      0
 race.skipped                   0      0      0
 race.excluded                  0      0      0
-changed: 2 of 20 counters
+changed: 2 of 22 counters
 
 mutants
 common: 6, only in the before report: 1, only in the after report: 1

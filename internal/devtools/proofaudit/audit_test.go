@@ -1271,11 +1271,11 @@ func TestAuditCountsAReusedRouteAsAClassOfItsOwn(t *testing.T) {
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
-	reused := blockRoute(2, firstMutant, 21, 4, killerTarget)
+	reused := blockRoute(2, firstMutant, 11, 4, killerTarget)
 	reused.Route.Plan, reused.Route.Reused = []string{"reused"}, true
 	stream := recordedRun(t, []string{killerTarget},
 		reused,
-		blockRoute(3, secondMutant, 21, 4, killerTarget),
+		blockRoute(3, secondMutant, 11, 4, killerTarget),
 		mutantEvent(4, trace.MutantRecord{
 			ID: secondMutant, DisplayID: secondDisplay, Package: fixtureModule + "/pkg",
 			Args: []string{"-test.run=^" + testNameOf(killerTarget) + "$"}, Outcome: outcomeKilled,

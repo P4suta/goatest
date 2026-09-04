@@ -246,6 +246,10 @@ func accountingDeltas(before, after report.Accounting) []counterDelta {
 	add("mutants.accepted", before.Mutants.Accepted, after.Mutants.Accepted)
 	add("mutants.out_of_scope", before.Mutants.OutOfScope, after.Mutants.OutOfScope)
 	add("mutants.unknown", before.Mutants.Unknown, after.Mutants.Unknown)
+	// How much of each run was answered without executing anything is part of
+	// what two runs differ in, so it is compared like every other counter.
+	add("mutants.reused_killed", before.Mutants.ReusedKilled, after.Mutants.ReusedKilled)
+	add("mutants.reused_survived", before.Mutants.ReusedSurvived, after.Mutants.ReusedSurvived)
 	addCounts("race", before.Race, after.Race)
 	return deltas
 }

@@ -391,8 +391,14 @@ type auditRow struct {
 // preserve, and all three are things a reader must be able to see the audit
 // did not look at.
 type auditResult struct {
-	targets           int
-	routes            int
+	targets int
+	routes  int
+	// reusedRoutes counts the routes whose verdict the run took from an
+	// earlier run's evidence. Nothing was executed for one, so it is neither a
+	// kill this audit can hold to a layer nor a mutant the recording lost: it
+	// is a class of its own, and the audited share of a run is read against
+	// the part of the run that ran.
+	reusedRoutes      int
 	killedExecutions  int
 	pairs             int
 	packageSuiteKills int
@@ -537,6 +543,9 @@ func (audit *auditor) read(event trace.Event) {
 		audit.measurement(event.Exec.Argv)
 	case event.Type == trace.TypeRoute && event.Route != nil:
 		audit.result.routes++
+		if event.Route.Reused {
+			audit.result.reusedRoutes++
+		}
 		audit.routes[event.Route.MutantID] = *event.Route
 	case event.Type == trace.TypeProbeExec && event.Probe != nil:
 		audit.probe(*event.Probe)

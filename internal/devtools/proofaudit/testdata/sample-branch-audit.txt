@@ -5,6 +5,7 @@ module: example.com/audited
 audit
 counter                     count
 routes                          6
+reused routes                   0
 targets with profiles           3
 probe executions                0
 targets the probe measured      0
