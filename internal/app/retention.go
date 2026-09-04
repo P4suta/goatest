@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/retention"
@@ -66,6 +67,80 @@ func collectReports(root string, keep int, moment time.Time) (retention.Result, 
 		_, referenced := protected[name]
 		return referenced
 	}, moment)
+}
+
+// repairStore names one of the two stores the repair path writes into.
+func repairStore(root, name string) string {
+	return filepath.Join(root, ".goatest", name)
+}
+
+// repairStatus reports what the candidate and patch stores hold.
+func repairStatus(root string) ([]report.Evidence, error) {
+	items := make([]report.Evidence, 0, 2)
+	for _, name := range []string{"candidates", "patches"} {
+		status, err := retention.InspectFiles(repairStore(root, name))
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, report.Evidence{
+			Kind: "repair-retention", ID: name + "-status", Status: "ready", Detail: retentionDetail(status),
+		})
+	}
+	return items, nil
+}
+
+// collectRepair bounds both repair stores under the cache policy, sparing the
+// candidates while any run could still resume.
+//
+// A resume re-validates the candidates its checkpoint recorded by ID and
+// discards its whole saved mutation work when one is gone. That is safe — it
+// costs the run its resumption rather than its correctness — but it is exactly
+// the work a checkpoint exists to protect, so a collection that could cause it
+// stands aside instead. A patch artifact is read by nothing and has no such
+// claim on it.
+func collectRepair(root, cacheRoot string, maxBytes int64, ttl time.Duration, moment time.Time) ([]report.Evidence, error) {
+	pending, err := cache.New(cacheRoot).PendingCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]report.Evidence, 0, 2)
+	for _, name := range []string{"candidates", "patches"} {
+		if name == "candidates" && pending {
+			items = append(items, report.Evidence{
+				Kind: "repair-retention", ID: name + "-gc", Status: "skipped", Detail: "a checkpoint is in progress",
+			})
+			continue
+		}
+		result, err := retention.CollectFiles(repairStore(root, name), maxBytes, ttl, moment)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, report.Evidence{
+			Kind: "repair-retention", ID: name + "-gc", Status: "completed",
+			Detail: fmt.Sprintf("removed-entries=%d removed-bytes=%d", result.RemovedEntries, result.RemovedBytes),
+		})
+	}
+	return items, nil
+}
+
+// collectDurableArtifacts bounds everything a run leaves in the repository that
+// nothing else collects: the run history, and the two repair stores.
+func (service Service) collectDurableArtifacts(root, cacheRoot string) {
+	service.collectDurableHistory(root)
+	service.collectRepairArtifacts(root, cacheRoot)
+}
+
+// collectRepairArtifacts applies the same bounds a maintenance command would,
+// reporting any failure as a note for the reason every collection here does.
+func (service Service) collectRepairArtifacts(root, cacheRoot string) {
+	loaded, err := config.Load(root)
+	if err != nil {
+		service.note("repair-gc-unavailable", err.Error())
+		return
+	}
+	if _, err := collectRepair(root, cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, service.clock()().UTC()); err != nil {
+		service.note("repair-gc-unavailable", err.Error())
+	}
 }
 
 // collectDurableHistory bounds the history a run has just extended.

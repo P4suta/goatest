@@ -286,7 +286,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 			return result, errors.Join(err, writeErr)
 		}
 		if ownsCacheLease {
-			service.collectDurableHistory(root)
+			service.collectDurableArtifacts(root, cacheRoot)
 		}
 		return result, err
 	}
@@ -301,7 +301,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		}
 	}
 	if ownsCacheLease {
-		service.collectDurableHistory(root)
+		service.collectDurableArtifacts(root, cacheRoot)
 	}
 	return result, nil
 }

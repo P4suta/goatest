@@ -57,9 +57,14 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		repair, err := repairStatus(root)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence, cacheStatusEvidence("status", status),
 			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus),
 			history)
+		result.Evidence = append(result.Evidence, repair...)
 		buildStatus, err := service.buildCacheLayer(root).Inspect()
 		if err != nil {
 			return report.Report{}, err
@@ -93,6 +98,10 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		repair, err := collectRepair(root, cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence,
 			cacheStatusEvidence("before", collected.Before),
 			report.Evidence{Kind: "cache", ID: "gc", Status: "completed", Detail: fmt.Sprintf("removed-entries=%d removed-bytes=%d", collected.RemovedEntries, collected.RemovedBytes)},
@@ -101,6 +110,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
 			reportsGCEvidence(history),
 		)
+		result.Evidence = append(result.Evidence, repair...)
 		// Every run already collects the build cache when it ends, so this is
 		// the same collection on demand rather than the only one there is. It
 		// takes the layer's own lock, so it yields to a run collecting beside
