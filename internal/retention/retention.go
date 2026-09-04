@@ -78,6 +78,12 @@ func (kind childKind) measure(path string, child fs.DirEntry) (int64, time.Time,
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("goatest: inspect retained artifact %s: %w", path, err)
 	}
+	// The type bits of a listing can be empty where the filesystem reports no
+	// type, and an empty mode reads as a regular file. The file's own metadata
+	// is what decides, because what is measured here is what remove is handed.
+	if !info.Mode().IsRegular() {
+		return 0, time.Time{}, fmt.Errorf("goatest: retained artifact %q is not a confined file", child.Name())
+	}
 	return info.Size(), info.ModTime(), nil
 }
 
