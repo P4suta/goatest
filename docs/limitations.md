@@ -113,6 +113,19 @@ self-dogfood is not external compatibility evidence.
   long it lasts. A preserved command output is capped at 1 MiB per file, so a
   long capture is truncated with a marker even though its event digests the
   whole of it.
+- `reports/runs` is bound by a count and not by age or size: the newest
+  `[reports] keep` runs, twenty by default, plus whatever `latest-any.json` and
+  `latest-full.json` point at. A run older than the newest twenty and referenced
+  by neither index is gone, however recently anybody looked at it and however
+  small it was, and `goatest report --run` of it then says it was collected or
+  never written. Copy `reports/runs/<run-id>` elsewhere to keep one.
+- `.goatest/candidates` and `.goatest/patches` are bound by the cache TTL and
+  byte budget. A collected candidate cannot be applied by `goatest fix`, and an
+  interrupted run whose checkpoint recorded one discards its saved mutation work
+  and starts that phase again. That is why the candidate store is left alone
+  entirely while any checkpoint exists, which also means a checkpoint nobody
+  ever resumes holds the whole store past its budget until `cache gc` runs
+  without one.
 - Only the directory sink is reachable from the command line; the in-memory and
   fan-out sinks remain in-process. `trace summary` and `trace diff` are bounded
   readers, not a query language over individual execution records. See

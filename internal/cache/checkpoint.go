@@ -39,6 +39,42 @@ func (store *Store) GetCheckpoint(digest string) (checkpoint.State, bool, error)
 	return state, true, nil
 }
 
+// PendingCheckpoint reports whether this cache holds interrupted-run state for
+// any input at all.
+//
+// GetCheckpoint answers for one digest, because a run resuming itself knows
+// which input it is. Maintenance does not: what it needs to know before it
+// collects something a resume would re-read is whether any run could still come
+// back, and no digest names that question. A cache directory nothing has
+// created yet holds no such run.
+func (store *Store) PendingCheckpoint() (bool, error) {
+	cacheOperationMutex.RLock()
+	defer cacheOperationMutex.RUnlock()
+	root := filepath.Join(store.root, "v1")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("goatest: inspect checkpoints: %w", err)
+	}
+	for _, entry := range entries {
+		// Only a real directory is an entry. A symbolic link is not followed
+		// here for the same reason nothing else in this package follows one.
+		if !entry.IsDir() {
+			continue
+		}
+		_, err := os.Stat(filepath.Join(root, entry.Name(), CheckpointFileName))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("goatest: inspect checkpoint: %w", err)
+		}
+	}
+	return false, nil
+}
+
 // PutCheckpoint atomically replaces interrupted-run state without writing a
 // completed report or changing a latest-report index.
 func (store *Store) PutCheckpoint(digest string, state checkpoint.State) error {

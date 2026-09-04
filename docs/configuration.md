@@ -21,7 +21,9 @@ line. Loading the untouched skeleton yields exactly the defaults.
   note.
 - `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
   applied independently to exact-input cache entries, trace run directories,
-  and failure-diagnostics directories. `ttl` alone also bounds the temporary
+  failure-diagnostics directories, the repair candidates in
+  `.goatest/candidates`, and the patch artifacts in `.goatest/patches`. `ttl`
+  alone also bounds the temporary
   directories a `--keep-temp` run kept: they are recorded in
   `.goatest/kept-temp-v1.json` and collected by `goatest cache gc` once they are
   older than it. No byte budget applies to those, because a keep is a request
@@ -35,8 +37,18 @@ line. Loading the untouched skeleton yields exactly the defaults.
   machine. The two
   bounds are separate because the two stores hold different things at different
   scales: verdicts of a few kilobytes, and object files measured in gigabytes.
-  Every run enforces `build_max_bytes` when it ends, so it is a bound and not
-  a suggestion; see [cache maintenance](#cache-maintenance) below.
+  Every run that holds the repository's cache lease enforces all of these when
+  it ends — one that could not take the lease leaves them to the next run or to
+  `cache gc` — so they are bounds and not suggestions; see
+  [cache maintenance](#cache-maintenance) below.
+- `[reports]`: non-negative `keep`, the number of run directories `reports/runs`
+  holds, twenty by default. Zero means that default rather than a history of
+  nothing. It is a count and not a byte budget because a report is the product
+  of a verification rather than exhaust, and what somebody asks for is the last
+  few runs. The runs `.goatest/latest-any.json` and `.goatest/latest-full.json`
+  point at are kept on top of the count, so `goatest report`,
+  `report --latest-full`, `explain`, `accept` and `replay` keep working at any
+  bound. There is no TTL: a report does not go stale.
 - `[resources.<capability>]`: provider `command`, positive `timeout`, one of
   `shared` or `exclusive`, and environment-name allowlist.
 - `[generation]`: provider `command`, `allowed_paths`, and environment-name
@@ -74,21 +86,32 @@ Protocol details are in [protocols](protocols.md).
 ## Cache maintenance
 
 `goatest cache status` reports the exact-input cache, `.goatest/trace`,
-`.goatest/diagnostics`, the build cache, and the temporary directory: the
-leftovers of runs that were killed, and each directory a `--keep-temp` run kept.
+`.goatest/diagnostics`, `reports/runs`, `.goatest/candidates`,
+`.goatest/patches`, the build cache, and the temporary directory: the leftovers
+of runs that were killed, and each directory a `--keep-temp` run kept.
 `goatest cache gc` removes expired entries first and then the oldest entries
-until each store meets its bound — `max_bytes` for the first three,
+until each store meets its bound — `max_bytes` for the cache, the recordings,
+the diagnostics and the two repair stores, `keep` for the run history,
 `build_max_bytes` for the build cache — and then collects those leftovers and
 the keeps `ttl` has expired. Both commands report the temporary directory as
 `skipped` when the process running them named none, which is every process that
-is not the goatest CLI.
+is not the goatest CLI. The candidate store is reported as `skipped` while a
+checkpoint exists: an interrupted run re-validates the candidates it recorded by
+ID when it resumes, and collecting one would cost it that resumption.
 Verification and maintenance hold one OS advisory lock rooted at
 `.goatest/cache`; a contending process reports `cache-wait`, and interrupting
 that wait does not start work or run GC without the lock.
 
-The build cache is also collected at the end of every run, with the same
-policy, so `build_max_bytes` is a bound whether or not anybody types `cache gc`.
-Both collections take a non-blocking lock on the layer and skip if another
+Every store is also collected at the end of every run, with the same policy, so
+`max_bytes`, `ttl`, `keep` and `build_max_bytes` are bounds whether or not
+anybody types `cache gc`. A run collects only while it holds the repository
+cache lock, and reports any failure as a progress note — `cache-gc-unavailable`,
+`reports-gc-unavailable`, `repair-gc-unavailable`,
+`diagnostic-gc-unavailable` — because nothing about housekeeping may change a
+verdict. The run history is collected after the report is published, so the run
+doing the collecting is the newest entry and cannot reach its own report.
+
+The build cache collections take a non-blocking lock on the layer and skip if another
 process holds it, so a run and a maintenance command running side by side
 simply let each other finish. A collection keeps anything read within the last
 two touch intervals — two hours for the layer the machine keeps — because the

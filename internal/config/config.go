@@ -67,6 +67,17 @@ type Cache struct {
 	BuildDir string
 }
 
+// Reports bounds the durable run history under reports/runs.
+type Reports struct {
+	// Keep is how many run directories the history holds, newest first. It is a
+	// count and not a byte budget because a report is product evidence rather
+	// than exhaust: what somebody wants back is "the last few runs", and the
+	// runs an index still points at are kept whatever this says. Zero or absent
+	// is the default; a value of zero cannot mean "keep none", because the run
+	// that just finished is the newest entry.
+	Keep int
+}
+
 type Acceptance struct {
 	ID      string
 	Reason  string
@@ -81,6 +92,7 @@ type Config struct {
 	Project    Project
 	Execution  Execution
 	Cache      Cache
+	Reports    Reports
 	Resources  map[string]Resource
 	Generation Generation
 	Acceptance []Acceptance
@@ -92,6 +104,7 @@ type rawConfig struct {
 	Project    rawProject             `toml:"project"`
 	Execution  rawExecution           `toml:"execution"`
 	Cache      rawCache               `toml:"cache"`
+	Reports    rawReports             `toml:"reports"`
 	Resources  map[string]rawResource `toml:"resources"`
 	Generation rawGeneration          `toml:"generation"`
 	Acceptance []rawAcceptance        `toml:"acceptance"`
@@ -115,6 +128,10 @@ type rawCache struct {
 	TTL           string `toml:"ttl"`
 	BuildMaxBytes int64  `toml:"build_max_bytes"`
 	BuildDir      string `toml:"build_dir"`
+}
+
+type rawReports struct {
+	Keep int `toml:"keep"`
 }
 
 type rawResource struct {
@@ -169,11 +186,22 @@ var (
 // the price of most of a small disk.
 const defaultBuildMaxBytes int64 = 2 << 30
 
+// defaultReportsKeep is how many run directories reports/runs holds by default.
+//
+// Twenty is roughly a working week of verifications: enough that a comparison
+// against "the run before the one that broke" is still on the disk, and few
+// enough that a directory of five artifacts per run stays a few tens of
+// megabytes rather than the hundreds it reaches when nothing collects it. The
+// runs the latest-* indexes point at are kept on top of this, so the bound can
+// be small without ever losing the report a command reads.
+const defaultReportsKeep = 20
+
 func defaults() Config {
 	return Config{
 		Version: 1, Contract: "standard-v1", Project: Project{Packages: []string{"./..."}},
 		Execution: Execution{Timeout: 10 * time.Minute},
 		Cache:     Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour, BuildMaxBytes: defaultBuildMaxBytes},
+		Reports:   Reports{Keep: defaultReportsKeep},
 		Resources: map[string]Resource{},
 	}
 }
@@ -248,6 +276,13 @@ func Load(root string) (Config, error) {
 	if buildDir != raw.Cache.BuildDir {
 		return Config{}, fmt.Errorf("goatest: cache build_dir %q has surrounding whitespace", raw.Cache.BuildDir)
 	}
+	reportsKeep := raw.Reports.Keep
+	if reportsKeep == 0 {
+		reportsKeep = defaultReportsKeep
+	}
+	if reportsKeep < 0 {
+		return Config{}, errors.New("goatest: reports keep must not be negative")
+	}
 	cacheTTL := 30 * 24 * time.Hour
 	if raw.Cache.TTL != "" {
 		parsed, parseErr := time.ParseDuration(raw.Cache.TTL)
@@ -265,6 +300,7 @@ func Load(root string) (Config, error) {
 			Environment: slices.Clone(raw.Execution.Environment), Timeout: executionTimeout, Jobs: raw.Execution.Jobs,
 		},
 		Cache:     Cache{MaxBytes: cacheMaxBytes, TTL: cacheTTL, BuildMaxBytes: buildMaxBytes, BuildDir: buildDir},
+		Reports:   Reports{Keep: reportsKeep},
 		Resources: make(map[string]Resource, len(raw.Resources)),
 		Generation: Generation{
 			Command:      append([]string(nil), raw.Generation.Command...),
@@ -356,6 +392,11 @@ contract = "standard-v1"
 # build_max_bytes = 2147483648  # 2 GiB build cache budget, collected at the end of every run
 # build_dir = ".goatest/build"  # where the build cache lives; the default is per machine
 
+# Durable run history under reports/runs. The runs latest-any.json and
+# latest-full.json point at are kept whatever this says.
+# [reports]
+# keep = 20                     # newest run directories kept; older ones are collected
+
 # One table per managed test resource; docs/protocols.md defines the provider
 # contract. Tests declare a capability with goatest.Integration("postgres") or
 # a //goatest:resources directive.
@@ -445,6 +486,7 @@ func save(root string, input Config) error {
 			MaxBytes: input.Cache.MaxBytes, TTL: input.Cache.TTL.String(),
 			BuildMaxBytes: input.Cache.BuildMaxBytes, BuildDir: input.Cache.BuildDir,
 		},
+		Reports:   rawReports{Keep: input.Reports.Keep},
 		Resources: make(map[string]rawResource, len(input.Resources)),
 		Generation: rawGeneration{
 			Command: slices.Clone(input.Generation.Command), AllowedPaths: slices.Clone(input.Generation.AllowedPaths),

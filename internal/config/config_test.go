@@ -151,6 +151,101 @@ func TestInitRoundTripsTheBuildCacheBound(t *testing.T) {
 	}
 }
 
+func TestLoadBoundsTheReportHistory(t *testing.T) {
+	defaults, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Reports.Keep != 20 {
+		t.Fatalf("report history defaults = %+v, want the newest twenty runs kept", defaults.Reports)
+	}
+	for _, test := range []struct {
+		name      string
+		contents  string
+		wantKeep  int
+		wantError string
+	}{
+		{
+			name:     "configured",
+			contents: "[reports]\nkeep = 5\n",
+			wantKeep: 5,
+		},
+		{
+			name:     "zero is the default rather than a history of nothing",
+			contents: "[reports]\nkeep = 0\n",
+			// Zero cannot mean "keep none" here: the run that just finished is
+			// the newest entry, and a bound of nothing would collect the very
+			// report the person who asked for the run is about to read.
+			wantKeep: 20,
+		},
+		{
+			name:      "negative",
+			contents:  "[reports]\nkeep = -1\n",
+			wantError: "goatest: reports keep must not be negative",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := config.Load(root)
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("Load error = %v, want %s", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Reports.Keep != test.wantKeep {
+				t.Fatalf("report history = %+v, want %d runs kept", loaded.Reports, test.wantKeep)
+			}
+		})
+	}
+}
+
+func TestInitAndAcceptanceRoundTripTheReportHistoryBound(t *testing.T) {
+	root := t.TempDir()
+	if err := config.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, config.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "[reports]") || !strings.Contains(string(written), "keep = 20") {
+		t.Fatalf("written config = %s, want the report history bound documented in it", written)
+	}
+	loaded, err := config.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Reports.Keep != 20 {
+		t.Fatalf("reloaded report history = %+v, want the default bound to have survived the round trip", loaded.Reports)
+	}
+	// 'goatest accept' rewrites the whole file from the configuration it loaded,
+	// so a section the save forgets is a setting the next acceptance silently
+	// reverts to its default.
+	configured := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configured, config.FileName), []byte("version = 1\n[reports]\nkeep = 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AddAcceptance(configured, config.Acceptance{
+		ID: "finding-a", Reason: "reviewed equivalent boundary", Expires: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := config.Load(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Reports.Keep != 5 {
+		t.Fatalf("rewritten report history = %+v, want the configured bound to have survived an acceptance", rewritten.Reports)
+	}
+}
+
 func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
 	root := t.TempDir()
 	contents := "version = 1\n[execution]\ntest_binary_args = [\"-short\", \"-custom=value\"]\n"
@@ -351,7 +446,7 @@ func TestInitWritesAnnotatedDefaultsAndReportsCreateFailure(t *testing.T) {
 		t.Fatalf("active lines = %q, want %q", active, want)
 	}
 	for _, section := range []string{
-		"[project]", "[execution]", "[cache]", "[resources.postgres]", "[generation]", "[[acceptance]]",
+		"[project]", "[execution]", "[cache]", "[reports]", "[resources.postgres]", "[generation]", "[[acceptance]]",
 		"packages", "exclude", "build_tags", "test_binary_args", "environment", "timeout", "jobs",
 		"max_bytes", "ttl", "command", "shared", "allowed_paths", "id", "reason", "expires",
 	} {

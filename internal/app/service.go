@@ -271,6 +271,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 	finishRecording(result, err)
 	if ownsCacheLease {
 		service.collectDiagnosticRetention(root)
+		service.collectVerdictCache(root)
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -285,6 +286,9 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
+		if ownsCacheLease {
+			service.collectDurableArtifacts(root, cacheRoot)
+		}
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
@@ -296,6 +300,9 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		if err := cache.New(cacheRoot).DeleteCheckpoint(result.Snapshot); err != nil {
 			service.note("checkpoint-warning", err.Error())
 		}
+	}
+	if ownsCacheLease {
+		service.collectDurableArtifacts(root, cacheRoot)
 	}
 	return result, nil
 }
@@ -737,7 +744,15 @@ func loadSelected(root string, request cli.Request) (report.Report, error) {
 		if !safeRunID(request.ReportRunID) {
 			return report.Report{}, fmt.Errorf("goatest: unsafe report run ID %q", request.ReportRunID)
 		}
-		return loadReport(filepath.Join(root, "reports", "runs", request.ReportRunID, "assurance-report-v1.json"), fmt.Sprintf("report run %q", request.ReportRunID))
+		path := filepath.Join(reportsRoot(root), request.ReportRunID, "assurance-report-v1.json")
+		// The history is bounded, so a run that is not there is an ordinary
+		// answer rather than a filesystem fault. Saying which of the two things
+		// happened is the whole difference between "this tool is broken" and
+		// "that run is old"; every other read failure keeps its cause.
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return report.Report{}, fmt.Errorf("goatest: report run %q is not in reports/runs: it was collected or never written", request.ReportRunID)
+		}
+		return loadReport(path, fmt.Sprintf("report run %q", request.ReportRunID))
 	}
 	if request.ReportLatestFull {
 		return loadReport(filepath.Join(root, ".goatest", "latest-full.json"), "latest report")
