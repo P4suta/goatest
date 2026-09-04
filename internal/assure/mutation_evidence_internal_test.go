@@ -627,10 +627,11 @@ func TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree(t *testing.T) {
 			}
 		})
 	}
-	if key(repositoryReaderKeyFixture(readers)) == key(targetKeyFixture()) {
+	reader := key(repositoryReaderKeyFixture(readers))
+	if reader == key(targetKeyFixture()) {
 		t.Fatal("a repository reader keys the same inputs as a package that reads no directory")
 	}
-	if key(repositoryReaderKeyFixture(readers)) != key(repositoryReaderKeyFixture(readers)) {
+	if reader != key(repositoryReaderKeyFixture(readers)) {
 		t.Fatal("the builder is not deterministic for a repository reader")
 	}
 }
