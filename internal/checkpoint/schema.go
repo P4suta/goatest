@@ -71,6 +71,7 @@ func JSONSchema() []byte {
 			"mutationResult": checkpointObject([]string{"id", "evidence", "findings", "repairs", "applied"}, map[string]any{
 				"id": nonEmpty, "evidence": array("#/$defs/evidence"), "findings": array("#/$defs/finding"),
 				"repairs": array("#/$defs/repair"), "applied": map[string]any{"type": "boolean"},
+				"provenance": nonEmpty,
 			}),
 			"mutation": checkpointObject([]string{"catalog_fingerprint", "complete", "results"}, map[string]any{
 				"catalog_fingerprint": digest, "complete": map[string]any{"type": "boolean"}, "results": array("#/$defs/mutationResult"),

@@ -764,8 +764,10 @@ func TestASurvivedRecordReplacesAContradictedKill(t *testing.T) {
 		disputed string
 	}{
 		{
-			name:    "a kill the tests no longer make",
-			loaded:  func(mutant gomutants.Mutant) evidence.MutationRecord { return killedEvidenceRecord(mutant, early, key) },
+			name: "a kill the tests no longer make",
+			loaded: func(mutant gomutants.Mutant) evidence.MutationRecord {
+				return killedEvidenceRecord(mutant, early, digestText("stale-key"))
+			},
 			outcome: gomutants.OutcomeSurvived, want: evidence.MutationOutcomeSurvived,
 		},
 		{

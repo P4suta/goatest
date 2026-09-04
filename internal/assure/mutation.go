@@ -180,6 +180,12 @@ type MutationEvaluation struct {
 	Accounting report.MutantAccounting
 	Mutants    []report.MutantDisposition
 	Applied    bool
+	// Provenance names the run that observed one mutant's verdict, when this
+	// unit is one mutant's and the verdict was resolved from that run's
+	// evidence rather than executed here. It belongs to a single mutant, so
+	// append leaves it behind: an evaluation of many mutants has no one run
+	// that established all of it.
+	Provenance string
 }
 
 // EvaluateMutations selects only targets that baseline coverage proves can
@@ -201,6 +207,11 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 	var evaluation MutationEvaluation
 	mutants := make([]gomutants.Mutant, 0, len(catalog.Mutants))
 	resumed := make(map[string]bool, len(options.Resume))
+	// A mutant restored from a checkpoint was evaluated by the run that was
+	// interrupted, and that run may have resolved it from an earlier run's
+	// evidence. This round's collector never saw the mutant, so the provenance
+	// the checkpoint carried is what its disposition is read from.
+	resumedProvenance := make(map[string]string, len(options.Resume))
 	replayPresent := options.ReplayMutantID == ""
 	for _, mutant := range catalog.Mutants {
 		if !mutant.Accepted || options.ReplayMutantID != "" && mutant.ID != options.ReplayMutantID {
@@ -210,6 +221,9 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		if saved, ok := options.Resume[mutant.ID]; ok {
 			evaluation.append(saved)
 			resumed[mutant.ID] = true
+			if saved.Provenance != "" {
+				resumedProvenance[mutant.ID] = saved.Provenance
+			}
 			continue
 		}
 		mutants = append(mutants, mutant)
@@ -317,7 +331,7 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 		evaluation.append(unit)
 		checkpointMutation(options, seed.mutant.ID, unit)
 	}
-	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation, options.Evidence)
+	evaluation.Accounting, evaluation.Mutants = mutationAccounting(catalog, options.ReplayMutantID, evaluation, options.Evidence, resumedProvenance)
 	return evaluation, nil
 }
 
@@ -402,7 +416,7 @@ func validateMutationCatalog(catalog gomutants.Catalog) error {
 	return nil
 }
 
-func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation, collected *MutationEvidence) (report.MutantAccounting, []report.MutantDisposition) {
+func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation MutationEvaluation, collected *MutationEvidence, resumedProvenance map[string]string) (report.MutantAccounting, []report.MutantDisposition) {
 	accounting := report.MutantAccounting{Discovered: len(catalog.Mutants)}
 	selected := make(map[string]bool)
 	for _, mutant := range catalog.Mutants {
@@ -454,8 +468,14 @@ func mutationAccounting(catalog gomutants.Catalog, replayID string, evaluation M
 		}
 		// Only a selected mutant is ever evaluated, so only a selected mutant
 		// can carry a reuse; the provenance travels with the flag, because
-		// each is what makes the other auditable.
+		// each is what makes the other auditable. A mutant restored from a
+		// checkpoint is read from what that checkpoint saved: this round did
+		// not evaluate it, so its collector has nothing to say about it.
 		reused, provenance := collected.disposition(mutant.ID)
+		if !reused {
+			provenance = resumedProvenance[mutant.ID]
+			reused = provenance != ""
+		}
 		dispositions = append(dispositions, report.MutantDisposition{
 			ID: mutant.ID, Status: status, Path: mutant.Path, Line: mutant.Line,
 			Package: mutant.Package, Rule: mutant.Rule, Detail: detail,
@@ -568,16 +588,17 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
 	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: route.discharged}
-	if killer, reused := options.Evidence.reuseKill(mutant, route); reused {
+	if killer, provenance, reused := options.Evidence.reuseKill(mutant, route); reused {
 		// An earlier run watched this target kill this mutant, and every
 		// condition under which that is still true holds. Nothing is executed,
 		// and what is reported is what executing it would have reported.
 		options.Trace.Route(reusedMutationRoute(mutant, route))
 		seed.evaluation.addKill(mutant, mutationKillDetail(killer.Target.Name, options))
+		seed.evaluation.Provenance = provenance
 		seed.resolved = true
 		return seed
 	}
-	if finding, reused := options.Evidence.reuseVerdict(mutant, route); reused {
+	if finding, provenance, reused := options.Evidence.reuseVerdict(mutant, route); reused {
 		// An earlier run ran every test this run's coverage routes to the
 		// mutant against it and watched none of them kill it, and each of them
 		// is still the same test. Nothing is executed, and the finding is
@@ -585,6 +606,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		// than the acceptances of the run that recorded it.
 		options.Trace.Route(reusedMutationRoute(mutant, route))
 		seed.evaluation.addFinding(mutant, finding.Kind, finding.Summary, options.Accepted)
+		seed.evaluation.Provenance = provenance
 		seed.resolved = true
 		return seed
 	}

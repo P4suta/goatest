@@ -182,6 +182,7 @@ func (controller *runCheckpointController) mutation(catalog gomutants.Catalog, r
 		}
 		result[saved.ID] = MutationEvaluation{
 			Evidence: slices.Clone(saved.Evidence), Findings: slices.Clone(saved.Findings), Repairs: slices.Clone(saved.Repairs), Applied: saved.Applied,
+			Provenance: saved.Provenance,
 		}
 	}
 	controller.reusedMutants = len(result)
@@ -211,6 +212,7 @@ func (controller *runCheckpointController) saveMutant(id string, evaluation Muta
 	}
 	unit := checkpoint.MutationResult{
 		ID: id, Evidence: slices.Clone(evaluation.Evidence), Findings: slices.Clone(evaluation.Findings), Repairs: slices.Clone(evaluation.Repairs), Applied: evaluation.Applied,
+		Provenance: evaluation.Provenance,
 	}
 	replaced := false
 	for index := range controller.state.Mutation.Results {

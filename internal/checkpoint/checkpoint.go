@@ -70,6 +70,13 @@ type MutationResult struct {
 	Findings []report.Finding  `json:"findings"`
 	Repairs  []report.Repair   `json:"repairs"`
 	Applied  bool              `json:"applied"`
+	// Provenance names the run that observed this mutant's verdict, when the
+	// interrupted run resolved it from that run's evidence instead of
+	// executing anything. A run resuming the unit did not observe the verdict
+	// either, so it reports the reuse the interrupted run reported. It is
+	// absent on every mutant a run executed and on every checkpoint written
+	// before evidence was reused.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 type Mutation struct {

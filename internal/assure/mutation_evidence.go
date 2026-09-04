@@ -401,34 +401,34 @@ func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targ
 //
 // A kill fuzzing found is never believed, because finding an input inside one
 // budget is not a claim that the next budget finds one.
-func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route mutationRoute) (TargetEvidence, bool) {
+func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route mutationRoute) (TargetEvidence, string, bool) {
 	if collected == nil {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	record, known := collected.records[mutant.ID]
 	if !known || record.Outcome != evidence.MutationOutcomeKilled || record.KilledBy == nil {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	killer := targetIdentity{pkg: record.KilledBy.Package, name: record.KilledBy.Name, kind: record.KilledBy.Kind}
 	if killer.kind == string(goanalysis.KindFuzz) {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	index := slices.IndexFunc(route.reaching, func(target TargetEvidence) bool {
 		return identify(target.Target) == killer
 	})
 	if index < 0 {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	if key := collected.keys[killer]; key == "" || key != record.KilledBy.Key {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	if !collected.passed[killer] {
-		return TargetEvidence{}, false
+		return TargetEvidence{}, "", false
 	}
 	collected.mutex.Lock()
 	collected.reused[mutant.ID] = record.Provenance
 	collected.mutex.Unlock()
-	return route.reaching[index], true
+	return route.reaching[index], record.Provenance, true
 }
 
 // reuseVerdict reports the finding an earlier run recorded for a mutant it
@@ -444,22 +444,22 @@ func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route muta
 // still covered, because a target that no longer reaches the mutant cannot
 // kill it; one that grew is not covered at all, because the target that
 // entered is one nothing was ever run against.
-func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route mutationRoute) (evidence.FindingSeed, bool) {
+func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route mutationRoute) (evidence.FindingSeed, string, bool) {
 	if collected == nil {
-		return evidence.FindingSeed{}, false
+		return evidence.FindingSeed{}, "", false
 	}
 	record, known := collected.records[mutant.ID]
 	if !known || record.Finding == nil {
-		return evidence.FindingSeed{}, false
+		return evidence.FindingSeed{}, "", false
 	}
 	switch record.Outcome {
 	case evidence.MutationOutcomeSurvived:
 		if !collected.exhausts(record.Exhausted, route.reaching) {
-			return evidence.FindingSeed{}, false
+			return evidence.FindingSeed{}, "", false
 		}
 	case evidence.MutationOutcomeUnreached:
 		if !collected.suiteAnswers(mutant, record.Suite, route) {
-			return evidence.FindingSeed{}, false
+			return evidence.FindingSeed{}, "", false
 		}
 	case evidence.MutationOutcomeTimedOut:
 		// Time ran out in one of two places, and the record has the shape of
@@ -468,18 +468,18 @@ func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route m
 		// is the only direction an unsettled question may be carried in.
 		if record.Suite != nil {
 			if !collected.suiteAnswers(mutant, record.Suite, route) {
-				return evidence.FindingSeed{}, false
+				return evidence.FindingSeed{}, "", false
 			}
 		} else if !collected.exhausts(record.Exhausted, route.reaching) {
-			return evidence.FindingSeed{}, false
+			return evidence.FindingSeed{}, "", false
 		}
 	default:
-		return evidence.FindingSeed{}, false
+		return evidence.FindingSeed{}, "", false
 	}
 	collected.mutex.Lock()
 	collected.reused[mutant.ID] = record.Provenance
 	collected.mutex.Unlock()
-	return *record.Finding, true
+	return *record.Finding, record.Provenance, true
 }
 
 // exhausts reports whether a recorded set of executed targets covers every
