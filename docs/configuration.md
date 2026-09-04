@@ -37,8 +37,10 @@ line. Loading the untouched skeleton yields exactly the defaults.
   machine. The two
   bounds are separate because the two stores hold different things at different
   scales: verdicts of a few kilobytes, and object files measured in gigabytes.
-  Every run enforces all of these when it ends, so they are bounds and not
-  suggestions; see [cache maintenance](#cache-maintenance) below.
+  Every run that holds the repository's cache lease enforces all of these when
+  it ends — one that could not take the lease leaves them to the next run or to
+  `cache gc` — so they are bounds and not suggestions; see
+  [cache maintenance](#cache-maintenance) below.
 - `[reports]`: non-negative `keep`, the number of run directories `reports/runs`
   holds, twenty by default. Zero means that default rather than a history of
   nothing. It is a count and not a byte budget because a report is the product

@@ -202,7 +202,7 @@ for a named one, so a job that cannot change a command line can still ask.
 The environment variable is read in `cmd/goatest` alone, where it becomes the
 flag the command layer parses: no layer below the command line reads the
 environment. Recordings under the default root are one of the stores
-[every run collects when it ends](#what-the-repository-keeps-and-what-collects-it).
+[every run that holds the cache lease collects when it ends](#what-the-repository-keeps-and-what-collects-it).
 
 A run that asked for no trace still records, into a ring of its last 4096 events
 in memory: no file, no directory, and a bounded price a run of any length pays
@@ -388,7 +388,7 @@ run. `<run>` is the run identity of the report; a run that stopped before it had
 one — the failure a bundle is most needed for — is named `<UTC timestamp>-<pid>`
 instead, the name a recording of the same run takes, from the same injected
 clock and process id. Bundles are one of the stores
-[every run collects when it ends](#what-the-repository-keeps-and-what-collects-it).
+[every run that holds the cache lease collects when it ends](#what-the-repository-keeps-and-what-collects-it).
 
 | File | What it holds |
 | --- | --- |

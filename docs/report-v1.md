@@ -25,7 +25,8 @@ cannot replace it. Use `goatest report --latest-full` or
 
 The history is bounded. The newest `[reports] keep` runs — twenty by default —
 and the runs the `latest-*` indexes point at are kept; older ones are collected
-at the end of every run and by `goatest cache gc`. Nothing ever rewrites a run
+at the end of every run that holds the repository's cache lease, and by
+`goatest cache gc`. Nothing ever rewrites a run
 directory: a run is there in full or it is gone, and `goatest report --run` of a
 collected run says so by name. Copy `reports/runs/<run-id>` elsewhere to keep one
 past the bound.

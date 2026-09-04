@@ -173,8 +173,9 @@ the evidence cache, trace recordings, diagnostics bundles, stored repair
 candidates and patches, the build cache, and the temporary directories runs
 were killed in or kept on purpose. 'gc' also bounds the run history under
 reports/runs to the newest [reports] keep runs plus the ones latest-any.json
-and latest-full.json name. Every run collects all of it when it ends, so this
-is the same collection on demand rather than the only one there is.
+and latest-full.json name. Every run that holds the cache lease collects all of
+it when it ends, so this is the same collection on demand rather than the only
+one there is.
 `, true
 	case CommandTrace:
 		return `Usage:	goatest trace summary [RUN]
