@@ -79,6 +79,16 @@ func timedOutMutationRecord() evidence.MutationRecord {
 	}
 }
 
+// suiteTimedOutMutationRecord is the other shape a timeout takes: the package
+// suite of a mutant no target reached ran out of time, so there is a suite to
+// name and no set of executed targets.
+func suiteTimedOutMutationRecord() evidence.MutationRecord {
+	record := timedOutMutationRecord()
+	record.Exhausted = nil
+	record.Suite = &evidence.SuiteKey{Package: mutationModulePath + "/pkg", Key: mutationDigest("6")}
+	return record
+}
+
 func unreachedMutationRecord() evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: mutationDigest("d"), Path: "value.go", Package: mutationModulePath + "/pkg",
@@ -402,11 +412,32 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 			want: "requires a suite and a finding",
 		},
 		{
-			name: "timed-out-without-exhausted-targets",
+			name: "timed-out-naming-neither-targets-nor-a-suite",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
 				store.Records[2].Exhausted = nil
 			}),
-			want: "requires exhausted targets and a finding",
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-naming-both-targets-and-a-suite",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].Suite = unreachedMutationRecord().Suite
+			}),
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-with-a-killer",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].KilledBy = killedMutationRecord().KilledBy
+			}),
+			want: "requires either exhausted targets or a suite",
+		},
+		{
+			name: "timed-out-without-a-finding",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[2].Finding = nil
+			}),
+			want: "requires either exhausted targets or a suite",
 		},
 		{
 			name: "finding-without-a-kind",
@@ -593,6 +624,7 @@ func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 		{name: evidence.MutationOutcomeSurvived, record: canonicalSurvivedMutationRecord()},
 		{name: evidence.MutationOutcomeUnreached, record: unreachedMutationRecord()},
 		{name: evidence.MutationOutcomeTimedOut, record: timedOutMutationRecord()},
+		{name: evidence.MutationOutcomeTimedOut + "-by-the-package-suite", record: suiteTimedOutMutationRecord()},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()

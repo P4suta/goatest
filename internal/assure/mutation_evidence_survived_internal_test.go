@@ -4,6 +4,7 @@
 package assure
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"testing"
@@ -513,5 +514,235 @@ func TestEvaluateMutationsRecordsNoSuiteVerdictForAPackageThisRunDidNotMeasure(t
 	}
 	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
 		t.Fatalf("recorded %+v, want nothing about a suite this run cannot name", records)
+	}
+}
+
+// timedOutEvidenceRecord is an earlier run's record of a mutant that ran out of
+// time under one of the targets that reach it.
+func timedOutEvidenceRecord(mutant gomutants.Mutant, exhausted ...evidence.TargetKey) evidence.MutationRecord {
+	return evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeTimedOut, Provenance: "snapshot=" + digestText("earlier-run"),
+		Exhausted: exhausted,
+		Finding:   &evidence.FindingSeed{Kind: "mutation-timeout", Summary: mutationTargetTimeoutSummary},
+	}
+}
+
+// timingOutSession answers every execution with a timeout, which is how a
+// mutant that does not terminate under a target reaches its verdict.
+func timingOutSession(catalog gomutants.Catalog) *mutationUnitSession {
+	return &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
+	}}
+}
+
+// TestEvaluateMutationsReusesATimedOutMutantUnderTheUniversalCondition pins the
+// one reuse that is not a proof. A timeout says the run could not settle the
+// mutant, so reusing it keeps a finding rather than removing one, which is the
+// direction that cannot cost assurance; the condition is still the universal
+// one, so a mutant a new test now reaches runs again.
+func TestEvaluateMutationsReusesATimedOutMutantUnderTheUniversalCondition(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	record := timedOutEvidenceRecord(mutant, exhaustedKey(early, key))
+	index := evidenceIndex([]evidence.MutationRecord{record},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 {
+		t.Fatalf("executions = %+v, want none", session.requests)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-timeout" ||
+		evaluation.Findings[0].Summary != mutationTargetTimeoutSummary {
+		t.Fatalf("findings = %+v, want the recorded timeout", evaluation.Findings)
+	}
+	// A timeout is not a verdict about the mutant, so the disposition is
+	// inconclusive: the reuse is visible in the flag and its provenance, and in
+	// no counter, because a reused timeout was never a kill or a survivor.
+	if !evaluation.Mutants[0].Reused || evaluation.Mutants[0].Status != report.MutantInconclusive {
+		t.Fatalf("dispositions = %+v", evaluation.Mutants)
+	}
+	accounting := report.MutantAccounting{Discovered: 1, Selected: 1, Executed: 1, Inconclusive: 1}
+	if !reflect.DeepEqual(evaluation.Accounting, accounting) {
+		t.Fatalf("accounting = %+v, want %+v", evaluation.Accounting, accounting)
+	}
+}
+
+// TestEvaluateMutationsRecordsATimeoutAgainstTheTargetsItRan pins what a run
+// writes down about a mutant it could not settle: the targets it did run,
+// including the one time ran out under, each with the behaviour key it had.
+func TestEvaluateMutationsRecordsATimeoutAgainstTheTargetsItRan(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	late := evidenceIdentity("TestLate", goanalysis.KindTest)
+	keys := map[targetIdentity]string{early: digestText("early-key"), late: digestText("late-key")}
+	index := evidenceIndex(nil, keys, map[targetIdentity]bool{early: true, late: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	// The cheapest target runs first and times out, so the second target never
+	// runs and is not part of what this run exhausted.
+	session := timingOutSession(catalog)
+
+	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+		evidenceTarget("TestLate", goanalysis.KindTest, 5*time.Millisecond),
+	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index}); err != nil {
+		t.Fatal(err)
+	}
+	want := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeTimedOut, Provenance: "snapshot=" + digestText("this-run"),
+		Exhausted: []evidence.TargetKey{exhaustedKey(early, keys[early])},
+		Finding:   &evidence.FindingSeed{Kind: "mutation-timeout", Summary: mutationTargetTimeoutSummary},
+	}
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 || !reflect.DeepEqual(records[0], want) {
+		t.Fatalf("records = %+v, want [%+v]", records, want)
+	}
+}
+
+// TestEvaluateMutationsReusesAPackageSuiteTimeoutAgainstTheSuiteKey pins the
+// other shape a timeout takes. A mutant no target reached is left to the
+// package suite, so a suite that ran out of time is a statement about the
+// suite and names no targets at all.
+func TestEvaluateMutationsReusesAPackageSuiteTimeoutAgainstTheSuiteKey(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	key := digestText("suite-key")
+	recorded := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeTimedOut, Provenance: "snapshot=" + digestText("earlier-run"),
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Finding: &evidence.FindingSeed{Kind: "mutation-timeout", Summary: mutationSuiteTimeoutSummary},
+	}
+	index := suiteEvidenceIndex([]evidence.MutationRecord{recorded}, nil, nil,
+		map[string]string{evidenceModule: key})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 || !evaluation.Mutants[0].Reused ||
+		evaluation.Mutants[0].Status != report.MutantInconclusive {
+		t.Fatalf("evaluation = %+v, requests = %+v", evaluation.Mutants, session.requests)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Summary != mutationSuiteTimeoutSummary {
+		t.Fatalf("findings = %+v, want the recorded suite timeout", evaluation.Findings)
+	}
+}
+
+// TestEvaluateMutationsRecordsAPackageSuiteTimeoutAgainstTheSuiteKey is the
+// recording half of the same shape.
+func TestEvaluateMutationsRecordsAPackageSuiteTimeoutAgainstTheSuiteKey(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	key := digestText("suite-key")
+	index := suiteEvidenceIndex(nil, nil, nil, map[string]string{evidenceModule: key})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := timingOutSession(catalog)
+
+	if _, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeTimedOut, Provenance: "snapshot=" + digestText("this-run"),
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Finding: &evidence.FindingSeed{Kind: "mutation-timeout", Summary: mutationSuiteTimeoutSummary},
+	}
+	records := index.store(catalog, evidenceModule).Records
+	if len(records) != 1 || !reflect.DeepEqual(records[0], want) {
+		t.Fatalf("records = %+v, want [%+v]", records, want)
+	}
+}
+
+// TestEvaluateMutationsNeverReusesFlakyOrInconclusiveEvidence pins the outcomes
+// a run refuses to write down at all. A control that failed, a kill that did
+// not reproduce, and an outcome the engine could not determine each say that
+// this run could not observe the mutant reliably; a later run that reused one
+// would be reusing an answer nobody ever had.
+func TestEvaluateMutationsNeverReusesFlakyOrInconclusiveEvidence(t *testing.T) {
+	t.Parallel()
+	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		return gomutants.CommandResult{}, nil
+	}
+	for _, test := range []struct {
+		name    string
+		targets []TargetEvidence
+		exec    func(gomutants.ExecRequest) (gomutants.MutantResult, error)
+		control func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+	}{
+		{
+			name: "an inconclusive outcome under a reaching target",
+			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeInconclusive}, nil
+			},
+		},
+		{
+			name: "an inconclusive outcome under the package suite", targets: []TargetEvidence{},
+			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeInconclusive}, nil
+			},
+		},
+		{
+			name: "a control that failed before the kill was confirmed",
+			control: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+				return gomutants.CommandResult{ExitCode: 1, Output: []byte("the original failed")}, nil
+			},
+			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+			},
+		},
+		{
+			name: "a kill that did not reproduce", control: passingControl,
+			exec: func() func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				attempts := 0
+				return func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+					attempts++
+					if attempts == 1 {
+						return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+					}
+					return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+				}
+			}(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := evidenceMutant("mutant-a")
+			early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+			targets := test.targets
+			if targets == nil {
+				targets = []TargetEvidence{evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)}
+			}
+			index := suiteEvidenceIndex(nil, map[targetIdentity]string{early: digestText("early-key")},
+				map[targetIdentity]bool{early: true}, map[string]string{evidenceModule: digestText("suite-key")})
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := &mutationUnitSession{catalog: catalog, exec: test.exec}
+
+			if _, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Evidence: index, OriginalControl: test.control,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
+				t.Fatalf("recorded %+v, want nothing a later run could reuse", records)
+			}
+		})
 	}
 }
