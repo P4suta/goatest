@@ -35,7 +35,8 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
 		Evidence: []report.Evidence{{
 			Kind: "cache", ID: "policy", Status: "configured",
-			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d", loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes),
+			Detail: fmt.Sprintf("max-bytes=%d ttl=%s build-max-bytes=%d reports-keep=%d",
+				loaded.Cache.MaxBytes, loaded.Cache.TTL, loaded.Cache.BuildMaxBytes, loaded.Reports.Keep),
 		}},
 	}
 	switch action {
@@ -52,8 +53,13 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		history, err := reportsStatus(root, loaded.Reports.Keep)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence, cacheStatusEvidence("status", status),
-			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus))
+			retentionStatusEvidence("trace-status", traceStatus), retentionStatusEvidence("diagnostics-status", diagnosticsStatus),
+			history)
 		buildStatus, err := service.buildCacheLayer(root).Inspect()
 		if err != nil {
 			return report.Report{}, err
@@ -83,12 +89,17 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		if err != nil {
 			return report.Report{}, err
 		}
+		history, err := collectReports(root, loaded.Reports.Keep, moment)
+		if err != nil {
+			return report.Report{}, err
+		}
 		result.Evidence = append(result.Evidence,
 			cacheStatusEvidence("before", collected.Before),
 			report.Evidence{Kind: "cache", ID: "gc", Status: "completed", Detail: fmt.Sprintf("removed-entries=%d removed-bytes=%d", collected.RemovedEntries, collected.RemovedBytes)},
 			cacheStatusEvidence("after", collected.After),
 			retentionGCStatusEvidence("trace", traceCollected),
 			retentionGCStatusEvidence("diagnostics", diagnosticsCollected),
+			reportsGCEvidence(history),
 		)
 		// Every run already collects the build cache when it ends, so this is
 		// the same collection on demand rather than the only one there is. It
@@ -155,6 +166,12 @@ func buildCacheStatusEvidence(id string, status buildcache.Status) report.Eviden
 }
 
 func retentionStatusEvidence(id string, status retention.Status) report.Evidence {
+	return report.Evidence{Kind: "diagnostic-retention", ID: id, Status: "ready", Detail: retentionDetail(status)}
+}
+
+// retentionDetail is how every retained store describes itself, so that a
+// reader comparing two of them is comparing the same measurements.
+func retentionDetail(status retention.Status) string {
 	detail := fmt.Sprintf("entries=%d bytes=%d", status.Entries, status.Bytes)
 	if !status.Oldest.IsZero() {
 		detail += " oldest=" + status.Oldest.UTC().Format(time.RFC3339Nano)
@@ -162,7 +179,7 @@ func retentionStatusEvidence(id string, status retention.Status) report.Evidence
 	if !status.Newest.IsZero() {
 		detail += " newest=" + status.Newest.UTC().Format(time.RFC3339Nano)
 	}
-	return report.Evidence{Kind: "diagnostic-retention", ID: id, Status: "ready", Detail: detail}
+	return detail
 }
 
 func retentionGCStatusEvidence(id string, result retention.Result) report.Evidence {
