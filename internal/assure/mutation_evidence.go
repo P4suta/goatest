@@ -76,9 +76,14 @@ type targetKeySources struct {
 	buildTags      []string
 	commandTimeout time.Duration
 	targetTimeout  time.Duration
-	// extraFiles are module-relative paths declared as inputs of every target
-	// beyond what the closure names. Nothing declares any yet; the field is
-	// where the configured list will arrive.
+	// repositoryReaders are the packages goanalysis found reading a directory
+	// they compute rather than a file they name, by import path. A target of
+	// one of them is keyed on extraFiles instead of on its closure alone.
+	repositoryReaders map[string]bool
+	// extraFiles are the module-relative paths a target keys beyond what its
+	// closure names: every file of the snapshot, in sorted order, for the
+	// targets whose verdict any of them could change. It is empty when the run
+	// found no repository reader, because nothing else declares one.
 	extraFiles []string
 
 	packages  map[string]goanalysis.Package
@@ -91,15 +96,30 @@ type targetKeySources struct {
 // of them: what lies in a package's directory, what lies under its testdata,
 // and what a fuzz target's corpus holds. The indexes are built once, because
 // every target of the run asks the same questions of the same scan.
-func newTargetKeySources(inputs evidence.Inputs, model goanalysis.Model, contract string, options Options) targetKeySources {
+//
+// The whole-tree list is built once too, and only when the run found a package
+// that reads one: it is every file the snapshot holds, so a target keyed on it
+// keeps a verdict only across a tree that did not change at all.
+func newTargetKeySources(inputs evidence.Inputs, model goanalysis.Model, contract string, options Options, readers map[string]bool) targetKeySources {
 	sources := targetKeySources{
 		inputs: inputs, model: model, contract: contract,
 		testArgs: options.TestArgs, buildTags: options.BuildTags,
 		commandTimeout: options.CommandTimeout, targetTimeout: options.TargetTimeout,
-		packages:  make(map[string]goanalysis.Package, len(model.Packages)),
-		directory: make(map[string][]string, len(model.Packages)),
-		testdata:  make(map[string][]string),
-		corpus:    make(map[string][]string),
+		repositoryReaders: readers,
+		packages:          make(map[string]goanalysis.Package, len(model.Packages)),
+		directory:         make(map[string][]string, len(model.Packages)),
+		testdata:          make(map[string][]string),
+		corpus:            make(map[string][]string),
+	}
+	if len(readers) != 0 {
+		sources.extraFiles = make([]string, 0, len(inputs.Files)+len(inputs.Corpus))
+		for name := range inputs.Files {
+			sources.extraFiles = append(sources.extraFiles, name)
+		}
+		for name := range inputs.Corpus {
+			sources.extraFiles = append(sources.extraFiles, name)
+		}
+		slices.Sort(sources.extraFiles)
 	}
 	for _, pkg := range model.Packages {
 		sources.packages[pkg.ImportPath] = pkg
@@ -166,18 +186,32 @@ func corpusOwner(name string) (string, string, bool) {
 // because a dependency's tests are never compiled into this binary — but the
 // target's package's test files are, and they are the file most likely to
 // change.
+//
+// A target of a package that reads a directory it computes is the exception,
+// and it is a conservative one: its closure is not what decides its verdict,
+// because the files it will read are not named anywhere, so every file of the
+// snapshot is an input of it. Such a target keeps a recorded verdict across an
+// identical tree and across nothing else. Nothing is excluded from testing or
+// from reuse by name; the key simply stops claiming to know what the test
+// reads.
 func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.TargetInputs {
 	files := make(map[string]string)
 	include := func(name string) {
 		if digest, known := sources.inputs.Files[name]; known {
+			files[name] = digest
+			return
+		}
+		if digest, known := sources.inputs.Corpus[name]; known {
 			files[name] = digest
 		}
 	}
 	for _, name := range moduleManifestFiles {
 		include(name)
 	}
-	for _, name := range sources.extraFiles {
-		include(name)
+	if sources.repositoryReaders[target.Package] {
+		for _, name := range sources.extraFiles {
+			include(name)
+		}
 	}
 	for _, pkg := range sources.closure(target) {
 		for _, name := range sources.directory[pkg.RelativeDir] {

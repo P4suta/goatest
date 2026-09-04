@@ -684,8 +684,8 @@ func TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity(t *testing.T) {
 	// evidence through, and it reads the same options.
 	target := goanalysis.Target{ID: "target-a", Name: "TestValue", Kind: goanalysis.KindTest, Package: "fixture.example/module"}
 	model := goanalysis.Model{ModulePath: "fixture.example/module"}
-	hereKey := newTargetKeySources(hereInputs, model, "standard-v1", here).inputsFor(target)
-	elsewhereKey := newTargetKeySources(elsewhereInputs, model, "standard-v1", elsewhere).inputsFor(target)
+	hereKey := newTargetKeySources(hereInputs, model, "standard-v1", here, nil).inputsFor(target)
+	elsewhereKey := newTargetKeySources(elsewhereInputs, model, "standard-v1", elsewhere, nil).inputsFor(target)
 	if !reflect.DeepEqual(elsewhereKey, hereKey) {
 		t.Fatalf("target key inputs elsewhere = %+v, want %+v", elsewhereKey, hereKey)
 	}

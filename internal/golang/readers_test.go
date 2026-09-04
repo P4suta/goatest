@@ -55,25 +55,17 @@ func TestAliased(t *testing.T) {
 `)
 	writeGo(t, root, "named/named.go", `package named
 
-import "os"
+import "strings"
 
 type dir struct{}
 
-// ReadDir is this package's own method, and a selector that only looks like the
-// call the rule names.
+// ReadDir is this package's own method, and a selector that only looks like
+// the call the rule names: nothing here imports the package it belongs to.
 func (dir) ReadDir(string) error { return nil }
 
-func Open(name string) error {
-	handle, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	return handle.Close()
-}
-
-func Local() error {
+func Local(name string) error {
 	var os dir
-	return os.ReadDir(".")
+	return os.ReadDir(strings.TrimSpace(name))
 }
 `)
 	packages := []gotest.Package{
