@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +204,65 @@ func TestEveryRunBoundsTheRepairStoresAndNotesWhatItCannotRead(t *testing.T) {
 	}
 	if !strings.Contains(progress.String(), "repair-gc-unavailable") {
 		t.Fatalf("progress = %q, want the unusable store reported as a note", progress.String())
+	}
+}
+
+func TestEveryRunBoundsTheVerdictCacheItRanAgainst(t *testing.T) {
+	root := t.TempDir()
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	store := cache.New(cacheRoot)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	digests := []string{strings.Repeat("a", 64), strings.Repeat("b", 64)}
+	for index, digest := range digests {
+		if err := store.Put(digest, report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Snapshot: digest}); err != nil {
+			t.Fatal(err)
+		}
+		moment := base.Add(time.Duration(index) * time.Hour)
+		if err := os.Chtimes(filepath.Join(cacheRoot, "v1", digest, "report.json"), moment, moment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A budget one entry fits inside and two do not, measured rather than
+	// guessed so that the collection is what decides the outcome.
+	info, err := os.Stat(filepath.Join(cacheRoot, "v1", digests[0], "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := "version = 1\n[cache]\nmax_bytes = " + strconv.FormatInt(info.Size()+info.Size()/2, 10) + "\n"
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moment := base.Add(2 * time.Hour)
+	service := historyService(t, root)
+	service.Now = func() time.Time { return moment }
+	historyRun(t, service, nil)
+	// Nobody typed 'cache gc'. The newest entry is the one a run would have
+	// just written, so it is the one a collection at the end of a run keeps.
+	if _, err := os.Stat(filepath.Join(cacheRoot, "v1", digests[1])); err != nil {
+		t.Fatalf("the newest cache entry was collected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheRoot, "v1", digests[0])); !os.IsNotExist(err) {
+		t.Fatalf("the over-budget cache entry remained: %v", err)
+	}
+}
+
+func TestAVerdictCacheThatCannotBeCollectedIsANoteRatherThanAFailedRun(t *testing.T) {
+	root := t.TempDir()
+	versionRoot := filepath.Join(root, ".goatest", "cache", "v1")
+	if err := os.MkdirAll(versionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A cache entry that is not a directory: the cache refuses to collect the
+	// whole store, and that refusal may not reach the verdict of a run.
+	if err := os.WriteFile(filepath.Join(versionRoot, "0000000000000000000000000000000000000000000000000000000000000000"), []byte("not an entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var progress bytes.Buffer
+	service := historyService(t, root)
+	service.Progress = &progress
+	historyRun(t, service, nil)
+	if !strings.Contains(progress.String(), "cache-gc-unavailable") {
+		t.Fatalf("progress = %q, want the unusable verdict cache reported as a note", progress.String())
 	}
 }
 
