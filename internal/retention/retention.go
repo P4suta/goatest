@@ -36,18 +36,81 @@ type entry struct {
 	expired    bool
 }
 
+// childKind is the shape of the direct children one retained store holds. A
+// store holds one or the other and never a mixture: a recording is a directory
+// of streams, a stored repair candidate is a single JSON file, and a root that
+// turned out to hold the other shape is a root this package has misidentified
+// rather than one it should collect.
+type childKind int
+
+const (
+	childDirectory childKind = iota
+	childFile
+)
+
+func (kind childKind) String() string {
+	if kind == childFile {
+		return "file"
+	}
+	return "directory"
+}
+
+// accepts reports whether a direct child is the shape this store holds. A
+// symbolic link is neither, whatever it points at, because everything below
+// walks and removes what it finds.
+func (kind childKind) accepts(child fs.DirEntry) bool {
+	if child.Type()&os.ModeSymlink != 0 {
+		return false
+	}
+	if kind == childFile {
+		return child.Type().IsRegular()
+	}
+	return child.IsDir()
+}
+
+// measure is the size and age of one child: a walk of the tree for a directory,
+// and the file's own metadata for a file.
+func (kind childKind) measure(path string, child fs.DirEntry) (int64, time.Time, error) {
+	if kind != childFile {
+		return metadata(path)
+	}
+	info, err := child.Info()
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("goatest: inspect retained artifact %s: %w", path, err)
+	}
+	return info.Size(), info.ModTime(), nil
+}
+
 func Inspect(root string) (Status, error) {
-	status, _, err := inspect(root, 0, time.Time{})
+	status, _, err := inspect(root, childDirectory, 0, time.Time{})
+	return status, err
+}
+
+// InspectFiles reports on a root whose children are regular files rather than
+// directories, which is what a store of repair candidates or patch artifacts is.
+func InspectFiles(root string) (Status, error) {
+	status, _, err := inspect(root, childFile, 0, time.Time{})
 	return status, err
 }
 
 // Collect removes expired recording directories first, then oldest
 // directories until maxBytes is met. It never follows a symbolic link.
 func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Result, error) {
+	return collect(root, childDirectory, maxBytes, ttl, now)
+}
+
+// CollectFiles applies the same expiry and byte budget to a root of regular
+// files. Eviction removes a whole file, so a reader of the root never meets a
+// half-written one.
+func CollectFiles(root string, maxBytes int64, ttl time.Duration, now time.Time) (Result, error) {
+	return collect(root, childFile, maxBytes, ttl, now)
+}
+
+func collect(root string, kind childKind, maxBytes int64, ttl time.Duration, now time.Time) (Result, error) {
 	if maxBytes < 0 || ttl < 0 {
 		return Result{}, errors.New("goatest: retention policy must not be negative")
 	}
-	before, entries, err := inspect(root, ttl, now)
+	before, entries, err := inspect(root, kind, ttl, now)
 	if err != nil {
 		return Result{}, err
 	}
@@ -65,7 +128,7 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Res
 		result.RemovedBytes += candidate.size
 		remaining -= candidate.size
 	}
-	result.After, _, err = inspect(root, 0, time.Time{})
+	result.After, _, err = inspect(root, kind, 0, time.Time{})
 	return result, err
 }
 
@@ -84,7 +147,7 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Res
 // survive, and a protected entry older than every one of them survives beside
 // them, because the reason to protect a run is that something still reads it.
 func Keep(root string, keep int, protected func(name string) bool, now time.Time) (Result, error) {
-	before, entries, err := inspect(root, 0, now)
+	before, entries, err := inspect(root, childDirectory, 0, now)
 	if err != nil {
 		return Result{}, err
 	}
@@ -107,7 +170,7 @@ func Keep(root string, keep int, protected func(name string) bool, now time.Time
 		result.RemovedEntries++
 		result.RemovedBytes += candidate.size
 	}
-	result.After, _, err = inspect(root, 0, time.Time{})
+	result.After, _, err = inspect(root, childDirectory, 0, time.Time{})
 	return result, err
 }
 
@@ -129,8 +192,8 @@ func order(entries []entry) {
 	})
 }
 
-func inspect(root string, ttl time.Duration, now time.Time) (Status, []entry, error) {
-	directories, err := os.ReadDir(root)
+func inspect(root string, kind childKind, ttl time.Duration, now time.Time) (Status, []entry, error) {
+	children, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return Status{}, []entry{}, nil
 	}
@@ -138,17 +201,17 @@ func inspect(root string, ttl time.Duration, now time.Time) (Status, []entry, er
 		return Status{}, nil, fmt.Errorf("goatest: inspect retained artifacts: %w", err)
 	}
 	var status Status
-	entries := make([]entry, 0, len(directories))
-	for _, directory := range directories {
-		if !safeName(directory.Name()) || directory.Type()&os.ModeSymlink != 0 || !directory.IsDir() {
-			return Status{}, nil, fmt.Errorf("goatest: retained artifact %q is not a confined directory", directory.Name())
+	entries := make([]entry, 0, len(children))
+	for _, child := range children {
+		if !safeName(child.Name()) || !kind.accepts(child) {
+			return Status{}, nil, fmt.Errorf("goatest: retained artifact %q is not a confined %s", child.Name(), kind)
 		}
-		path := filepath.Join(root, directory.Name())
-		size, modified, err := metadata(path)
+		path := filepath.Join(root, child.Name())
+		size, modified, err := kind.measure(path, child)
 		if err != nil {
 			return Status{}, nil, err
 		}
-		candidate := entry{name: directory.Name(), path: path, size: size, modified: modified}
+		candidate := entry{name: child.Name(), path: path, size: size, modified: modified}
 		if ttl > 0 && !now.IsZero() && !modified.IsZero() {
 			candidate.expired = !modified.Add(ttl).After(now)
 		}
