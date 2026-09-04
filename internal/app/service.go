@@ -271,6 +271,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 	finishRecording(result, err)
 	if ownsCacheLease {
 		service.collectDiagnosticRetention(root)
+		service.collectVerdictCache(root)
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {

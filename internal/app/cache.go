@@ -77,11 +77,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		result.Evidence = append(result.Evidence, keptTemporaryStatus(root)...)
 		return result, nil
 	case "gc":
-		now := time.Now
-		if service.Now != nil {
-			now = service.Now
-		}
-		moment := now().UTC()
+		moment := service.clock()().UTC()
 		collected, err := cache.Collect(cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, moment)
 		if err != nil {
 			return report.Report{}, err
@@ -203,15 +199,31 @@ func (service Service) collectDiagnosticRetention(root string) {
 		service.note("diagnostic-gc-unavailable", err.Error())
 		return
 	}
-	now := time.Now
-	if service.Now != nil {
-		now = service.Now
-	}
-	moment := now().UTC()
+	moment := service.clock()().UTC()
 	for _, directory := range []string{"trace", "diagnostics"} {
 		if _, err := retention.Collect(filepath.Join(root, ".goatest", directory), loaded.Cache.MaxBytes, loaded.Cache.TTL, moment); err != nil {
 			service.note("diagnostic-gc-unavailable", directory+": "+err.Error())
 		}
+	}
+}
+
+// collectVerdictCache applies the cache policy to the store that policy is
+// named after, at the end of the run that just read and wrote it.
+//
+// It belongs beside the diagnostic collection rather than after the report is
+// published, because the entry a run adds is written during the run: by the
+// time this runs the cache already holds it, and it is the newest, so the
+// budget falls on older entries. A failure is a note for the same reason every
+// collection here reports one — the run has already produced its verdict.
+func (service Service) collectVerdictCache(root string) {
+	loaded, err := config.Load(root)
+	if err != nil {
+		service.note("cache-gc-unavailable", err.Error())
+		return
+	}
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	if _, err := cache.Collect(cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, service.clock()().UTC()); err != nil {
+		service.note("cache-gc-unavailable", err.Error())
 	}
 }
 
