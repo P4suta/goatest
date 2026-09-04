@@ -168,7 +168,9 @@ func TestTheLedgerLivesWhereTheRepositoryKeepsItsOwnFiles(t *testing.T) {
 func TestConcurrentAppendsKeepEveryEntry(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "kept-temp-v1.json")
-	const writers, each = 2, 50
+	// Twenty each is contention enough to lose an entry without the lock and
+	// little enough that the synced writes stay short under the race detector.
+	const writers, each = 2, 20
 	var group sync.WaitGroup
 	failures := make(chan error, writers*each)
 	for writer := range writers {

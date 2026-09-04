@@ -61,11 +61,15 @@ const (
 	// the new file and the holder of the old one would contend over nothing.
 	lockSuffix = ".lock"
 
-	// lockPatience is how long a writer waits for another one. A ledger write
-	// is a small read, a change and a rename, so a wait this long means
-	// something is wrong rather than busy, and reporting that is more use than
-	// waiting on it.
-	lockPatience = 2 * time.Second
+	// lockPatience is how long a writer waits for another one. Whoever holds
+	// the lock is another goatest writing the same file for a few
+	// milliseconds, so waiting for it is always right, and the bound exists
+	// only so that a holder that died with the lock cannot hang a run forever.
+	// It is generous because the wait is measured on a loaded machine: under
+	// the race detector, eight packages at a time, one writer's turn has been
+	// seen to come more than two seconds after the other's, and a wait that
+	// gave up there turned a slow neighbour into a lost record.
+	lockPatience = time.Minute
 
 	// lockPoll is how often the wait asks again.
 	lockPoll = 5 * time.Millisecond
