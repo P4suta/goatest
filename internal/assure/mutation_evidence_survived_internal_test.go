@@ -746,3 +746,113 @@ func TestEvaluateMutationsNeverReusesFlakyOrInconclusiveEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestASurvivedRecordReplacesAContradictedKill pins how a stale record is
+// removed: by being contradicted. Every mutant a run executes produces a fresh
+// record, and this run's record wins over the one it was read from, so a kill
+// the tests no longer make and a survival they now make each replace the other
+// without anything having to expire a record or decide it is old.
+func TestASurvivedRecordReplacesAContradictedKill(t *testing.T) {
+	t.Parallel()
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	for _, test := range []struct {
+		name     string
+		loaded   func(gomutants.Mutant) evidence.MutationRecord
+		outcome  gomutants.Outcome
+		want     string
+		disputed string
+	}{
+		{
+			name:    "a kill the tests no longer make",
+			loaded:  func(mutant gomutants.Mutant) evidence.MutationRecord { return killedEvidenceRecord(mutant, early, key) },
+			outcome: gomutants.OutcomeSurvived, want: evidence.MutationOutcomeSurvived,
+		},
+		{
+			name: "a survival the tests now contradict",
+			loaded: func(mutant gomutants.Mutant) evidence.MutationRecord {
+				return survivedEvidenceRecord(mutant, exhaustedKey(early, digestText("stale-key")))
+			},
+			outcome: gomutants.OutcomeKilled, want: evidence.MutationOutcomeKilled,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := evidenceMutant("mutant-a")
+			loaded := test.loaded(mutant)
+			index := evidenceIndex([]evidence.MutationRecord{loaded},
+				map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: request.Mutant, Outcome: test.outcome}, nil
+			}}
+
+			if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+				evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+			}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index}); err != nil {
+				t.Fatal(err)
+			}
+			records := index.store(catalog, evidenceModule).Records
+			if len(records) != 1 || records[0].Outcome != test.want ||
+				records[0].Provenance != "snapshot="+digestText("this-run") {
+				t.Fatalf("store = %+v, want one %s record of this run", records, test.want)
+			}
+		})
+	}
+}
+
+// TestAResumedMutantKeepsTheReuseItWasCheckpointedWith pins the seam between
+// the two layers of saved work. A checkpoint carries a mutant's verdict across
+// an interrupted run inside one input digest; when that verdict was itself
+// resolved from an earlier run's evidence, the run that resumes it did not
+// observe it either, so the provenance travels with it and the report says the
+// same thing it would have said had the run not been interrupted.
+func TestAResumedMutantKeepsTheReuseItWasCheckpointedWith(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	provenance := "snapshot=" + digestText("earlier-run")
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+
+	evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1",
+		Resume: map[string]MutationEvaluation{mutant.ID: {
+			Evidence:   []report.Evidence{{Kind: "mutation", ID: mutant.ID, Status: "killed", Detail: "TestEarly"}},
+			Provenance: provenance,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluation.Mutants) != 1 || !evaluation.Mutants[0].Reused ||
+		evaluation.Mutants[0].Provenance != provenance || evaluation.Accounting.ReusedKilled != 1 {
+		t.Fatalf("dispositions = %+v, accounting = %+v", evaluation.Mutants, evaluation.Accounting)
+	}
+}
+
+// TestAReusedMutantIsCheckpointedWithItsProvenance is the other half of the
+// same seam: what the interrupted run wrote down is what the resumed run reads.
+func TestAReusedMutantIsCheckpointedWithItsProvenance(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	key := digestText("early-key")
+	record := survivedEvidenceRecord(mutant, exhaustedKey(early, key))
+	index := evidenceIndex([]evidence.MutationRecord{record},
+		map[targetIdentity]string{early: key}, map[targetIdentity]bool{early: true})
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+	session := refusingSession(t, catalog)
+	saved := make(map[string]MutationEvaluation)
+
+	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
+	}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+		Checkpoint: func(id string, evaluation MutationEvaluation) { saved[id] = evaluation },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if unit, checkpointed := saved[mutant.ID]; !checkpointed || unit.Provenance != record.Provenance {
+		t.Fatalf("checkpointed %+v, want the provenance of the run that established the verdict", saved)
+	}
+}

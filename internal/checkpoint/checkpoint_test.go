@@ -31,6 +31,7 @@ func checkpointFixture() checkpoint.State {
 			}}, Repairs: []report.Repair{{
 				ID: "repair-a", Finding: "finding-mutant", Path: "value_test.go", Status: "applied", Diff: "+test", Validation: "passed", Reason: "cover mutant", Provenance: "goatest",
 			}},
+			Provenance: "snapshot=" + strings.Repeat("c", 64),
 		}}},
 	}
 }
@@ -41,6 +42,12 @@ func TestCheckpointStrictRoundTripAndSchema(t *testing.T) {
 	decoded, err := checkpoint.Decode(data)
 	if err != nil || decoded.Attempts != 2 || len(decoded.Baseline.Targets) != 1 || len(decoded.Mutation.Results) != 1 {
 		t.Fatalf("checkpoint round trip = (%+v, %v)", decoded, err)
+	}
+	// A mutant whose verdict the round resolved from an earlier run's evidence
+	// carries the run that established it, so a resume reports the reuse the
+	// interrupted run reported rather than claiming it observed the verdict.
+	if got := decoded.Mutation.Results[0].Provenance; got != input.Mutation.Results[0].Provenance {
+		t.Fatalf("resumed provenance = %q, want %q", got, input.Mutation.Results[0].Provenance)
 	}
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(checkpoint.JSONSchema()))
 	if err != nil {
