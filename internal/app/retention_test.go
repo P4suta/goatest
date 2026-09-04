@@ -4,9 +4,12 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +55,86 @@ func findEvidence(t *testing.T, result report.Report, kind, id string) (report.E
 	}
 	t.Fatalf("evidence %s/%s is absent from %+v", kind, id, result.Evidence)
 	return report.Evidence{}, -1
+}
+
+// boundedHistoryRoot is a repository whose history holds one run.
+func boundedHistoryRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\n[reports]\nkeep = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// historyEntries is what reports/runs holds right now.
+func historyEntries(t *testing.T, root string) []string {
+	t.Helper()
+	children, err := os.ReadDir(filepath.Join(root, "reports", "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(children))
+	for _, child := range children {
+		names = append(names, child.Name())
+	}
+	return names
+}
+
+func TestEveryRunBoundsTheHistoryItJustExtended(t *testing.T) {
+	t.Run("a completed run collects the runs it made obsolete", func(t *testing.T) {
+		root := boundedHistoryRoot(t)
+		service := historyService(t, root)
+		historyRun(t, service, nil)
+		historyRun(t, service, nil)
+		newest := historyRun(t, service, nil)
+		// Nobody typed 'cache gc'. The run that just finished is the newest
+		// entry and the one both indexes name, so it survives by construction.
+		if entries := historyEntries(t, root); !slices.Equal(entries, []string{newest}) {
+			t.Fatalf("history after three runs = %v, want only %s", entries, newest)
+		}
+	})
+
+	t.Run("a run that failed collects as well", func(t *testing.T) {
+		root := boundedHistoryRoot(t)
+		service := app.Service{
+			Root: root, TempDirectory: t.TempDir(),
+			Run: func(context.Context, assure.Options) (report.Report, error) {
+				return report.Report{}, errors.New("the toolchain went missing")
+			},
+		}
+		for range 2 {
+			if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err == nil {
+				t.Fatal("a failing run reported success")
+			}
+		}
+		// The bundle a failed run writes is exactly the history somebody needs,
+		// so the collection has to run on that path too rather than letting a
+		// repository that only ever fails grow without a bound.
+		if entries := historyEntries(t, root); len(entries) != 1 {
+			t.Fatalf("history after two failed runs = %v, want one run", entries)
+		}
+	})
+
+	t.Run("a history that cannot be listed is a note rather than a failed run", func(t *testing.T) {
+		root := boundedHistoryRoot(t)
+		var progress bytes.Buffer
+		service := historyService(t, root)
+		service.Progress = &progress
+		historyRun(t, service, nil)
+		// Something the history is not supposed to hold. Nothing about it may
+		// reach the verdict of a run.
+		if err := os.WriteFile(filepath.Join(root, "reports", "runs", "notes.txt"), []byte("hand written"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		newest := historyRun(t, service, nil)
+		if !strings.Contains(progress.String(), "reports-gc-unavailable") {
+			t.Fatalf("progress = %q, want the unusable history reported as a note", progress.String())
+		}
+		if _, err := os.Stat(filepath.Join(root, "reports", "runs", newest)); err != nil {
+			t.Fatalf("the run that could not collect did not keep its own report: %v", err)
+		}
+	})
 }
 
 func TestACollectedRunIsNamedByReportAndLeavesEveryLatestCommandWorking(t *testing.T) {
