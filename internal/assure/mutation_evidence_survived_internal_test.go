@@ -7,6 +7,7 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -856,5 +857,140 @@ func TestAReusedMutantIsCheckpointedWithItsProvenance(t *testing.T) {
 	}
 	if unit, checkpointed := saved[mutant.ID]; !checkpointed || unit.Provenance != record.Provenance {
 		t.Fatalf("checkpointed %+v, want the provenance of the run that established the verdict", saved)
+	}
+}
+
+// TestMutationEvidenceBoundaryCases states the whole decision in one table:
+// for each record a store may hold and each route this run may reach, whether
+// the mutant is resolved from the record or executed. The reason behind each
+// row is pinned by a test of its own above; what this table adds is that the
+// rows are read together, so a rule that widened one of them without meaning
+// to is visible here as a mutant that stopped running.
+func TestMutationEvidenceBoundaryCases(t *testing.T) {
+	t.Parallel()
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	late := evidenceIdentity("TestLate", goanalysis.KindTest)
+	fuzzer := evidenceIdentity("FuzzValue", goanalysis.KindFuzz)
+	keys := map[targetIdentity]string{
+		early: digestText("early-key"), late: digestText("late-key"), fuzzer: digestText("fuzz-key"),
+	}
+	passed := map[targetIdentity]bool{early: true, late: true, fuzzer: true}
+	suites := map[string]string{evidenceModule: digestText("suite-key")}
+	reaches := func(names ...string) []TargetEvidence {
+		targets := make([]TargetEvidence, 0, len(names))
+		for index, name := range names {
+			kind := goanalysis.KindTest
+			if strings.HasPrefix(name, "Fuzz") {
+				kind = goanalysis.KindFuzz
+			}
+			targets = append(targets, evidenceTarget(name, kind, time.Duration(index+1)*time.Millisecond))
+		}
+		return targets
+	}
+
+	for _, test := range []struct {
+		name    string
+		record  func(gomutants.Mutant) *evidence.MutationRecord
+		targets []TargetEvidence
+		reuse   bool
+	}{
+		{name: "no record at all", targets: reaches("TestEarly")},
+		{
+			name: "a killed record whose killer still reaches unchanged", reuse: true,
+			targets: reaches("TestEarly"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := killedEvidenceRecord(mutant, early, keys[early])
+				return &record
+			},
+		},
+		{
+			name: "a killed record whose killer is a fuzz target", targets: reaches("FuzzValue"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := killedEvidenceRecord(mutant, fuzzer, keys[fuzzer])
+				return &record
+			},
+		},
+		{
+			name: "a survived record covering the whole reaching set", reuse: true,
+			targets: reaches("TestEarly"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := survivedEvidenceRecord(mutant, exhaustedKey(early, keys[early]), exhaustedKey(late, keys[late]))
+				return &record
+			},
+		},
+		{
+			name:    "a survived record a target has entered the reaching set of",
+			targets: reaches("TestEarly", "TestLate"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := survivedEvidenceRecord(mutant, exhaustedKey(early, keys[early]))
+				return &record
+			},
+		},
+		{
+			name: "a survived record a fuzz target reaches", targets: reaches("TestEarly", "FuzzValue"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := survivedEvidenceRecord(mutant, exhaustedKey(early, keys[early]), exhaustedKey(fuzzer, keys[fuzzer]))
+				return &record
+			},
+		},
+		{
+			name: "an unreached record whose package suite is unchanged", reuse: true,
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := unreachedEvidenceRecord(mutant, suites[evidenceModule])
+				return &record
+			},
+		},
+		{
+			name: "an unreached record a target now reaches", targets: reaches("TestEarly"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := unreachedEvidenceRecord(mutant, suites[evidenceModule])
+				return &record
+			},
+		},
+		{
+			name: "a timed-out record covering the whole reaching set", reuse: true,
+			targets: reaches("TestEarly"),
+			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
+				record := timedOutEvidenceRecord(mutant, exhaustedKey(early, keys[early]))
+				return &record
+			},
+		},
+		{
+			name: "a record about another mutant", targets: reaches("TestEarly"),
+			record: func(gomutants.Mutant) *evidence.MutationRecord {
+				other := evidenceMutant("mutant-b")
+				record := survivedEvidenceRecord(other, exhaustedKey(early, keys[early]))
+				return &record
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := evidenceMutant("mutant-a")
+			var records []evidence.MutationRecord
+			if test.record != nil {
+				records = append(records, *test.record(mutant))
+			}
+			index := suiteEvidenceIndex(records, keys, passed, suites)
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := &mutationUnitSession{catalog: catalog}
+
+			evaluation, err := EvaluateMutations(t.Context(), session, test.targets, MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evaluation.Mutants[0].Reused != test.reuse {
+				t.Fatalf("reused = %t, want %t (%d executions)",
+					evaluation.Mutants[0].Reused, test.reuse, len(session.requests))
+			}
+			if test.reuse && len(session.requests) != 0 {
+				t.Fatalf("a reused mutant was executed: %+v", session.requests)
+			}
+			if !test.reuse && len(session.requests) == 0 {
+				t.Fatal("a mutant no record answers for was not executed")
+			}
+		})
 	}
 }
