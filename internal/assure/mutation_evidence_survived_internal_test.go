@@ -537,12 +537,12 @@ func timingOutSession(catalog gomutants.Catalog) *mutationUnitSession {
 	}}
 }
 
-// TestEvaluateMutationsReusesATimedOutMutantUnderTheUniversalCondition pins the
-// one reuse that is not a proof. A timeout says the run could not settle the
-// mutant, so reusing it keeps a finding rather than removing one, which is the
-// direction that cannot cost assurance; the condition is still the universal
-// one, so a mutant a new test now reaches runs again.
-func TestEvaluateMutationsReusesATimedOutMutantUnderTheUniversalCondition(t *testing.T) {
+// TestEvaluateMutationsReusesATimedOutMutantAsAnInconclusiveDisposition pins
+// what a reused timeout reports. A timeout says the run could not settle the
+// mutant, so reusing it keeps a finding rather than removing one, and the
+// disposition stays inconclusive: no counter sums it, because a reuse that was
+// never a kill or a survival is not part of either.
+func TestEvaluateMutationsReusesATimedOutMutantAsAnInconclusiveDisposition(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
 	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
@@ -589,9 +589,15 @@ func TestEvaluateMutationsRecordsATimeoutAgainstTheTargetsItRan(t *testing.T) {
 	keys := map[targetIdentity]string{early: digestText("early-key"), late: digestText("late-key")}
 	index := evidenceIndex(nil, keys, map[targetIdentity]bool{early: true, late: true})
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
-	// The cheapest target runs first and times out, so the second target never
-	// runs and is not part of what this run exhausted.
-	session := timingOutSession(catalog)
+	// The cheapest target runs first and passes; time runs out under the second.
+	// Both ran, so both are named, and the one time ran out under is last —
+	// which is the part of the record a later run reads.
+	session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		if slices.Contains(request.Args, "-test.run=^TestLate$") {
+			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
 
 	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
@@ -602,12 +608,127 @@ func TestEvaluateMutationsRecordsATimeoutAgainstTheTargetsItRan(t *testing.T) {
 	want := evidence.MutationRecord{
 		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
 		Outcome: evidence.MutationOutcomeTimedOut, Provenance: "snapshot=" + digestText("this-run"),
-		Exhausted: []evidence.TargetKey{exhaustedKey(early, keys[early])},
+		Exhausted: []evidence.TargetKey{exhaustedKey(early, keys[early]), exhaustedKey(late, keys[late])},
 		Finding:   &evidence.FindingSeed{Kind: "mutation-timeout", Summary: mutationTargetTimeoutSummary},
 	}
 	records := index.store(catalog, evidenceModule).Records
 	if len(records) != 1 || !reflect.DeepEqual(records[0], want) {
 		t.Fatalf("records = %+v, want [%+v]", records, want)
+	}
+}
+
+// TestEvaluateMutationsReusesATimedOutMutantWhileTheTargetItTimedOutUnderStillReaches
+// pins the shape of the timeout condition, which is not the shape of the
+// survival condition.
+//
+// A survival is a claim about a set: every test that reaches the mutant ran
+// and none killed it, so a test that entered the set makes the claim someone
+// else's. A timeout is an observation about one target — this one did not
+// finish in the time it was given — and the targets that ran before it say
+// nothing about whether it finishes now. The condition is therefore
+// existential: the target time ran out under still reaches the mutant, is
+// still the same target, and this run saw it pass its baseline.
+func TestEvaluateMutationsReusesATimedOutMutantWhileTheTargetItTimedOutUnderStillReaches(t *testing.T) {
+	t.Parallel()
+	first := evidenceIdentity("TestFirst", goanalysis.KindTest)
+	slow := evidenceIdentity("TestSlow", goanalysis.KindTest)
+	fuzzer := evidenceIdentity("FuzzValue", goanalysis.KindFuzz)
+	keys := map[targetIdentity]string{
+		first: digestText("first-key"), slow: digestText("slow-key"),
+		fuzzer: digestText("fuzz-key"), evidenceIdentity("TestNew", goanalysis.KindTest): digestText("new-key"),
+	}
+	measured := func(name string, kind goanalysis.TargetKind, millis int) TargetEvidence {
+		return evidenceTarget(name, kind, time.Duration(millis)*time.Millisecond)
+	}
+
+	for _, test := range []struct {
+		name      string
+		exhausted []evidence.TargetKey
+		targets   []TargetEvidence
+		passed    map[targetIdentity]bool
+		reuse     bool
+	}{
+		{
+			name: "a target has entered the reaching set since the timeout", reuse: true,
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
+			targets: []TargetEvidence{
+				measured("TestFirst", goanalysis.KindTest, 1), measured("TestSlow", goanalysis.KindTest, 2),
+				measured("TestNew", goanalysis.KindTest, 3),
+			},
+		},
+		{
+			name: "a target that ran before the timeout has left the reaching set", reuse: true,
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
+			targets:   []TargetEvidence{measured("TestSlow", goanalysis.KindTest, 2)},
+		},
+		{
+			name:      "the target time ran out under has a different behaviour key",
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, digestText("stale-key"))},
+			targets: []TargetEvidence{
+				measured("TestFirst", goanalysis.KindTest, 1), measured("TestSlow", goanalysis.KindTest, 2),
+			},
+		},
+		{
+			name:      "the target time ran out under no longer reaches the mutant",
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
+			targets:   []TargetEvidence{measured("TestFirst", goanalysis.KindTest, 1)},
+		},
+		{
+			name:      "the target time ran out under is a fuzz target",
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(fuzzer, keys[fuzzer])},
+			targets: []TargetEvidence{
+				measured("TestFirst", goanalysis.KindTest, 1), measured("FuzzValue", goanalysis.KindFuzz, 2),
+			},
+		},
+		{
+			name:      "the target time ran out under was restored from a checkpoint",
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
+			targets: []TargetEvidence{
+				measured("TestFirst", goanalysis.KindTest, 1), resumedBlockTarget("TestSlow", 2*time.Millisecond),
+			},
+		},
+		{
+			name:      "the target time ran out under did not pass this run's baseline",
+			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
+			targets: []TargetEvidence{
+				measured("TestFirst", goanalysis.KindTest, 1), measured("TestSlow", goanalysis.KindTest, 2),
+			},
+			passed: map[targetIdentity]bool{first: true},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := evidenceMutant("mutant-a")
+			passed := test.passed
+			if passed == nil {
+				passed = map[targetIdentity]bool{}
+				for identity := range keys {
+					passed[identity] = true
+				}
+			}
+			index := evidenceIndex(
+				[]evidence.MutationRecord{timedOutEvidenceRecord(mutant, test.exhausted...)}, keys, passed)
+			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
+			session := &mutationUnitSession{catalog: catalog}
+
+			evaluation, err := EvaluateMutations(t.Context(), session, test.targets, MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+				Instrumented: blockRoutingInstrumentation(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evaluation.Mutants[0].Reused != test.reuse {
+				t.Fatalf("reused = %t, want %t (%d executions)",
+					evaluation.Mutants[0].Reused, test.reuse, len(session.requests))
+			}
+			if test.reuse && len(session.requests) != 0 {
+				t.Fatalf("a reused timeout was executed: %+v", session.requests)
+			}
+			if !test.reuse && len(session.requests) == 0 {
+				t.Fatal("a timeout no record answers for was not executed")
+			}
+		})
 	}
 }
 
@@ -948,7 +1069,7 @@ func TestMutationEvidenceBoundaryCases(t *testing.T) {
 			},
 		},
 		{
-			name: "a timed-out record covering the whole reaching set", reuse: true,
+			name: "a timed-out record whose timing-out target still reaches", reuse: true,
 			targets: reaches("TestEarly"),
 			record: func(mutant gomutants.Mutant) *evidence.MutationRecord {
 				record := timedOutEvidenceRecord(mutant, exhaustedKey(early, keys[early]))
