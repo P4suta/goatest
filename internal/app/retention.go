@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/retention"
 )
@@ -65,6 +66,25 @@ func collectReports(root string, keep int, moment time.Time) (retention.Result, 
 		_, referenced := protected[name]
 		return referenced
 	}, moment)
+}
+
+// collectDurableHistory bounds the history a run has just extended.
+//
+// It runs after the report is published, so the run that called it is the
+// newest entry and both indexes name it: it cannot collect its own report. A
+// history that will not list is reported as a note, because nothing this
+// function does may reach a verdict — the collection is housekeeping, and a
+// verification that failed because of housekeeping would be a worse outcome
+// than a directory that grew.
+func (service Service) collectDurableHistory(root string) {
+	loaded, err := config.Load(root)
+	if err != nil {
+		service.note("reports-gc-unavailable", err.Error())
+		return
+	}
+	if _, err := collectReports(root, loaded.Reports.Keep, service.clock()().UTC()); err != nil {
+		service.note("reports-gc-unavailable", err.Error())
+	}
 }
 
 func reportsGCEvidence(result retention.Result) report.Evidence {

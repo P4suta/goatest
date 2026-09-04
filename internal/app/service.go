@@ -285,6 +285,9 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		if writeErr := WriteReports(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
+		if ownsCacheLease {
+			service.collectDurableHistory(root)
+		}
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
@@ -296,6 +299,9 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		if err := cache.New(cacheRoot).DeleteCheckpoint(result.Snapshot); err != nil {
 			service.note("checkpoint-warning", err.Error())
 		}
+	}
+	if ownsCacheLease {
+		service.collectDurableHistory(root)
 	}
 	return result, nil
 }
