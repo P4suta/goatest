@@ -168,8 +168,13 @@ Print the latest report, the latest full-project report, or one recorded run.
 	case CommandCache:
 		return `Usage:	goatest cache status|gc
 
-Show the evidence cache policy and contents, or collect expired and
-over-budget entries.
+Show the policy and contents of everything runs leave behind, or collect it:
+the evidence cache, trace recordings, diagnostics bundles, stored repair
+candidates and patches, the build cache, and the temporary directories runs
+were killed in or kept on purpose. 'gc' also bounds the run history under
+reports/runs to the newest [reports] keep runs plus the ones latest-any.json
+and latest-full.json name. Every run collects all of it when it ends, so this
+is the same collection on demand rather than the only one there is.
 `, true
 	case CommandTrace:
 		return `Usage:	goatest trace summary [RUN]

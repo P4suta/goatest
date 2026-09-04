@@ -201,7 +201,8 @@ reads, and naming one collects its recordings there instead; `GOATEST_TRACE=1` a
 for a named one, so a job that cannot change a command line can still ask.
 The environment variable is read in `cmd/goatest` alone, where it becomes the
 flag the command layer parses: no layer below the command line reads the
-environment.
+environment. Recordings under the default root are one of the stores
+[every run collects when it ends](#what-the-repository-keeps-and-what-collects-it).
 
 A run that asked for no trace still records, into a ring of its last 4096 events
 in memory: no file, no directory, and a bounded price a run of any length pays
@@ -386,7 +387,8 @@ It lands in `<repository>/.goatest/diagnostics/<run>/`, one directory per failed
 run. `<run>` is the run identity of the report; a run that stopped before it had
 one — the failure a bundle is most needed for — is named `<UTC timestamp>-<pid>`
 instead, the name a recording of the same run takes, from the same injected
-clock and process id.
+clock and process id. Bundles are one of the stores
+[every run collects when it ends](#what-the-repository-keeps-and-what-collects-it).
 
 | File | What it holds |
 | --- | --- |
@@ -529,6 +531,38 @@ was made nor what its sweep found:
 `TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity` pins that for the
 assurance digest and for the behaviour key of every target, because both are
 facts about the machine and never about the code under test.
+
+### What the repository keeps, and what collects it
+
+Everything a run leaves in the repository has a bound and something that applies
+it. `.goatest/cache` holds the exact-input verdicts and the checkpoints inside
+them; `.goatest/trace` and `.goatest/diagnostics` hold the recordings and the
+failure bundles; `.goatest/candidates` holds a stored repair candidate per file
+and `.goatest/patches` a record of each candidate whose preimage moved;
+`.goatest/kept-temp-v1.json` is the ledger of what `--keep-temp` kept; and
+`reports/runs` holds one directory per completed run.
+
+All of them are collected by `goatest cache gc` and again at the end of every
+run, under the `[cache]` policy — except the run history, which is bound by
+`[reports] keep` as a count, because a report is product evidence rather than
+exhaust. Two rules keep the run-end collection out of the way of the run:
+
+- It happens only while the process holds the repository cache lease, so two
+  goatest processes never collect one directory at once.
+- Every failure is a progress note and never an error. `internal/app` reports
+  `cache-gc-unavailable`, `diagnostic-gc-unavailable`, `reports-gc-unavailable`
+  and `repair-gc-unavailable`; none of them reaches the report, the verdict or
+  the exit code. A verification that failed because housekeeping failed would be
+  a far worse outcome than a directory that grew.
+
+Two collections wait for something. The run history is collected after
+`WriteReports` has published the report, so the run doing the collecting is the
+newest entry and is named by both indexes: it cannot reach its own report,
+whatever the bound. And `.goatest/candidates` is skipped entirely while any
+checkpoint exists — `cache.Store.PendingCheckpoint` is the question maintenance
+asks, since it has no digest to ask about — because a resume re-validates the
+candidates its checkpoint recorded by ID and discards its whole saved mutation
+work when one is gone.
 
 ## Seam policy
 

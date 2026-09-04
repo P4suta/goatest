@@ -5,7 +5,8 @@ released an earlier schema, so the implementation has no legacy report reader.
 
 ## Durable layout
 
-Each completed verification owns an immutable directory:
+Each completed verification owns a directory that is immutable for as long as it
+exists:
 
 ```text
 reports/runs/<run-id>/
@@ -21,6 +22,13 @@ completed run of any scope. `latest-full.json` exists in both locations and
 advances only when `run_kind` is `full`. Changeset, package, and replay runs
 cannot replace it. Use `goatest report --latest-full` or
 `goatest report --run=<run-id>` to select explicitly.
+
+The history is bounded. The newest `[reports] keep` runs — twenty by default —
+and the runs the `latest-*` indexes point at are kept; older ones are collected
+at the end of every run and by `goatest cache gc`. Nothing ever rewrites a run
+directory: a run is there in full or it is gone, and `goatest report --run` of a
+collected run says so by name. Copy `reports/runs/<run-id>` elsewhere to keep one
+past the bound.
 
 ## Required audit identity
 
