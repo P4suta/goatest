@@ -39,9 +39,10 @@ the exact interruption guarantee the checkpoint exists to provide.
    completed baseline, race, catalog creation or invalidation, and completed
    mutation — publishes a new full base document. The successful rename makes
    that base authoritative, then the old journal is removed. If the process
-   dies between those steps, the first old journal record's base digest differs
-   and replay ignores the entire stale journal because its state is already in
-   the new base.
+   dies between those steps, replay skips the leading records whose old base
+   digest differs because their state is already in the new base. It still
+   applies any records a later process appended for the current base, and
+   rejects another base change after current-base replay has begun.
 5. **Replay in linear time and canonicalise once.** Replay indexes existing
    target and mutant identities, replaces or appends each unit in one pass, and
    sorts each completed collection once. Mutation workers likewise append to

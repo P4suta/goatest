@@ -228,3 +228,86 @@ func TestCheckpointJournalIgnoresOnlyAnUncommittedTail(t *testing.T) {
 		t.Fatalf("complete corrupt journal = found %t, error %v", found, err)
 	}
 }
+
+func TestCheckpointJournalReportsAReadErrorEvenWhenNoDataWasRead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	digest := strings.Repeat("7", 64)
+	store := New(root)
+	state := checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}
+	if err := store.PutCheckpoint(digest, state); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(root, "v1", digest, CheckpointJournalFileName)
+	if err := os.Mkdir(journalPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.GetCheckpoint(digest); err == nil || found ||
+		!strings.Contains(err.Error(), "read checkpoint journal") {
+		t.Fatalf("unreadable journal = found %t, error %v", found, err)
+	}
+}
+
+func TestCheckpointJournalSkipsOnlyAStalePrefix(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	digest := strings.Repeat("6", 64)
+	store := New(root)
+	state := checkpoint.State{
+		Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1,
+		Mutation: &checkpoint.Mutation{CatalogFingerprint: strings.Repeat("5", 64)},
+	}
+	if err := store.PutCheckpoint(digest, state); err != nil {
+		t.Fatal(err)
+	}
+	stale := checkpoint.MutationResult{
+		ID: "mutant-stale", Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-stale", Status: "killed"}},
+	}
+	if err := store.AppendMutationCheckpoint(digest, stale); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(root, "v1", digest, CheckpointJournalFileName)
+	staleData, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Publish a new compacted base, then model a crash before the stale journal
+	// was removed followed by a process that appended work for the current base.
+	state.Attempts = 2
+	if err := store.PutCheckpoint(digest, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journalPath, staleData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := checkpoint.MutationResult{
+		ID: "mutant-current", Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-current", Status: "killed"}},
+	}
+	if err := store.AppendMutationCheckpoint(digest, current); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.GetCheckpoint(digest)
+	if err != nil || !found || loaded.Attempts != 2 || len(loaded.Mutation.Results) != 1 ||
+		loaded.Mutation.Results[0].ID != current.ID {
+		t.Fatalf("checkpoint after stale prefix = (%+v, %t, %v)", loaded, found, err)
+	}
+
+	// A stale identity after current-base records is not a compaction prefix;
+	// accepting it would splice two histories in an order no writer produced.
+	journal, err := os.OpenFile(journalPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Write(staleData); err != nil {
+		_ = journal.Close()
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.GetCheckpoint(digest); err == nil || found ||
+		!strings.Contains(err.Error(), "changed base identity") {
+		t.Fatalf("stale journal suffix = found %t, error %v", found, err)
+	}
+}

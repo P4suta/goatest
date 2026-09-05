@@ -510,6 +510,27 @@ func TestAuditCountsPackageSuiteControlsApartFromTargetFacts(t *testing.T) {
 	}
 }
 
+func TestAuditCountsEachMeasuredPackageSuiteIdentityOnce(t *testing.T) {
+	t.Parallel()
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(10, 2, 12, 16)}})
+	suite := trace.ProbeRecord{
+		Target: "package-suite:" + fixtureModule + "/pkg", Package: fixtureModule + "/pkg",
+		Suite: true, Outcome: trace.ProbeOutcomeMeasured,
+	}
+	stream := recordedTrace(t,
+		probeEvent(1, suite), probeEvent(2, suite),
+		probeEvent(3, trace.ProbeRecord{
+			Target: suite.Target, Package: suite.Package, Suite: true,
+			Outcome: trace.ProbeOutcomeUnavailable,
+		}),
+	)
+	result := auditFixture(t, stream, recorded)
+	if result.suiteProbeExecutions != 3 || result.suiteProbeMeasured != 1 {
+		t.Fatalf("package-suite probe accounting = %d measured identities across %d executions, want 1 across 3",
+			result.suiteProbeMeasured, result.suiteProbeExecutions)
+	}
+}
+
 func TestAuditIgnoresPairedControlsAsInfectionEvidence(t *testing.T) {
 	t.Parallel()
 	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(10, 2, 12, 16)}})

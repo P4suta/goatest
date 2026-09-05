@@ -214,11 +214,14 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 	}
 	journalPath := filepath.Join(filepath.Dir(path), CheckpointJournalFileName)
 	data, err := os.ReadFile(journalPath)
-	if errors.Is(err, os.ErrNotExist) || len(data) == 0 {
+	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
 	}
 	if err != nil {
 		return checkpoint.State{}, fmt.Errorf("goatest: read checkpoint journal: %w", err)
+	}
+	if len(data) == 0 {
+		return state, nil
 	}
 	// A killed writer may leave only the tail of its last record. Newline is
 	// the commit marker: every complete line is checksummed and replayed, while
@@ -239,6 +242,7 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 		}
 	}
 	lines := bytes.Split(data[:lastNewline], []byte{'\n'})
+	currentBaseSeen := false
 	for index, line := range lines {
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
@@ -255,13 +259,16 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 		}
 		if record.BaseDigest != baseDigest {
 			// A crash after publishing a compacted base but before deleting its
-			// old journal is expected. None of that journal belongs to the new
-			// base; its complete state is already in the base document.
-			if index == 0 {
-				return state, nil
+			// old journal is expected. Skip that stale prefix: a later process
+			// can already have appended records for the current base. Once a
+			// current record appears, another base would splice histories and is
+			// corruption rather than a compaction remainder.
+			if !currentBaseSeen {
+				continue
 			}
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d changed base identity", index+1)
 		}
+		currentBaseSeen = true
 		if (record.BaselineTarget == nil) == (record.MutationResult == nil) {
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d does not contain exactly one unit", index+1)
 		}

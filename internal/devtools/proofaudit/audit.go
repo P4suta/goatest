@@ -571,6 +571,7 @@ type auditor struct {
 	executions            map[string][]targetIdentity
 	suiteProfiles         map[string]string
 	suiteProfileConflicts map[string]bool
+	measuredSuiteProbes   map[string]struct{}
 	decided               map[pairKey]struct{}
 	suiteDecided          map[pairKey]struct{}
 	result                auditResult
@@ -593,6 +594,7 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 		measuredBy: make(map[targetIdentity]string), probes: make(map[string]*probeFacts),
 		executions: make(map[string][]targetIdentity), suiteProfiles: make(map[string]string),
 		suiteProfileConflicts: make(map[string]bool),
+		measuredSuiteProbes:   make(map[string]struct{}),
 		decided:               make(map[pairKey]struct{}), suiteDecided: make(map[pairKey]struct{}), result: result,
 	}
 }
@@ -638,7 +640,10 @@ func (audit *auditor) probe(record trace.ProbeRecord) {
 	if record.Suite {
 		audit.result.suiteProbeExecutions++
 		if record.Outcome == trace.ProbeOutcomeMeasured {
-			audit.result.suiteProbeMeasured++
+			if _, measured := audit.measuredSuiteProbes[record.Target]; !measured {
+				audit.measuredSuiteProbes[record.Target] = struct{}{}
+				audit.result.suiteProbeMeasured++
+			}
 		}
 		return
 	}

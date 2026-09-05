@@ -117,12 +117,13 @@ identities.
 The base decoder rejects unknown fields, trailing JSON, duplicate identities,
 invalid digests, and nonterminal saved units. Journal replay rejects unknown
 fields, trailing data within a complete line, invalid identities or checksums,
-mixed base digests, and a record that does not carry exactly one allowed unit.
-An unterminated final line is an unpublished killed write and is ignored. A
-journal left after a new base was atomically published is ignored when its
-first record names the old base digest; the state it contains has already been
-compacted into the new base. Replay indexes identities in one pass, sorts once,
-and applies the same strict state validation as a decoded base.
+a base change after a current-base record, and a record that does not carry
+exactly one allowed unit. An unterminated final line is an unpublished killed
+write and is ignored. A journal left after a new base was atomically published
+may begin with old-base records; replay skips that stale prefix because its
+state has already been compacted, then applies any current-base records appended
+afterward. Replay indexes identities in one pass, sorts once, and applies the
+same strict state validation as a decoded base.
 
 Baseline target identities are checked against current discovery. The race
 package list must match exactly. The mutation fingerprint is SHA-256 over sorted
