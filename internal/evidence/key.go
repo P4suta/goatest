@@ -93,7 +93,11 @@ func (inputs TargetInputs) Clone() TargetInputs {
 // mistaken for each other.
 func TargetBehaviorKey(inputs TargetInputs) string {
 	h := sha256.New()
-	write(h, "goatest-mutation-evidence-key-v1")
+	// v2 separates evidence produced with baseline-calibrated command limits
+	// from v1 evidence, whose configured command timeout replaced calibration.
+	// Development builds can carry the same version string across that runner
+	// change, so the key domain itself must mark the execution contract.
+	write(h, "goatest-mutation-evidence-key-v2")
 	writeMap(h, "files", inputs.Files)
 	writeMap(h, "dependencies", inputs.Dependencies)
 	write(h, "toolchain", inputs.Toolchain)
@@ -152,7 +156,7 @@ func SuiteBehaviorKey(inputs TargetInputs, targets []TargetKey) string {
 	ordered := slices.Clone(targets)
 	slices.SortFunc(ordered, compareTargetKeys)
 	h := sha256.New()
-	write(h, "goatest-mutation-evidence-suite-key-v1")
+	write(h, "goatest-mutation-evidence-suite-key-v2")
 	write(h, "targets", strconv.Itoa(len(ordered)))
 	for _, target := range ordered {
 		write(h, target.Package, target.Name, target.Kind, target.Key)

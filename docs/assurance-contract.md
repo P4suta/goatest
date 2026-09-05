@@ -255,8 +255,10 @@ direction in which a question nobody answered may be carried forward.
 
 Each mutation command, and the probe command that measures the same target,
 gets five times its measured baseline duration plus five seconds, with a
-30-second floor. The contract caps that calibration at 30 minutes for
-`standard-v1` and five hours for `deep-v1`; `[execution].timeout` is a further
+30-second floor. That floor is applied before `[execution].timeout`: a positive
+configured ceiling shorter than 30 seconds, such as seven seconds, remains the
+effective limit. The contract otherwise caps calibration at 30 minutes for
+`standard-v1` and five hours for `deep-v1`; the configured timeout is a further
 upper bound, not a switch that disables calibration. An expired budget remains
 inconclusive under every bound, so a shorter calibrated command can reduce
 waiting without manufacturing a kill or a survival.

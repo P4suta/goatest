@@ -90,6 +90,21 @@ func TestTargetBehaviorKeyIsDeterministicAndEveryInputInvalidatesIt(t *testing.T
 	}
 }
 
+// TestBehaviorKeyContractV2Golden makes an execution-contract change an
+// explicit persisted-key migration rather than an accidental cache hit or
+// miss. Update these values only when old mutation evidence must be retired.
+func TestBehaviorKeyContractV2Golden(t *testing.T) {
+	t.Parallel()
+	inputs := targetInputsFixture()
+	target := evidence.TargetBehaviorKey(inputs)
+	suite := evidence.SuiteBehaviorKey(inputs, suiteTargetsFixture())
+	const wantTarget = "0a9ef3a12487b5b85ea1242b3fce6dcecb78721f29b5a403c420a3df12615869"
+	const wantSuite = "ba69d8777e6835daca3b548a9502b0535d64da4519e8d845131b8723e2401d09"
+	if target != wantTarget || suite != wantSuite {
+		t.Fatalf("behavior keys = target %s, suite %s", target, suite)
+	}
+}
+
 func TestTargetBehaviorKeyOrdersFilesAndEnvironmentIndependently(t *testing.T) {
 	t.Parallel()
 	base := targetInputsFixture()
