@@ -75,6 +75,27 @@ func TestProbeBlockCountsPackageSuitesApartFromTargets(t *testing.T) {
 	}
 }
 
+func TestProbeBlockExcludesPairedControlsAndReportsThemApart(t *testing.T) {
+	t.Parallel()
+	control := probeEvent("paired-control:example.com/app", trace.ProbeOutcomeMeasured)
+	control.Probe.Package, control.Probe.Control, control.Probe.DurationMS = "example.com/app", true, 2500
+	timedOut := probeEvent("paired-control:example.com/lib", trace.ProbeOutcomeTimedOut)
+	timedOut.Probe.Package, timedOut.Probe.Control, timedOut.Probe.DurationMS = "example.com/lib", true, 1000
+	probe := probeEvent("target-a", trace.ProbeOutcomeMeasured, "m-0001")
+	events := []trace.Event{control, probe, timedOut}
+
+	if lines := strings.Join(probeBlock(events), "\n"); !strings.Contains(lines, "probe: 1 execution across 1 target") || strings.Contains(lines, "paired-control") {
+		t.Fatalf("infection probe block mixed in paired controls:\n%s", lines)
+	}
+	want := []string{
+		"paired controls: 2 executions in 3.5s",
+		"outcomes: measured 1, test-failed 0, timed-out 1, unavailable 0, error 0",
+	}
+	if got := controlBlock(events); !slices.Equal(got, want) {
+		t.Fatalf("control block = %q, want %q", got, want)
+	}
+}
+
 func TestProbeBlockNamesARecordingWithoutProbes(t *testing.T) {
 	t.Parallel()
 	// A recording made before the probe pass existed carries no probe event,

@@ -628,6 +628,13 @@ func (audit *auditor) read(event trace.Event) {
 // whichever came first would decide every pair of that killer on the order a
 // run happened to write. Both records are dropped for a mark that says so.
 func (audit *auditor) probe(record trace.ProbeRecord) {
+	// A paired control uses the probe tree only as an already-built semantic
+	// original. It is evidence that a kill was confirmed, never infection
+	// evidence used to route a target, so it cannot conflict with that target's
+	// one routing measurement.
+	if record.Control {
+		return
+	}
 	if record.Suite {
 		audit.result.suiteProbeExecutions++
 		if record.Outcome == trace.ProbeOutcomeMeasured {

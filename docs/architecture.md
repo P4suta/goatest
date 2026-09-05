@@ -84,15 +84,17 @@ before the pass existed, which only executes more.
 Ordinary mutant commands do not wait for a project-independent fixed timeout.
 Their comparative deadline is derived from the slower of the same run's passing
 baseline and probe controls, widened by disagreement between those samples. A
-remaining package-suite fallback first runs the exact uninstrumented original
-command, memoized once per package/arguments/environment identity; a failure or
-expiration makes all dependent mutants inconclusive without executing them,
-while a pass supplies the closest duration sample. The contract ceiling and
-`[execution].timeout` remain hard cancellation caps because arbitrary mutated
-code may not terminate. The legacy fixed calibration is used only when no
-control fact exists, and fuzzing retains a separate bound because a seed-corpus
-duration does not predict a 10,000- or 100,000-input campaign. The design
-decision is recorded in
+remaining package-suite fallback first runs the semantic original through the
+already-compiled probe binaries with no mutant active, memoized once per
+package/arguments/environment identity; a failure or expiration makes all
+dependent mutants inconclusive without executing them, while a pass supplies
+the closest duration sample. Compilation is therefore outside that comparative
+deadline. Replay skips probe preparation and uses a lazy pristine fallback. The
+contract ceiling and `[execution].timeout` remain hard cancellation caps
+because arbitrary mutated code may not terminate. The legacy fixed calibration
+is used only when no control fact exists, and fuzzing retains a separate bound
+because a seed-corpus duration does not predict a 10,000- or 100,000-input
+campaign. The design decision is recorded in
 [ADR 0008](adr/0008-controls-before-timeouts.md).
 
 Across runs, the mutation phase keeps a store of what it established about each

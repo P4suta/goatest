@@ -367,7 +367,7 @@
       ]
     },
     "probe": {
-      "description": "One probe execution of a test target against the probe tree, recorded without the environment it ran in and without a path into that tree.",
+      "description": "One infection probe or paired semantic-original control against the prepared probe tree, recorded without the environment it ran in and without a path into that tree.",
       "type": "object",
       "additionalProperties": false,
       "required": ["target", "exit_code"],
@@ -376,6 +376,10 @@
         "package": { "type": "string" },
         "suite": {
           "description": "Whether this is one whole package-suite execution rather than one top-level target. Absent and false mean a target probe.",
+          "type": "boolean"
+        },
+        "control": {
+          "description": "Whether this probe-tree execution was used only as the original half of paired mutation confirmation. Its infection log is not routing evidence.",
           "type": "boolean"
         },
         "args": { "type": "array", "items": { "type": "string" } },
@@ -413,6 +417,22 @@
             "description": "A synthetic package-suite target identity belongs only to a whole-suite probe.",
             "required": ["suite"],
             "properties": { "suite": { "const": true } }
+          }
+        },
+        {
+          "if": { "required": ["control"], "properties": { "control": { "const": true } } },
+          "then": {
+            "description": "A paired control has its own synthetic identity and is neither a package-suite routing probe nor a source of infection facts.",
+            "properties": { "target": { "pattern": "^paired-control:.+" } },
+            "not": { "anyOf": [{ "required": ["suite"] }, { "required": ["infected"] }] }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "pattern": "^paired-control:" } } },
+          "then": {
+            "description": "A synthetic paired-control identity belongs only to a control execution.",
+            "required": ["control"],
+            "properties": { "control": { "const": true } }
           }
         },
         {

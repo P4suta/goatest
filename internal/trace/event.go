@@ -216,8 +216,9 @@ type Discharge struct {
 	Reason string `json:"reason"`
 }
 
-// ProbeRecord describes one probe execution: which target or package suite ran
-// against the probe tree, how it ran, and which mutants it infected.
+// ProbeRecord describes one prepared probe-tree execution: which target,
+// package suite, or paired semantic-original control ran, how it ran, and —
+// for an infection probe — which mutants it infected.
 //
 // Target is the target ID, the same string a Discharge and the KilledBy of a
 // MutantRecord name. A package suite carries a synthetic package-suite: ID and
@@ -232,6 +233,10 @@ type Discharge struct {
 // measured execution carries it, so a consumer reading any other outcome, or
 // an execution that errored, treats every mutant as infected by that target.
 //
+// Control marks a second use of the probe tree: an execution with no mutant
+// active between two mutant executions, used only to confirm that a kill
+// belongs to the mutant. Its infections are deliberately not routing facts.
+//
 // Args are the test flags the execution ran with. The record carries no
 // environment and no path into the probe tree: a probe execution is described
 // by the target that ran and the mutants it infected.
@@ -239,6 +244,7 @@ type ProbeRecord struct {
 	Target     string   `json:"target"`
 	Package    string   `json:"package,omitempty"`
 	Suite      bool     `json:"suite,omitempty"`
+	Control    bool     `json:"control,omitempty"`
 	Args       []string `json:"args,omitempty"`
 	TimeoutMS  int64    `json:"timeout_ms,omitempty"`
 	Outcome    string   `json:"outcome,omitempty"`

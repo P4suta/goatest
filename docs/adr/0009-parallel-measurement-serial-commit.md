@@ -3,8 +3,8 @@
 ## Status
 
 Accepted, 2026-09-05. Implemented by the bounded baseline target and package
-suite schedulers in `internal/assure`, concurrent original-control workspaces,
-and concurrent pre-preparation execution in go-mutants.
+suite schedulers in `internal/assure`, concurrent paired-original controls over
+prepared sessions, and concurrent pre-preparation execution in go-mutants.
 
 ## Context
 
@@ -52,11 +52,12 @@ must not silently change the program mutation discovery measures.
    refuses any path a control added, removed, or changed.
 6. **Package controls overlap by package.** Whole-suite coverage controls run
    in deterministic import-path slots after target controls have supplied their
-   duration references. Exact uninstrumented controls use a lazy second frozen
-   workspace: independent commands take shared execution ownership, opening is
-   performed once, and close takes exclusive ownership after all commands end.
-   Command results are memoized by package, arguments, and environment, so
-   concurrent mutants never duplicate the same original preflight.
+   duration references. Full-run original controls reuse the prepared probe
+   session's semantic-original binaries, whose calls are independently
+   scratch-isolated and concurrency-safe. Replay retains a lazy second frozen
+   workspace because it deliberately skips probe preparation. Command results
+   are memoized by package, arguments, and environment, so concurrent mutants
+   never duplicate the same original preflight.
 
 ## Consequences
 

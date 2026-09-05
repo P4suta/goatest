@@ -513,6 +513,26 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "suite probe target", "exact package"},
 		},
 		{
+			name:   "paired control identity without its marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired-control identity", "control=true"},
+		},
+		{
+			name:   "paired control names another package",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/other","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired control target", "exact package"},
+		},
+		{
+			name:   "paired control carries infection facts",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured","infected":[]}}`),
+			want:   []string{"line 2", "paired control carries suite or infected"},
+		},
+		{
+			name:   "paired control carries a false suite marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"suite":false,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired control carries suite or infected"},
+		},
+		{
 			name:   "probe with a negative timeout",
 			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":0,"timeout_ms":-1}}`),
 			want:   []string{"line 2", "probe.timeout_ms"},

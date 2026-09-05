@@ -20,6 +20,7 @@ import (
 const (
 	packageSuiteProbePrefix    = "package-suite:"
 	packageSuiteCoveragePrefix = "package-suite-coverage:"
+	pairedControlProbePrefix   = "paired-control:"
 )
 
 // readBufferSize is the read buffer one line is assembled in. A line is not
@@ -549,6 +550,23 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 	if err := checkNotEmpty("probe.target", record.Target); err != nil {
 		return err
 	}
+	_, suiteRecorded := probe["suite"]
+	_, infectionsRecorded := probe["infected"]
+	if record.Control {
+		target := pairedControlProbePrefix + record.Package
+		if record.Package == "" {
+			target = pairedControlProbePrefix + "all"
+		}
+		if record.Target != target {
+			return fmt.Errorf("paired control target %q in package %q, want %q for that exact package",
+				record.Target, record.Package, target)
+		}
+		if suiteRecorded || infectionsRecorded {
+			return errors.New("paired control carries suite or infected: a control is neither a routing suite nor a source of infection facts")
+		}
+	} else if strings.HasPrefix(record.Target, pairedControlProbePrefix) {
+		return fmt.Errorf("probe target %q has a paired-control identity without control=true", record.Target)
+	}
 	if record.Suite {
 		if !strings.HasPrefix(record.Target, packageSuiteProbePrefix) ||
 			len(record.Target) == len(packageSuiteProbePrefix) || record.Package == "" ||
@@ -588,8 +606,7 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 			return err
 		}
 	}
-	_, infected := probe["infected"]
-	return checkInfections(record, infected)
+	return checkInfections(record, infectionsRecorded)
 }
 
 // checkInfections holds the mutants a probe execution infected to the

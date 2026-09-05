@@ -4,12 +4,16 @@
 package assure
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
+	gomutants "github.com/P4suta/go-mutants"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
@@ -154,6 +158,58 @@ func TestRunCoordinatorHandsTheRecorderToEveryTracedComponent(t *testing.T) {
 	}
 	if harness.generationOptions.RepositoryValidator.Trace != harness.recorder {
 		t.Fatalf("validation recorder = %v, want the run's recorder", harness.generationOptions.RepositoryValidator.Trace)
+	}
+}
+
+func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
+	t.Parallel()
+	harness := newRunCoordinatorHarness(t)
+	sink := harness.record()
+	session := &mutationUnitSession{catalog: harness.catalog, probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Duration: 25 * time.Millisecond}, nil
+	}}
+	harness.dependencies.prepareSession = func(_ context.Context, _ *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		harness.preparedOptions = options
+		return session, nil
+	}
+	harness.dependencies.evaluateMutations = func(ctx context.Context, got MutationSession, targets []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
+		harness.mutationCalls++
+		harness.mutationOptions = options
+		harness.mutationTargets = slices.Clone(targets)
+		if got != session {
+			t.Fatalf("mutation session = %p, want prepared session %p", got, session)
+		}
+		result, err := options.OriginalControl(ctx, gomutants.ExecRequest{
+			Package: "fixture.example/module", Args: []string{"-test.run=^TestValue$"},
+			Env: []string{"DB=ready"}, Timeout: 2 * time.Second,
+		})
+		if err != nil || result.ExitCode != 0 || result.Duration != 25*time.Millisecond {
+			t.Fatalf("prepared original control = (%+v, %v)", result, err)
+		}
+		return harness.mutation, nil
+	}
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	want := gomutants.ProbeRequest{
+		Package: "fixture.example/module", Args: []string{"-test.run=^TestValue$"},
+		Env: []string{"DB=ready"}, Timeout: 2 * time.Second,
+	}
+	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("prepared control requests = %+v, want %+v", got, want)
+	}
+	if harness.openCalls != 1 {
+		t.Fatalf("workspace opens = %d, want only the primary prepared workspace", harness.openCalls)
+	}
+	var controls []trace.ProbeRecord
+	for _, event := range sink.Events() {
+		if event.Type == trace.TypeProbeExec && event.Probe != nil && event.Probe.Control {
+			controls = append(controls, *event.Probe)
+		}
+	}
+	if len(controls) != 1 || controls[0].Target != "paired-control:fixture.example/module" {
+		t.Fatalf("recorded controls = %+v", controls)
 	}
 }
 

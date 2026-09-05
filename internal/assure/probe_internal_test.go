@@ -705,3 +705,107 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 		t.Fatalf("evaluation = %+v", evaluation)
 	}
 }
+
+func TestPreparedProbeMutationControlRunsTheExactSemanticOriginal(t *testing.T) {
+	t.Parallel()
+	session := &mutationUnitSession{probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{
+			Outcome: gomutants.ProbeMeasured, ExitCode: 0,
+			Duration: 1250 * time.Millisecond, OutputTail: "passing output",
+		}, nil
+	}}
+	recording, recorder := newProbeRecording()
+	args := []string{"-test.run=^TestBoundary$", "-test.short=true"}
+	environment := []string{"DB=ready", "TOKEN=fixture"}
+	request := gomutants.ExecRequest{
+		Mutant: "mutant-a", Package: "fixture.example/module/pkg",
+		Args: args, Env: environment, Timeout: 7 * time.Second,
+	}
+	result, err := preparedProbeMutationControl(session, recorder)(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRequest := gomutants.ProbeRequest{
+		Package: request.Package, Args: slices.Clone(args), Env: slices.Clone(environment), Timeout: request.Timeout,
+	}
+	args[0], environment[0] = "mutated", "mutated"
+	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], wantRequest) {
+		t.Fatalf("probe requests = %+v, want %+v", got, wantRequest)
+	}
+	wantResult := gomutants.CommandResult{
+		ExitCode: 0, Duration: 1250 * time.Millisecond, Output: []byte("passing output"),
+	}
+	if !reflect.DeepEqual(result, wantResult) {
+		t.Fatalf("control result = %+v, want %+v", result, wantResult)
+	}
+	validateProbeLines(t, recording.Lines())
+	records := probeRecords(t, recording)
+	wantRecord := trace.ProbeRecord{
+		Target: "paired-control:fixture.example/module/pkg", Package: "fixture.example/module/pkg",
+		Control: true, Args: wantRequest.Args, TimeoutMS: 7000,
+		Outcome: trace.ProbeOutcomeMeasured, DurationMS: 1250,
+	}
+	if got := records[wantRecord.Target]; !reflect.DeepEqual(got, wantRecord) {
+		t.Fatalf("control record = %+v, want %+v", got, wantRecord)
+	}
+}
+
+func TestPreparedProbeMutationControlFailsClosed(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("probe process did not start")
+	tests := []struct {
+		name       string
+		result     gomutants.ProbeResult
+		failure    error
+		wantError  string
+		wantResult gomutants.CommandResult
+	}{
+		{
+			name: "a timed-out original", result: gomutants.ProbeResult{
+				Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: 3 * time.Second, OutputTail: "stalled",
+			},
+			wantResult: gomutants.CommandResult{
+				ExitCode: -1, TimedOut: true, Duration: 3 * time.Second, Output: []byte("stalled"),
+			},
+		},
+		{name: "an execution error", failure: cause, wantError: "goatest: prepared original control: probe process did not start"},
+		{
+			name: "an unknown outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeOutcome("future")},
+			wantError: `goatest: prepared original control returned unknown outcome "future"`,
+		},
+		{
+			name: "a contradictory measured outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, ExitCode: 2},
+			wantError: "goatest: prepared original control returned measured with exit code 2",
+		},
+		{
+			name: "a contradictory failed outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeTestFailed},
+			wantError: "goatest: prepared original control returned test-failed with exit code 0",
+		},
+		{
+			name: "a negative duration", result: gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Duration: -time.Nanosecond},
+			wantError: "goatest: prepared original control returned negative duration -1ns",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			session := &mutationUnitSession{probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+				return testCase.result, testCase.failure
+			}}
+			recording, recorder := newProbeRecording()
+			result, err := preparedProbeMutationControl(session, recorder)(t.Context(), gomutants.ExecRequest{Timeout: time.Second})
+			if testCase.wantError == "" {
+				if err != nil || !reflect.DeepEqual(result, testCase.wantResult) {
+					t.Fatalf("control = (%+v, %v), want (%+v, nil)", result, err, testCase.wantResult)
+				}
+			} else if err == nil || err.Error() != testCase.wantError || !reflect.DeepEqual(result, gomutants.CommandResult{}) {
+				t.Fatalf("control = (%+v, %v), want zero result and %q", result, err, testCase.wantError)
+			}
+			validateProbeLines(t, recording.Lines())
+			record := probeRecords(t, recording)["paired-control:all"]
+			if !record.Control || (testCase.wantError != "" && record.Error == "") {
+				t.Fatalf("control record = %+v", record)
+			}
+		})
+	}
+}

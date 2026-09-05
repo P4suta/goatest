@@ -34,9 +34,9 @@ self-dogfood is not external compatibility evidence.
   child does not participate in the probe runtime, goatest cannot invent that
   reachability. An otherwise-unreached mutant still has its exact package-suite
   fallback measured first with coverage and, where useful, infection; anything
-  neither control answers receives an exact original preflight and is then
-  executed with the mutant. A blind target omitted from a non-empty route
-  remains a possible surviving mutant rather than a manufactured kill.
+  neither control answers receives a prepared semantic-original preflight and
+  is then executed with the mutant. A blind target omitted from a non-empty
+  route remains a possible surviving mutant rather than a manufactured kill.
 - Negative package-suite coverage is one measured execution, not a liveness
   theorem. It discharges a fallback only when the exact mutant position lies in
   a block cmd/cover instrumented but the passing suite did not cover. A clock,
@@ -46,7 +46,7 @@ self-dogfood is not external compatibility evidence.
   instrumentation can itself perturb timing or scheduling. Unknown positions,
   gaps between instrumented blocks, failed controls, and missing profiles are
   kept; a positive target or suite infection overrides contradictory coverage
-  silence. Remaining fallbacks run the exact uninstrumented original package
+  silence. Remaining fallbacks run the prepared semantic-original package
   first and then the mutant, so the proof never substitutes a guess for an
   unknown. `proofaudit` independently checks the rule against attributable
   package-suite kills in full recordings, reporting missing or conflicting
@@ -174,9 +174,11 @@ self-dogfood is not external compatibility evidence.
   same-run passing controls rather than project-independent waits, and their
   expiration is inconclusive rather than a verdict. When a package fallback
   has no positive duration sample, the legacy 30-second-floor calibration may
-  still be paid once by its memoized exact original preflight; it is not paid
-  independently by every mutant. Fuzz campaigns retain a separate fixed safety
-  bound because a seed-corpus duration does not predict the configured search.
+  still be paid once by its memoized prepared original preflight; compilation
+  is outside that deadline and it is not paid independently by every mutant.
+  Replay has no prepared probe tree and can still pay for its pristine fallback
+  compilation. Fuzz campaigns retain a separate fixed safety bound because a
+  seed-corpus duration does not predict the configured search.
 - A reused timeout keeps its finding rather than resolving anything, so it can
   only ever cost a run work it did not need to do, never assurance. Its
   condition is existential — the target time ran out under still reaches the

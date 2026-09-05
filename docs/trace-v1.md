@@ -133,7 +133,7 @@ many goroutines record at once.
 | `exec` | `exec` | a command of the mutation workspace returned |
 | `mutant-exec` | `mutant` | one mutant execution returned |
 | `route` | `route` | coverage and probe evidence decided a mutant's execution plan |
-| `probe-exec` | `probe` | one probe execution of a test target or package suite returned |
+| `probe-exec` | `probe` | one infection probe or prepared paired-original control returned |
 | `progress` | `progress` | the run reported a progress note |
 | `artifact` | `artifact` | the run wrote a file |
 | `run-end` | `run` | the recording closes; always the last line |
@@ -378,14 +378,17 @@ answer with its outcome.
 
 ### `probe`
 
-One probe execution of a test target or package suite, recorded after the
-engine answered so that the execution and what it measured are one line.
+One execution through the prepared probe tree, recorded after the engine
+answered so that the execution and what it established are one line. Most are
+infection probes; a `control` execution is the semantic original used for
+mutation confirmation and establishes no routing fact.
 
 | Field | Meaning |
 | --- | --- |
-| `target` | the target that ran, or `package-suite:<import-path>` for a whole-suite control |
+| `target` | the target that ran, `package-suite:<import-path>` for a whole-suite probe, or `paired-control:<package>` for a paired original |
 | `package` | the package the target or suite belongs to |
 | `suite` | `true` for a whole-package control; absent for a top-level target |
+| `control` | `true` only when this is the prepared semantic-original half of mutation confirmation |
 | `args` | the test flags the execution ran with |
 | `timeout_ms` | the timeout the execution was given |
 | `outcome` | `measured`, `test-failed`, `timed-out`, or `unavailable` |
@@ -404,14 +407,15 @@ Which targets. goatest probes the test and example targets, the ones the
 mutation phase runs under `-test.run=^Name$`, and sends each of them the
 request that phase would send for that single target: the same package, the
 same `-test.run` selection followed by the run's extra test flags, the same
-environment, and a comparative deadline derived from its passing baseline — everything
-but the mutant, which a probe tree never activates. That is what makes the
-answer a statement about the execution the mutation phase will run rather than
-about some other one.
-Fuzz targets are never probed and produce no `probe-exec` event: the mutation
-phase fuzzes them beyond the seed corpus the probe would measure, so a
-measurement of the corpus would speak for inputs it never saw, and a fuzz run on
-the probe tree would write corpus files into that tree.
+environment, and a comparative deadline derived from its passing baseline —
+everything but the mutant, which a probe tree never activates. That is what
+makes the answer a statement about the execution the mutation phase will run
+rather than about some other one.
+Fuzz targets receive no infection probe: the mutation phase fuzzes them beyond
+the seed corpus such a probe would measure, so a measurement of the corpus
+would speak for inputs it never saw. A fuzz target can still produce a
+`control: true` event when a mutation needs paired confirmation; that event
+asserts only that the semantic original passed.
 
 Which suites. A package-suite probe carries `suite: true`, the synthetic target
 identity `package-suite:<import-path>`, the run's extra test flags without a
@@ -424,6 +428,18 @@ unreached mutant of the package. The schema requires the suite marker and a
 synthetic identity; the summary reader additionally requires that identity to
 name the exact `package` in the same record, so no consumer can attribute the
 control to another package or count it as one top-level target.
+
+Which controls. In a full run, every original preflight and paired kill
+confirmation reuses the session's already-compiled probe binaries with no
+mutant active. The package, arguments, environment, and comparative deadline
+are exactly those of the mutant request; only the tree is the
+semantics-preserving probe form of the original program. The synthetic identity
+is `paired-control:<package>`, or `paired-control:all` for an all-package
+request, and `control: true` is required. A control never carries `suite` or
+`infected`: incidental probe logging is not infection evidence, `proofaudit`
+ignores it, and `tracesummary` accounts for it in a separate paired-controls
+block. A mutant replay deliberately prepares no probe tree and instead uses a
+lazy pristine-workspace control, recorded as an ordinary `exec` event.
 
 A target or suite the pass could not measure keeps no facts at all. A
 `test-failed`, a `timed-out`, an `unavailable`, and an execution stopped by an

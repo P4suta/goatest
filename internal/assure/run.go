@@ -442,11 +442,13 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				repositoryObserver = newRepositoryObserver(metadata.model.ModuleDir, observationDirectory, candidates, mutationSources)
 			}
 		}
-		// Opening is lazy because a run with no confirmed kill needs no second
-		// workspace. Once opened, read ownership lets independent paired controls
-		// overlap; go-mutants gives every Exec its own frozen tree and temporary
-		// environment. Close takes write ownership, so it waits for all controls
-		// already in flight and no execution can race the workspace teardown.
+		// Replay deliberately prepares no probe tree, so its original controls use
+		// this lazy second workspace. Once opened, read ownership lets independent
+		// paired controls overlap; go-mutants gives every Exec its own frozen tree
+		// and temporary environment. Full runs replace this callback below with
+		// their already-prepared semantic-original probe binaries. Close takes
+		// write ownership, so it waits for all controls already in flight and no
+		// execution can race the workspace teardown.
 		var controlMutex sync.RWMutex
 		var controlOpenOnce sync.Once
 		var controlWorkspace *mutationbridge.Workspace
@@ -698,6 +700,16 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					countedNoun(probed.SuitesMeasured, "package suite", "package suites")+" measured, "+
 					fmt.Sprintf("%d without facts", probed.SuitesUnmeasured))
 		}
+		mutationOriginalControl := originalControl
+		if options.ReplayMutantID == "" {
+			// A full run already paid to compile the semantics-preserving probe
+			// tree. Reuse those prepared binaries for the original half of paired
+			// kill confirmation: no mutant is active, the exact package/flags/env
+			// are retained, and the deadline now measures test execution rather
+			// than a second workspace's cold compilation. Replay deliberately has
+			// no probe tree and keeps the lazy pristine-workspace fallback above.
+			mutationOriginalControl = preparedProbeMutationControl(session, options.Trace)
+		}
 
 		// The evidence of earlier runs is read once, here, where everything a
 		// behaviour key is built from is known and before anything is routed.
@@ -728,7 +740,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Jobs: mutationJobs, Accepted: accepted,
 			Progress: mutationProgress(options),
 			Resume:   mutationResume, Checkpoint: checkpointController.saveMutant,
-			OriginalControl:    originalControl,
+			OriginalControl:    mutationOriginalControl,
 			Trace:              options.Trace,
 			Instrumented:       baseline.Instrumented,
 			Evidence:           mutationEvidence,
@@ -866,6 +878,67 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 	return workspace.Exec(ctx, gomutants.Command{
 		Argv: argv, Env: slices.Clone(request.Env), Timeout: request.Timeout, OutputLimit: 32 << 20,
 	})
+}
+
+const pairedControlProbePrefix = "paired-control:"
+
+// preparedProbeMutationControl runs the semantic original through binaries
+// the current run has already compiled. A probe tree never activates a mutant;
+// its logging is an incidental side effect here and none of its infection facts
+// are used. Recording the execution as a control probe keeps it out of the
+// routing proof while retaining a complete account of paired confirmation.
+func preparedProbeMutationControl(session MutationSession, recorder *trace.Recorder) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		probeRequest := gomutants.ProbeRequest{
+			Package: request.Package, Args: slices.Clone(request.Args),
+			Env: slices.Clone(request.Env), Timeout: request.Timeout,
+		}
+		record := trace.ProbeRecord{
+			Target: pairedControlProbeTarget(request.Package), Package: request.Package,
+			Args: slices.Clone(request.Args), TimeoutMS: traceMilliseconds(request.Timeout), Control: true,
+		}
+		result, err := session.Probe(ctx, probeRequest)
+		if err != nil {
+			record.Error = err.Error()
+			recorder.ProbeExec(record)
+			return gomutants.CommandResult{}, fmt.Errorf("goatest: prepared original control: %w", err)
+		}
+		record.ExitCode = result.ExitCode
+		record.DurationMS = traceMilliseconds(result.Duration)
+		switch {
+		case result.Duration < 0:
+			err = fmt.Errorf("goatest: prepared original control returned negative duration %s", result.Duration)
+		case result.Outcome == gomutants.ProbeMeasured:
+			if result.ExitCode != 0 {
+				err = fmt.Errorf("goatest: prepared original control returned measured with exit code %d", result.ExitCode)
+			}
+		case result.Outcome == gomutants.ProbeTestFailed || result.Outcome == gomutants.ProbeUnavailable:
+			if result.ExitCode == 0 {
+				err = fmt.Errorf("goatest: prepared original control returned %s with exit code 0", result.Outcome)
+			}
+		case result.Outcome == gomutants.ProbeTimedOut:
+		default:
+			err = fmt.Errorf("goatest: prepared original control returned unknown outcome %q", result.Outcome)
+		}
+		if err != nil {
+			record.Error = err.Error()
+			recorder.ProbeExec(record)
+			return gomutants.CommandResult{}, err
+		}
+		record.Outcome = string(result.Outcome)
+		recorder.ProbeExec(record)
+		return gomutants.CommandResult{
+			ExitCode: result.ExitCode, TimedOut: result.Outcome == gomutants.ProbeTimedOut,
+			Duration: result.Duration, Output: []byte(result.OutputTail),
+		}, nil
+	}
+}
+
+func pairedControlProbeTarget(pkg string) string {
+	if pkg == "" {
+		return pairedControlProbePrefix + "all"
+	}
+	return pairedControlProbePrefix + pkg
 }
 
 func hasTestArgument(arguments []string, name string) bool {

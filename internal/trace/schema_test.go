@@ -775,6 +775,50 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
 			},
 		},
+		{
+			name: "a paired original control",
+			record: map[string]any{
+				"target": "paired-control:example.com/app", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "an all-package paired original control",
+			record: map[string]any{
+				"target": "paired-control:all", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "a paired-control identity without its marker",
+			record: map[string]any{
+				"target": "paired-control:example.com/app", "package": "example.com/app",
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a paired control with an ordinary target identity",
+			record: map[string]any{
+				"target": "TestRun", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a paired control carrying a suite marker",
+			record: map[string]any{
+				"target": "paired-control:example.com/app", "package": "example.com/app", "control": true,
+				"suite": false, "exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a paired control carrying infection facts",
+			record: map[string]any{
+				"target": "paired-control:example.com/app", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured, "infected": []any{},
+			},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

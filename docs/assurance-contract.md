@@ -192,18 +192,22 @@ retains `TestMain`, package setup, ordering, and cross-test interactions. If
 neither proof is available, silence proves nothing and the suite remains.
 
 Immediately before any remaining mutant package-suite command, goatest runs
-the exact uninstrumented original command and memoizes its result by package,
-arguments, and merged environment. A failed or timed-out original cannot
-distinguish a mutant failure from the suite's own state, so all mutants sharing
-it become inconclusive without repeating the command. A passing original
-supplies the closest duration control and also serves paired kill confirmation.
+the semantic original from the already-compiled probe tree with no mutant
+active and memoizes its result by package, arguments, and merged environment.
+A failed or timed-out original cannot distinguish a mutant failure from the
+suite's own state, so all mutants sharing it become inconclusive without
+repeating the command. A passing original supplies the closest duration control
+and also serves paired kill confirmation. The deadline covers test execution,
+not a second workspace's cold compilation. Mutant replay deliberately skips
+probe preparation and retains a lazy pristine-workspace fallback.
 
 These reach statements rest on one measured execution. A target or suite whose
 behaviour differs between runs may enter a block, or make a site differ, in the
 run that would kill the mutant and not in the one that was measured. Coverage
 instrumentation and subprocess execution have their ordinary observational
 limits as well. Positive infection overrides negative coverage, and every
-unknown case falls through to the exact original preflight and mutant suite.
+unknown case falls through to the prepared semantic-original preflight and
+mutant suite.
 The full boundary is recorded in [limitations](limitations.md), and the
 negative suite-coverage rule and its independent audit are specified by
 [ADR 0010](adr/0010-whole-suite-reach-before-fallback.md).
@@ -321,7 +325,8 @@ An ordinary mutation command is bounded relative to controls from the same
 run, not by one fixed routine timeout. A target mutation uses its passing
 baseline and measured probe durations. A package-suite mutation uses its
 passing whole-suite coverage control and, when available, the suite probe; the
-exact uninstrumented preflight immediately before the mutant is another sample.
+prepared semantic-original preflight immediately before the mutant is another
+sample.
 Let `slow` and `fast` be the slowest and fastest positive control samples
 available for that request:
 
@@ -337,10 +342,10 @@ rule from the passing baseline; the first whole-suite controls use the sum of
 that package's passing target durations. If no positive control exists, goatest
 fails closed to the legacy five-times-baseline-plus-five-seconds calibration
 with a 30-second floor. On an ordinary package-suite route that legacy wait can
-occur at most once, in the memoized original preflight; a failure or expiration
-settles every dependent mutant as inconclusive without running them. Fuzz
-campaigns retain that legacy bound because the duration of their seed corpus
-does not predict a fixed 10,000- or 100,000-input campaign.
+occur at most once, in the memoized prepared original preflight; a failure or
+expiration settles every dependent mutant as inconclusive without running them.
+Fuzz campaigns retain that legacy bound because the duration of their seed
+corpus does not predict a fixed 10,000- or 100,000-input campaign.
 
 The contract caps every derived deadline at 30 minutes for `standard-v1` and
 five hours for `deep-v1`; `[execution].timeout` is a further hard cancellation

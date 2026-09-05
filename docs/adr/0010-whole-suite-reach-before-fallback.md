@@ -65,14 +65,15 @@ source position on the original program?
    needs the fallback after ordinary routing and suite coverage. A negative
    suite-coverage proof has already answered every operator at that position;
    repeating the weaker operator-specific measurement would add no evidence.
-5. **Preflight the exact uninstrumented command before remaining fallbacks.**
-   Before any mutant is run by a package suite, goatest runs the original code
-   with exactly the same package, arguments, merged environment, and execution
-   shape. The result is memoized by that command identity. If the original
-   fails or reaches its safety ceiling, every mutant waiting on that command is
-   inconclusive without executing another copy. If it passes, its duration is
-   a same-run control sample for the mutant's comparative deadline and the same
-   result can serve later paired kill confirmations.
+5. **Preflight the semantic original before remaining fallbacks.** Before any
+   mutant is run by a package suite, goatest runs the already-compiled probe
+   tree with no mutant active and exactly the same package, arguments, merged
+   environment, and execution shape. The result is memoized by that command
+   identity. If the original fails or reaches its safety ceiling, every mutant
+   waiting on that command is inconclusive without executing another copy. If
+   it passes, its duration is a same-run control sample for the mutant's
+   comparative deadline and the same result can serve later paired kill
+   confirmations. Replay skips the probe tree and uses a pristine fallback.
 6. **Record and audit the proof independently.** A route names its passing
    control as `suite_coverage`; `suite_reached` is present only when a covered
    block contained the exact position. `proofaudit` reconstructs package-suite

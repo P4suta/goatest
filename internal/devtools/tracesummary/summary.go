@@ -54,6 +54,7 @@ func renderSummary(source string, events []trace.Event) string {
 		execBlock(events),
 		routingBlock(events),
 		probeBlock(events),
+		controlBlock(events),
 		mutantBlock(events),
 		runBlock(events),
 	}
@@ -638,7 +639,7 @@ func probeTotals(events []trace.Event) probeTotal {
 	measuredSuites := make(map[string]bool)
 	total := probeTotal{}
 	for _, event := range events {
-		if event.Type != trace.TypeProbeExec || event.Probe == nil {
+		if event.Type != trace.TypeProbeExec || event.Probe == nil || event.Probe.Control {
 			continue
 		}
 		record := event.Probe
@@ -684,6 +685,37 @@ func probeTotals(events []trace.Event) probeTotal {
 	total.outcomes = tally(outcomes, trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
 		trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)
 	return total
+}
+
+// controlBlock reports the prepared semantic-original executions separately
+// from infection probes. They share the probe tree implementation, but one is
+// a paired kill control and the other can remove work from a route.
+func controlBlock(events []trace.Event) []string {
+	outcomes := make(map[string]int)
+	executions := 0
+	var duration int64
+	for _, event := range events {
+		if event.Type != trace.TypeProbeExec || event.Probe == nil || !event.Probe.Control {
+			continue
+		}
+		executions++
+		duration += event.Probe.DurationMS
+		switch {
+		case event.Probe.Outcome != "":
+			outcomes[event.Probe.Outcome]++
+		case event.Probe.Error != "":
+			outcomes[probeError]++
+		}
+	}
+	if executions == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("paired controls: %s in %s", plural(executions, "execution", "executions"), formatDuration(duration)),
+		"outcomes: " + formatLabelCounts(tally(outcomes,
+			trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
+			trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)),
+	}
 }
 
 // mutantTotal is what one mutant cost across every execution of it.

@@ -28,12 +28,13 @@ healthy 23-second suite.
 
 The same probe tree used for infection routing is the original program with
 semantics-preserving observations. Its executions are controls measured on the
-same prepared binaries, machine, job count, arguments, and phase as the mutant
+same prepared session, machine, job count, arguments, and phase as the mutant
 executions. A whole-suite coverage control can answer every operator at an
 instrumented but uncovered position, while an infection-suite control can
 answer a probed mutation that reached its site without changing the value.
-Before any unresolved mutant fallback, an exact uninstrumented original suite
-can answer whether the command is healthy and provide its closest duration.
+Before any unresolved mutant fallback, an already-compiled semantic-original
+execution can answer whether the command is healthy and provide its closest
+duration without making compilation part of the deadline.
 
 ## Decision
 
@@ -52,11 +53,14 @@ can answer whether the command is healthy and provide its closest duration.
    operators. Only packages with an unresolved probed mutant then get an
    infection-suite control; once measured, either suite duration calibrates the
    remaining fallback.
-4. **The exact original answers before a mutant deadline does.** Before the
-   first remaining mutant suite execution, the same uninstrumented package,
-   arguments, and merged environment run once. Failure or expiration makes all
-   mutants sharing it inconclusive without executing them. A pass adds its
-   duration to the comparative deadline and is reused by paired confirmation.
+4. **The semantic original answers before a mutant deadline does.** Before the
+   first remaining mutant suite execution, the same package, arguments, and
+   merged environment run once through the already-prepared probe tree with no
+   mutant active. Failure or expiration makes all mutants sharing it
+   inconclusive without executing them. A pass adds its duration to the
+   comparative deadline and is reused by paired confirmation. Replay, which
+   intentionally prepares no probe tree, retains a lazy pristine-workspace
+   fallback.
 5. **Positive facts override negative silence.** A positive target probe may
    restore a target coverage missed. A positive suite infection defeats a
    negative coverage observation. If a measured suite does not infect a probed
@@ -80,9 +84,10 @@ can answer whether the command is healthy and provide its closest duration.
   the spread its controls observed, while a naturally slow suite receives
   proportionate room.
 - The cold cost of an uncovered package is one coverage control, an infection
-  control only when it can still answer something, one memoized original
-  preflight when execution remains, and mutant suites only where no proof
-  answers. It is no longer one fixed wait per uncovered mutant.
+  control only when it can still answer something, one memoized prepared
+  original preflight when execution remains, and mutant suites only where no
+  proof answers. It pays no second-workspace compilation and is no longer one
+  fixed wait per uncovered mutant.
 - Runtime variation widens the budget from measured evidence. Extreme variation
   may still create an inconclusive timeout, which is fail-closed and visible.
 - There remains an absolute worst-case deadline: no finite observation can

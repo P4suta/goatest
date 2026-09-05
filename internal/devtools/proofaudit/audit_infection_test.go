@@ -509,3 +509,22 @@ func TestAuditCountsPackageSuiteControlsApartFromTargetFacts(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditIgnoresPairedControlsAsInfectionEvidence(t *testing.T) {
+	t.Parallel()
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(10, 2, 12, 16)}})
+	control := probeEvent(3, trace.ProbeRecord{
+		Target: "paired-control:" + fixtureModule + "/pkg", Package: fixtureModule + "/pkg",
+		Control: true, Outcome: trace.ProbeOutcomeMeasured,
+	})
+	stream := recordedTrace(t,
+		measured(1, killerTarget), probeMeasured(2, killerTarget, firstMutant), control,
+	)
+	result := auditFixture(t, stream, recorded)
+	if result.probeExecutions != 1 || result.probeMeasured != 1 ||
+		result.suiteProbeExecutions != 0 || result.suiteProbeMeasured != 0 {
+		t.Fatalf("paired control changed infection accounting: target %d/%d, suite %d/%d",
+			result.probeMeasured, result.probeExecutions,
+			result.suiteProbeMeasured, result.suiteProbeExecutions)
+	}
+}
