@@ -104,8 +104,8 @@ func TestRouteMutantDischargesATargetThatNeverTakesTheNarrowedBranch(t *testing.
 		header, body, tail := blocks()
 		targets := narrowedBranchTargets(header, body, tail)
 		route := routeMutant(narrowedBranchMutant(), targets, narrowedBranchInstrumentation(header, body, tail))
-		// The fuzz target explores past its measured coverage and the resumed
-		// one carries no blocks to argue with, so the proof discharges only the
+		// The fuzz target explores past its measured coverage and the simulated
+		// legacy resume carries no blocks to argue with, so the proof discharges only the
 		// measured test that stayed out of the body.
 		if want := []string{"FuzzSkipsIt", "TestTakesIt", "TestResumed"}; !slices.Equal(routedNames(route), want) {
 			t.Errorf("reaching over %+v = %v, want %v", body, routedNames(route), want)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -569,6 +570,8 @@ type auditor struct {
 	measuredBy            map[targetIdentity]string
 	probes                map[string]*probeFacts
 	executions            map[string][]targetIdentity
+	testBinaries          map[string]string
+	testBinaryConflicts   map[string]bool
 	suiteProfiles         map[string]string
 	suiteProfileConflicts map[string]bool
 	measuredSuiteProbes   map[string]struct{}
@@ -592,7 +595,8 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 		recorded: recorded, catalog: catalog, layers: layers,
 		routes: make(map[string]trace.RouteRecord), targets: make(map[string]targetIdentity),
 		measuredBy: make(map[targetIdentity]string), probes: make(map[string]*probeFacts),
-		executions: make(map[string][]targetIdentity), suiteProfiles: make(map[string]string),
+		executions: make(map[string][]targetIdentity), testBinaries: make(map[string]string),
+		testBinaryConflicts: make(map[string]bool), suiteProfiles: make(map[string]string),
 		suiteProfileConflicts: make(map[string]bool),
 		measuredSuiteProbes:   make(map[string]struct{}),
 		decided:               make(map[pairKey]struct{}), suiteDecided: make(map[pairKey]struct{}), result: result,
@@ -662,17 +666,26 @@ func (audit *auditor) probe(record trace.ProbeRecord) {
 	audit.probes[record.Target] = facts
 }
 
-// measurement reads a target's identity out of one recorded command. A baseline
-// measurement writes a target's coverage profile under the target's own
-// identity while selecting the target's single test in the target's package,
-// which is the only place a recording puts the three together. Every other
-// command a run executes names no profile and is passed over.
+// measurement reads a target's identity out of recorded commands. A current
+// run first records `go test -c -o binary package`, then executes that binary
+// directly with a target selector and coverage profile. Legacy recordings put
+// the package in test2json's -p argument instead. Reading both shapes keeps the
+// independent audit useful across the process-startup optimisation.
 //
 // Two targets claiming one identity would identify neither, so a name a second
 // target claims is unclaimed rather than given to whichever measurement came
 // first: a kill the audit cannot place is worth more than a kill it places
 // wrongly.
 func (audit *auditor) measurement(argv []string) {
+	if binary, packagePath, compiled := compiledTestBinary(argv); compiled {
+		if previous, exists := audit.testBinaries[binary]; exists && previous != packagePath {
+			audit.testBinaries[binary] = ""
+			audit.testBinaryConflicts[binary] = true
+		} else if !audit.testBinaryConflicts[binary] {
+			audit.testBinaries[binary] = packagePath
+		}
+		return
+	}
 	target, identity := "", targetIdentity{}
 	for index, argument := range argv {
 		switch {
@@ -681,6 +694,9 @@ func (audit *auditor) measurement(argv []string) {
 		case argument == packageArgument && index+1 < len(argv):
 			identity.packagePath = argv[index+1]
 		}
+	}
+	if identity.packagePath == "" && len(argv) != 0 && !audit.testBinaryConflicts[argv[0]] {
+		identity.packagePath = audit.testBinaries[argv[0]]
 	}
 	if selected, selective := killerTests(argv); selective && len(selected) == 1 {
 		identity.test = selected[0]
@@ -705,6 +721,41 @@ func (audit *auditor) measurement(argv []string) {
 		return
 	}
 	audit.measuredBy[identity] = target
+}
+
+// compiledTestBinary recognises the exact compile boundary recorded before a
+// direct baseline execution. The output path is the stable join key; the
+// import path is the final operand emitted by baselineCompileCommand.
+func compiledTestBinary(argv []string) (string, string, bool) {
+	if len(argv) < 5 || !goCommandName(argv[0]) || argv[1] != "test" {
+		return "", "", false
+	}
+	compiled, output := false, ""
+	for index := 2; index < len(argv)-1; index++ {
+		switch {
+		case argv[index] == "-c":
+			compiled = true
+		case argv[index] == "-o" && index+1 < len(argv)-1:
+			output = argv[index+1]
+			index++
+		case strings.HasPrefix(argv[index], "-o="):
+			output = strings.TrimPrefix(argv[index], "-o=")
+		}
+	}
+	packagePath := argv[len(argv)-1]
+	if !compiled || output == "" || packagePath == "" || strings.HasPrefix(packagePath, "-") {
+		return "", "", false
+	}
+	return output, packagePath, true
+}
+
+func goCommandName(name string) bool {
+	if cut := strings.LastIndexAny(name, `/\\`); cut >= 0 {
+		name = name[cut+1:]
+	} else {
+		name = filepath.Base(name)
+	}
+	return name == "go" || name == "go.exe"
 }
 
 // measuredTarget is the target whose baseline measurement ran one test in one

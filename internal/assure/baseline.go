@@ -4,17 +4,18 @@
 package assure
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/P4suta/goatest/internal/checkpoint"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 type CommandWorkspace interface {
@@ -53,7 +55,7 @@ type BaselineOptions struct {
 	Packages             []string
 	BuildTags            []string
 	TestArgs             []string
-	UseTest2JSON         bool
+	UseTestFraming       bool
 	ClassifyUserFailures bool
 	Resume               *checkpoint.Baseline
 	Checkpoint           func(checkpoint.Baseline)
@@ -88,12 +90,11 @@ type PackageSuiteCoverage struct {
 }
 
 const (
-	defaultBaselineTimeout     = 10 * time.Minute
-	maximumSummaryRunes        = 512
-	packageSuiteCoveragePrefix = "package-suite-coverage:"
+	defaultBaselineTimeout = 10 * time.Minute
+	maximumSummaryRunes    = 512
 )
 
-func packageSuiteCoverageTarget(pkg string) string { return packageSuiteCoveragePrefix + pkg }
+func packageSuiteCoverageTarget(pkg string) string { return trace.PackageSuiteCoveragePrefix + pkg }
 
 // CollectBaseline validates build/vet, compiles exactly one baseline test
 // binary for each package that owns a target, and executes every top-level
@@ -122,6 +123,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 	}
 	completed := make(map[string]checkpoint.BaselineTarget)
 	buildVetComplete := false
+	resumeRouting := false
 	if options.Resume != nil {
 		buildVetComplete = options.Resume.BuildVetComplete
 		result.Evidence = append(result.Evidence, options.Resume.Evidence...)
@@ -129,6 +131,10 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 		for _, unit := range options.Resume.Targets {
 			completed[unit.ID] = unit
 			appendBaselineUnit(&result, unit, nil)
+		}
+		if options.Resume.Complete && options.Resume.Routing != nil {
+			resumeRouting = true
+			result.Instrumented, result.Suites = restoreBaselineRouting(*options.Resume.Routing, options.PackageSuites)
 		}
 	}
 	checkpointNow := func(complete bool) {
@@ -139,10 +145,14 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 		for _, unit := range completed {
 			units = append(units, unit)
 		}
-		options.Checkpoint(checkpoint.Baseline{
+		state := checkpoint.Baseline{
 			BuildVetComplete: buildVetComplete, Complete: complete,
 			Evidence: baselineCheckEvidence(result.Evidence), Targets: units,
-		})
+		}
+		if complete {
+			state.Routing = checkpointBaselineRouting(result.Instrumented, result.Suites)
+		}
+		options.Checkpoint(state)
 	}
 	patterns := slices.Clone(options.Packages)
 	if len(patterns) == 0 {
@@ -153,7 +163,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 		argv []string
 	}{
 		{name: "go vet", argv: baselineGoCommand("vet", options.BuildTags, patterns)},
-		{name: "go build", argv: baselineGoCommand("build", options.BuildTags, patterns)},
+		{name: "go build", argv: baselineBuildCommand(options.BuildTags, patterns)},
 	}
 	if buildVetComplete {
 		checks = nil
@@ -195,7 +205,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 	packageTargets := make(map[string][]BaselineTarget)
 	packageSuites := make(map[string]bool)
 	for _, target := range targets {
-		if options.PackageSuites {
+		if options.PackageSuites && !resumeRouting {
 			packageSuites[target.Target.Package] = true
 		}
 		if _, done := completed[target.Target.ID]; done {
@@ -460,9 +470,9 @@ func executeBaselineTarget(
 	observedCommand := command
 	observedArguments, finishObservation := options.RepositoryObserver.instrumentPackage(importPath, observedCommand.Argv)
 	observedCommand.Argv = observedArguments
-	if options.UseTest2JSON {
-		observedCommand = test2JSONCommand(importPath, observedCommand)
-		command = test2JSONCommand(importPath, command)
+	if options.UseTestFraming {
+		observedCommand = testFramedCommand(observedCommand)
+		command = testFramedCommand(command)
 	}
 	first, err := workspace.Exec(ctx, observedCommand)
 	observation := finishObservation()
@@ -476,9 +486,9 @@ func executeBaselineTarget(
 			return baselineTargetRun{err: fmt.Errorf("goatest: repeat baseline target %s without repository observation: %w", target.Target.Name, err)}
 		}
 	}
-	skipped, skipKind, skipSummary, eventErr := classifyTest2JSON(target.Target.Name, first.Output)
-	if eventErr != nil && options.UseTest2JSON {
-		return baselineTargetRun{err: fmt.Errorf("goatest: decode test2json for %s: %w", target.Target.Name, eventErr)}
+	skipped, skipKind, skipSummary, framingErr := classifyTestFraming(target.Target.Name, first.Output)
+	if framingErr != nil && options.UseTestFraming {
+		return baselineTargetRun{err: fmt.Errorf("goatest: classify framed test output for %s: %w", target.Target.Name, framingErr)}
 	}
 	if skipped {
 		evidenceItem := report.Evidence{
@@ -552,10 +562,6 @@ func collectPackageSuiteCoverage(
 	observed := command
 	observedArguments, finishObservation := options.RepositoryObserver.instrumentPackage(importPath, observed.Argv)
 	observed.Argv = observedArguments
-	if options.UseTest2JSON {
-		observed = test2JSONCommand(importPath, observed)
-		command = test2JSONCommand(importPath, command)
-	}
 	run, err := workspace.Exec(ctx, observed)
 	observation := finishObservation()
 	if err != nil {
@@ -615,10 +621,10 @@ func baselineClassifiedUnit(target BaselineTarget, status, detail string, durati
 	return unit
 }
 
-// appendBaselineUnit adds one completed target to the round. A unit measured
-// in this round hands over the evidence it measured, blocks included; a unit
-// that comes back from a checkpoint has only the checkpoint form, which
-// carries the files a target reached but not the blocks inside them.
+// appendBaselineUnit adds one completed target to the round. A current
+// checkpoint carries the positive coverage blocks needed to preserve exact
+// routing. Legacy checkpoints omitted them; restoring nil keeps those targets
+// on the conservative whole-file path.
 func appendBaselineUnit(result *BaselineResult, unit checkpoint.BaselineTarget, measured *TargetEvidence) {
 	result.Evidence = append(result.Evidence, unit.Evidence...)
 	result.Findings = append(result.Findings, unit.Findings...)
@@ -646,6 +652,7 @@ func checkpointTargetEvidence(input TargetEvidence) *checkpoint.TargetEvidence {
 		},
 		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), DurationNS: int64(input.Duration),
 		WholeTree: input.WholeTree, RepositoryObserved: input.RepositoryObserved,
+		Coverage: checkpointCoverage(input.Covered),
 	}
 }
 
@@ -656,9 +663,90 @@ func restoreTargetEvidence(input checkpoint.TargetEvidence) TargetEvidence {
 			RelativeDir: input.Target.RelativeDir, Path: input.Target.Path, Line: input.Target.Line,
 			Capability: input.Target.Capability, Capabilities: slices.Clone(input.Target.Capabilities), Dependencies: slices.Clone(input.Target.Dependencies),
 		},
-		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), Duration: time.Duration(input.DurationNS),
+		CoveredFiles: slices.Clone(input.CoveredFiles), Covered: restoreCheckpointCoverage(input.Coverage),
+		Environment: slices.Clone(input.Environment), Duration: time.Duration(input.DurationNS),
 		WholeTree: input.WholeTree, RepositoryObserved: input.RepositoryObserved,
 	}
+}
+
+func checkpointCoverage(input []goanalysis.FileCoverage) *checkpoint.Coverage {
+	if input == nil {
+		return nil
+	}
+	result := &checkpoint.Coverage{Files: make([]checkpoint.FileCoverage, len(input))}
+	for fileIndex, file := range input {
+		blocks := make([]checkpoint.CoverageBlock, len(file.Blocks))
+		for blockIndex, block := range file.Blocks {
+			blocks[blockIndex] = checkpoint.CoverageBlock{
+				StartLine: block.StartLine, StartColumn: block.StartColumn,
+				EndLine: block.EndLine, EndColumn: block.EndColumn,
+			}
+		}
+		result.Files[fileIndex] = checkpoint.FileCoverage{Path: file.Path, Blocks: blocks}
+	}
+	return result
+}
+
+func restoreCheckpointCoverage(input *checkpoint.Coverage) []goanalysis.FileCoverage {
+	if input == nil {
+		return nil
+	}
+	files := make([]goanalysis.FileCoverage, len(input.Files))
+	for fileIndex, file := range input.Files {
+		blocks := make([]goanalysis.CoverageBlock, len(file.Blocks))
+		for blockIndex, block := range file.Blocks {
+			blocks[blockIndex] = goanalysis.CoverageBlock{
+				StartLine: block.StartLine, StartColumn: block.StartColumn,
+				EndLine: block.EndLine, EndColumn: block.EndColumn,
+			}
+		}
+		files[fileIndex] = goanalysis.FileCoverage{Path: file.Path, Blocks: blocks}
+	}
+	// A checkpoint is strict but still external state. Restore the canonical
+	// ordering routing's binary searches require instead of trusting JSON order.
+	return goanalysis.MergeFileCoverage(nil, files)
+}
+
+func checkpointBaselineRouting(instrumented []goanalysis.FileCoverage, suites map[string]PackageSuiteCoverage) *checkpoint.BaselineRouting {
+	routing := &checkpoint.BaselineRouting{Instrumented: checkpointCoverageValue(instrumented)}
+	packages := make([]string, 0, len(suites))
+	for pkg := range suites {
+		packages = append(packages, pkg)
+	}
+	slices.Sort(packages)
+	routing.Suites = make([]checkpoint.SuiteCoverage, 0, len(packages))
+	for _, pkg := range packages {
+		suite := suites[pkg]
+		routing.Suites = append(routing.Suites, checkpoint.SuiteCoverage{
+			Package: pkg, Covered: checkpointCoverageValue(suite.Covered),
+			Instrumented: checkpointCoverageValue(suite.Instrumented),
+			DurationNS:   int64(suite.Duration), WholeTree: suite.WholeTree,
+		})
+	}
+	return routing
+}
+
+func checkpointCoverageValue(input []goanalysis.FileCoverage) checkpoint.Coverage {
+	if coverage := checkpointCoverage(input); coverage != nil {
+		return *coverage
+	}
+	return checkpoint.Coverage{Files: []checkpoint.FileCoverage{}}
+}
+
+func restoreBaselineRouting(input checkpoint.BaselineRouting, packageSuites bool) ([]goanalysis.FileCoverage, map[string]PackageSuiteCoverage) {
+	instrumented := restoreCheckpointCoverage(&input.Instrumented)
+	var suites map[string]PackageSuiteCoverage
+	if packageSuites {
+		suites = make(map[string]PackageSuiteCoverage, len(input.Suites))
+		for _, saved := range input.Suites {
+			suites[saved.Package] = PackageSuiteCoverage{
+				Covered:      restoreCheckpointCoverage(&saved.Covered),
+				Instrumented: restoreCheckpointCoverage(&saved.Instrumented),
+				Duration:     time.Duration(saved.DurationNS), WholeTree: saved.WholeTree,
+			}
+		}
+	}
+	return instrumented, suites
 }
 
 func baselineGoCommand(operation string, tags, packages []string) []string {
@@ -666,6 +754,18 @@ func baselineGoCommand(operation string, tags, packages []string) []string {
 	if len(tags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(tags, ","))
 	}
+	return append(argv, packages...)
+}
+
+// baselineBuildCommand discards any executable produced for a selected main
+// package. Without the explicit null output, `go build` writes a binary in its
+// working directory when the selection resolves to exactly one main package,
+// changing the frozen snapshot before mutation preparation. The go command
+// recognises the host null device specially and retains its normal compile-only
+// behaviour for library and multi-package selections.
+func baselineBuildCommand(tags, packages []string) []string {
+	argv := baselineGoCommand("build", tags, nil)
+	argv = append(argv, "-o", os.DevNull)
 	return append(argv, packages...)
 }
 
@@ -678,44 +778,79 @@ func baselineCompileCommand(modulePath, importPath, binary string, tags []string
 	return argv
 }
 
-func test2JSONCommand(importPath string, target gomutants.Command) gomutants.Command {
-	arguments := slices.Clone(target.Argv[1:])
-	arguments = append([]string{"go", "tool", "test2json", "-t", "-p", importPath, target.Argv[0], "-test.v=test2json"}, arguments...)
+// testFramedCommand asks the test binary for the same unambiguous status
+// framing consumed by cmd/test2json, without starting a go command and a
+// second wrapper process for every target. testargs rejects user-owned
+// -test.v flags, so this setting cannot be overridden later in argv.
+func testFramedCommand(target gomutants.Command) gomutants.Command {
+	if len(target.Argv) == 0 {
+		return target
+	}
+	arguments := make([]string, 0, len(target.Argv)+1)
+	arguments = append(arguments, target.Argv[0], "-test.v=test2json")
+	arguments = append(arguments, target.Argv[1:]...)
 	target.Argv = arguments
 	return target
 }
 
-type test2JSONEvent struct {
-	Action string `json:"Action"`
-	Test   string `json:"Test"`
-	Output string `json:"Output"`
-}
+const (
+	testFramingMarker            = byte(0x16)
+	testSkipReportPrefix         = "--- SKIP: "
+	commandOutputTruncatedPrefix = "[go-mutants] output truncated"
+)
 
-func classifyTest2JSON(target string, output []byte) (bool, string, string, error) {
-	if len(output) == 0 {
-		return false, "", "", nil
+// classifyTestFraming reads only status lines that Go's testing package marks
+// for cmd/test2json. A marker also terminates preceding output that omitted a
+// newline, so splitting on newlines alone would miss a legitimate skip after
+// a partial log line. Unmarked lookalikes are ordinary user output.
+//
+// go-mutants retains the tail of bounded command output. If it had to discard
+// the prefix, absence of a skip report is no longer a fact, so the baseline is
+// refused instead of silently treating an unknown target as passing.
+func classifyTestFraming(target string, output []byte) (bool, string, string, error) {
+	truncated := bytes.HasPrefix(output, []byte(commandOutputTruncatedPrefix))
+	for remaining := output; ; {
+		marker := bytes.IndexByte(remaining, testFramingMarker)
+		if marker < 0 {
+			break
+		}
+		framed := remaining[marker+1:]
+		end := len(framed)
+		delimiter := byte(0)
+		if newline := bytes.IndexByte(framed, '\n'); newline >= 0 {
+			end, delimiter = newline, '\n'
+		}
+		if next := bytes.IndexByte(framed, testFramingMarker); next >= 0 && next < end {
+			end, delimiter = next, testFramingMarker
+		}
+		line := bytes.TrimSuffix(framed[:end], []byte{'\r'})
+		for bytes.HasPrefix(line, []byte("    ")) {
+			line = line[4:]
+		}
+		if bytes.HasPrefix(line, []byte(testSkipReportPrefix)) {
+			name := strings.TrimSpace(string(line[len(testSkipReportPrefix):]))
+			if duration := strings.Index(name, " ("); duration >= 0 && strings.HasSuffix(name, "s)") {
+				if _, err := strconv.ParseFloat(name[duration+2:len(name)-2], 64); err == nil {
+					name = name[:duration]
+				}
+			}
+			switch {
+			case name == target:
+				return true, "skipped-target", "the selected top-level target called Skip", nil
+			case strings.HasPrefix(name, target+"/"):
+				return true, "skipped-subtest", "a selected subtest was skipped: " + name, nil
+			}
+		}
+		if delimiter == 0 {
+			break
+		}
+		remaining = framed[end:]
+		if delimiter == '\n' {
+			remaining = remaining[1:]
+		}
 	}
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var event test2JSONEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-		if event.Action != "skip" || event.Test != target && !strings.HasPrefix(event.Test, target+"/") {
-			continue
-		}
-		if event.Test == target {
-			return true, "skipped-target", "the selected top-level target called Skip", nil
-		}
-		return true, "skipped-subtest", "a selected subtest was skipped: " + event.Test, nil
-	}
-	if err := scanner.Err(); err != nil {
-		return false, "", "", err
+	if truncated {
+		return false, "", "", errors.New("captured output was truncated before skip classification completed")
 	}
 	return false, "", "", nil
 }

@@ -512,7 +512,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			ArtifactDirectory: artifactDirectory, Contract: contract, PackageSuites: true,
 			SuiteEnvironment: slices.Clone(resourceEnv),
 			Packages:         slices.Clone(options.Packages),
-			BuildTags:        slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
+			BuildTags:        slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTestFraming: true,
 			ClassifyUserFailures: true,
 			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout, Jobs: mutationJobs,
 			Resume: baselineResume, Checkpoint: checkpointController.saveBaseline,
@@ -663,14 +663,19 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			mutationDetail = "1 mutant"
 		}
 		emit(options, "mutation-target", mutationDetail)
+		// Establish the catalogue identity before probing. This makes one complete
+		// probe phase durable at its boundary and also returns any terminal mutant
+		// results whose routing depended on that exact phase.
+		mutationResume := checkpointController.mutation(catalog, root)
 
 		var suiteProbes map[string]PackageProbeEvidence
 		if options.ReplayMutantID == "" {
 			// The probe pass measures which mutants each target could observe
 			// at all, and routing discharges a measured target that never made
 			// a probed mutant's site differ. What the pass establishes is
-			// recorded, so the layer is held to the proofaudit infection layer
-			// on every dogfood recording rather than trusted.
+			// recorded on a fresh pass, so clean dogfood recordings hold the
+			// layer to proofaudit rather than trusting it. An exact resumed pass
+			// is announced separately and creates no fictitious execution record.
 			phases.enter(phaseProbe)
 			probeTargets := probeTargetCount(baseline.Targets)
 			probeSuitePackages := neededProbeSuitePackages(
@@ -680,18 +685,32 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			probeDetail := countedNoun(probeTargets, "target", "targets") + ", " +
 				countedNoun(probeSuites, "package suite", "package suites")
 			emit(options, "probe-target", probeDetail)
-			probed, probeErr := dependencies.probeTargets(ctx, session, baseline.Targets, ProbeOptions{
-				Contract: contract, Timeout: options.CommandTimeout, TestArgs: slices.Clone(options.TestArgs),
-				Jobs: mutationJobs, Trace: options.Trace, Progress: probeProgress(options),
-				SuitePackages: probeSuitePackages, SuiteEnvironment: slices.Clone(resourceEnv),
-				RepositoryObserver: repositoryObserver,
-			})
-			if probeErr != nil {
-				_ = closeRound()
-				return report.Report{}, probeErr
+			probed, resumedProbe, validProbe := checkpointController.probe(
+				catalog, baseline.Targets, probeSuitePackages,
+			)
+			if !validProbe {
+				// The saved mutant results were evaluated with the rejected routing
+				// facts, so the controller discarded them with the probe.
+				mutationResume = nil
 			}
-			// The only later reader of these targets is the mutation phase; the
-			// checkpoint keeps a form of its own, written while the baseline ran.
+			if resumedProbe {
+				emit(options, "resume-probe", probeDetail)
+			} else {
+				var probeErr error
+				probed, probeErr = dependencies.probeTargets(ctx, session, baseline.Targets, ProbeOptions{
+					Contract: contract, Timeout: options.CommandTimeout, TestArgs: slices.Clone(options.TestArgs),
+					Jobs: mutationJobs, Trace: options.Trace, Progress: probeProgress(options),
+					SuitePackages: probeSuitePackages, SuiteEnvironment: slices.Clone(resourceEnv),
+					RepositoryObserver: repositoryObserver,
+				})
+				if probeErr != nil {
+					_ = closeRound()
+					return report.Report{}, probeErr
+				}
+				checkpointController.saveProbe(catalog, probed)
+			}
+			// Probe facts are separate from baseline facts because their compact
+			// indices belong to this prepared mutation catalogue.
 			baseline.Targets = probed.Targets
 			suiteProbes = probed.Suites
 			emit(options, "probe-summary",
@@ -731,7 +750,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 
 		phases.enter(phaseMutation)
-		mutationResume := checkpointController.mutation(catalog, root)
 		mutation, err := dependencies.evaluateMutations(ctx, session, baseline.Targets, MutationOptions{
 			Root: root, Snapshot: digest, Contract: contract, NoApply: options.NoApply,
 			ReplayMutantID: options.ReplayMutantID,
@@ -880,13 +898,14 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 	})
 }
 
-const pairedControlProbePrefix = "paired-control:"
-
 // preparedProbeMutationControl runs the semantic original through binaries
 // the current run has already compiled. A probe tree never activates a mutant;
 // its logging is an incidental side effect here and none of its infection facts
 // are used. Recording the execution as a control probe keeps it out of the
 // routing proof while retaining a complete account of paired confirmation.
+// Session.Probe owns the same per-call scratch isolation as Session.Exec,
+// including creation of a private -test.fuzzcachedir when Args select fuzzing;
+// callers must not inject that reserved flag themselves.
 func preparedProbeMutationControl(session MutationSession, recorder *trace.Recorder) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
 	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
 		probeRequest := gomutants.ProbeRequest{
@@ -936,9 +955,9 @@ func preparedProbeMutationControl(session MutationSession, recorder *trace.Recor
 
 func pairedControlProbeTarget(pkg string) string {
 	if pkg == "" {
-		return pairedControlProbePrefix + "all"
+		return trace.PairedControlProbePrefix + "all"
 	}
-	return pairedControlProbePrefix + pkg
+	return trace.PairedControlProbePrefix + pkg
 }
 
 func hasTestArgument(arguments []string, name string) bool {

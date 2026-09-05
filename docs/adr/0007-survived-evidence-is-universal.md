@@ -55,15 +55,16 @@ survive.
    at all. The asymmetry is the whole rule: reuse is refused by growth, never
    by shrinkage.
 
-3. **Fuzz targets and resumed targets never qualify, in either direction.** A
+3. **Fuzz targets and targets without exact blocks never qualify.** A
    fuzz target explores past the corpus its coverage was measured on, so "this
    budget found no input" is not "no input exists"; the next budget is a
-   different experiment. A target restored from a checkpoint carries no
-   coverage blocks, so routing keeps it for the whole file: the set it belongs
-   to is wider than the set any run measured, and a claim about a measured set
-   is not a claim about a widened one. Both disqualify a record from being
-   written as well as from being read, so the store never holds a record that
-   could not be used.
+   different experiment. A target restored from a legacy checkpoint may carry
+   no coverage blocks, so routing keeps it for the whole file: the set it
+   belongs to is wider than the set any run measured, and a claim about a
+   measured set is not a claim about a widened one. Current checkpoints
+   preserve the blocks and remain eligible. Unknown blocks and fuzzing both
+   disqualify a record from being written as well as from being read, so the
+   store never holds a record that could not be used.
 
 4. **A mutant no target reaches is a claim about the package suite.** The claim
    is established by exact negative suite coverage, by a semantics-preserving
@@ -83,7 +84,8 @@ survive.
    about a set, so the condition has the shape a kill's has and not the shape a
    survival's has — the target time ran out under still reaches the mutant, has
    the same behaviour key, passed this run's baseline, and is neither a fuzz
-   target nor one restored from a checkpoint. The targets that ran before it
+   target nor one whose exact coverage is unavailable. The targets that ran
+   before it
    neither caused the timeout nor say anything about whether it recurs, and a
    target that has since joined the reaching set says nothing about it either.
    Applying the survival's universal condition here would be wrong twice over:

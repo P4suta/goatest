@@ -5,6 +5,9 @@ package assure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/trace"
 )
@@ -289,13 +293,12 @@ func probeTarget(ctx context.Context, session MutationSession, target TargetEvid
 		return probeMeasurement{record: record, recorded: true}
 	}
 	infected := slices.Clone(result.Infected)
-	if !slices.IsSorted(infected) {
-		// The engine contract promises the indices ascending and distinct.
-		// Routing will binary-search them, so a set that arrives otherwise is
-		// repaired here rather than trusted into a wrong answer.
-		slices.Sort(infected)
-		infected = slices.Compact(infected)
-	}
+	// The engine contract promises ascending, distinct indices. Normalize even
+	// an adjacent duplicate from a faulty implementation: routing binary-searches
+	// this set, and the checkpoint validator deliberately requires its canonical
+	// representation.
+	slices.Sort(infected)
+	infected = slices.Compact(infected)
 	identifiers := make([]string, 0, len(infected))
 	for _, index := range infected {
 		identity, known := identities[index]
@@ -317,9 +320,7 @@ func probeTarget(ctx context.Context, session MutationSession, target TargetEvid
 	return probeMeasurement{measured: true, infected: infected, duration: result.Duration, record: record, recorded: true}
 }
 
-const packageSuiteProbePrefix = "package-suite:"
-
-func packageSuiteProbeTarget(pkg string) string { return packageSuiteProbePrefix + pkg }
+func packageSuiteProbeTarget(pkg string) string { return trace.PackageSuiteProbePrefix + pkg }
 
 func probeSuitePackages(catalog gomutants.Catalog) []string {
 	seen := make(map[string]bool)
@@ -374,10 +375,8 @@ func probeSuite(ctx context.Context, session MutationSession, pkg string, contro
 		return measurement
 	}
 	infected := slices.Clone(result.Infected)
-	if !slices.IsSorted(infected) {
-		slices.Sort(infected)
-		infected = slices.Compact(infected)
-	}
+	slices.Sort(infected)
+	infected = slices.Compact(infected)
 	identifiers := make([]string, 0, len(infected))
 	for _, index := range infected {
 		identity, known := identities[index]
@@ -418,4 +417,189 @@ func probeRequest(target TargetEvidence, options ProbeOptions) gomutants.ProbeRe
 		Env:     slices.Clone(target.Environment),
 		Timeout: controlRelativeMutationTimeout(options.Contract, options.Timeout, target.Duration),
 	}
+}
+
+func checkpointMutationProbe(catalog gomutants.Catalog, evaluation ProbeEvaluation) *checkpoint.MutationProbe {
+	result := &checkpoint.MutationProbe{
+		IndexFingerprint: mutationProbeIndexFingerprint(catalog),
+		Targets:          make([]checkpoint.TargetProbe, len(evaluation.Targets)),
+	}
+	for index, target := range evaluation.Targets {
+		result.Targets[index] = checkpoint.TargetProbe{ID: target.Target.ID, Measured: target.Probed}
+		if target.Probed {
+			result.Targets[index].DurationNS = int64(target.ProbeDuration)
+			result.Targets[index].Infected = slices.Clone(target.Infected)
+			slices.Sort(result.Targets[index].Infected)
+			result.Targets[index].Infected = slices.Compact(result.Targets[index].Infected)
+		}
+	}
+	packages := make([]string, 0, len(evaluation.Suites))
+	for pkg := range evaluation.Suites {
+		packages = append(packages, pkg)
+	}
+	slices.Sort(packages)
+	result.Suites = make([]checkpoint.SuiteProbe, 0, len(packages))
+	for _, pkg := range packages {
+		suite := evaluation.Suites[pkg]
+		saved := checkpoint.SuiteProbe{Package: pkg, Measured: suite.Measured}
+		if suite.Measured {
+			saved.DurationNS = int64(suite.Duration)
+			saved.Infected = slices.Clone(suite.Infected)
+			slices.Sort(saved.Infected)
+			saved.Infected = slices.Compact(saved.Infected)
+			saved.WholeTree = suite.WholeTree
+		}
+		result.Suites = append(result.Suites, saved)
+	}
+	return result
+}
+
+func restoreMutationProbe(catalog gomutants.Catalog, targets []TargetEvidence, packages []string, saved checkpoint.MutationProbe) (ProbeEvaluation, bool) {
+	if saved.IndexFingerprint != mutationProbeIndexFingerprint(catalog) {
+		return ProbeEvaluation{}, false
+	}
+	evaluation := ProbeEvaluation{Targets: slices.Clone(targets)}
+	byID := make(map[string]int, len(targets))
+	for index := range evaluation.Targets {
+		target := &evaluation.Targets[index]
+		target.Probed, target.ProbeDuration, target.Infected = false, 0, nil
+		if target.Target.ID == "" {
+			return ProbeEvaluation{}, false
+		}
+		if _, duplicate := byID[target.Target.ID]; duplicate {
+			return ProbeEvaluation{}, false
+		}
+		byID[target.Target.ID] = index
+	}
+	if len(saved.Targets) != len(targets) {
+		return ProbeEvaluation{}, false
+	}
+	knownIndices := make(map[uint32]bool, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		knownIndices[mutant.Index] = true
+	}
+	seenTargets := make(map[string]bool, len(saved.Targets))
+	for _, measured := range saved.Targets {
+		position, found := byID[measured.ID]
+		if !found || seenTargets[measured.ID] || !validCheckpointProbeFact(measured.Measured, measured.DurationNS, measured.Infected, false) {
+			return ProbeEvaluation{}, false
+		}
+		seenTargets[measured.ID] = true
+		for _, infected := range measured.Infected {
+			if !knownIndices[infected] {
+				return ProbeEvaluation{}, false
+			}
+		}
+		target := &evaluation.Targets[position]
+		if target.Target.Kind == goanalysis.KindFuzz && measured.Measured {
+			return ProbeEvaluation{}, false
+		}
+		if measured.Measured {
+			target.Probed = true
+			target.ProbeDuration = time.Duration(measured.DurationNS)
+			target.Infected = slices.Clone(measured.Infected)
+		}
+	}
+	for _, position := range probedTargetPositions(evaluation.Targets) {
+		if evaluation.Targets[position].Probed {
+			evaluation.Measured++
+		} else {
+			evaluation.Unmeasured++
+		}
+	}
+
+	wantPackages := slices.Clone(packages)
+	slices.Sort(wantPackages)
+	wantPackages = slices.Compact(wantPackages)
+	gotPackages := make([]string, 0, len(saved.Suites))
+	for _, suite := range saved.Suites {
+		gotPackages = append(gotPackages, suite.Package)
+	}
+	slices.Sort(gotPackages)
+	if !slices.Equal(gotPackages, wantPackages) {
+		return ProbeEvaluation{}, false
+	}
+	if len(saved.Suites) != 0 {
+		evaluation.Suites = make(map[string]PackageProbeEvidence, len(saved.Suites))
+	}
+	for _, measured := range saved.Suites {
+		if measured.Package == "" || !validCheckpointProbeFact(measured.Measured, measured.DurationNS, measured.Infected, measured.WholeTree) {
+			return ProbeEvaluation{}, false
+		}
+		for _, infected := range measured.Infected {
+			if !knownIndices[infected] {
+				return ProbeEvaluation{}, false
+			}
+		}
+		evaluation.Suites[measured.Package] = PackageProbeEvidence{
+			Measured: measured.Measured, Duration: time.Duration(measured.DurationNS),
+			Infected: slices.Clone(measured.Infected), WholeTree: measured.WholeTree,
+		}
+		if measured.Measured {
+			evaluation.SuitesMeasured++
+		} else {
+			evaluation.SuitesUnmeasured++
+		}
+	}
+	return evaluation, true
+}
+
+func validCheckpointProbeFact(measured bool, durationNS int64, infected []uint32, wholeTree bool) bool {
+	if durationNS < 0 || !measured && (durationNS != 0 || len(infected) != 0 || wholeTree) {
+		return false
+	}
+	for index := 1; index < len(infected); index++ {
+		if infected[index-1] >= infected[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// mutationProbeIndexFingerprint binds the compact uint32 sets in a checkpoint
+// to the prepared session that assigned them. Source-mutant identity alone is
+// insufficient: the same identities may be returned in another order, and a
+// change from unprobed to probed also changes whether absence is evidence.
+func mutationProbeIndexFingerprint(catalog gomutants.Catalog) string {
+	type entry struct {
+		index    uint32
+		id       string
+		accepted bool
+		probed   bool
+	}
+	entries := make([]entry, 0, len(catalog.Mutants))
+	for _, mutant := range catalog.Mutants {
+		entries = append(entries, entry{
+			index: mutant.Index, id: mutant.ID, accepted: mutant.Accepted, probed: mutant.Probed,
+		})
+	}
+	slices.SortFunc(entries, func(left, right entry) int {
+		if left.index < right.index {
+			return -1
+		}
+		if left.index > right.index {
+			return 1
+		}
+		return compareText(left.id, right.id)
+	})
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("goatest-mutation-probe-index-v1\x00"))
+	for _, item := range entries {
+		var index [4]byte
+		binary.BigEndian.PutUint32(index[:], item.index)
+		_, _ = hash.Write(index[:])
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(item.id)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(item.id))
+		flags := byte(0)
+		if item.accepted {
+			flags |= 1
+		}
+		if item.probed {
+			flags |= 2
+		}
+		_, _ = hash.Write([]byte{flags})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }

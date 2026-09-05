@@ -39,6 +39,7 @@ const (
 	deepMutationTimeoutLimit        = 5 * time.Hour
 	mutationTimeoutMultiplier       = 5
 	individualMutationTargetLimit   = 8
+	individualMutationWitnessBudget = 2 * time.Second
 	maximumMutationBatchTargets     = 64
 	maximumMutationRunArgumentBytes = 8 << 10
 	maximumMutationBatchDuration    = time.Second
@@ -52,6 +53,7 @@ const (
 const (
 	mutationPlanIndividual   = "individual:"
 	mutationPlanBatch        = "batch:"
+	mutationPlanBatchRefine  = "->bisect-on-ambiguity-or-kill"
 	mutationPlanFuzz         = "fuzz:"
 	mutationPlanPackageSuite = "package-suite"
 	mutationPlanReused       = "reused"
@@ -110,19 +112,18 @@ type MutationSession interface {
 // TargetEvidence is one top-level Go test/fuzz target and the source files it
 // demonstrably reached during its baseline execution.
 //
-// Covered narrows the same evidence to the coverage blocks the target ran. It
-// lives in memory only: blocks are far too large to rewrite on every
-// checkpoint, so a target restored from a checkpoint carries nil there and
-// routing treats it as reaching everything in CoveredFiles.
+// Covered narrows the same evidence to the coverage blocks the target ran.
+// Current checkpoints preserve those positive blocks. A legacy checkpoint has
+// nil there, which routing treats as reaching everything in CoveredFiles.
 //
 // Probed reports that the probe pass measured this target. Infected is then the
 // catalogue indices of the mutants whose site the target made differ, ascending
 // and distinct, and is meaningful only when Probed is true. A target the pass
 // did not measure - it failed, timed out, was unavailable, errored, was a fuzz
-// target, was restored from a checkpoint, or the pass was not run - carries
-// Probed == false and is treated as infecting every mutant it reaches. Both
-// live in memory only, like the blocks and for the same reason: they describe
-// one execution of one run.
+// target, or the pass was not run - carries Probed == false and is treated as
+// infecting every mutant it reaches. A complete pass is durable scheduling
+// state for an exact-input interrupted run; a partial or legacy pass is never
+// restored and is measured in full.
 type TargetEvidence struct {
 	Target       goanalysis.Target
 	CoveredFiles []string
@@ -132,7 +133,8 @@ type TargetEvidence struct {
 	// ProbeDuration is a second, same-run control sample for this target. The
 	// mutation phase uses the slower of baseline and probe as the centre of a
 	// relative stall budget instead of making every mutant wait out one fixed
-	// timeout. It is in-memory evidence only, like Infected below.
+	// timeout. It is checkpointed only with the complete probe phase, like
+	// Infected below.
 	ProbeDuration time.Duration
 	// WholeTree reports that the baseline or mutant execution consulted the
 	// frozen repository beyond the target's ordinary closure inputs, or that
@@ -570,18 +572,33 @@ type mutationSeed struct {
 // runs it, the detail that names it in the evidence, the plan entry that names
 // it in a trace, and the targets it selects.
 //
-// A batch selects several targets at once, and the three kinds of verdict read
-// that differently. A survival is about every target the selector ran, because
-// the selection ran to completion and all of them passed. A kill and a timeout
-// are about one target each, and the engine names neither: it reports that the
-// selection failed, or that it ran out of time, without saying which target
-// did. Both are therefore attributable only to a selection of one, and a vague
-// record is worse than none.
+// A batch selects several targets at once, and the three kinds of outcome read
+// that differently. A survival proves every target the selector ran passed. A
+// kill proves the selector killed the mutant, but not which subset did, so the
+// selection is bisected until a named target or a minimal interacting group
+// reproduces it. A timeout proves nothing and is likewise bisected. Reusable
+// kill and timeout records remain attributable to a selection of exactly one.
 type mutationSeedExecution struct {
 	request gomutants.ExecRequest
 	detail  string
 	plan    string
 	targets []TargetEvidence
+	// refineKill marks an aggregate proof shortcut whose kill is recursively
+	// narrowed to seek an attributable witness. Every planned batch has this
+	// property; a completed survival remains final for all of its targets.
+	refineKill bool
+	// delayedKill is a sentinel placed after those refinement executions. It
+	// confirms the aggregate kill only if both smaller selectors survived.
+	delayedKill *delayedMutationKill
+	// fallbackKill retains that same aggregate fact while a smaller attribution
+	// attempt runs. An inconclusive refinement cannot disprove an already
+	// observed aggregate kill, so it falls back to exact confirmation.
+	fallbackKill *delayedMutationKill
+}
+
+type delayedMutationKill struct {
+	execution mutationSeedExecution
+	first     gomutants.MutantResult
 }
 
 // soleTarget names the one target this execution selected, and the zero
@@ -775,20 +792,51 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	}
 	executions := mutationSeedExecutions(mutant, seed.reaching, options)
 	options.Trace.Route(mutationSeedRoute(mutant, route, executions))
-	// The targets that have run, in the order they ran. A verdict this loop
-	// reaches without exhausting the whole reaching set is a verdict about
-	// exactly these, so a record of one names them and no more.
+	// The targets proved passing, in the order their selectors ran. A terminal
+	// timeout also records its one selected target separately; an ambiguous
+	// aggregate attempt contributes nothing here because it proved nothing.
 	executed := make([]TargetEvidence, 0, len(seed.reaching))
-	for _, execution := range executions {
+	pending := slices.Clone(executions)
+	confirmDelayedKill := func(attempt *delayedMutationKill) {
+		confirmed, finding, _, _, confirmErr := confirmMutationKill(
+			ctx, session, mutant, attempt.execution.request, attempt.first, options,
+		)
+		if confirmErr != nil {
+			seed.err = confirmErr
+			return
+		}
+		if confirmed {
+			seed.evaluation.addKill(mutant, mutationKillDetail(attempt.execution.detail, options))
+		} else {
+			seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
+		}
+		seed.resolved = true
+	}
+	for len(pending) != 0 {
+		execution := pending[0]
+		pending = pending[1:]
+		if execution.delayedKill != nil {
+			confirmDelayedKill(execution.delayedKill)
+			return seed
+		}
 		result, observation, err := executeMutation(ctx, session, execution.request, options)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
 		}
 		observedTargets := applyRepositoryObservation(execution.targets, observation, options.RepositoryObserver)
-		executed = append(executed, observedTargets...)
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
+			if execution.refineKill && len(execution.targets) > 1 {
+				attempt := &delayedMutationKill{execution: execution, first: result}
+				refinements := mutationRefinementExecutions(mutant, execution.targets, options)
+				for index := range refinements {
+					refinements[index].fallbackKill = attempt
+				}
+				refinements = append(refinements, mutationSeedExecution{delayedKill: attempt})
+				pending = append(refinements, pending...)
+				continue
+			}
 			confirmed, finding, _, confirmationObservation, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
 			if confirmErr != nil {
 				seed.err = confirmErr
@@ -807,18 +855,48 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			}
 			seed.resolved = true
 		case gomutants.OutcomeSurvived:
-			// Continue through every demonstrably relevant target.
+			// A completed selector proves every target it names passed with the
+			// mutant active. Keep exactly those targets for the universal
+			// survivor record, then continue through the rest of the route.
+			executed = append(executed, observedTargets...)
 		case gomutants.OutcomeTimedOut:
+			if execution.fallbackKill != nil {
+				// Attribution failed, but that does not contradict the exact
+				// aggregate kill already observed. Confirm that stronger fact
+				// instead of replacing it with a weaker inconclusive outcome.
+				confirmDelayedKill(execution.fallbackKill)
+				return seed
+			}
+			if len(execution.targets) > 1 {
+				// Aggregation is a proof shortcut, not a new source of
+				// inconclusive verdicts. The engine cannot name which target in
+				// a selector was still running, so discard this ambiguous attempt
+				// and refine the exact same set into attributable executions.
+				pending = append(mutationRefinementExecutions(mutant, execution.targets, options), pending...)
+				continue
+			}
+			executed = append(executed, observedTargets...)
 			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationTargetTimeoutSummary, options.Accepted)
 			// A timeout is not a verdict about the mutant, so what is recorded
-			// is what the run did: these targets ran, and time ran out under
-			// the last of them — which is why only an execution that selected
-			// one target is recorded, and a batch that ran out of time leaves
-			// the store alone.
+			// is what the run did: the earlier selectors passed, and time ran
+			// out under this one target. An aggregate expiration never reaches
+			// here and leaves no evidence of its own.
 			options.Evidence.recordTimedOut(mutant, executed, execution.soleTarget(),
 				"mutation-timeout", mutationTargetTimeoutSummary)
 			seed.resolved = true
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
+			if execution.fallbackKill != nil {
+				confirmDelayedKill(execution.fallbackKill)
+				return seed
+			}
+			if len(execution.targets) > 1 {
+				// As with an aggregate expiration, a non-decisive engine outcome
+				// names no target and must not become a finding introduced by the
+				// batching shortcut. Refine until an exact smaller selector passes
+				// or one target owns the terminal ambiguity.
+				pending = append(mutationRefinementExecutions(mutant, execution.targets, options), pending...)
+				continue
+			}
 			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationTargetInconclusiveSummary, options.Accepted)
 			seed.resolved = true
 		default:
@@ -1016,39 +1094,84 @@ func applyRepositoryObservation(targets []TargetEvidence, observation repository
 }
 
 func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {
-	individual := min(len(targets), individualMutationTargetLimit)
+	individual := individualMutationTargetCount(targets)
 	executions := make([]mutationSeedExecution, 0, individual+len(targets[individual:]))
-	for _, target := range targets[:individual] {
-		request := seedRequest(mutant, target, controlRelativeMutationTimeout(
-			options.Contract, options.Timeout, target.Duration, target.ProbeDuration))
-		request.Args = append(request.Args, options.TestArgs...)
-		executions = append(executions, mutationSeedExecution{
-			request: request,
-			detail:  target.Target.Name,
-			plan:    mutationPlanIndividual + target.Target.Name,
-			targets: []TargetEvidence{target},
-		})
-	}
-	for _, batch := range mutationTargetBatches(targets[individual:]) {
-		baseline, probe := batchMutationControlDurations(batch)
-		request := batchSeedRequest(mutant, batch, controlRelativeMutationTimeout(
-			options.Contract, options.Timeout, baseline, probe))
-		request.Args = append(request.Args, options.TestArgs...)
-		executions = append(executions, mutationSeedExecution{
-			request: request,
-			detail:  batchMutationDetail(batch),
-			plan:    batchMutationPlan(batch),
-			targets: batch,
-		})
+	executions = append(executions, mutationIndividualExecutions(mutant, targets[:individual], options)...)
+	for _, batch := range aggregateSlowMutationBatches(mutationTargetBatches(targets[individual:])) {
+		executions = append(executions, mutationExecutionForTargets(mutant, batch, options, len(batch) > 1))
 	}
 	return executions
+}
+
+// individualMutationTargetCount keeps the high-yield front of a route cheap.
+// Count alone is not a cost bound: the eighth target of an integration-heavy
+// package can take seconds while eight unit tests elsewhere take milliseconds.
+// The semantic-original probe is the closest same-run timing sample for a
+// prepared mutant binary, with baseline duration as the fail-closed fallback.
+// One target always remains an attributable witness even when it is unmeasured
+// or already exceeds the budget.
+func individualMutationTargetCount(targets []TargetEvidence) int {
+	limit := min(len(targets), individualMutationTargetLimit)
+	var total time.Duration
+	for index := range limit {
+		duration := mutationPlanningDuration(targets[index])
+		if index > 0 && (duration <= 0 || boundedDurationSum(total, duration) > individualMutationWitnessBudget) {
+			return index
+		}
+		total = boundedDurationSum(total, duration)
+		if duration <= 0 {
+			return index + 1
+		}
+	}
+	return limit
+}
+
+func mutationPlanningDuration(target TargetEvidence) time.Duration {
+	if target.ProbeDuration > 0 {
+		return target.ProbeDuration
+	}
+	return target.Duration
+}
+
+func mutationIndividualExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {
+	executions := make([]mutationSeedExecution, 0, len(targets))
+	for _, target := range targets {
+		executions = append(executions, mutationExecutionForTargets(mutant, []TargetEvidence{target}, options, false))
+	}
+	return executions
+}
+
+// mutationRefinementExecutions halves an ambiguous aggregate instead of
+// expanding it into a linear worst case. A passing half proves all of its
+// targets together; only a half that times out or kills needs another split.
+// Eventually a terminal timeout or ordinary kill has one owner. If both halves
+// pass after their parent killed, the parent's delayed exact confirmation keeps
+// the cross-test interaction rather than manufacturing an attribution.
+func mutationRefinementExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {
+	if len(targets) < 2 {
+		return mutationIndividualExecutions(mutant, targets, options)
+	}
+	middle := len(targets) / 2
+	return []mutationSeedExecution{
+		mutationExecutionForTargets(mutant, targets[:middle], options, middle > 1),
+		mutationExecutionForTargets(mutant, targets[middle:], options, len(targets)-middle > 1),
+	}
+}
+
+func mutationExecutionForTargets(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions, refineKill bool) mutationSeedExecution {
+	request := batchSeedRequest(mutant, targets, aggregateMutationTimeout(targets, options))
+	request.Args = append(request.Args, options.TestArgs...)
+	return mutationSeedExecution{
+		request: request, detail: batchMutationDetail(targets),
+		plan: batchMutationPlan(targets), targets: targets, refineKill: refineKill,
+	}
 }
 
 func mutationTargetBatches(targets []TargetEvidence) [][]TargetEvidence {
 	batches := make([][]TargetEvidence, 0)
 	byExecutionEnvironment := make(map[string]int)
 	for _, target := range targets {
-		key := target.Target.Package + "\x00" + strings.Join(target.Environment, "\x00")
+		key := mutationExecutionEnvironment(target)
 		index, ok := byExecutionEnvironment[key]
 		full := ok && len(batches[index]) == maximumMutationBatchTargets
 		if ok && !full && len(batches[index]) != 0 {
@@ -1066,10 +1189,55 @@ func mutationTargetBatches(targets []TargetEvidence) [][]TargetEvidence {
 	return batches
 }
 
+// aggregateSlowMutationBatches retains cheap duration-bounded batches and
+// combines only the consecutive one-target batches left behind by that bound.
+// The cost-bounded individual prefix already supplied the route's attributable
+// witnesses. These singletons are its expensive survivor tail: running them
+// together repeats no target and removes only process and suite setup.
+// Structural selector limits still apply, and a different package or
+// environment always ends an aggregate.
+func aggregateSlowMutationBatches(batches [][]TargetEvidence) [][]TargetEvidence {
+	result := make([][]TargetEvidence, 0, len(batches))
+	for index := 0; index < len(batches); {
+		batch := batches[index]
+		if len(batch) != 1 {
+			result = append(result, batch)
+			index++
+			continue
+		}
+		key := mutationExecutionEnvironment(batch[0])
+		end := index
+		for end < len(batches) && len(batches[end]) == 1 &&
+			mutationExecutionEnvironment(batches[end][0]) == key {
+			end++
+		}
+		for next := index; next < end; {
+			aggregate := slices.Clone(batches[next])
+			next++
+			for next < end {
+				candidate := append(slices.Clone(aggregate), batches[next][0])
+				if len(candidate) > maximumMutationBatchTargets ||
+					len(batchRunArgument(candidate)) > maximumMutationRunArgumentBytes {
+					break
+				}
+				aggregate = candidate
+				next++
+			}
+			result = append(result, aggregate)
+		}
+		index = end
+	}
+	return result
+}
+
+func mutationExecutionEnvironment(target TargetEvidence) string {
+	return target.Target.Package + "\x00" + strings.Join(target.Environment, "\x00")
+}
+
 func batchMutationDuration(targets []TargetEvidence) time.Duration {
 	var total time.Duration
 	for _, target := range targets {
-		duration := min(max(target.Duration, 0), deepMutationTimeoutLimit)
+		duration := min(max(mutationPlanningDuration(target), 0), deepMutationTimeoutLimit)
 		total = min(total+duration, deepMutationTimeoutLimit)
 	}
 	return total
@@ -1082,6 +1250,36 @@ func batchMutationControlDurations(targets []TargetEvidence) (time.Duration, tim
 		probe = boundedDurationSum(probe, target.ProbeDuration)
 	}
 	return baseline, probe
+}
+
+// aggregateMutationTimeout gives a multi-target shortcut the cheaper of two
+// measured comparisons: the isolated controls it replaces and an available
+// whole-package control. A package suite may use a broader environment or run
+// extra tests, so its duration is a scheduling hint rather than a semantic
+// premise. That is safe here because an aggregate expiration proves nothing
+// and is automatically refined into individual target executions.
+//
+// A one-target execution is terminal on expiration and therefore never uses
+// the shortcut. Its deadline remains tied only to that exact target's controls.
+func aggregateMutationTimeout(targets []TargetEvidence, options MutationOptions) time.Duration {
+	baseline, probe := batchMutationControlDurations(targets)
+	targetDeadline := controlRelativeMutationTimeout(options.Contract, options.Timeout, baseline, probe)
+	if len(targets) < 2 {
+		return targetDeadline
+	}
+	pkg := targets[0].Target.Package
+	var suiteSamples []time.Duration
+	if suite, measured := options.SuiteCoverage[pkg]; measured && suite.Duration > 0 {
+		suiteSamples = append(suiteSamples, suite.Duration)
+	}
+	if suite, measured := options.SuiteProbes[pkg]; measured && suite.Measured && suite.Duration > 0 {
+		suiteSamples = append(suiteSamples, suite.Duration)
+	}
+	if len(suiteSamples) == 0 {
+		return targetDeadline
+	}
+	suiteDeadline := controlRelativeMutationTimeout(options.Contract, options.Timeout, suiteSamples...)
+	return min(targetDeadline, suiteDeadline)
 }
 
 func boundedDurationSum(total, duration time.Duration) time.Duration {
@@ -1102,7 +1300,7 @@ func batchMutationPlan(targets []TargetEvidence) string {
 	if len(targets) == 1 {
 		return mutationPlanIndividual + targets[0].Target.Name
 	}
-	return fmt.Sprintf("%s%s(%d)", mutationPlanBatch, targets[0].Target.Package, len(targets))
+	return fmt.Sprintf("%s%s(%d)%s", mutationPlanBatch, targets[0].Target.Package, len(targets), mutationPlanBatchRefine)
 }
 
 // mutationSeedRoute describes how a mutant was routed: the targets baseline
@@ -1344,8 +1542,9 @@ func packageProbeInfects(evidence PackageProbeEvidence, index uint32) bool {
 // cannot support it: a mutant whose position the catalog could not report is
 // routed by file, and so is a position no instrumented block contains, which
 // is a gap between the blocks cmd/cover cut rather than proof that nothing
-// runs it. A target restored from a checkpoint carries no blocks and is kept
-// for the whole file for the same reason.
+// runs it. A target restored from a legacy checkpoint may carry no blocks and
+// is kept for the whole file for the same reason; current checkpoints preserve
+// the positive blocks.
 //
 // A position that instrumentation does describe and no target ran reaches
 // nobody. That is not a fallback but the answer: the mutation lives in code
@@ -1429,9 +1628,9 @@ func dischargeReachingTargets(mutant gomutants.Mutant, ordered []TargetEvidence,
 // The proof is used only where it is a proof. A mutant the engine compiled no
 // probe form for is absent from every measurement there will ever be, and that
 // absence says nothing about any target. A target the pass could not measure —
-// its test failed, it timed out, the tree was unavailable, it errored, it was
-// restored from a checkpoint, or it is a fuzz target, which the pass never
-// probes because fuzzing explores past the corpus a probe would measure —
+// its test failed, it timed out, the tree was unavailable, it errored, or it is
+// a fuzz target, which the pass never probes because fuzzing explores past the
+// corpus a probe would measure —
 // carries no facts at all, and silence is not evidence of absence. Both are
 // read off TargetEvidence.infects, which is fail-closed for exactly that
 // reason. Everything the proof does not cover is kept, which is what the run
@@ -1472,8 +1671,8 @@ func dischargeNeverInfected(mutant gomutants.Mutant, reaching []TargetEvidence) 
 //
 // The proof is used only where it is a proof. A fuzz target explores inputs
 // beyond the corpus its coverage was measured on, so its blocks do not bound
-// what it will execute. A target restored from a checkpoint carries no blocks
-// at all, and silence is not evidence of absence. Neither is the body itself:
+// what it will execute. A target restored from a legacy checkpoint may carry
+// no blocks at all, and silence is not evidence of absence. Neither is the body itself:
 // unless some instrumented block begins inside the span, the body was never
 // measured, and every target's silence about it means nothing. Everything the
 // proof does not cover is kept, which is what the run did before it existed.

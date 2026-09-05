@@ -555,17 +555,40 @@ func TestClassifyTargetFailureDistinguishesFlakeTimeoutAndStableFailure(t *testi
 	}
 }
 
-func TestClassifyTest2JSONIgnoresMixedStderrButRetainsScannerFailures(t *testing.T) {
-	output := []byte("plain stderr before JSON\n" +
-		`{"Action":"output","Test":"TestValue","Output":"running"}` + "\n" +
-		"another malformed line\n" +
-		`{"Action":"skip","Test":"TestValue/subtest","Output":"skipped"}` + "\n")
-	skipped, kind, summary, err := classifyTest2JSON("TestValue", output)
-	if err != nil || !skipped || kind != "skipped-subtest" || summary != "a selected subtest was skipped: TestValue/subtest" {
-		t.Fatalf("mixed test2json = (%t, %q, %q, %v)", skipped, kind, summary, err)
-	}
-	if skipped, kind, summary, err = classifyTest2JSON("TestValue", []byte(strings.Repeat("x", (4<<20)+1))); err == nil || skipped || kind != "" || summary != "" {
-		t.Fatalf("oversized test2json = (%t, %q, %q, %v)", skipped, kind, summary, err)
+func TestClassifyTestFramingAcceptsOnlyMarkedSelectedSkipReports(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name        string
+		output      string
+		wantSkipped bool
+		wantKind    string
+		wantSummary string
+		wantError   bool
+	}{
+		{
+			name: "top-level", output: "\x16--- SKIP: TestValue (0.00s)\r\n",
+			wantSkipped: true, wantKind: "skipped-target", wantSummary: "the selected top-level target called Skip",
+		},
+		{
+			name: "indented subtest after unterminated output", output: "user output without newline\x16    --- SKIP: TestValue/subtest (1.25s)\n",
+			wantSkipped: true, wantKind: "skipped-subtest", wantSummary: "a selected subtest was skipped: TestValue/subtest",
+		},
+		{name: "unmarked lookalike", output: "--- SKIP: TestValue (0.00s)\n"},
+		{name: "different target", output: "\x16--- SKIP: TestValuable (0.00s)\n"},
+		{name: "large unframed output", output: strings.Repeat("x", (4<<20)+1)},
+		{name: "truncated unknown", output: commandOutputTruncatedPrefix + ": the process produced 2000000 bytes, only the tail is kept\n\x16--- PASS: TestValue (0.00s)\n", wantError: true},
+		{
+			name: "skip retained in truncated tail", output: commandOutputTruncatedPrefix + ": the process produced 2000000 bytes, only the tail is kept\n\x16--- SKIP: TestValue/subtest (0.00s)\n",
+			wantSkipped: true, wantKind: "skipped-subtest", wantSummary: "a selected subtest was skipped: TestValue/subtest",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			skipped, kind, summary, err := classifyTestFraming("TestValue", []byte(test.output))
+			if skipped != test.wantSkipped || kind != test.wantKind || summary != test.wantSummary || (err != nil) != test.wantError {
+				t.Fatalf("classifyTestFraming = (%t, %q, %q, %v)", skipped, kind, summary, err)
+			}
+		})
 	}
 }
 
@@ -612,6 +635,11 @@ func TestTargetFindingAndCommandAreDeterministicAndDoNotAliasInputs(t *testing.T
 	}
 	if name := binaryName("fixture.example/module"); !strings.HasSuffix(name, testBinarySuffixInternal()) || len(strings.TrimSuffix(name, testBinarySuffixInternal())) != 16 {
 		t.Fatalf("binaryName = %q", name)
+	}
+	if build := baselineBuildCommand([]string{"integration"}, []string{"./cmd/tool"}); !slices.Equal(build, []string{
+		"go", "build", "-tags=integration", "-o", os.DevNull, "./cmd/tool",
+	}) {
+		t.Fatalf("baseline build command = %q", build)
 	}
 }
 

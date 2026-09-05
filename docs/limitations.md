@@ -69,10 +69,11 @@ self-dogfood is not external compatibility evidence.
   block of the surrounding code inside the braces — the block after the body
   begins one column past the closing brace or later. A proof whose coordinates
   do not describe a span the edit precedes discharges nothing.
-- A baseline target restored from a checkpoint carries the files it reached but
-  not the blocks inside them, so it is routed at file granularity for the rest
-  of the run. A resumed run therefore executes at least the work a cold run
-  would, never less. See [checkpoint v1](checkpoint-v1.md).
+- A baseline target restored from a checkpoint written before positive blocks
+  were preserved carries only the files it reached. It is routed at file
+  granularity for the rest of the run, so a legacy resume executes at least the
+  work a cold run would, never less. Current checkpoints retain exact block
+  routing. See [checkpoint v1](checkpoint-v1.md).
 - Infection facts are taken from one execution of each eligible target and each
   package suite for which infection can still answer an unresolved mutant. A
   target or suite whose behaviour differs between runs — a clock, a
@@ -91,7 +92,11 @@ self-dogfood is not external compatibility evidence.
   what its probe tree records: a mutant the engine has no probe form for is
   absent from every measurement there will ever be, and is read as infected by
   every target rather than as one nothing infected. Fuzz targets are not probed
-  at all, and carry no facts for the same reason.
+  at all, and carry no facts for the same reason. An exact-input continuation
+  restores the same complete observation instead of taking a second sample;
+  this adds no blind spot beyond uninterrupted execution, but its new trace has
+  no physical `probe-exec` records and therefore is not by itself a
+  self-contained `proofaudit` input for the infection layer.
 - `replay` currently accepts only mutation-backed findings with a recorded
   mutant identity. Other finding kinds are rejected instead of executing an
   unrelated mutation set.

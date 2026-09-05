@@ -7,7 +7,7 @@ pipeline is:
 CLI/config
    │
    ├─ exact repository + dependency + environment identity
-   ├─ native build/vet/test/test2json baseline
+   ├─ native build/vet/direct test-binary baseline
    ├─ top-level + exact package-suite coverage graph ── changeset routing
    ├─ resource leases
    ├─ race checks
@@ -97,6 +97,19 @@ because a seed-corpus duration does not predict a 10,000- or 100,000-input
 campaign. The design decision is recorded in
 [ADR 0008](adr/0008-controls-before-timeouts.md).
 
+Within a reaching route, the shortest targets run individually until their
+measured execution cost reaches two seconds, with at least one and at most
+eight kept as cheap, attributable kill witnesses. The remainder forms small
+duration-bounded batches; consecutive compatible singletons in the expensive
+tail then share one exact selector. A completed selector proves the same facts
+as its isolated targets without repeating process and suite setup. A selector
+that times out or kills is recursively bisected: only a singleton can own a
+terminal target timeout or reusable kill, while a kill visible only through
+cross-test interaction is confirmed on the smallest exact aggregate that
+reproduces it. Whole-package measurements bound speculative attempts but never
+become a premise of a verdict. This is
+[ADR 0012](adr/0012-aggregate-proof-before-timeout.md).
+
 Across runs, the mutation phase keeps a store of what it established about each
 mutant, `.goatest/cache/mutation-evidence-v1.json`, read once before the phase
 and written once after it. Cache status strictly validates and accounts for
@@ -138,12 +151,18 @@ runs, and a scratch layer removed when the run ends. Reads resolve scratch and
 then base. Writes are where the rule is: **only a command that compiles or lists
 writes to the base layer** — `go vet`, `go build`, `go list`, `go version`, and
 a `go test -c` — and everything that runs the project's tests writes to scratch.
+The build-only check passes the host null device to `go build -o`; this keeps
+an exact selection of one `main` package from writing its executable into the
+frozen repository while preserving compile-only behaviour for every selection.
 That second half is what keeps the cache useful. A baseline target is the
-project's test binary under `go tool test2json`, and a test suite spawns go
-commands of its own; were a target run to persist, every throwaway package those
-fixtures compile would evict the standard library the base layer exists to hold.
-The rule lives in one function, is applied by one workspace decorator, and is
-pinned by a test that names every command goatest issues.
+project's compiled test binary executed directly with Go's machine-readable
+test framing, and a test suite spawns go commands of its own; were a target run
+to persist, every throwaway package those fixtures compile would evict the
+standard library the base layer exists to hold. Direct execution avoids a
+`go tool test2json` process and its child-process handoff for every isolated
+target. The rule lives in one function, is applied by one workspace decorator,
+and is pinned by a test that names every command goatest issues. See
+[ADR 0015](adr/0015-execute-framed-baselines-directly.md).
 
 Both layers are bounded, and nobody has to remember to bound them. The run
 collects the base layer when it ends and the served processes keep the scratch
@@ -190,8 +209,15 @@ and never acts as evidence or advances a latest-report index. Phase boundaries
 atomically replace a complete base document; completed targets and mutants
 between them are individually synced to a checksummed append-only journal.
 This preserves per-unit crash recovery while making cumulative checkpoint I/O
-linear rather than quadratic. See [checkpoint v1](checkpoint-v1.md) and
-[ADR 0011](adr/0011-append-only-checkpoint-journal.md).
+linear rather than quadratic. Positive target blocks preserve exact routes,
+and a completed baseline carries its global instrumentation and package-suite
+controls so resume starts no baseline command. A complete catalog-bound probe
+phase is another atomic boundary, so a mutation continuation does not repeat
+its target and package-suite controls. See
+[checkpoint v1](checkpoint-v1.md),
+[ADR 0011](adr/0011-append-only-checkpoint-journal.md),
+[ADR 0013](adr/0013-preserve-block-routing-across-resume.md), and
+[ADR 0014](adr/0014-resume-complete-probe-phase.md).
 
 The current implementation supports one main Go module per run. Detecting
 multiple main modules causes an error rather than an aggregate that could omit

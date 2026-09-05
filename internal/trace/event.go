@@ -8,6 +8,15 @@ package trace
 // replaced in place instead of consuming a public version.
 const SchemaV1 = "goatest-trace-v1"
 
+// Synthetic target identity prefixes are shared by trace producers and
+// consumers. Keeping the vocabulary here prevents either side from silently
+// accepting a spelling the other no longer emits.
+const (
+	PackageSuiteProbePrefix    = "package-suite:"
+	PackageSuiteCoveragePrefix = "package-suite-coverage:"
+	PairedControlProbePrefix   = "paired-control:"
+)
+
 // Event types. Every recorded event carries exactly one of these discriminators
 // and at most one payload record, named after the same concept.
 const (

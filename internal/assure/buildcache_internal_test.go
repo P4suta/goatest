@@ -24,11 +24,9 @@ import (
 //
 // It is written from the argv builders the run uses rather than from literals,
 // so a change to what goatest runs is a change this test sees. The case that
-// matters most is the baseline target: it is the project's test binary wrapped
-// in `go tool test2json`, so its argv begins with the go binary like every
-// compile does, and a suite whose tests spawn go commands of their own — this
-// repository's does — would fill the base layer with fixture packages and evict
-// the standard library it exists to hold.
+// matters most is the baseline target: a suite whose tests spawn go commands
+// of their own — this repository's does — would fill the base layer with
+// fixture packages and evict the standard library it exists to hold.
 func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 	t.Parallel()
 	target := gomutants.Command{Argv: []string{filepath.Join("artifacts", "internal-assure.test"), "-test.run=^TestValue$"}}
@@ -38,15 +36,15 @@ func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 		want bool
 	}{
 		{name: "baseline vet", argv: baselineGoCommand("vet", nil, []string{"./..."}), want: true},
-		{name: "baseline build", argv: baselineGoCommand("build", nil, []string{"./..."}), want: true},
-		{name: "baseline build with tags", argv: baselineGoCommand("build", []string{"integration"}, []string{"./..."}), want: true},
+		{name: "baseline build", argv: baselineBuildCommand(nil, []string{"./..."}), want: true},
+		{name: "baseline build with tags", argv: baselineBuildCommand([]string{"integration"}, []string{"./..."}), want: true},
 		{name: "baseline test binary compile", argv: baselineCompileCommand("fixture.example/module", "fixture.example/module/pkg", "binary", nil), want: true},
 		{name: "workspace toolchain", argv: []string{"go", "version"}, want: true},
 		{name: "workspace package list", argv: []string{"go", "list", "-json", "./..."}, want: true},
 		{name: "workspace module list", argv: []string{"go", "list", "-m", "-json", "all"}, want: true},
 		{name: "selected package list", argv: []string{"go", "list", "-json", "-tags=integration", "./internal/..."}, want: true},
 
-		{name: "baseline target under test2json", argv: test2JSONCommand("fixture.example/module/pkg", target).Argv, want: false},
+		{name: "baseline target with test framing", argv: testFramedCommand(target).Argv, want: false},
 		{name: "baseline target run directly", argv: target.Argv, want: false},
 		{name: "race verification", argv: []string{"go", "test", "-race", "-count=1", "./..."}, want: false},
 		{name: "original mutation control", argv: []string{"go", "test", "-count=1", "./..."}, want: false},
@@ -158,8 +156,7 @@ func TestBuildCacheWorkspaceReplacesACacheProgramItWasHandedAndWrapsNothingWitho
 func TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns(t *testing.T) {
 	workspace := &baselineFakeWorkspace{}
 	// The coverage profile is written whichever way the target was run, so the
-	// round completes with the target under test2json — the form whose argv
-	// begins with the go binary, and the one the rule has to get right.
+	// round completes with the directly executed framed test binary.
 	workspace.exec = func(command gomutants.Command) (gomutants.CommandResult, error) {
 		if profile := coverageProfileArgument(command); profile != "" {
 			contents := "mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n"
@@ -172,7 +169,7 @@ func TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns(t *testing.T) {
 	cache := runBuildCache{scratch: "scratch", base: "base", plain: "program", persisting: "program --persist"}
 	result, err := CollectBaseline(t.Context(), withBuildCache(workspace, cache), baselineModel(), []BaselineTarget{{
 		Target: baselineTestTarget("TestValue"),
-	}}, BaselineOptions{ArtifactDirectory: t.TempDir(), UseTest2JSON: true})
+	}}, BaselineOptions{ArtifactDirectory: t.TempDir(), UseTestFraming: true})
 	if err != nil || len(result.Targets) != 1 {
 		t.Fatalf("CollectBaseline = (%+v, %v)", result, err)
 	}
@@ -185,8 +182,8 @@ func TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns(t *testing.T) {
 		}
 	}
 	targetRun := workspace.commands[3]
-	if targetRun.Argv[0] != "go" || targetRun.Argv[1] != "tool" {
-		t.Fatalf("the fourth command was %q, want the target under test2json", targetRun.Argv)
+	if filepath.Base(targetRun.Argv[0]) != binaryName("fixture.example/module") || !slices.Contains(targetRun.Argv, "-test.v=test2json") {
+		t.Fatalf("the fourth command was %q, want the directly executed framed target", targetRun.Argv)
 	}
 	for _, entry := range targetRun.Env {
 		if strings.HasPrefix(entry, cacheProgramVariable+"=") {

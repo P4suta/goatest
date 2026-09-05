@@ -217,7 +217,8 @@ spent its time in, how coverage routed the mutants, what the probe pass
 measured, and what became of the ones it executed. The `probe` block counts the
 target and package-suite controls separately, tallies their outcomes, and
 reports the `(probe, mutant)` infections they recorded together with the
-measured executions that infected nothing; a recording made without the pass
+measured executions that infected nothing; a recording made without a physical
+pass — including an attempt that restored its completed probe checkpoint —
 reads `probe: not recorded` rather than a pass that infected nothing. The
 routing block counts `probe-reaching` routes, whole-suite coverage decisions,
 and the routes carrying a probe on its `probed:` line, which is absent from a
@@ -254,7 +255,9 @@ Why every speed-up is such a layer, and why a budget never is, is
 [ADR 0004](adr/0004-proof-layers-not-budgets.md).
 The `infection` layer reads the recording alone, so it is audited whenever the
 recording holds a target probe pass and left out — with a line under the layer
-table saying so — whenever it holds none. The `suite-reach` layer is separate:
+table saying so — whenever it holds none. A resumed attempt announces
+`resume-probe` but does not invent execution records; use its interrupted
+attempt or a clean recording to audit that layer. The `suite-reach` layer is separate:
 it reconstructs passing whole-package coverage controls from recorded command
 arguments, then independently applies exact block containment to attributable
 package-suite kills. It deduplicates paired confirmations; a missing route,

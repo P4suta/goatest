@@ -514,6 +514,66 @@ func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 	}
 }
 
+func TestRunCoordinatorRestoresCompleteProbeWithoutExecutingItAgain(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants[0].Index = 7
+	harness.catalog.Mutants[0].Path = "value.go"
+	harness.catalog.Mutants[0].Line = 8
+	harness.catalog.Mutants[0].Probed = true
+	harness.baseline.Instrumented = blockRoutingInstrumentation()
+	harness.baseline.Targets[0].Covered = []goanalysis.FileCoverage{{
+		Path: "value.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 7, StartColumn: 1, EndLine: 9, EndColumn: 1}},
+	}}
+	probed := slices.Clone(harness.baseline.Targets)
+	probed[0].Probed = true
+	probed[0].ProbeDuration = 750 * time.Millisecond
+	probed[0].Infected = []uint32{7}
+	probeEvaluation := ProbeEvaluation{Targets: probed, Measured: 1}
+	probePackages := neededProbeSuitePackages(
+		harness.catalog, harness.baseline.Targets, harness.baseline.Instrumented, harness.baseline.Suites,
+	)
+	if len(probePackages) != 0 {
+		probeEvaluation.Suites = make(map[string]PackageProbeEvidence, len(probePackages))
+		for _, pkg := range probePackages {
+			probeEvaluation.Suites[pkg] = PackageProbeEvidence{Measured: true, Duration: time.Second, Infected: []uint32{7}}
+			probeEvaluation.SuitesMeasured++
+		}
+	}
+	target := harness.targets[0]
+	harness.cache.checkpoint = checkpoint.State{
+		Schema: checkpoint.SchemaV1, InputDigest: harness.digest, Attempts: 1,
+		Baseline: checkpoint.Baseline{
+			BuildVetComplete: true, Complete: true,
+			Targets: []checkpoint.BaselineTarget{{
+				ID: target.ID, Executed: true,
+				Inventory: report.TargetDisposition{
+					ID: target.ID, Name: target.Name, Kind: string(target.Kind), Package: target.Package, Path: target.Path, Status: "passed",
+				},
+				Target: checkpointTargetEvidence(harness.baseline.Targets[0]),
+			}},
+			Routing: checkpointBaselineRouting(harness.baseline.Instrumented, harness.baseline.Suites),
+		},
+		Mutation: &checkpoint.Mutation{
+			CatalogFingerprint: MutationCatalogFingerprint(harness.catalog),
+			Probe:              checkpointMutationProbe(harness.catalog, probeEvaluation),
+		},
+	}
+	harness.cache.checkpointFound = true
+
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if harness.probeCalls != 0 || harness.mutationCalls != 1 {
+		t.Fatalf("probe calls = %d, mutation calls = %d", harness.probeCalls, harness.mutationCalls)
+	}
+	if !reflect.DeepEqual(harness.mutationTargets, probed) || !reflect.DeepEqual(harness.mutationOptions.SuiteProbes, probeEvaluation.Suites) {
+		t.Fatalf("restored routing = targets %+v suites %+v, want %+v %+v", harness.mutationTargets, harness.mutationOptions.SuiteProbes, probed, probeEvaluation.Suites)
+	}
+	if !slices.ContainsFunc(harness.events, func(event Event) bool { return event.Kind == "resume-probe" }) {
+		t.Fatalf("events = %+v, want resume-probe", harness.events)
+	}
+}
+
 // TestRunCoordinatorSkipsTheProbePassOnReplay pins that replaying one mutant
 // does not pay for a probe pass. Its routing is then the pre-probe one, which
 // only executes more.

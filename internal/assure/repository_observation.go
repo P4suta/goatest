@@ -252,9 +252,10 @@ func repositoryTestLogFailure(output string, arguments []string) bool {
 	if strings.Contains(output, path) {
 		return true
 	}
-	// Baseline output may already be a test2json event, where Windows path
-	// separators are escaped. Match the JSON string contents as well as raw
-	// test-binary output so an observation failure never becomes a test failure.
+	// Legacy baseline output may already be a test2json event, where Windows
+	// path separators are escaped. Match the JSON string contents as well as
+	// raw framed test-binary output so an observation failure never becomes a
+	// test failure.
 	encoded, err := json.Marshal(path)
 	return err == nil && len(encoded) >= 2 && strings.Contains(output, string(encoded[1:len(encoded)-1]))
 }

@@ -17,12 +17,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-const (
-	packageSuiteProbePrefix    = "package-suite:"
-	packageSuiteCoveragePrefix = "package-suite-coverage:"
-	pairedControlProbePrefix   = "paired-control:"
-)
-
 // readBufferSize is the read buffer one line is assembled in. A line is not
 // bounded by it: a route event naming every target that reaches a mutant can
 // be far larger than any fixed buffer, so lines are read whole rather than
@@ -447,8 +441,8 @@ func checkProbeRouting(record trace.RouteRecord, fields map[string]json.RawMessa
 	}
 	_, suiteCoverage := fields["suite_coverage"]
 	if suiteCoverage {
-		if !strings.HasPrefix(record.SuiteCoverage, packageSuiteCoveragePrefix) ||
-			len(record.SuiteCoverage) == len(packageSuiteCoveragePrefix) || record.Granularity != trace.GranularityBlock {
+		if !strings.HasPrefix(record.SuiteCoverage, trace.PackageSuiteCoveragePrefix) ||
+			len(record.SuiteCoverage) == len(trace.PackageSuiteCoveragePrefix) || record.Granularity != trace.GranularityBlock {
 			return fmt.Errorf("route suite_coverage %q on granularity %q, want a package-suite-coverage identity on block granularity",
 				record.SuiteCoverage, record.Granularity)
 		}
@@ -457,10 +451,18 @@ func checkProbeRouting(record trace.RouteRecord, fields map[string]json.RawMessa
 		return fmt.Errorf("route suite_reached=%t without a suite_coverage control", record.SuiteReached)
 	}
 	if _, recorded := fields["suite_probe"]; recorded {
-		if !strings.HasPrefix(record.SuiteProbe, packageSuiteProbePrefix) ||
-			len(record.SuiteProbe) == len(packageSuiteProbePrefix) || !record.Probed {
+		if !strings.HasPrefix(record.SuiteProbe, trace.PackageSuiteProbePrefix) ||
+			len(record.SuiteProbe) == len(trace.PackageSuiteProbePrefix) || !record.Probed {
 			return fmt.Errorf("route suite_probe %q with probed=%t, want a package-suite identity and probed=true",
 				record.SuiteProbe, record.Probed)
+		}
+	}
+	if suiteCoverage && record.SuiteProbe != "" {
+		coveragePackage := strings.TrimPrefix(record.SuiteCoverage, trace.PackageSuiteCoveragePrefix)
+		probePackage := strings.TrimPrefix(record.SuiteProbe, trace.PackageSuiteProbePrefix)
+		if coveragePackage != probePackage {
+			return fmt.Errorf("route suite controls name different packages: coverage %q, probe %q",
+				coveragePackage, probePackage)
 		}
 	}
 	return nil
@@ -553,9 +555,9 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 	_, suiteRecorded := probe["suite"]
 	_, infectionsRecorded := probe["infected"]
 	if record.Control {
-		target := pairedControlProbePrefix + record.Package
+		target := trace.PairedControlProbePrefix + record.Package
 		if record.Package == "" {
-			target = pairedControlProbePrefix + "all"
+			target = trace.PairedControlProbePrefix + "all"
 		}
 		if record.Target != target {
 			return fmt.Errorf("paired control target %q in package %q, want %q for that exact package",
@@ -564,17 +566,17 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 		if suiteRecorded || infectionsRecorded {
 			return errors.New("paired control carries suite or infected: a control is neither a routing suite nor a source of infection facts")
 		}
-	} else if strings.HasPrefix(record.Target, pairedControlProbePrefix) {
+	} else if strings.HasPrefix(record.Target, trace.PairedControlProbePrefix) {
 		return fmt.Errorf("probe target %q has a paired-control identity without control=true", record.Target)
 	}
 	if record.Suite {
-		if !strings.HasPrefix(record.Target, packageSuiteProbePrefix) ||
-			len(record.Target) == len(packageSuiteProbePrefix) || record.Package == "" ||
-			record.Target != packageSuiteProbePrefix+record.Package {
+		if !strings.HasPrefix(record.Target, trace.PackageSuiteProbePrefix) ||
+			len(record.Target) == len(trace.PackageSuiteProbePrefix) || record.Package == "" ||
+			record.Target != trace.PackageSuiteProbePrefix+record.Package {
 			return fmt.Errorf("suite probe target %q in package %q, want the package-suite identity of that exact package",
 				record.Target, record.Package)
 		}
-	} else if strings.HasPrefix(record.Target, packageSuiteProbePrefix) {
+	} else if strings.HasPrefix(record.Target, trace.PackageSuiteProbePrefix) {
 		return fmt.Errorf("probe target %q has a package-suite identity without suite=true", record.Target)
 	}
 	if err := checkNotNegative("probe.timeout_ms", record.TimeoutMS); err != nil {

@@ -10,6 +10,8 @@ func JSONSchema() []byte {
 	stringType := map[string]any{"type": "string"}
 	nonEmpty := map[string]any{"type": "string", "minLength": 1}
 	nonNegative := map[string]any{"type": "integer", "minimum": 0}
+	positive := map[string]any{"type": "integer", "minimum": 1}
+	uint32Type := map[string]any{"type": "integer", "minimum": 0, "maximum": 4_294_967_295}
 	digest := map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}
 	array := func(ref string) map[string]any {
 		return map[string]any{"type": "array", "items": map[string]any{"$ref": ref}}
@@ -28,6 +30,24 @@ func JSONSchema() []byte {
 			"mutation": map[string]any{"$ref": "#/$defs/mutation"},
 		},
 		"$defs": map[string]any{
+			"coverageBlock": checkpointObject([]string{"start_line", "start_column", "end_line", "end_column"}, map[string]any{
+				"start_line": positive, "start_column": positive, "end_line": positive, "end_column": positive,
+			}),
+			"fileCoverage": checkpointObject([]string{"path", "blocks"}, map[string]any{
+				"path": nonEmpty, "blocks": array("#/$defs/coverageBlock"),
+			}),
+			"coverage": checkpointObject([]string{"files"}, map[string]any{
+				"files": array("#/$defs/fileCoverage"),
+			}),
+			"suiteCoverage": checkpointObject([]string{"package", "covered", "instrumented", "duration_ns"}, map[string]any{
+				"package": nonEmpty, "covered": map[string]any{"$ref": "#/$defs/coverage"},
+				"instrumented": map[string]any{"$ref": "#/$defs/coverage"}, "duration_ns": nonNegative,
+				"whole_tree": map[string]any{"type": "boolean"},
+			}),
+			"baselineRouting": checkpointObject([]string{"instrumented", "suites"}, map[string]any{
+				"instrumented": map[string]any{"$ref": "#/$defs/coverage"},
+				"suites":       array("#/$defs/suiteCoverage"),
+			}),
 			"evidence": checkpointObject([]string{"kind", "id", "status"}, map[string]any{
 				"kind": stringType, "id": stringType, "status": stringType, "detail": stringType,
 			}),
@@ -54,6 +74,7 @@ func JSONSchema() []byte {
 				"covered_files": map[string]any{"type": "array", "items": stringType},
 				"environment":   map[string]any{"type": "array", "items": stringType}, "duration_ns": nonNegative,
 				"whole_tree": map[string]any{"type": "boolean"}, "repository_observed": map[string]any{"type": "boolean"},
+				"coverage": map[string]any{"$ref": "#/$defs/coverage"},
 			}),
 			"baselineTarget": checkpointObject([]string{"id", "executed", "skipped", "evidence", "findings", "inventory"}, map[string]any{
 				"id": nonEmpty, "executed": map[string]any{"type": "boolean"}, "skipped": map[string]any{"type": "boolean"},
@@ -64,6 +85,7 @@ func JSONSchema() []byte {
 			"baseline": checkpointObject([]string{"build_vet_complete", "complete", "evidence", "findings", "targets"}, map[string]any{
 				"build_vet_complete": map[string]any{"type": "boolean"}, "complete": map[string]any{"type": "boolean"},
 				"evidence": array("#/$defs/evidence"), "findings": array("#/$defs/finding"), "targets": array("#/$defs/baselineTarget"),
+				"routing": map[string]any{"$ref": "#/$defs/baselineRouting"},
 			}),
 			"race": checkpointObject([]string{"complete", "packages", "evidence", "findings"}, map[string]any{
 				"complete": map[string]any{"type": "boolean"}, "packages": map[string]any{"type": "array", "items": stringType},
@@ -74,8 +96,22 @@ func JSONSchema() []byte {
 				"repairs": array("#/$defs/repair"), "applied": map[string]any{"type": "boolean"},
 				"provenance": nonEmpty,
 			}),
+			"targetProbe": checkpointObject([]string{"id", "measured", "duration_ns", "infected"}, map[string]any{
+				"id": nonEmpty, "measured": map[string]any{"type": "boolean"}, "duration_ns": nonNegative,
+				"infected": map[string]any{"type": "array", "items": uint32Type},
+			}),
+			"suiteProbe": checkpointObject([]string{"package", "measured", "duration_ns", "infected"}, map[string]any{
+				"package": nonEmpty, "measured": map[string]any{"type": "boolean"}, "duration_ns": nonNegative,
+				"infected":   map[string]any{"type": "array", "items": uint32Type},
+				"whole_tree": map[string]any{"type": "boolean"},
+			}),
+			"mutationProbe": checkpointObject([]string{"index_fingerprint", "targets", "suites"}, map[string]any{
+				"index_fingerprint": digest,
+				"targets":           array("#/$defs/targetProbe"), "suites": array("#/$defs/suiteProbe"),
+			}),
 			"mutation": checkpointObject([]string{"catalog_fingerprint", "complete", "results"}, map[string]any{
 				"catalog_fingerprint": digest, "complete": map[string]any{"type": "boolean"}, "results": array("#/$defs/mutationResult"),
+				"probe": map[string]any{"$ref": "#/$defs/mutationProbe"},
 			}),
 		},
 	}

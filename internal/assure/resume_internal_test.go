@@ -339,20 +339,26 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind || !slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration || restored.WholeTree != input.WholeTree || restored.RepositoryObserved != input.RepositoryObserved {
 		t.Fatalf("restored target = %+v, want %+v", restored, input)
 	}
-	// Blocks are far too large to rewrite on every checkpoint, so a checkpoint
-	// carries none of them and a restored target says so with a nil Covered.
-	if restored.Covered != nil {
-		t.Fatalf("restored blocks = %+v, want none", restored.Covered)
+	// Positive blocks are part of the target's completed scheduling fact. They
+	// preserve the same exact route after interruption instead of widening the
+	// target to every mutant in a covered file.
+	if !reflect.DeepEqual(restored.Covered, input.Covered) {
+		t.Fatalf("restored blocks = %+v, want %+v", restored.Covered, input.Covered)
 	}
-	// Infection facts belong to the probe pass of one run and are never
-	// checkpointed, so a restored target says it was never probed and is
-	// treated as infecting every mutant it reaches.
+	// Infection facts do not belong inside baseline target state. The separate
+	// mutation-probe phase may restore them only after it binds a complete pass
+	// to its prepared catalog; this conversion alone stays conservative.
 	if restored.Probed || restored.Infected != nil || restored.ProbeDuration != 0 {
 		t.Fatalf("restored infection facts = %+v, want none", restored)
 	}
+	legacy := checkpointTargetEvidence(input)
+	legacy.Coverage = nil
+	if got := restoreTargetEvidence(*legacy).Covered; got != nil {
+		t.Fatalf("legacy checkpoint blocks = %+v, want conservative nil", got)
+	}
 }
 
-func TestCollectBaselineKeepsBlocksForFreshTargetsAndNoneForResumedOnes(t *testing.T) {
+func TestCollectBaselineKeepsBlocksForFreshAndResumedTargets(t *testing.T) {
 	model := baselineModel()
 	resumedTarget := baselineTestTarget("TestResumed")
 	freshTarget := baselineTestTarget("TestFresh")
@@ -388,8 +394,11 @@ func TestCollectBaselineKeepsBlocksForFreshTargetsAndNoneForResumedOnes(t *testi
 	for _, target := range result.Targets {
 		switch target.Target.Name {
 		case resumedTarget.Name:
-			if target.Covered != nil || !slices.Equal(target.CoveredFiles, []string{"value.go"}) {
-				t.Errorf("resumed target = %+v, want file evidence without blocks", target)
+			want := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
+				{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
+			}}}
+			if !reflect.DeepEqual(target.Covered, want) || !slices.Equal(target.CoveredFiles, []string{"value.go"}) {
+				t.Errorf("resumed target = %+v, want exact checkpointed blocks %+v", target, want)
 			}
 		case freshTarget.Name:
 			want := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
@@ -408,6 +417,45 @@ func TestCollectBaselineKeepsBlocksForFreshTargetsAndNoneForResumedOnes(t *testi
 	}}}
 	if !reflect.DeepEqual(result.Instrumented, wantInstrumented) {
 		t.Fatalf("instrumented = %+v, want %+v", result.Instrumented, wantInstrumented)
+	}
+}
+
+func TestCompletedBaselineRoutingResumesWithoutCompileOrSuiteCommands(t *testing.T) {
+	model := baselineModel()
+	target := baselineTestTarget("TestResumed")
+	evidence := TargetEvidence{
+		Target: target, CoveredFiles: []string{"value.go"}, Duration: 11 * time.Millisecond,
+		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{{
+			StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16,
+		}}}},
+	}
+	instrumented := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{{
+		StartLine: 5, StartColumn: 29, EndLine: 8, EndColumn: 4,
+	}}}}
+	suites := map[string]PackageSuiteCoverage{target.Package: {
+		Covered: evidence.Covered, Instrumented: instrumented, Duration: 17 * time.Millisecond, WholeTree: true,
+	}}
+	resume := &checkpoint.Baseline{
+		BuildVetComplete: true, Complete: true, Routing: checkpointBaselineRouting(instrumented, suites),
+		Targets: []checkpoint.BaselineTarget{{
+			ID: target.ID, Executed: true, Target: checkpointTargetEvidence(evidence),
+			Inventory: report.TargetDisposition{
+				ID: target.ID, Name: target.Name, Kind: string(target.Kind), Package: target.Package, Status: "passed",
+			},
+		}},
+	}
+	workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+		t.Fatalf("completed baseline executed %+v", command.Argv)
+		return gomutants.CommandResult{}, nil
+	}}
+	var completed checkpoint.Baseline
+	result, err := CollectBaseline(t.Context(), workspace, model, []BaselineTarget{{Target: target}}, BaselineOptions{
+		ArtifactDirectory: t.TempDir(), PackageSuites: true, Resume: resume,
+		Checkpoint: func(state checkpoint.Baseline) { completed = state },
+	})
+	if err != nil || len(workspace.commands) != 0 || !reflect.DeepEqual(result.Instrumented, instrumented) ||
+		!reflect.DeepEqual(result.Suites, suites) || completed.Routing == nil {
+		t.Fatalf("resumed baseline = (%+v, %v), commands=%+v checkpoint=%+v", result, err, workspace.commands, completed)
 	}
 }
 
@@ -449,6 +497,43 @@ func TestCheckpointClaimFailureForcesColdRunAndCatalogMismatchPreservesBaseline(
 			t.Fatalf("catalog mismatch resumed=%+v state=%+v", resumed, controller.state)
 		}
 	})
+}
+
+func TestCheckpointControllerPersistsCompleteProbeAndRejectsChangedInventory(t *testing.T) {
+	t.Parallel()
+	digest := strings.Repeat("9", 64)
+	catalog := probeCatalog()
+	targets := []TargetEvidence{probeEvidence("TestValue", goanalysis.KindTest, 17*time.Millisecond)}
+	probed := slices.Clone(targets)
+	probed[0].Probed = true
+	probed[0].ProbeDuration = 11 * time.Millisecond
+	probed[0].Infected = []uint32{0, 2}
+	evaluation := ProbeEvaluation{Targets: probed, Measured: 1}
+	store := &coordinatorCache{}
+	first := openRunCheckpoint(store, digest, Options{}, true)
+	if resumed := first.mutation(catalog, t.TempDir()); len(resumed) != 0 {
+		t.Fatalf("new catalogue resumed %+v", resumed)
+	}
+	first.saveProbe(catalog, evaluation)
+	first.saveMutant("mutant-a", MutationEvaluation{
+		Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}},
+	})
+
+	second := openRunCheckpoint(store, digest, Options{}, true)
+	resumedMutants := second.mutation(catalog, t.TempDir())
+	restored, reused, valid := second.probe(catalog, targets, nil)
+	if !valid || !reused || len(resumedMutants) != 1 || !reflect.DeepEqual(restored, evaluation) {
+		t.Fatalf("resume = probe (%+v, reused=%t valid=%t), mutants=%+v", restored, reused, valid, resumedMutants)
+	}
+
+	changed := slices.Clone(targets)
+	changed[0].Target.ID = "changed-target"
+	if _, reused, valid := second.probe(catalog, changed, nil); valid || reused {
+		t.Fatalf("changed inventory reused=%t valid=%t", reused, valid)
+	}
+	if second.state.Mutation == nil || second.state.Mutation.Probe != nil || len(second.state.Mutation.Results) != 0 || second.reusedMutants != 0 {
+		t.Fatalf("changed inventory retained dependent work: %+v", second.state.Mutation)
+	}
 }
 
 func TestCheckpointRaceAndCandidateValidationDiscardOnlyUnsafePhases(t *testing.T) {

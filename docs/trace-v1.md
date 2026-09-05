@@ -353,18 +353,20 @@ records one records `granularity: file`. A `fallback` on any other route — on
 `granularity: block`, or on a route that records no granularity at all —
 contradicts itself, and both the schema and the trace reader reject it.
 
-Two labels are worth reading carefully. A target restored from a checkpoint
-carries no block evidence, so it is admitted to a reaching set by file match
-while the route as a whole still records `granularity: block` — that is a
-target included conservatively, not a fallback. A file no test binary was ever
+Two labels are worth reading carefully. A target restored from a legacy
+checkpoint may carry no block evidence, so it is admitted to a reaching set by
+file match while the route as a whole still records `granularity: block` — that
+is a target included conservatively, not a fallback. Current checkpoints
+preserve positive blocks. A file no test binary was ever
 linked against has no candidates at all, and its routes carry
 `granularity: file` with `fallback: outside-blocks` and `file_candidates: 0`,
 which is omitted from the wire as the zero it is.
 
 A plan entry is `individual:<target>` for a target run on its own,
-`batch:<package>(<count>)` for related targets of one package run together,
-`fuzz:<target>` for the fuzzing of one target, and `package-suite` for the
-whole package suite. A mutant no measured target reaches has reason `unreached`
+`batch:<package>(<count>)->bisect-on-ambiguity-or-kill` for related targets of
+one package run together and recursively split when that shortcut cannot
+provide a direct passing proof, `fuzz:<target>` for the fuzzing of one target, and
+`package-suite` for the whole package suite. A mutant no measured target reaches has reason `unreached`
 and no `reaching_targets`. It has the package suite as its plan unless
 `suite_coverage` proved its position unreached or `suite_probe` proved that
 exact execution unchanged, in which case it has no plan. A mutant whose whole
@@ -451,6 +453,15 @@ than a measurement. Everything else is recorded and the pass continues.
 A run replaying one mutant runs no pass and records no `probe-exec` event: it
 would pay for a probe tree to measure against once, and its routing without the
 measurement is the conservative one.
+
+An exact-input continuation can instead restore one checkpointed probe phase.
+It emits `resume-probe` with the restored target and package-suite counts, and
+emits no `probe-exec`: those commands ran in the interrupted attempt, not this
+one. Routes may use the restored facts, but `proofaudit` deliberately reports
+the infection layer of this new trace as not audited because its physical probe
+records are in the interrupted attempt's trace. A clean dogfood trace remains
+the self-contained audit input; command and duration totals never count restored
+facts as executions.
 
 The `probed` field of a `route` is produced from the same prepared tree: it says the
 engine compiled a probe of that mutant, which is what lets a reader tell a

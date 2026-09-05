@@ -88,7 +88,7 @@ func TestEvaluateMutationsRecordsHowCoverageRoutedAMutant(t *testing.T) {
 	wantPlan := []string{
 		"individual:TestValue0", "individual:TestValue1", "individual:TestValue2", "individual:TestValue3",
 		"individual:TestValue4", "individual:TestValue5", "individual:TestValue6", "individual:TestValue7",
-		"batch:fixture.example/module(2)", "fuzz:FuzzValue",
+		"batch:fixture.example/module(2)->bisect-on-ambiguity-or-kill", "fuzz:FuzzValue",
 	}
 	if !slices.Equal(route.Plan, wantPlan) {
 		t.Fatalf("plan = %v, want %v", route.Plan, wantPlan)

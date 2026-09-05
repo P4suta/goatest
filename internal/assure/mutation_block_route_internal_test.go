@@ -28,8 +28,8 @@ func blockTarget(name string, duration time.Duration, blocks ...goanalysis.Cover
 	}
 }
 
-// resumedBlockTarget is a target restored from a checkpoint: it reached
-// value.go, but the checkpoint kept no blocks, so it says it knows none.
+// resumedBlockTarget models a target restored from a legacy checkpoint: it
+// reached value.go, but that checkpoint kept no blocks, so it says it knows none.
 func resumedBlockTarget(name string, duration time.Duration) TargetEvidence {
 	return TargetEvidence{
 		Target: goanalysis.Target{
@@ -42,7 +42,7 @@ func resumedBlockTarget(name string, duration time.Duration) TargetEvidence {
 
 // blockRoutingTargets are the three targets every block routing test decides
 // between: one that ran the early block, one that ran the late block, and one
-// restored from a checkpoint that cannot say which block it ran.
+// restored from a legacy checkpoint that cannot say which block it ran.
 func blockRoutingTargets() []TargetEvidence {
 	return []TargetEvidence{
 		blockTarget("TestEarly", 3*time.Millisecond, goanalysis.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3}),

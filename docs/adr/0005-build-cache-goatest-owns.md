@@ -55,14 +55,15 @@ toolchain makes by TTL.
 3. **Nothing that runs the project's tests may.** The baseline target runs, the
    race verification, the original-mutation control, the go-mutants session, and
    candidate validation all write to the run's scratch layer, which dies with
-   the run. This is the load-bearing half. A baseline target is the project's
-   own test binary wrapped in `go tool test2json`, so its argument list begins
-   with the go binary exactly as a compile does — and it is precisely the
-   command whose children produce the throwaway fixture builds. Were it to
-   persist, every fixture package would be written into the base layer and would
-   evict the standard library the layer exists to hold: the cache would grow
-   without bound and get slower the more it was used. The rule therefore reads
-   the *subcommand*, never the executable.
+   the run. This is the load-bearing half. A current baseline target begins with
+   the compiled test binary itself; older versions wrapped it in `go tool
+   test2json`, whose argument list began with the go binary exactly as a compile
+   does. Both shapes can spawn children that produce throwaway fixture builds.
+   Were either to persist, every fixture package would be written into the base
+   layer and would evict the standard library the layer exists to hold: the
+   cache would grow without bound and get slower the more it was used. The rule
+   therefore reads the *subcommand* for go commands and treats every direct test
+   binary as non-persisting.
 
 4. **The rule lives in one place and is pinned by a test.** `persistingCommand`
    is the whole policy, `buildCacheWorkspace` is the only thing that applies it,

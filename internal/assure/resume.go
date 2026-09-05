@@ -249,6 +249,49 @@ func (controller *runCheckpointController) mutation(catalog gomutants.Catalog, r
 	return result
 }
 
+// probe restores one complete semantic-original probe phase. The caller has
+// already called mutation, which either established this catalogue fingerprint
+// or discarded every mutation-phase fact that belonged to another catalogue.
+// valid is false only when a present probe cannot be tied to the current target
+// and suite inventories; in that case its dependent mutant results are also
+// discarded and the caller must forget the map mutation returned.
+func (controller *runCheckpointController) probe(catalog gomutants.Catalog, targets []TargetEvidence, packages []string) (evaluation ProbeEvaluation, reused, valid bool) {
+	if controller == nil || !controller.enabled {
+		return ProbeEvaluation{}, false, true
+	}
+	controller.mutex.Lock()
+	defer controller.mutex.Unlock()
+	if controller.state.Mutation == nil || controller.state.Mutation.Probe == nil {
+		return ProbeEvaluation{}, false, true
+	}
+	restored, ok := restoreMutationProbe(catalog, targets, packages, *controller.state.Mutation.Probe)
+	if ok {
+		return restored, true, true
+	}
+	emit(controller.options, "checkpoint-warning", "mutation probe inventory changed; discarding saved probe and mutation work")
+	controller.state.Mutation = &checkpoint.Mutation{CatalogFingerprint: MutationCatalogFingerprint(catalog)}
+	controller.reusedMutants = 0
+	controller.persistLocked()
+	return ProbeEvaluation{}, false, false
+}
+
+// saveProbe writes only a complete pass. ProbeTargets returns no evaluation on
+// cancellation or a fatal session error, so there is no partial fact to save
+// or accidentally interpret as absence on the next attempt.
+func (controller *runCheckpointController) saveProbe(catalog gomutants.Catalog, evaluation ProbeEvaluation) {
+	if controller == nil {
+		return
+	}
+	controller.mutex.Lock()
+	defer controller.mutex.Unlock()
+	if !controller.enabled || controller.state.Mutation == nil ||
+		controller.state.Mutation.CatalogFingerprint != MutationCatalogFingerprint(catalog) {
+		return
+	}
+	controller.state.Mutation.Probe = checkpointMutationProbe(catalog, evaluation)
+	controller.persistLocked()
+}
+
 func checkpointArtifactsPresent(root string, saved checkpoint.MutationResult) bool {
 	for _, item := range saved.Repairs {
 		if item.Status != string(repair.StatusCandidate) {

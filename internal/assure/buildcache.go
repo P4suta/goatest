@@ -234,11 +234,10 @@ func (wrapper buildCacheWorkspace) Exec(ctx context.Context, command gomutants.C
 // Only a go command that compiles or lists may: vet, build, list, version, and
 // a test that is compiled and not run. Nothing that runs the project's tests
 // ever may, and the check reads the subcommand rather than the executable
-// because the command that runs a baseline target begins with the go binary
-// too: it is `go tool test2json` wrapped around the compiled test binary. That
-// command is precisely the one whose children fill a cache with garbage, so
-// treating every argv that starts with "go" as a compile would defeat the rule
-// exactly where it matters most.
+// rather than merely the executable. Baseline targets now begin with their
+// compiled test binary; keeping the subcommand rule also classifies legacy
+// `go tool test2json` recordings correctly and prevents any other go wrapper
+// that runs project code from writing into the persistent layer.
 func persistingCommand(argv []string) bool {
 	if len(argv) < 2 || !goExecutable(argv[0]) {
 		return false

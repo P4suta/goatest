@@ -348,9 +348,9 @@ type MutationEvidence struct {
 	passed map[targetIdentity]bool
 	// suites is what each package's whole test suite does in this run, by
 	// import path. A package is here only when this run can describe its suite
-	// at all: every target of it was measured by this run rather than restored
-	// from a checkpoint, and every one of them passed the baseline. A package
-	// that is absent is one no suite verdict is written about or read for.
+	// at all: every target has exact blocks from a fresh or current checkpoint
+	// baseline, and every one of them passed. A package that is absent is one no
+	// suite verdict is written about or read for.
 	suites             map[string]string
 	wholeSuites        map[string]string
 	suiteBaselineWhole map[string]bool
@@ -416,10 +416,10 @@ func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySourc
 
 // suiteKeys is what every package's test suite does in this run.
 //
-// A package is described only when this run measured all of it: a target
-// restored from a checkpoint carries no coverage of its own, and a target the
-// baseline did not see pass leaves the suite's own outcome unaccounted for, so
-// either one makes the package one this run cannot speak for. Every other
+// A package is described only when this run has exact coverage for all of it:
+// a target restored from a legacy checkpoint may carry no blocks, and a target
+// the baseline did not see pass leaves the suite's own outcome unaccounted for,
+// so either one makes the package one this run cannot speak for. Every other
 // package of the model is keyed, including one with no targets at all, whose
 // suite runs nothing and says so.
 func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targetIdentity]string, passed map[targetIdentity]bool, wholeTree bool) map[string]string {
@@ -591,10 +591,11 @@ func (collected *MutationEvidence) reuseVerdict(mutant gomutants.Mutant, route m
 // The conditions on each of them are the conditions of the whole claim, so one
 // target failing any of them ends it. A fuzz target is refused for the reason
 // a fuzz kill is refused: exploring one budget without finding an input says
-// nothing about the next. A target restored from a checkpoint carries no
-// coverage blocks, so routing keeps it for the whole file and the reaching set
-// it belongs to is wider than the one any run measured; a claim about a
-// measured set is not a claim about that. And a reaching set that is empty
+// nothing about the next. A target restored from a legacy checkpoint may carry
+// no coverage blocks, so routing keeps it for the whole file and the reaching
+// set it belongs to is wider than the one any run measured; a claim about a
+// measured set is not a claim about that. Current checkpoints preserve blocks.
+// And a reaching set that is empty
 // exhausts nothing: a mutant nothing reaches is a statement about a package
 // suite instead.
 func (collected *MutationEvidence) exhausts(exhausted []evidence.TargetKey, reaching []TargetEvidence) bool {
@@ -680,8 +681,8 @@ func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome 
 // nothing about it. What must still hold is that the observation is about a
 // target of this run: it still reaches the mutant, it is still the same target
 // under the same behaviour key, this run's baseline saw it pass, and it is
-// neither a fuzz target nor one restored from a checkpoint — refused for the
-// reasons every other reuse refuses them.
+// neither a fuzz target nor one whose exact coverage is unavailable — refused
+// for the reasons every other reuse refuses them.
 //
 // The target is the last entry of the recorded list, which is where the writer
 // puts the one time ran out under, and the store preserves that order for a
@@ -755,9 +756,9 @@ func (collected *MutationEvidence) recordTimedOut(mutant gomutants.Mutant, execu
 // that selected one target, ever writes a timed-out record.
 //
 // Every condition reuse will check is checked here too, so that a record that
-// could never be reused is never written: a fuzz target or a target restored
-// from a checkpoint among them, a target this run's baseline did not see pass,
-// or a target with no behaviour key leaves the store as it found it.
+// could never be reused is never written: a fuzz target or a legacy restored
+// target with no exact blocks among them, a target this run's baseline did not
+// see pass, or a target with no behaviour key leaves the store as it found it.
 func (collected *MutationEvidence) recordExhausted(mutant gomutants.Mutant, outcome string, targets []TargetEvidence, kind, summary string) {
 	if collected == nil || len(targets) == 0 || kind == "" || summary == "" {
 		return

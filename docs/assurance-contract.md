@@ -46,8 +46,10 @@ the mutant when one of the blocks it executed contains that position.
 The decision gives way to the whole file whenever the evidence cannot carry it.
 A mutant with no reported position, and a position that lies in a gap between
 the blocks the coverage toolchain cut, are both routed by every target that
-executed the file, which is what routing did before blocks were read. A target
-restored from a checkpoint carries no blocks and keeps reaching its whole file.
+executed the file, which is what routing did before blocks were read. A current
+checkpoint preserves those positive blocks and therefore preserves the exact
+decision. A target restored from a legacy checkpoint whose optional block set
+is absent keeps reaching its whole file.
 
 A position that instrumentation describes and no measured target executed
 initially reaches nothing, exactly as for a mutant in a file no target covers.
@@ -80,8 +82,8 @@ requires that the body was instrumented at all — some instrumented block must
 begin inside the span — because otherwise no target's silence about the body
 means anything. A fuzz target is never discharged: it explores inputs beyond
 the corpus its coverage was measured on, so its blocks do not bound what it
-will execute. Neither is a target restored from a checkpoint, which carries no
-blocks to argue with.
+will execute. Neither is a target restored from a legacy checkpoint whose
+block set is absent, because it has no blocks to argue with.
 
 A mutant every reaching target was discharged for is resolved without a single
 execution, and reported as a `surviving-mutant`. It is not `unreached`: the
@@ -128,12 +130,16 @@ is kept. A mutant the engine compiled no probe form for — `Mutant.Probed` is
 false — is absent from every measurement there will ever be, so its absence from
 one says nothing. A target the pass did not measure carries no facts at all: its
 test failed, it timed out, the probe tree was unavailable, the execution
-errored, it was restored from a checkpoint, or it is a fuzz target, which the
-pass never probes because fuzzing explores past the corpus a probe would
-measure. As for the branch proof, the narrowing is attempted on a route decided
-by block with no fallback and never on one decided by file: a file route is the
-answer routing falls back to when the blocks cannot decide, and it is not
-narrowed further.
+errored, or it is a fuzz target, which the pass never probes because fuzzing
+explores past the corpus a probe would measure. An exact-input continuation may
+restore only a complete probe phase bound to the same numeric-index mapping,
+target inventory, and requested suite inventory. A partial, legacy, or
+mismatched phase is probed again in full. As for the branch proof, the narrowing
+is attempted on a route decided by block with no fallback and never on one
+decided by file: a file route is the answer routing falls back to when the
+blocks cannot decide, and it is not narrowed further.
+The all-or-nothing resume boundary and its catalog-index binding are
+[ADR 0014](adr/0014-resume-complete-probe-phase.md).
 
 Both proofs may answer for targets of the same route. They are applied in order
 — branch first, then infection — so a target both would remove is recorded under
@@ -296,7 +302,7 @@ subset. A target that entered it is a test nothing was ever run against, so the
 universal claim is simply not about this run and the mutant executes. Two kinds
 of target disqualify a survival in both directions: a fuzz target, because
 exploring one budget without finding an input says nothing about the next, and
-a target restored from a checkpoint, which carries no coverage blocks and is
+a target restored from a legacy checkpoint with no coverage blocks, which is
 therefore routed for the whole file, so the set it belongs to is wider than the
 one any run measured. A survivor whose whole reaching set the proofs discharged
 is not recorded either: nothing ran to exhaust, and the proofs re-derive the
@@ -311,9 +317,9 @@ of every target of the package — all kinds, fuzz targets included, because the
 suite runs them as ordinary unit tests — each with its own behaviour key, and
 of what the package-level run itself reads. A recorded verdict is reused when
 the suite still has that key and nothing has come to reach the mutant; a
-package this run could not measure whole, because a target of it was restored
-from a checkpoint or did not pass, names no key at all and neither records nor
-reuses anything.
+package this run could not measure whole, because a target has no exact blocks
+(as with a legacy checkpoint) or did not pass, names no key at all and neither
+records nor reuses anything.
 
 #### A timeout
 
@@ -347,6 +353,26 @@ expiration settles every dependent mutant as inconclusive without running them.
 Fuzz campaigns retain that legacy bound because the duration of their seed
 corpus does not predict a fixed 10,000- or 100,000-input campaign.
 
+For a mutation reached by several targets, the shortest controls run
+individually until their cumulative measured probe cost reaches two seconds,
+with at least one and at most eight retained. The remainder forms cheap batches
+whose measured probe costs sum to at most one second. Consecutive compatible
+singletons left by this boundary are selected together, up to 64 target names
+and 8 KiB of selector text. Baseline duration is the conservative fallback when
+no probe duration exists. This is not sampling: every reaching target is either
+discharged by a proof or actually run with the mutant active. A completed
+aggregate proves all of its named targets passed. An aggregate failure is
+recursively bisected to seek a named killer; if both smaller selectors pass,
+the exact parent aggregate is original-controlled and repeated so that a
+cross-test interaction kill is retained. If an aggregate expires or returns
+another non-decisive outcome, that attempt establishes nothing and the same set
+is recursively bisected. Only an individual execution can therefore produce a
+terminal target-timeout or mutation-inconclusive finding.
+The aggregate's speculative deadline is the shorter comparison derived from
+its exact target controls and available whole-package controls; the latter
+decide scheduling, not the verdict. See
+[ADR 0012](adr/0012-aggregate-proof-before-timeout.md).
+
 The contract caps every derived deadline at 30 minutes for `standard-v1` and
 five hours for `deep-v1`; `[execution].timeout` is a further hard cancellation
 ceiling, not the normal amount of time each mutant waits. No finite verifier
@@ -362,8 +388,9 @@ given. The targets that ran before it neither caused that nor say anything
 about whether it finishes now, and a target that has since joined the reaching
 set says nothing about it either. A recorded timeout is reused when the target
 time ran out under still reaches the mutant, has the same behaviour key, passed
-this run's baseline, and is neither a fuzz target nor one restored from a
-checkpoint. The record names that target as the **last** of its executed
+this run's baseline, and is neither a fuzz target nor one whose legacy
+checkpoint lacks exact blocks. The record names that target as the **last** of
+its executed
 targets — a timed-out record is stored in execution order for exactly that
 reason, where a survived record's targets are stored sorted, because there the
 set is the claim.

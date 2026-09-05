@@ -176,6 +176,22 @@ func measuredIn(seq int64, target, packagePath, test string) trace.Event {
 	}}
 }
 
+func compiledBaseline(seq int64, binary, packagePath string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{"go", "test", "-c", "-coverpkg=" + fixtureModule + "/...", "-o", binary, packagePath},
+	}}
+}
+
+func directlyMeasuredIn(seq int64, target, binary, test string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{
+			binary, "-test.v=test2json", "-test.run=^" + test + "$",
+			"-test.coverprofile=/tmp/goatest-baseline/" + target + profileSuffix,
+			"-test.count=1",
+		},
+	}}
+}
+
 // killedBy is one execution of a mutant that its target killed.
 func killedBy(seq int64, mutant, display, target string) trace.Event {
 	return killedIn(seq, mutant, display, fixtureModule+"/pkg", testNameOf(target))
@@ -1156,6 +1172,50 @@ func TestAuditAttributesAKillToTheTargetThatMeasuredItsTest(t *testing.T) {
 	if violation.pair.path != subjectPath || violation.pair.line != 21 || violation.pair.column != 4 {
 		t.Errorf("the pair places the mutant at %s:%d:%d, want the position the route recorded",
 			violation.pair.path, violation.pair.line, violation.pair.column)
+	}
+}
+
+func TestAuditAttributesADirectBaselineExecutionThroughItsCompileRecord(t *testing.T) {
+	t.Parallel()
+	binary := "/tmp/goatest-baseline/direct.test"
+	packagePath := fixtureModule + "/pkg"
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(20, 2, 24, 3)}})
+	stream := recordedTrace(t,
+		compiledBaseline(1, binary, packagePath),
+		directlyMeasuredIn(2, killerTarget, binary, testNameOf(killerTarget)),
+		blockRoute(3, firstMutant, 20, 4, killerTarget),
+		killedIn(4, firstMutant, firstDisplay, packagePath, testNameOf(killerTarget)),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if result.pairs != 1 || result.unattributedKills != 0 || len(result.violations) != 0 {
+		t.Fatalf("direct measurement audit = pairs %d unattributed %d violations %+v",
+			result.pairs, result.unattributedKills, result.violations)
+	}
+}
+
+func TestCompiledTestBinaryRejectsRunsAndReadsPortableGoNames(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		argv         []string
+		wantBinary   string
+		wantPackage  string
+		wantCompiled bool
+	}{
+		{name: "ordinary", argv: []string{"go", "test", "-c", "-o", "pkg.test", fixtureModule + "/pkg"}, wantBinary: "pkg.test", wantPackage: fixtureModule + "/pkg", wantCompiled: true},
+		{name: "windows executable", argv: []string{`C:\\Go\\bin\\go.exe`, "test", "-c", "-o=package.test.exe", fixtureModule + "/pkg"}, wantBinary: "package.test.exe", wantPackage: fixtureModule + "/pkg", wantCompiled: true},
+		{name: "run", argv: []string{"go", "test", "-o", "pkg.test", fixtureModule + "/pkg"}},
+		{name: "no output", argv: []string{"go", "test", "-c", fixtureModule + "/pkg"}},
+		{name: "other tool", argv: []string{"cargo", "test", "-c", "-o", "pkg.test", fixtureModule + "/pkg"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			binary, packagePath, compiled := compiledTestBinary(test.argv)
+			if binary != test.wantBinary || packagePath != test.wantPackage || compiled != test.wantCompiled {
+				t.Fatalf("compiledTestBinary(%q) = (%q, %q, %t)", test.argv, binary, packagePath, compiled)
+			}
+		})
 	}
 }
 

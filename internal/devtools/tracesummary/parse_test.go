@@ -483,6 +483,11 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "suite_probe", "probed=false"},
 		},
 		{
+			name:   "suite controls name different packages",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","suite_coverage":"package-suite-coverage:example.com/app","suite_probe":"package-suite:example.com/lib","probed":true}}`),
+			want:   []string{"line 2", "suite controls name different packages", "example.com/app", "example.com/lib"},
+		},
+		{
 			name:   "probe without the target it ran",
 			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"exit_code":0}}`),
 			want:   []string{"line 2", `"probe.target"`},

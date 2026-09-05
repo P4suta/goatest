@@ -27,6 +27,15 @@ func measuredSuite(seq int64, profile, packagePath string) trace.Event {
 	}}
 }
 
+func directlyMeasuredSuite(seq int64, profile, binary string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{
+			binary, "-test.coverprofile=/tmp/goatest-baseline/" + profile + profileSuffix,
+			"-test.count=1",
+		},
+	}}
+}
+
 func packageSuiteKilled(seq int64, mutant, display, packagePath string) trace.Event {
 	return mutantEvent(seq, trace.MutantRecord{
 		ID: mutant, DisplayID: display, Package: packagePath,
@@ -92,6 +101,31 @@ func TestAuditHoldsSuiteReachToCoveredAndUncoveredPackageSuiteKills(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestAuditAttributesADirectPackageSuiteThroughItsCompileRecord(t *testing.T) {
+	t.Parallel()
+	packagePath := fixtureModule + "/pkg"
+	binary := "/tmp/goatest-baseline/suite.test"
+	recorded := recordedEvidence(t, map[string][]string{
+		fixtureSuiteProfile: {ran(20, 2, 24, 3)},
+	})
+	stream := recordedTrace(t,
+		compiledBaseline(1, binary, packagePath),
+		directlyMeasuredSuite(2, fixtureSuiteProfile, binary),
+		routeEvent(3, trace.RouteRecord{
+			MutantID: firstMutant, Rule: "eq-to-neq", Path: subjectPath, Line: 21, Column: 4,
+			Plan: []string{packageSuitePlan}, Reason: trace.ReasonUnreached,
+			Granularity: trace.GranularityBlock,
+		}),
+		packageSuiteKilled(4, firstMutant, firstDisplay, packagePath),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if result.suitePairs != 1 || result.suiteReach.audited != 1 || result.suiteReach.kept != 1 || len(result.violations) != 0 {
+		t.Fatalf("direct suite audit = pairs %d reach %+v violations %+v",
+			result.suitePairs, result.suiteReach, result.violations)
 	}
 }
 

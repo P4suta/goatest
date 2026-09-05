@@ -215,8 +215,8 @@ func TestEvaluateMutationsNeverReusesASurvivorReachedByAFuzzTarget(t *testing.T)
 }
 
 // TestEvaluateMutationsExecutesAMutantWhoseReachingTargetCameFromACheckpoint
-// pins the boundary between the two layers. A target restored from a
-// checkpoint carries no coverage blocks, so routing keeps it for the whole
+// pins the boundary between the two layers. A target restored from a legacy
+// checkpoint may carry no coverage blocks, so routing keeps it for the whole
 // file: the reaching set it belongs to is wider than the one this run measured,
 // and a claim about the measured set is not a claim about that.
 func TestEvaluateMutationsExecutesAMutantWhoseReachingTargetCameFromACheckpoint(t *testing.T) {
@@ -499,9 +499,10 @@ func TestEvaluateMutationsRecordsAnUnreachedMutantAgainstItsPackageSuite(t *test
 }
 
 // TestEvaluateMutationsRecordsNoSuiteVerdictForAPackageThisRunDidNotMeasure
-// pins the fail-closed side of the suite key. A package with a target this run
-// restored from a checkpoint or never saw pass is a package whose suite this
-// run cannot describe, so it names no key and nothing about it is written down.
+// pins the fail-closed side of the suite key. A package with a legacy restored
+// target that has no exact blocks, or one the baseline never saw pass, is a
+// package whose suite this run cannot describe, so it names no key and nothing
+// about it is written down.
 func TestEvaluateMutationsRecordsNoSuiteVerdictForAPackageThisRunDidNotMeasure(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -591,17 +592,14 @@ func batchedEvidenceTargets(count int) []TargetEvidence {
 	return targets
 }
 
-// TestEvaluateMutationsRecordsNoTimeoutForABatchOfTargets pins the refusal a
-// batched timeout gets, which is the refusal a batched kill already gets and
-// for the same reason.
+// TestEvaluateMutationsRefinesABatchTimeoutIntoAttributableTargets pins the
+// distinction between an aggregate proof attempt and a terminal timeout.
 //
 // A batch runs several targets under one selector, and the engine reports that
 // the selection ran out of time without saying which of them was still
-// running. The later targets of the selection may never have started, so the
-// record's last entry — the target a later run checks — would be a target that
-// possibly never ran against this mutant. A vague record is worse than none,
-// so nothing is written and the next run runs the batch again.
-func TestEvaluateMutationsRecordsNoTimeoutForABatchOfTargets(t *testing.T) {
+// running. That ambiguous attempt is not a verdict: the planner runs the exact
+// same targets individually, where every completed execution is attributable.
+func TestEvaluateMutationsRefinesABatchTimeoutIntoAttributableTargets(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
 	targets := batchedEvidenceTargets(10)
@@ -629,11 +627,15 @@ func TestEvaluateMutationsRecordsNoTimeoutForABatchOfTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-timeout" {
-		t.Fatalf("findings = %+v, want the timeout the batch ran into", evaluation.Findings)
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "surviving-mutant" {
+		t.Fatalf("findings = %+v, want the individually established survivor", evaluation.Findings)
 	}
-	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
-		t.Fatalf("recorded %+v, want nothing for a timeout no single target ran into", records)
+	if got, want := len(session.requests), individualMutationTargetLimit+1+2; got != want {
+		t.Fatalf("requests = %d, want %d cheap targets, one batch attempt, and two refinements", got, want)
+	}
+	if records := index.store(catalog, evidenceModule).Records; len(records) != 1 ||
+		records[0].Outcome != evidence.MutationOutcomeSurvived || len(records[0].Exhausted) != len(targets) {
+		t.Fatalf("recorded %+v, want one survivor exhausting all refined targets", records)
 	}
 }
 
@@ -740,7 +742,7 @@ func TestEvaluateMutationsReusesATimedOutMutantWhileTheTargetItTimedOutUnderStil
 			},
 		},
 		{
-			name:      "the target time ran out under was restored from a checkpoint",
+			name:      "the target time ran out under has only legacy checkpoint coverage",
 			exhausted: []evidence.TargetKey{exhaustedKey(first, keys[first]), exhaustedKey(slow, keys[slow])},
 			targets: []TargetEvidence{
 				measured("TestFirst", goanalysis.KindTest, 1), resumedBlockTarget("TestSlow", 2*time.Millisecond),

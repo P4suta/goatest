@@ -212,6 +212,47 @@ func TestTargetEvidenceInfectsEveryMutantUnlessProbedAndAbsent(t *testing.T) {
 	}
 }
 
+func TestMutationProbeCheckpointRoundTripBindsCompactIndices(t *testing.T) {
+	t.Parallel()
+	catalog := probeCatalog()
+	targets := []TargetEvidence{
+		probeEvidence("TestValue", goanalysis.KindTest, 17*time.Millisecond),
+		probeEvidence("FuzzValue", goanalysis.KindFuzz, 23*time.Millisecond),
+	}
+	targets[0].Probed = true
+	targets[0].ProbeDuration = 9 * time.Millisecond
+	targets[0].Infected = []uint32{0, 2}
+	evaluation := ProbeEvaluation{
+		Targets: targets, Measured: 1,
+		Suites: map[string]PackageProbeEvidence{
+			"fixture.example/module": {Measured: true, Duration: 31 * time.Millisecond, Infected: []uint32{1, 2}, WholeTree: true},
+			"fixture.example/other":  {},
+		},
+		SuitesMeasured: 1, SuitesUnmeasured: 1,
+	}
+	saved := checkpointMutationProbe(catalog, evaluation)
+	restored, ok := restoreMutationProbe(
+		catalog, []TargetEvidence{targets[0], targets[1]},
+		[]string{"fixture.example/other", "fixture.example/module"}, *saved,
+	)
+	if !ok || !reflect.DeepEqual(restored, evaluation) {
+		t.Fatalf("restored probe = (%+v, %t), want %+v", restored, ok, evaluation)
+	}
+
+	// The source-mutant fingerprint is order-independent, while an infection
+	// set is not. Swapping just the runtime indices must therefore reject the
+	// saved compact set even though every source mutant is unchanged.
+	reindexed := catalog
+	reindexed.Mutants = slices.Clone(catalog.Mutants)
+	reindexed.Mutants[0].Index, reindexed.Mutants[1].Index = reindexed.Mutants[1].Index, reindexed.Mutants[0].Index
+	if MutationCatalogFingerprint(reindexed) != MutationCatalogFingerprint(catalog) {
+		t.Fatal("source catalogue fingerprint unexpectedly depends on runtime order")
+	}
+	if _, ok := restoreMutationProbe(reindexed, targets, []string{"fixture.example/module", "fixture.example/other"}, *saved); ok {
+		t.Fatal("probe checkpoint survived a changed index-to-mutant mapping")
+	}
+}
+
 // TestProbePassSkipsFuzzTargets pins that a fuzz target is never probed: the
 // mutation phase fuzzes beyond the seed corpus the probe would measure, and a
 // fuzz run on the probe tree would write corpus files into that tree.

@@ -41,22 +41,46 @@ state is not captured. Only repair round zero may reuse a checkpoint. A corpus
 promotion or generated source change deletes and disables the old checkpoint
 before the next round.
 
-A saved baseline target carries the files it reached and not the coverage
-blocks inside them. This repository alone measures some four thousand blocks
-for each of several hundred targets, so storing them would multiply durable
-checkpoint bytes by orders of magnitude for state that is only a scheduling
-hint. A target
-restored from a checkpoint is therefore routed by file for the rest of the run:
-it reaches every mutant in a file it covered. That is the conservative
-direction — a resumed run executes at least the work a cold run would, and the
-`route` events of a trace say which targets were included that way.
+A saved baseline target carries the exact positive coverage blocks it measured,
+so interruption does not widen block routing into a whole-file approximation.
+The append-only journal writes each target's blocks once; it does not rewrite
+earlier targets. On this repository's 1,115-target dogfood baseline, 129,595
+positive blocks add 25.8 MB to an 8.7 MB checkpoint and deterministic encoding
+takes 0.21 seconds. With the same aggregate planner, preserving them removes
+4,145 planned executions (82,353 to 78,208) from the recorded interrupted route
+set and keeps exact-block survivor evidence eligible for reuse. The durable
+size is therefore bounded scheduling state with a measured payoff rather than
+repeated profiles.
 
-The target and package-suite infection facts of the probe pass, including their
-control durations, are in memory only for the same reason and under the same
-rule. A checkpoint carries none of them. A resumed run may establish fresh
-facts by repeating the probe phase; any route that has no fresh measurement is
-treated conservatively, as infecting rather than as proved unchanged. The
-probe pass itself is not a save boundary and adds no field to `checkpoint-v1`.
+The `coverage` member is optional for safe compatibility with checkpoints
+written before blocks were preserved. Its absence means unknown, never empty:
+such a legacy target is routed by every mutant in a file it covered. A present
+empty coverage object is an exact empty measurement. This is the conservative
+direction, and [ADR 0013](adr/0013-preserve-block-routing-across-resume.md)
+records the decision.
+
+At baseline completion the checkpoint also stores the deduplicated global
+instrumented block set and each successful package-suite coverage control. A
+later exact-input attempt can reconstruct the completed baseline without
+recompiling coverage binaries or rerunning package suites. An unfinished or
+legacy baseline has no `routing` object and repeats those controls; missing
+package-level state is never inferred from target blocks.
+
+A complete target and package-suite probe pass is stored once at its phase
+boundary, including measured/unmeasured classification, infection indices,
+control durations, and suite whole-tree selection. The compact indices are
+bound to a SHA-256 fingerprint of the exact index-to-mutant and probe-capability
+mapping in the prepared catalog. Restore also requires the exact target and
+requested-suite inventories. A mismatch discards both the probe and every
+mutant result routed with it.
+
+No partial probe is ever stored. Cancellation before the phase boundary, a
+legacy checkpoint without `probe`, or any invalid mapping repeats the complete
+pass; unmeasured entries remain conservative and never become negative facts.
+The fresh attempt emits `probe-exec` records. A restored attempt emits the
+`resume-probe` progress note but no pretend execution record, so trace command
+counts remain physical counts. The decision and its proof are
+[ADR 0014](adr/0014-resume-complete-probe-phase.md).
 
 Repository-read observation is different because a resumed mutation verdict
 must retain the input boundary established by its baseline. A saved target
@@ -74,6 +98,7 @@ boundary:
 - the baseline phase has completed;
 - the complete selected race phase has finished;
 - mutation catalog validation or invalidation has completed; and
+- the complete semantic-original probe phase has finished; and
 - the mutation phase has completed.
 
 Inside the baseline and mutation phases, each terminal unit is instead one
@@ -127,10 +152,13 @@ same strict state validation as a decoded base.
 
 Baseline target identities are checked against current discovery. The race
 package list must match exactly. The mutation fingerprint is SHA-256 over sorted
-mutant ID, path, package, rule, and line tuples. A changed mutation fingerprint
-discards only mutation state; a changed baseline inventory discards baseline,
-race, and mutation state; a changed race inventory discards race and mutation
-state.
+mutant ID, path, package, rule, and line tuples. A probe additionally requires
+the same target and suite inventories and the same ordered numeric-index,
+mutant-ID, executable, and probe-capability mapping. A changed mutation
+fingerprint discards only mutation state; a changed baseline inventory discards
+baseline, race, and mutation state; a changed race inventory discards race and
+mutation state; a changed probe inventory or mapping discards probe and mutant
+results together.
 
 Saved repair candidates must still load from the candidate store. A missing
 candidate discards mutation state rather than consuming incomplete evidence.
