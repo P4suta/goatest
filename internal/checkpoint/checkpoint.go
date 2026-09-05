@@ -33,10 +33,12 @@ type Target struct {
 }
 
 type TargetEvidence struct {
-	Target       Target   `json:"target"`
-	CoveredFiles []string `json:"covered_files"`
-	Environment  []string `json:"environment"`
-	DurationNS   int64    `json:"duration_ns"`
+	Target             Target   `json:"target"`
+	CoveredFiles       []string `json:"covered_files"`
+	Environment        []string `json:"environment"`
+	DurationNS         int64    `json:"duration_ns"`
+	WholeTree          bool     `json:"whole_tree,omitempty"`
+	RepositoryObserved bool     `json:"repository_observed,omitempty"`
 }
 
 type BaselineTarget struct {

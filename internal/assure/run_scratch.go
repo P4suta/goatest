@@ -23,9 +23,10 @@ const (
 	// The directories below a run scratch. Their names say what each one is
 	// for and nothing else: which tool made them is already answered by the
 	// parent they are in.
-	baselineScratchName = "baseline-"
-	candidateTreeName   = "candidate-"
-	controlFuzzName     = "control-fuzz-"
+	baselineScratchName       = "baseline-"
+	candidateTreeName         = "candidate-"
+	controlFuzzName           = "control-fuzz-"
+	repositoryObservationName = "repository-observation-"
 
 	// buildScratchName is the build cache layer that dies with the run. It is
 	// the one fixed name below a run scratch, because a run has exactly one of
@@ -59,6 +60,7 @@ func TemporaryPrefixes() []string {
 		legacyPrefix + baselineScratchName,
 		legacyPrefix + candidateTreeName,
 		legacyPrefix + controlFuzzName,
+		legacyPrefix + repositoryObservationName,
 		legacyBuildCachePrefix,
 	}
 }

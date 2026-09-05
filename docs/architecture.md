@@ -65,9 +65,11 @@ under the same conditions and keeps its finding. The behaviour key is an
 allowlist over the digests the run already computed for its snapshot: the test
 binary's package closure, the data and embedded files beside it, manifests,
 dependencies, toolchain, platform, environment, contract, arguments, tags,
-timeouts, versions — or, for a package whose sources read a directory they
-compute rather than a file they name, the whole tree. Every other record
-executes, and a record about a mutant the catalogue no longer names is pruned
+timeouts, and versions. Packages whose sources may enumerate a repository are
+observed through Go's test action log; only the baseline/mutant targets that
+actually escape those ordinary inputs use the whole-tree variant, with every
+unknown observation conservatively widened. Every other record executes, and
+a record about a mutant the catalogue no longer names is pruned
 when the store is written back. The report marks each reused disposition with
 its provenance and the trace records the reuse as a route with no execution
 beside it. The rule is in [the assurance contract](assurance-contract.md) and

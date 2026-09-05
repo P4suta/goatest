@@ -283,16 +283,28 @@ compiled into the binary; the target's own package's test files are always in
 it. Diagnostics — tracing, kept temporaries — and parallelism are outside
 every key, because neither changes what a test observes.
 
-One kind of target is keyed on the whole tree instead. A test that reads the
-repository as data — one whose package's own or test sources call `os.ReadDir`,
-`os.DirFS`, `os.OpenRoot`, `filepath.Walk`, `filepath.WalkDir`,
-`filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or `fs.Sub` — reads
-files no closure names, so its verdict can change while a key built from its
-closure does not. Every target of such a package is keyed on every file of the
-snapshot, so it keeps a recorded verdict across an identical tree and across
-nothing else. The list is a deliberate over-approximation and may only grow; a
-package whose directory cannot be listed or whose sources cannot be parsed
-counts as one of them. Nothing is excluded from testing or from reuse by name.
+Sources that use `os.ReadDir`, `os.DirFS`, `os.OpenRoot`, `filepath.Walk`,
+`filepath.WalkDir`, `filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or
+`fs.Sub` select a package for repository-read observation. For those packages,
+Go's test action log records the `open`, `stat`, and `chdir` operations of both
+the baseline target and every mutant execution used to establish a record. A
+named ordinary input already present in the closure key leaves it narrow. A
+repository directory, a missing path, or a file outside that input set widens
+the target to every file of the snapshot. A batch's observation applies to
+every target it selected, and paired kill confirmations are combined, so a
+mutant that opens a repository-reading branch the baseline did not take still
+gets a whole-tree key.
+
+The stored target or suite key carries `whole_tree: true` when widened; its
+absence is the narrow form and is also how old records are read. An old
+package-wide reader record therefore misses its new narrow key once and is
+re-established in the precise form. A current baseline that requires the whole
+tree never accepts an old narrow record. Missing, malformed, truncated, or
+otherwise ambiguous action logs widen rather than fail the run. Direct uses in
+package initialization or `TestMain`, generic `io/fs` uses whose backing store
+cannot be observed, and source parse/list failures remain statically
+whole-tree. Nothing is excluded from testing or reuse by name, and no
+configuration or annotation is required.
 
 Two kinds of kill are neither recorded nor believed. A kill fuzzing found is a
 claim about one budget, not the next. A kill by a batch or a package suite

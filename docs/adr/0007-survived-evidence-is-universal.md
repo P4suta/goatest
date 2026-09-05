@@ -101,18 +101,20 @@ survive.
    contains it and a second place to say so would be a second place to keep
    consistent; the store's schema stays additive.
 
-6. **A test that reads the repository keys the whole tree, rather than being
-   excluded.** A behaviour key is built from the target's build closure, so a
-   test that lists, walks or globs a directory it computes reads files no key
-   names, and its verdict can change while its key does not. ADR 0004 forbids
-   exclusions, and an exclusion would be the wrong answer anyway — it would
-   stop such a package's mutants from being tested rather than stop their
-   verdicts from being trusted. Instead, a package whose own or test sources
-   call one of a named list of standard-library functions has every one of its
-   targets keyed on every file of the snapshot: it keeps a verdict across an
-   identical tree and across nothing else. The list is a conservative
-   over-approximation, may only grow, and a directory that cannot be listed or
-   a file that cannot be parsed counts as reading one.
+6. **An execution that reads the repository keys the whole tree, rather than
+   excluding its package.** A named list of directory APIs statically selects
+   candidates. Go's test action log then observes the baseline and every mutant
+   execution that establishes a record. Access to a repository directory, a
+   missing repository path, or a file outside the ordinary closure widens that
+   target or suite to the whole snapshot; accesses to temporary directories
+   and already-keyed files do not. The observations of both paired kill runs
+   are joined, and a batch applies its observation to every selected target.
+   An absent, malformed, or unobservable log always widens. Thus a reused
+   narrow record exists only when both the original and mutated executions
+   were observed inside its stated input set; a mutant-only reader branch
+   cannot escape the key. Known pre-`M.Run` and generic-FS cases remain
+   statically whole-tree. ADR 0004 still forbids exclusions: the rule changes
+   what a verdict may be reused across, never which mutants are tested.
 
 7. **Contradiction removes a record; nothing else does.** Every mutant a run
    executes writes a fresh record and this run's record replaces the one it was
@@ -140,12 +142,12 @@ those for a kill, so a repository whose tests change often will reuse fewer
 survivors than kills — which is the correct behaviour, not a shortfall: a
 changed test binary is a test binary nothing was ever run against.
 
-Repository-reading packages pay for the over-approximation. On this repository
-that is a real cost — several of its own packages call `os.ReadDir` in tests
-that read only temporary directories — and it is paid deliberately: the
-alternative is a key that claims to describe what a test reads and does not.
-The remedy, if the cost ever matters, is a narrower proof about what such a
-test reads, never a list of packages whose verdicts are trusted anyway.
+Repository-reading packages now pay the whole-tree cost only for targets that
+actually cross the key boundary. Tests that use the same APIs exclusively on
+temporary directories retain narrow evidence, while repository-wide gates and
+every uncertain observation retain the conservative behaviour. The refinement
+adds transient action logs but no user configuration, stored paths, or weaker
+fallback.
 
 `proofaudit` gains a class rather than a rule. A reused route is not a measured
 kill it can hold to a layer, and counting it as one would be auditing evidence

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
@@ -135,7 +136,7 @@ func (workspace *Workspace) Exec(ctx context.Context, command gomutants.Command)
 // that can store it. The bridge writes neither.
 func executionRecord(command gomutants.Command, result gomutants.CommandResult, err error) trace.ExecRecord {
 	record := trace.ExecRecord{
-		Argv:       slices.Clone(command.Argv),
+		Argv:       diagnosticCommandArguments(command.Argv),
 		Dir:        command.Dir,
 		EnvNames:   command.Env,
 		TimeoutMS:  traceMilliseconds(command.Timeout),
@@ -148,6 +149,16 @@ func executionRecord(command gomutants.Command, result gomutants.CommandResult, 
 		record.Error = err.Error()
 	}
 	return record
+}
+
+// diagnosticCommandArguments keeps execution-only action-log paths out of a
+// durable trace. They are random scratch names rather than part of the command
+// a user asked goatest to run, and the log itself is deliberately transient.
+func diagnosticCommandArguments(arguments []string) []string {
+	result := slices.Clone(arguments)
+	return slices.DeleteFunc(result, func(argument string) bool {
+		return strings.HasPrefix(argument, "-test.testlogfile=")
+	})
 }
 
 // traceMilliseconds is the millisecond count a trace records for a duration. A

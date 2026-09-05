@@ -300,6 +300,48 @@ func TestEvaluateMutationsCoversEveryTargetedFuzzOutcomeAndError(t *testing.T) {
 	}
 }
 
+func TestEvaluateMutationsDoesNotObserveTargetedFuzzCampaignOrConfirmation(t *testing.T) {
+	t.Parallel()
+	mutant := internalMutation("mutant-a")
+	const pkg = "fixture.example/module"
+	observer := newRepositoryObserver(t.TempDir(), t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
+		pkg: {},
+	}, targetKeySources{model: goanalysis.Model{Packages: []goanalysis.Package{{ImportPath: pkg, RelativeDir: "."}}}})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		if hasMutationArgPrefix(request.Args, "-test.fuzz=") {
+			return gomutants.MutantResult{Outcome: gomutants.OutcomeKilled}, nil
+		}
+		return gomutants.MutantResult{Outcome: gomutants.OutcomeSurvived}, nil
+	}
+
+	_, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+		internalTarget("FuzzValue", goanalysis.KindFuzz, time.Second),
+	}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1, NoApply: true,
+		RepositoryObserver: observer,
+		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+			return gomutants.CommandResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fuzzExecutions := 0
+	for _, request := range session.requests {
+		if !hasMutationArgPrefix(request.Args, "-test.fuzz=") {
+			continue
+		}
+		fuzzExecutions++
+		if _, observed := repositoryTestLogPath(request.Args); observed {
+			t.Fatalf("targeted fuzz request was instrumented: %+v", request.Args)
+		}
+	}
+	if fuzzExecutions != 2 {
+		t.Fatalf("targeted fuzz executions = %d, want campaign and confirmation; requests=%+v", fuzzExecutions, session.requests)
+	}
+}
+
 func TestEvaluateMutationsStopsFuzzingAfterFirstKillOrBlockedOutcome(t *testing.T) {
 	for _, outcome := range []gomutants.Outcome{gomutants.OutcomeKilled, gomutants.OutcomeTimedOut} {
 		t.Run(string(outcome), func(t *testing.T) {

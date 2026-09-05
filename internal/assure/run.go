@@ -421,6 +421,26 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
+		var mutationSources targetKeySources
+		var repositoryObserver *RepositoryObserver
+		if mutationEvidenceGuarded(round, loaded, options) {
+			candidates := goanalysis.RepositoryReadCandidates(root, metadata.model.Packages)
+			readers := make(map[string]bool, len(candidates))
+			for path := range candidates {
+				readers[path] = true
+			}
+			mutationSources = newTargetKeySources(inputs, metadata.model, contract, options, readers)
+			if len(candidates) != 0 {
+				observationParent, observationPrefix := scratch.subdirectory(repositoryObservationName)
+				observationDirectory, observationErr := os.MkdirTemp(observationParent, observationPrefix)
+				if observationErr != nil {
+					emit(options, "repository-observation-unavailable", observationErr.Error())
+				} else {
+					defer func() { _ = os.RemoveAll(observationDirectory) }()
+				}
+				repositoryObserver = newRepositoryObserver(metadata.model.ModuleDir, observationDirectory, candidates, mutationSources)
+			}
+		}
 		var controlMutex sync.Mutex
 		var controlWorkspace *mutationbridge.Workspace
 		originalControl := func(controlContext context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
@@ -473,6 +493,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			ClassifyUserFailures: true,
 			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout,
 			Resume: baselineResume, Checkpoint: checkpointController.saveBaseline,
+			RepositoryObserver: repositoryObserver,
 		})
 		removeErr := releaseBaselineScratch(options, dependencies.removeBaselineScratch, artifactDirectory)
 		if err != nil || removeErr != nil {
@@ -661,13 +682,8 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				emit(options, "mutation-evidence-rejected", evidenceErr.Error())
 				mutationStore = evidence.MutationStore{}
 			}
-			// Which packages read a directory they compute rather than a file
-			// they name is a question about the sources alone, so it is asked
-			// once, here, and answers every key the phase goes on to build.
 			mutationEvidence = newRunMutationEvidence(
-				mutationStore,
-				newTargetKeySources(inputs, metadata.model, contract, options,
-					goanalysis.RepositoryReaders(root, metadata.model.Packages)),
+				mutationStore, mutationSources,
 				baseline.Targets, baseline.Inventory, digest,
 			)
 		}
@@ -682,10 +698,11 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Jobs: mutationJobs, Accepted: accepted,
 			Progress: mutationProgress(options),
 			Resume:   mutationResume, Checkpoint: checkpointController.saveMutant,
-			OriginalControl: originalControl,
-			Trace:           options.Trace,
-			Instrumented:    baseline.Instrumented,
-			Evidence:        mutationEvidence,
+			OriginalControl:    originalControl,
+			Trace:              options.Trace,
+			Instrumented:       baseline.Instrumented,
+			Evidence:           mutationEvidence,
+			RepositoryObserver: repositoryObserver,
 		})
 		if err != nil {
 			_ = closeRound()

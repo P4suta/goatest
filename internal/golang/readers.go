@@ -14,11 +14,11 @@ import (
 
 // repositoryReaderCalls are the standard-library calls through which a package
 // reads a directory it computes rather than a file it names, by the import
-// path the call belongs to and the names of the functions in it.
+// path the selector belongs to and the names of the functions in it.
 //
 // The list is a deliberate over-approximation of "this package's verdict can
-// depend on a file no closure of its own describes": a call to any of them may
-// read the whole tree, and none of them says which part it read. It may only
+// depend on a file no closure of its own describes": using any of them may read
+// the whole tree, and none of them says which part it read. It may only
 // grow. Removing an entry would silently widen what a recorded verdict is
 // reused across, and adding one only costs a package the reuse of verdicts it
 // might not have deserved.
@@ -28,6 +28,16 @@ var repositoryReaderCalls = map[string][]string{
 	"io/fs":         {"WalkDir", "ReadDir", "Glob", "Sub"},
 }
 
+// RepositoryReadCandidate is the static boundary within which runtime
+// observation may safely narrow the old whole-tree approximation.
+//
+// Unobservable is true when the syntax itself uses a reader through a route
+// Go's test action log cannot account for completely. Such a package remains
+// keyed on the whole tree without trying to observe it.
+type RepositoryReadCandidate struct {
+	Unobservable bool
+}
+
 // RepositoryReaders names the packages whose sources read the repository as
 // data, so that a caller can key such a package's targets on the whole tree
 // instead of on the closure their test binaries link.
@@ -35,8 +45,8 @@ var repositoryReaderCalls = map[string][]string{
 // A package answers for both halves of its own directory: its test files,
 // which are where a golden reader or a repository-wide gate usually lives, and
 // its own files, because a test calls into them. Detection is by syntax — a
-// call whose selector names one of the functions above on an identifier bound
-// to that function's import path — so a method of the package's own that
+// selector naming one of the functions above on an identifier imported from
+// that function's path — so a method of the package's own that
 // happens to share a name is not one of them, and an aliased import of the
 // same package is.
 //
@@ -49,58 +59,70 @@ var repositoryReaderCalls = map[string][]string{
 // mark a package that does not deserve it.
 func RepositoryReaders(root string, packages []Package) map[string]bool {
 	readers := make(map[string]bool, len(packages))
-	for _, pkg := range packages {
-		if packageReadsRepository(filepath.Join(root, filepath.FromSlash(pkg.RelativeDir))) {
-			readers[pkg.ImportPath] = true
-		}
+	for path := range RepositoryReadCandidates(root, packages) {
+		readers[path] = true
 	}
 	return readers
 }
 
-// packageReadsRepository reports whether any Go file directly in one package
-// directory reads a path it computes. A directory below it is another
-// package's, and answers for itself.
-func packageReadsRepository(directory string) bool {
+// RepositoryReadCandidates describes the packages covered by the existing
+// reader rule and identifies the cases runtime action logging cannot narrow.
+// It deliberately has the same candidate boundary as RepositoryReaders: the
+// richer answer changes only whether a candidate may be observed, never which
+// package is protected by the rule.
+func RepositoryReadCandidates(root string, packages []Package) map[string]RepositoryReadCandidate {
+	candidates := make(map[string]RepositoryReadCandidate, len(packages))
+	for _, pkg := range packages {
+		candidate, unobservable := packageRepositoryReadCandidate(filepath.Join(root, filepath.FromSlash(pkg.RelativeDir)))
+		if candidate {
+			candidates[pkg.ImportPath] = RepositoryReadCandidate{Unobservable: unobservable}
+		}
+	}
+	return candidates
+}
+
+func packageRepositoryReadCandidate(directory string) (bool, bool) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return true
+		return true, true
 	}
+	var candidate, unobservable bool
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
-		if fileReadsRepository(filepath.Join(directory, entry.Name())) {
-			return true
+		reads, cannotObserve := fileRepositoryReadCandidate(filepath.Join(directory, entry.Name()))
+		candidate = candidate || reads
+		unobservable = unobservable || cannotObserve
+		if candidate && unobservable {
+			return true, true
 		}
 	}
-	return false
+	return candidate, unobservable
 }
 
-// fileReadsRepository reports whether one Go file calls one of the listed
-// functions on the package it belongs to.
-func fileReadsRepository(path string) bool {
+func fileRepositoryReadCandidate(path string) (bool, bool) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 	if err != nil {
-		return true
+		return true, true
 	}
 	selectors, unqualified := repositoryReaderSelectors(file)
 	if unqualified {
-		return true
+		return true, true
 	}
 	if len(selectors) == 0 {
-		return false
+		return false, false
 	}
-	found := false
+	found, unobservable := false, false
+	var stack []ast.Node
 	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
-		}
-		call, isCall := node.(*ast.CallExpr)
-		if !isCall {
+		if node == nil {
+			stack = stack[:len(stack)-1]
 			return true
 		}
-		selector, isSelector := call.Fun.(*ast.SelectorExpr)
+		stack = append(stack, node)
+		selector, isSelector := node.(*ast.SelectorExpr)
 		if !isSelector {
 			return true
 		}
@@ -108,15 +130,48 @@ func fileReadsRepository(path string) bool {
 		if !isIdent {
 			return true
 		}
-		for _, name := range selectors[qualifier.Name] {
-			if name == selector.Sel.Name {
+		for _, named := range selectors[qualifier.Name] {
+			if named.name == selector.Sel.Name {
 				found = true
-				return false
+				// Generic io/fs calls can be backed by an implementation that
+				// never reaches package os, and package/TestMain initialisation
+				// runs before testing installs its action logger.
+				unobservable = unobservable || named.importPath == "io/fs" || referenceRunsBeforeTestLog(stack)
+				break
 			}
 		}
 		return true
 	})
-	return found
+	return found, unobservable
+}
+
+type repositoryReaderCall struct {
+	importPath string
+	name       string
+}
+
+// referenceRunsBeforeTestLog identifies reader references in execution regions
+// that precede testing.M.Run's action logger. A selector used as a function
+// value is included as well as a direct call, so indirection cannot leave the
+// static candidate boundary merely by dropping the call's parentheses.
+func referenceRunsBeforeTestLog(stack []ast.Node) bool {
+	for index := len(stack) - 1; index >= 0; index-- {
+		declaration, ok := stack[index].(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		return declaration.Name.Name == "init" || declaration.Name.Name == "TestMain"
+	}
+	// A selector merely stored as a package-level function value performs no
+	// I/O yet; its later call still reaches package os and is observable. A
+	// selector below a call expression may execute as part of package
+	// initialization, whether as the callee or as a callback argument.
+	for _, node := range stack {
+		if _, called := node.(*ast.CallExpr); called {
+			return true
+		}
+	}
+	return false
 }
 
 // repositoryReaderSelectors maps the name one file refers to each listed
@@ -128,8 +183,8 @@ func fileReadsRepository(path string) bool {
 // could name them; it is reported instead, and the file is treated as reading
 // the repository without looking any further. A blank import binds nothing
 // that can be called and is passed over.
-func repositoryReaderSelectors(file *ast.File) (map[string][]string, bool) {
-	var selectors map[string][]string
+func repositoryReaderSelectors(file *ast.File) (map[string][]repositoryReaderCall, bool) {
+	var selectors map[string][]repositoryReaderCall
 	for _, imported := range file.Imports {
 		path := strings.Trim(imported.Path.Value, `"`)
 		calls, listed := repositoryReaderCalls[path]
@@ -147,9 +202,11 @@ func repositoryReaderSelectors(file *ast.File) (map[string][]string, bool) {
 			name = imported.Name.Name
 		}
 		if selectors == nil {
-			selectors = make(map[string][]string, len(repositoryReaderCalls))
+			selectors = make(map[string][]repositoryReaderCall, len(repositoryReaderCalls))
 		}
-		selectors[name] = append(selectors[name], calls...)
+		for _, call := range calls {
+			selectors[name] = append(selectors[name], repositoryReaderCall{importPath: path, name: call})
+		}
 	}
 	return selectors, false
 }

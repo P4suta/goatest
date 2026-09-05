@@ -139,7 +139,10 @@ func TestARunCollectsWhatEarlierRunsLeftBehindBeforeItWritesAnything(t *testing.
 	}
 	// go-mutants sweeps its own directories behind its own owner files, so
 	// goatest sweeps its names and never those.
-	want := []string{"goatest-run-", "goatest-baseline-", "goatest-candidate-", "goatest-control-fuzz-", "goatest-build-cache-"}
+	want := []string{
+		"goatest-run-", "goatest-baseline-", "goatest-candidate-", "goatest-control-fuzz-",
+		"goatest-repository-observation-", "goatest-build-cache-",
+	}
 	if !slices.Equal(harness.sweptPrefixes, want) {
 		t.Fatalf("swept prefixes = %v, want %v", harness.sweptPrefixes, want)
 	}

@@ -45,7 +45,7 @@ func TestWorkspaceExecRecordsTheCommandItRan(t *testing.T) {
 	engine := &fakeMutationWorkspace{execResult: gomutants.CommandResult{Duration: 1500 * time.Millisecond, Output: output}}
 	sink, recorder := newRecording()
 	workspace := &Workspace{inner: engine, trace: recorder}
-	argv := []string{"go", "test", "./..."}
+	argv := []string{"go", "test", "./...", "-test.testlogfile=/tmp/private-action.log"}
 	if _, err := workspace.Exec(t.Context(), gomutants.Command{
 		Argv: argv, Dir: "internal/assure", Timeout: 2 * time.Minute,
 		Env: []string{"GOFLAGS=-mod=mod", "AWS_SECRET_ACCESS_KEY=shhh", "GOFLAGS=-mod=mod"},

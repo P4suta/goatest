@@ -77,8 +77,9 @@ type targetKeySources struct {
 	commandTimeout time.Duration
 	targetTimeout  time.Duration
 	// repositoryReaders are the packages goanalysis found reading a directory
-	// they compute rather than a file they name, by import path. A target of
-	// one of them is keyed on extraFiles instead of on its closure alone.
+	// they compute rather than a file they name, by import path. They name the
+	// candidates for runtime observation and the packages for which a
+	// whole-tree key must be available.
 	repositoryReaders map[string]bool
 	// extraFiles are the module-relative paths a target keys beyond what its
 	// closure names: every file of the snapshot, in sorted order, for the
@@ -177,8 +178,18 @@ func corpusOwner(name string) (string, string, bool) {
 	return owner, target, true
 }
 
-// inputsFor is everything one target's behaviour depends on, as the allowlist
-// TargetInputs states it.
+// inputsFor preserves the conservative static answer used by callers that do
+// not possess an execution observation. The guarded mutation-evidence path
+// chooses explicitly between narrowInputsFor and wholeTreeInputsFor instead.
+func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.TargetInputs {
+	if sources.repositoryReaders[target.Package] {
+		return sources.wholeTreeInputsFor(target)
+	}
+	return sources.narrowInputsFor(target)
+}
+
+// narrowInputsFor is everything one target's ordinary build-and-test closure
+// depends on, as the allowlist TargetInputs states it.
 //
 // The files are the test binary's own: the Go files of its build closure, the
 // data beside those packages, the files they embed, and the module manifests
@@ -187,14 +198,11 @@ func corpusOwner(name string) (string, string, bool) {
 // target's package's test files are, and they are the file most likely to
 // change.
 //
-// A target of a package that reads a directory it computes is the exception,
-// and it is a conservative one: its closure is not what decides its verdict,
-// because the files it will read are not named anywhere, so every file of the
-// snapshot is an input of it. Such a target keeps a recorded verdict across an
-// identical tree and across nothing else. Nothing is excluded from testing or
-// from reuse by name; the key simply stops claiming to know what the test
-// reads.
-func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.TargetInputs {
+// Runtime observation may later prove that an execution crossed this
+// allowlist. That decision is deliberately outside this builder: the same
+// narrow key remains available beside its whole-tree variant, and a stored
+// marker says which claim the execution actually established.
+func (sources targetKeySources) narrowInputsFor(target goanalysis.Target) evidence.TargetInputs {
 	files := make(map[string]string)
 	include := func(name string) {
 		if digest, known := sources.inputs.Files[name]; known {
@@ -207,11 +215,6 @@ func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.Tar
 	}
 	for _, name := range moduleManifestFiles {
 		include(name)
-	}
-	if sources.repositoryReaders[target.Package] {
-		for _, name := range sources.extraFiles {
-			include(name)
-		}
 	}
 	for _, pkg := range sources.closure(target) {
 		for _, name := range sources.directory[pkg.RelativeDir] {
@@ -244,6 +247,34 @@ func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.Tar
 	return inputs
 }
 
+// wholeTreeInputsFor widens the ordinary closure inputs to every file the
+// frozen snapshot described. Runtime repository-read observation chooses this
+// form only for executions that actually escaped their narrow input set, or
+// for observations it could not trust.
+func (sources targetKeySources) wholeTreeInputsFor(target goanalysis.Target) evidence.TargetInputs {
+	inputs := sources.narrowInputsFor(target)
+	for _, name := range sources.extraFiles {
+		if digest, known := sources.inputs.Files[name]; known {
+			inputs.Files[name] = digest
+			continue
+		}
+		if digest, known := sources.inputs.Corpus[name]; known {
+			inputs.Files[name] = digest
+		}
+	}
+	return inputs
+}
+
+func (sources targetKeySources) targetKey(target goanalysis.Target, wholeTree bool) string {
+	if wholeTree {
+		if !sources.repositoryReaders[target.Package] {
+			return ""
+		}
+		return evidence.TargetBehaviorKey(sources.wholeTreeInputsFor(target))
+	}
+	return evidence.TargetBehaviorKey(sources.narrowInputsFor(target))
+}
+
 // suiteKey identifies what one package's whole test suite does, which is what
 // a mutant no measured target reaches is settled by and what a verdict about
 // such a mutant is a statement about.
@@ -256,14 +287,21 @@ func (sources targetKeySources) inputsFor(target goanalysis.Target) evidence.Tar
 // package-level run's own inputs, and each target with the behaviour key it
 // has here. A package this run knows nothing about names no key, and a run
 // that cannot name a key neither records a suite verdict nor believes one.
-func (sources targetKeySources) suiteKey(pkg string, targets []evidence.TargetKey) string {
+func (sources targetKeySources) suiteKey(pkg string, targets []evidence.TargetKey, wholeTree bool) string {
 	owner, known := sources.packages[pkg]
 	if !known {
 		return ""
 	}
-	return evidence.SuiteBehaviorKey(sources.inputsFor(goanalysis.Target{
+	target := goanalysis.Target{
 		Package: pkg, RelativeDir: owner.RelativeDir, Dependencies: owner.Dependencies,
-	}), targets)
+	}
+	if wholeTree {
+		if !sources.repositoryReaders[pkg] {
+			return ""
+		}
+		return evidence.SuiteBehaviorKey(sources.wholeTreeInputsFor(target), targets)
+	}
+	return evidence.SuiteBehaviorKey(sources.narrowInputsFor(target), targets)
 }
 
 // closure is the packages of this module whose sources the target's test
@@ -300,6 +338,11 @@ type MutationEvidence struct {
 	records map[string]evidence.MutationRecord
 	// keys is what each target of this run does, by identity.
 	keys map[targetIdentity]string
+	// wholeKeys is the conservative variant of keys for statically selected
+	// repository-reader packages. baselineWholeTree prevents an old narrow
+	// record from being reused when this run's original target escaped it.
+	wholeKeys         map[targetIdentity]string
+	baselineWholeTree map[targetIdentity]bool
 	// passed is the targets this run's baseline ran on the original tree and
 	// saw pass. It is the fresh control a reused kill stands on.
 	passed map[targetIdentity]bool
@@ -308,7 +351,9 @@ type MutationEvidence struct {
 	// at all: every target of it was measured by this run rather than restored
 	// from a checkpoint, and every one of them passed the baseline. A package
 	// that is absent is one no suite verdict is written about or read for.
-	suites map[string]string
+	suites             map[string]string
+	wholeSuites        map[string]string
+	suiteBaselineWhole map[string]bool
 
 	mutex    sync.Mutex
 	recorded map[string]evidence.MutationRecord
@@ -326,6 +371,8 @@ func newMutationEvidence(store evidence.MutationStore, keys map[targetIdentity]s
 	}
 	return &MutationEvidence{
 		provenance: provenance, records: records, keys: keys, passed: passed, suites: suites,
+		wholeKeys: make(map[targetIdentity]string), baselineWholeTree: make(map[targetIdentity]bool),
+		wholeSuites: make(map[string]string), suiteBaselineWhole: make(map[string]bool),
 		recorded: make(map[string]evidence.MutationRecord),
 		reused:   make(map[string]string),
 	}
@@ -340,8 +387,16 @@ func newMutationEvidence(store evidence.MutationStore, keys map[targetIdentity]s
 // suite key is the conjunction of the target keys this loop already computed.
 func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySources, targets []TargetEvidence, inventory []report.TargetDisposition, snapshot string) *MutationEvidence {
 	keys := make(map[targetIdentity]string, len(targets))
+	wholeKeys := make(map[targetIdentity]string, len(targets))
+	baselineWholeTree := make(map[targetIdentity]bool, len(targets))
 	for _, target := range targets {
-		keys[identify(target.Target)] = evidence.TargetBehaviorKey(sources.inputsFor(target.Target))
+		identity := identify(target.Target)
+		keys[identity] = sources.targetKey(target.Target, false)
+		if sources.repositoryReaders[identity.pkg] {
+			wholeKeys[identity] = sources.targetKey(target.Target, true)
+		}
+		baselineWholeTree[identity] = target.WholeTree ||
+			sources.repositoryReaders[identity.pkg] && !target.RepositoryObserved
 	}
 	passed := make(map[targetIdentity]bool, len(inventory))
 	for _, item := range inventory {
@@ -349,7 +404,14 @@ func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySourc
 			passed[targetIdentity{pkg: item.Package, name: item.Name, kind: item.Kind}] = true
 		}
 	}
-	return newMutationEvidence(store, keys, passed, suiteKeys(sources, targets, keys, passed), "snapshot="+snapshot)
+	collected := newMutationEvidence(store, keys, passed, suiteKeys(sources, targets, keys, passed, false), "snapshot="+snapshot)
+	collected.wholeKeys = wholeKeys
+	collected.baselineWholeTree = baselineWholeTree
+	collected.wholeSuites = suiteKeys(sources, targets, wholeKeys, passed, true)
+	for identity, wholeTree := range baselineWholeTree {
+		collected.suiteBaselineWhole[identity.pkg] = collected.suiteBaselineWhole[identity.pkg] || wholeTree
+	}
+	return collected
 }
 
 // suiteKeys is what every package's test suite does in this run.
@@ -360,7 +422,7 @@ func newRunMutationEvidence(store evidence.MutationStore, sources targetKeySourc
 // either one makes the package one this run cannot speak for. Every other
 // package of the model is keyed, including one with no targets at all, whose
 // suite runs nothing and says so.
-func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targetIdentity]string, passed map[targetIdentity]bool) map[string]string {
+func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targetIdentity]string, passed map[targetIdentity]bool, wholeTree bool) map[string]string {
 	byPackage := make(map[string][]evidence.TargetKey, len(sources.packages))
 	unmeasured := make(map[string]bool, len(sources.packages))
 	for _, target := range targets {
@@ -371,7 +433,7 @@ func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targ
 			continue
 		}
 		byPackage[identity.pkg] = append(byPackage[identity.pkg], evidence.TargetKey{
-			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key,
+			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key, WholeTree: wholeTree,
 		})
 	}
 	suites := make(map[string]string, len(sources.packages))
@@ -379,11 +441,52 @@ func suiteKeys(sources targetKeySources, targets []TargetEvidence, keys map[targ
 		if unmeasured[path] {
 			continue
 		}
-		if key := sources.suiteKey(path, byPackage[path]); key != "" {
+		if key := sources.suiteKey(path, byPackage[path], wholeTree); key != "" {
 			suites[path] = key
 		}
 	}
 	return suites
+}
+
+func (collected *MutationEvidence) targetMatches(identity targetIdentity, recorded evidence.TargetKey) bool {
+	if recorded.WholeTree {
+		key := collected.wholeKeys[identity]
+		return key != "" && key == recorded.Key
+	}
+	if collected.baselineWholeTree[identity] {
+		return false
+	}
+	key := collected.keys[identity]
+	return key != "" && key == recorded.Key
+}
+
+func (collected *MutationEvidence) targetKey(target TargetEvidence) (string, bool) {
+	identity := identify(target.Target)
+	wholeTree := target.WholeTree || collected.baselineWholeTree[identity]
+	if wholeTree {
+		return collected.wholeKeys[identity], true
+	}
+	return collected.keys[identity], false
+}
+
+func (collected *MutationEvidence) suiteMatches(pkg string, recorded evidence.SuiteKey) bool {
+	if recorded.WholeTree {
+		key := collected.wholeSuites[pkg]
+		return key != "" && key == recorded.Key
+	}
+	if collected.suiteBaselineWhole[pkg] {
+		return false
+	}
+	key := collected.suites[pkg]
+	return key != "" && key == recorded.Key
+}
+
+func (collected *MutationEvidence) suiteKey(pkg string, wholeTree bool) (string, bool) {
+	wholeTree = wholeTree || collected.suiteBaselineWhole[pkg]
+	if wholeTree {
+		return collected.wholeSuites[pkg], true
+	}
+	return collected.suites[pkg], false
 }
 
 // reuseKill reports the target of this run that answers for a mutant an
@@ -419,7 +522,7 @@ func (collected *MutationEvidence) reuseKill(mutant gomutants.Mutant, route muta
 	if index < 0 {
 		return TargetEvidence{}, "", false
 	}
-	if key := collected.keys[killer]; key == "" || key != record.KilledBy.Key {
+	if !collected.targetMatches(killer, *record.KilledBy) {
 		return TargetEvidence{}, "", false
 	}
 	if !collected.passed[killer] {
@@ -503,13 +606,9 @@ func (collected *MutationEvidence) exhausts(exhausted []evidence.TargetKey, reac
 		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
 			return false
 		}
-		key := collected.keys[identity]
-		if key == "" {
-			return false
-		}
 		if !slices.ContainsFunc(exhausted, func(candidate evidence.TargetKey) bool {
 			return candidate.Package == identity.pkg && candidate.Name == identity.name &&
-				candidate.Kind == identity.kind && candidate.Key == key
+				candidate.Kind == identity.kind && collected.targetMatches(identity, candidate)
 		}) {
 			return false
 		}
@@ -531,37 +630,36 @@ func (collected *MutationEvidence) suiteAnswers(mutant gomutants.Mutant, suite *
 	if suite == nil || len(route.reaching) != 0 || len(route.discharged) != 0 {
 		return false
 	}
-	key := collected.suites[mutant.Package]
-	return key != "" && key == suite.Key && suite.Package == mutant.Package
+	return suite.Package == mutant.Package && collected.suiteMatches(mutant.Package, *suite)
 }
 
 // recordUnreached remembers that a mutant no measured target reached was left
 // to its package suite, which did not kill it.
-func (collected *MutationEvidence) recordUnreached(mutant gomutants.Mutant, kind, summary string) {
-	collected.recordSuite(mutant, evidence.MutationOutcomeUnreached, kind, summary)
+func (collected *MutationEvidence) recordUnreached(mutant gomutants.Mutant, wholeTree bool, kind, summary string) {
+	collected.recordSuite(mutant, evidence.MutationOutcomeUnreached, wholeTree, kind, summary)
 }
 
 // recordSuiteTimedOut remembers that the package suite of a mutant no measured
 // target reached ran out of time before it could settle it.
-func (collected *MutationEvidence) recordSuiteTimedOut(mutant gomutants.Mutant, kind, summary string) {
-	collected.recordSuite(mutant, evidence.MutationOutcomeTimedOut, kind, summary)
+func (collected *MutationEvidence) recordSuiteTimedOut(mutant gomutants.Mutant, wholeTree bool, kind, summary string) {
+	collected.recordSuite(mutant, evidence.MutationOutcomeTimedOut, wholeTree, kind, summary)
 }
 
 // recordSuite writes down a verdict the package suite reached, with the key
 // that suite had. A package this run cannot describe leaves the store as it
 // found it, exactly as an unusable target key does.
-func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome, kind, summary string) {
+func (collected *MutationEvidence) recordSuite(mutant gomutants.Mutant, outcome string, wholeTree bool, kind, summary string) {
 	if collected == nil || kind == "" || summary == "" {
 		return
 	}
-	key := collected.suites[mutant.Package]
+	key, wholeTree := collected.suiteKey(mutant.Package, wholeTree)
 	if key == "" {
 		return
 	}
 	record := evidence.MutationRecord{
 		MutantID: mutant.ID, Path: filepath.ToSlash(mutant.Path), Package: mutant.Package,
 		Outcome: outcome, Provenance: collected.provenance,
-		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key},
+		Suite:   &evidence.SuiteKey{Package: mutant.Package, Key: key, WholeTree: wholeTree},
 		Finding: &evidence.FindingSeed{Kind: kind, Summary: summary},
 	}
 	collected.mutex.Lock()
@@ -597,7 +695,7 @@ func (collected *MutationEvidence) stillTimesOut(exhausted []evidence.TargetKey,
 	if identity.kind == string(goanalysis.KindFuzz) || !collected.passed[identity] {
 		return false
 	}
-	if key := collected.keys[identity]; key == "" || key != recorded.Key {
+	if !collected.targetMatches(identity, recorded) {
 		return false
 	}
 	index := slices.IndexFunc(reaching, func(target TargetEvidence) bool {
@@ -612,8 +710,8 @@ func (collected *MutationEvidence) stillTimesOut(exhausted []evidence.TargetKey,
 // A survivor a proof discharged the whole reaching set of is not one of these:
 // nothing ran, so there is no set of executed targets to name, and the proofs
 // re-derive the verdict for free on the next run anyway.
-func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, route mutationRoute, kind, summary string) {
-	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, route.reaching, kind, summary)
+func (collected *MutationEvidence) recordSurvived(mutant gomutants.Mutant, targets []TargetEvidence, kind, summary string) {
+	collected.recordExhausted(mutant, evidence.MutationOutcomeSurvived, targets, kind, summary)
 }
 
 // recordTimedOut remembers that time ran out under one named target that
@@ -668,12 +766,12 @@ func (collected *MutationEvidence) recordExhausted(mutant gomutants.Mutant, outc
 		if identity.kind == string(goanalysis.KindFuzz) || target.Covered == nil || !collected.passed[identity] {
 			return
 		}
-		key := collected.keys[identity]
+		key, wholeTree := collected.targetKey(target)
 		if key == "" {
 			return
 		}
 		exhausted = append(exhausted, evidence.TargetKey{
-			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key,
+			Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key, WholeTree: wholeTree,
 		})
 	}
 	record := evidence.MutationRecord{
@@ -694,18 +792,19 @@ func (collected *MutationEvidence) recordExhausted(mutant gomutants.Mutant, outc
 // without saying which of them a later run would have to check, and a package
 // suite names no target at all: both are left unrecorded rather than recorded
 // vaguely. A fuzz target is refused for the reason reuseKill refuses one.
-func (collected *MutationEvidence) recordKill(mutant gomutants.Mutant, killer targetIdentity) {
+func (collected *MutationEvidence) recordKill(mutant gomutants.Mutant, target TargetEvidence) {
+	killer := identify(target.Target)
 	if collected == nil || killer == (targetIdentity{}) || killer.kind == string(goanalysis.KindFuzz) {
 		return
 	}
-	key := collected.keys[killer]
+	key, wholeTree := collected.targetKey(target)
 	if key == "" {
 		return
 	}
 	record := evidence.MutationRecord{
 		MutantID: mutant.ID, Path: filepath.ToSlash(mutant.Path), Package: mutant.Package,
 		Outcome: evidence.MutationOutcomeKilled, Provenance: collected.provenance,
-		KilledBy: &evidence.TargetKey{Package: killer.pkg, Name: killer.name, Kind: killer.kind, Key: key},
+		KilledBy: &evidence.TargetKey{Package: killer.pkg, Name: killer.name, Kind: killer.kind, Key: key, WholeTree: wholeTree},
 	}
 	collected.mutex.Lock()
 	defer collected.mutex.Unlock()

@@ -163,6 +163,34 @@ func TestMutationEvidenceStoreRoundTripsCanonicalRecord(t *testing.T) {
 	}
 }
 
+func TestMutationEvidenceWholeTreeMarkersRoundTripAndRemainOptional(t *testing.T) {
+	t.Parallel()
+	store := mutationStoreFixture()
+	store.Records[0].KilledBy.WholeTree = true
+	store.Records[3].Suite.WholeTree = true
+	path := filepath.Join(t.TempDir(), "mutation.json")
+	if err := evidence.SaveMutation(path, store); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := evidence.LoadMutation(path, mutationModulePath)
+	if err != nil || !found {
+		t.Fatalf("LoadMutation = (%+v, %t, %v)", loaded, found, err)
+	}
+	if !loaded.Records[0].KilledBy.WholeTree || !loaded.Records[3].Suite.WholeTree {
+		t.Fatalf("whole-tree markers were lost: %+v", loaded.Records)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(data, []byte(`"whole_tree": true`)) != 2 || bytes.Contains(data, []byte(`"whole_tree": false`)) {
+		t.Fatalf("optional marker encoding = %s", data)
+	}
+	if err := validateMutationInstance(t, compileMutationSchema(t), data); err != nil {
+		t.Fatalf("marked document failed its schema: %v", err)
+	}
+}
+
 // mutationRecords reaches the record objects of a decoded document.
 func mutationRecords(t *testing.T, document map[string]any) []map[string]any {
 	t.Helper()

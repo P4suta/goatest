@@ -6,6 +6,7 @@ package assure
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
@@ -56,7 +57,7 @@ func mutantExecutionRecord(request gomutants.ExecRequest, result gomutants.Mutan
 		ID:         request.Mutant,
 		DisplayID:  result.DisplayID,
 		Package:    request.Package,
-		Args:       slices.Clone(request.Args),
+		Args:       mutationTraceArguments(request.Args),
 		TimeoutMS:  traceMilliseconds(request.Timeout),
 		Outcome:    string(result.Outcome),
 		KilledBy:   result.KilledBy,
@@ -69,6 +70,13 @@ func mutantExecutionRecord(request gomutants.ExecRequest, result gomutants.Mutan
 		record.Error = err.Error()
 	}
 	return record
+}
+
+func mutationTraceArguments(arguments []string) []string {
+	result := slices.Clone(arguments)
+	return slices.DeleteFunc(result, func(argument string) bool {
+		return strings.HasPrefix(argument, "-test.testlogfile=")
+	})
 }
 
 // prepareTracedSession prepares the mutation session of a workspace and traces

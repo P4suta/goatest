@@ -44,6 +44,7 @@ type BaselineOptions struct {
 	ClassifyUserFailures bool
 	Resume               *checkpoint.Baseline
 	Checkpoint           func(checkpoint.Baseline)
+	RepositoryObserver   *RepositoryObserver
 }
 
 // BaselineResult is everything one baseline round established. Instrumented is
@@ -212,12 +213,25 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			profile := filepath.Join(options.ArtifactDirectory, target.Target.ID+".cover")
 			command := targetCommand(binary, profile, pkg.RelativeDir, target, targetTimeout)
 			command.Argv = append(command.Argv, options.TestArgs...)
+			observedCommand := command
+			observedArguments, finishObservation := options.RepositoryObserver.instrumentPackage(
+				importPath, observedCommand.Argv)
+			observedCommand.Argv = observedArguments
 			if options.UseTest2JSON {
+				observedCommand = test2JSONCommand(importPath, observedCommand)
 				command = test2JSONCommand(importPath, command)
 			}
-			first, err := workspace.Exec(ctx, command)
+			first, err := workspace.Exec(ctx, observedCommand)
+			observation := finishObservation()
 			if err != nil {
 				return BaselineResult{}, fmt.Errorf("goatest: baseline target %s: %w", target.Target.Name, err)
+			}
+			if repositoryTestLogFailure(string(first.Output), observedCommand.Argv) {
+				first, err = workspace.Exec(ctx, command)
+				observation = repositoryObservation{unknown: true}
+				if err != nil {
+					return BaselineResult{}, fmt.Errorf("goatest: repeat baseline target %s without repository observation: %w", target.Target.Name, err)
+				}
 			}
 			skipped, skipKind, skipSummary, eventErr := classifyTest2JSON(target.Target.Name, first.Output)
 			if eventErr != nil && options.UseTest2JSON {
@@ -262,6 +276,7 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			targetEvidence := TargetEvidence{
 				Target: target.Target, CoveredFiles: goanalysis.CoveredPaths(coverage.Covered), Covered: coverage.Covered,
 				Environment: slices.Clone(target.Environment), Duration: first.Duration,
+				WholeTree: options.RepositoryObserver.wholeTree(target.Target, observation), RepositoryObserved: options.RepositoryObserver.observes(importPath),
 			}
 			result.Instrumented = goanalysis.MergeFileCoverage(result.Instrumented, coverage.Instrumented)
 			evidenceItem := report.Evidence{
@@ -336,6 +351,7 @@ func checkpointTargetEvidence(input TargetEvidence) *checkpoint.TargetEvidence {
 			Capability: input.Target.Capability, Capabilities: slices.Clone(input.Target.Capabilities), Dependencies: slices.Clone(input.Target.Dependencies),
 		},
 		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), DurationNS: int64(input.Duration),
+		WholeTree: input.WholeTree, RepositoryObserved: input.RepositoryObserved,
 	}
 }
 
@@ -347,6 +363,7 @@ func restoreTargetEvidence(input checkpoint.TargetEvidence) TargetEvidence {
 			Capability: input.Target.Capability, Capabilities: slices.Clone(input.Target.Capabilities), Dependencies: slices.Clone(input.Target.Dependencies),
 		},
 		CoveredFiles: slices.Clone(input.CoveredFiles), Environment: slices.Clone(input.Environment), Duration: time.Duration(input.DurationNS),
+		WholeTree: input.WholeTree, RepositoryObserved: input.RepositoryObserved,
 	}
 }
 

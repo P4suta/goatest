@@ -130,19 +130,19 @@ self-dogfood is not external compatibility evidence.
   fan-out sinks remain in-process. `trace summary` and `trace diff` are bounded
   readers, not a query language over individual execution records. See
   [trace v1](trace-v1.md).
-- Reusing a survived verdict across runs rests on a behaviour key built from
-  what a test binary links and reads, so a test that reads files that key does
-  not name could change its verdict without changing its key. The answer is an
-  over-approximation, not an exclusion: a package whose own or test sources call
-  `os.ReadDir`, `os.DirFS`, `os.OpenRoot`, `filepath.Walk`, `filepath.WalkDir`,
-  `filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or `fs.Sub` is keyed
-  on every file of the snapshot, so its verdicts survive an identical tree and
-  nothing else. Detection is syntactic, over the call's selector and the import
-  path it belongs to. A test that reads the repository some other way — through
-  a helper in a package the list does not name, a subprocess, or a path handed
-  to it at run time — is not caught, and its recorded verdicts can outlive the
-  files they depended on. The list is deliberately conservative and may only
-  grow; nothing is ever excluded from testing or from reuse by name.
+- Reusing a verdict across runs rests on a behaviour key built from what a test
+  binary links and reads. A syntactic list of directory APIs selects candidates;
+  their baseline and evidence-producing mutant runs are narrowed with Go's test
+  action log, and any observed repository input outside the ordinary closure —
+  or any missing/ambiguous log — selects a whole-tree key. The log covers
+  operations made through package `os` after `testing.M.Run` starts. Direct
+  candidate calls in package initialization or `TestMain`, and generic `io/fs`
+  calls with an unknown backing store, therefore remain statically whole-tree.
+  Reads made only through raw syscalls, a subprocess, a helper package the
+  syntactic list does not select, or an uninstrumented pre-`M.Run` helper remain
+  outside the model and can outlive a file they depended on. This is an
+  execution-observation boundary, not an exclusion: every mutant is still
+  tested, and uncertain evidence is widened rather than trusted.
 - A reused timeout keeps its finding rather than resolving anything, so it can
   only ever cost a run work it did not need to do, never assurance. Its
   condition is existential — the target time ran out under still reaches the

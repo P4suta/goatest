@@ -29,9 +29,10 @@ func MutationJSONSchema() []byte {
 		"$defs": map[string]any{
 			"targetKey": mutationObject([]string{"package", "name", "kind", "key"}, map[string]any{
 				"package": nonEmpty, "name": nonEmpty, "kind": nonEmpty, "key": digest,
+				"whole_tree": map[string]any{"type": "boolean"},
 			}),
 			"suiteKey": mutationObject([]string{"package", "key"}, map[string]any{
-				"package": nonEmpty, "key": digest,
+				"package": nonEmpty, "key": digest, "whole_tree": map[string]any{"type": "boolean"},
 			}),
 			"findingSeed": mutationObject([]string{"kind", "summary"}, map[string]any{
 				"kind": nonEmpty, "summary": nonEmpty,

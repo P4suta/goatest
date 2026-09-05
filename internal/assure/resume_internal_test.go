@@ -257,12 +257,12 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 		ID: "target", Name: "TestValue", Kind: goanalysis.KindTest, Package: "example.test/project", RelativeDir: ".", Path: "value_test.go", Line: 7,
 		Capabilities: []string{"db"}, Dependencies: []string{"example.test/dependency"},
 	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond,
-		Probed: true, Infected: []uint32{1, 4},
+		WholeTree: true, RepositoryObserved: true, Probed: true, Infected: []uint32{1, 4},
 		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 			{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1},
 		}}}}
 	restored := restoreTargetEvidence(*checkpointTargetEvidence(input))
-	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind || !slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration {
+	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind || !slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration || restored.WholeTree != input.WholeTree || restored.RepositoryObserved != input.RepositoryObserved {
 		t.Fatalf("restored target = %+v, want %+v", restored, input)
 	}
 	// Blocks are far too large to rewrite on every checkpoint, so a checkpoint

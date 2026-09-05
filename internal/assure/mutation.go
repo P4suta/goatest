@@ -124,8 +124,17 @@ type TargetEvidence struct {
 	Covered      []goanalysis.FileCoverage
 	Environment  []string
 	Duration     time.Duration
-	Probed       bool
-	Infected     []uint32
+	// WholeTree reports that the baseline or mutant execution consulted the
+	// frozen repository beyond the target's ordinary closure inputs, or that
+	// observation of a static reader candidate was not trustworthy. It selects
+	// the conservative behaviour-key variant and is retained by a checkpoint.
+	WholeTree bool
+	// RepositoryObserved distinguishes a dynamically established narrow result
+	// from target evidence restored from an older checkpoint. The latter is
+	// widened for a current reader candidate rather than trusted by omission.
+	RepositoryObserved bool
+	Probed             bool
+	Infected           []uint32
 }
 
 // infects reports whether this target could observe the mutant at one catalogue
@@ -171,6 +180,10 @@ type MutationOptions struct {
 	// that reuses nothing and records nothing, which is what a run outside the
 	// full-run guard is given.
 	Evidence *MutationEvidence
+	// RepositoryObserver is present only for the guarded evidence-producing
+	// full run. It adds no user-facing execution option and fails closed to a
+	// whole-tree key whenever it cannot observe a candidate.
+	RepositoryObserver *RepositoryObserver
 }
 
 type MutationEvaluation struct {
@@ -261,19 +274,27 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 
 		unit := seed.evaluation
 		var killed, blocked bool
+		fuzzOptions := options
+		// A fuzz campaign cannot create reusable mutation evidence: a future
+		// budget is not guaranteed to rediscover its killing input. Repository
+		// observations therefore cannot affect its result or evidence key, while
+		// passing the action-log flag into fuzz workers adds work and a possible
+		// observation-failure retry. Keep both the campaign and its paired kill
+		// confirmation on the original, uninstrumented request.
+		fuzzOptions.RepositoryObserver = nil
 		for _, target := range seed.reaching {
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
 			}
 			request := fuzzRequest(seed.mutant, target, executions, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
 			request.Args = append(request.Args, options.TestArgs...)
-			result, err := session.Exec(ctx, request)
+			result, _, err := executeMutation(ctx, session, request, fuzzOptions)
 			if err != nil {
 				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", seed.mutant.DisplayID, target.Target.Name, err)
 			}
 			switch result.Outcome {
 			case gomutants.OutcomeKilled:
-				confirmed, confirmFinding, confirmedResult, confirmErr := confirmMutationKill(ctx, session, seed.mutant, request, result, options)
+				confirmed, confirmFinding, confirmedResult, _, confirmErr := confirmMutationKill(ctx, session, seed.mutant, request, result, fuzzOptions)
 				if confirmErr != nil {
 					return MutationEvaluation{}, confirmErr
 				}
@@ -630,14 +651,14 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(options.TestArgs),
 			Timeout: calibratedMutationTimeout(options.Contract, 0, options.Timeout),
 		}
-		result, err := session.Exec(ctx, request)
+		result, observation, err := executeMutation(ctx, session, request, options)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute unreached mutant %s: %w", mutant.DisplayID, err)
 			return seed
 		}
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
-			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, request, result, options)
+			confirmed, finding, _, _, confirmErr := confirmMutationKill(ctx, session, mutant, request, result, options)
 			if confirmErr != nil {
 				seed.err = confirmErr
 				return seed
@@ -652,12 +673,16 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			// Nothing reached the mutation and the suite that ran everything
 			// did not kill it, which is a claim about the suite a later run
 			// can check against the suite it would run.
-			options.Evidence.recordUnreached(mutant, "unreached-mutant", mutationUnreachedSummary)
+			options.Evidence.recordUnreached(mutant,
+				options.RepositoryObserver.wholeTreeSuite(mutant.Package, observation),
+				"unreached-mutant", mutationUnreachedSummary)
 		case gomutants.OutcomeTimedOut:
 			seed.evaluation.addFinding(mutant, "mutation-timeout", mutationSuiteTimeoutSummary, options.Accepted)
 			// Time ran out in the suite, so the record names the suite for the
 			// same reason an unreached verdict does.
-			options.Evidence.recordSuiteTimedOut(mutant, "mutation-timeout", mutationSuiteTimeoutSummary)
+			options.Evidence.recordSuiteTimedOut(mutant,
+				options.RepositoryObserver.wholeTreeSuite(mutant.Package, observation),
+				"mutation-timeout", mutationSuiteTimeoutSummary)
 		case gomutants.OutcomeInconclusive, gomutants.OutcomeErrored, gomutants.OutcomeNotRun:
 			seed.evaluation.addFinding(mutant, "mutation-inconclusive", mutationSuiteInconclusiveSummary, options.Accepted)
 		default:
@@ -673,15 +698,16 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	// exactly these, so a record of one names them and no more.
 	executed := make([]TargetEvidence, 0, len(seed.reaching))
 	for _, execution := range executions {
-		result, err := session.Exec(ctx, execution.request)
+		result, observation, err := executeMutation(ctx, session, execution.request, options)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
 		}
-		executed = append(executed, execution.targets...)
+		observedTargets := applyRepositoryObservation(execution.targets, observation, options.RepositoryObserver)
+		executed = append(executed, observedTargets...)
 		switch result.Outcome {
 		case gomutants.OutcomeKilled:
-			confirmed, finding, _, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
+			confirmed, finding, _, confirmationObservation, confirmErr := confirmMutationKill(ctx, session, mutant, execution.request, result, options)
 			if confirmErr != nil {
 				seed.err = confirmErr
 				return seed
@@ -690,7 +716,10 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 				seed.evaluation.addKill(mutant, mutationKillDetail(execution.detail, options))
 				// Only an execution of one named target is a kill a later run
 				// could check: recordKill refuses everything else.
-				options.Evidence.recordKill(mutant, execution.soleTarget())
+				confirmedTargets := applyRepositoryObservation(observedTargets, confirmationObservation, options.RepositoryObserver)
+				if len(confirmedTargets) == 1 {
+					options.Evidence.recordKill(mutant, confirmedTargets[0])
+				}
 			} else {
 				seed.evaluation.addFinding(mutant, finding.kind, finding.summary, options.Accepted)
 			}
@@ -730,7 +759,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		// claim a later run can reuse. It is recorded whatever this run's
 		// acceptances made of the finding, because an acceptance is what a run
 		// does with a verdict and not the verdict itself.
-		options.Evidence.recordSurvived(mutant, route, "surviving-mutant", summary)
+		options.Evidence.recordSurvived(mutant, executed, "surviving-mutant", summary)
 		seed.resolved = true
 	}
 	return seed
@@ -855,29 +884,53 @@ func memoizedOriginalControl(control func(context.Context, gomutants.ExecRequest
 	}
 }
 
-func confirmMutationKill(ctx context.Context, session MutationSession, mutant gomutants.Mutant, request gomutants.ExecRequest, first gomutants.MutantResult, options MutationOptions) (bool, confirmationFinding, gomutants.MutantResult, error) {
+func confirmMutationKill(ctx context.Context, session MutationSession, mutant gomutants.Mutant, request gomutants.ExecRequest, first gomutants.MutantResult, options MutationOptions) (bool, confirmationFinding, gomutants.MutantResult, repositoryObservation, error) {
 	if options.OriginalControl == nil {
-		return true, confirmationFinding{}, first, nil
+		return true, confirmationFinding{}, first, repositoryObservation{}, nil
 	}
 	control, err := options.OriginalControl(ctx, request)
 	if err != nil {
-		return false, confirmationFinding{}, gomutants.MutantResult{}, fmt.Errorf("goatest: original control for mutant %s: %w", mutant.DisplayID, err)
+		return false, confirmationFinding{}, gomutants.MutantResult{}, repositoryObservation{}, fmt.Errorf("goatest: original control for mutant %s: %w", mutant.DisplayID, err)
 	}
 	if control.TimedOut || control.ExitCode != 0 {
 		return false, confirmationFinding{
 			kind: "flaky-mutation-control", summary: "the original control failed immediately before kill confirmation: " + summarize(control.Output),
-		}, gomutants.MutantResult{}, nil
+		}, gomutants.MutantResult{}, repositoryObservation{}, nil
 	}
-	second, err := session.Exec(ctx, request)
+	second, observation, err := executeMutation(ctx, session, request, options)
 	if err != nil {
-		return false, confirmationFinding{}, gomutants.MutantResult{}, fmt.Errorf("goatest: confirm mutant %s: %w", mutant.DisplayID, err)
+		return false, confirmationFinding{}, gomutants.MutantResult{}, observation, fmt.Errorf("goatest: confirm mutant %s: %w", mutant.DisplayID, err)
 	}
 	if second.Outcome != gomutants.OutcomeKilled {
 		return false, confirmationFinding{
 			kind: "flaky-mutation-kill", summary: "the mutation kill did not reproduce in paired confirmation",
-		}, second, nil
+		}, second, observation, nil
 	}
-	return true, confirmationFinding{}, second, nil
+	return true, confirmationFinding{}, second, observation, nil
+}
+
+// executeMutation keeps the private observation flag out of the caller's
+// request. In particular, original-control memoization and trace identity see
+// the test selection itself, never the unique path of a transient log.
+func executeMutation(ctx context.Context, session MutationSession, request gomutants.ExecRequest, options MutationOptions) (gomutants.MutantResult, repositoryObservation, error) {
+	instrumented := request
+	var finish func() repositoryObservation
+	instrumented.Args, finish = options.RepositoryObserver.instrumentPackage(request.Package, request.Args)
+	result, err := session.Exec(ctx, instrumented)
+	observation := finish()
+	if err == nil && repositoryTestLogFailure(result.OutputTail, instrumented.Args) {
+		result, err = session.Exec(ctx, request)
+		observation = repositoryObservation{unknown: true}
+	}
+	return result, observation, err
+}
+
+func applyRepositoryObservation(targets []TargetEvidence, observation repositoryObservation, observer *RepositoryObserver) []TargetEvidence {
+	result := slices.Clone(targets)
+	for index := range result {
+		result[index].WholeTree = result[index].WholeTree || observer.wholeTree(result[index].Target, observation)
+	}
+	return result
 }
 
 func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) []mutationSeedExecution {

@@ -54,7 +54,7 @@ func TestTracedSessionRecordsEveryMutantExecution(t *testing.T) {
 	if got := traced.Catalog(); !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("Catalog = %+v", got)
 	}
-	args := []string{"-test.run=^TestBoundary$"}
+	args := []string{"-test.run=^TestBoundary$", "-test.testlogfile=/tmp/private-action.log"}
 	result, err := traced.Exec(t.Context(), gomutants.ExecRequest{
 		Mutant: "mutant", Package: "fixture.example/module/pkg", Args: args, Timeout: 30 * time.Second,
 	})
