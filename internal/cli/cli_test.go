@@ -187,6 +187,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 		{[]string{"replay", "finding-b"}, cli.CommandReplay, "finding-b"},
 		{[]string{"accept", "finding-c", "--reason=reviewed", "--expires=2026-12-01T00:00:00Z"}, cli.CommandAccept, "finding-c"},
 		{[]string{"report"}, cli.CommandReport, ""},
+		{[]string{"cache", "flush"}, cli.CommandCache, "flush"},
 		{[]string{"trace", "summary"}, cli.CommandTrace, "summary"},
 		{[]string{"trace", "diff", "run-a", "run-b"}, cli.CommandTrace, "diff"},
 	} {
@@ -340,7 +341,7 @@ func TestParseErrorsPointAtHelp(t *testing.T) {
 		{args: []string{"--unknown"}, hint: "run 'goatest --help' for usage"},
 		{args: []string{"--ui=fancy"}, hint: "run 'goatest --help' for usage"},
 		{args: []string{"accept", "finding-a"}, hint: "run 'goatest help accept' for usage"},
-		{args: []string{"cache", "flush"}, hint: "run 'goatest help cache' for usage"},
+		{args: []string{"cache", "prune"}, hint: "run 'goatest help cache' for usage"},
 		{args: []string{"doctor", "--changed"}, hint: "run 'goatest help doctor' for usage"},
 		{args: []string{"report", "--apply"}, hint: "run 'goatest help report' for usage"},
 	} {

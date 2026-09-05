@@ -88,7 +88,8 @@ Protocol details are in [protocols](protocols.md).
 
 ## Cache maintenance
 
-`goatest cache status` reports the exact-input cache, `.goatest/trace`,
+`goatest cache status` reports the exact-input cache, its reusable mutation
+evidence (including validity and outcome counts), `.goatest/trace`,
 `.goatest/diagnostics`, `reports/runs`, `.goatest/candidates`,
 `.goatest/patches`, the build cache, and the temporary directory: the leftovers
 of runs that were killed, and each directory a `--keep-temp` run kept.
@@ -101,6 +102,14 @@ the keeps `ttl` has expired. Both commands report the temporary directory as
 is not the goatest CLI. The candidate store is reported as `skipped` while a
 checkpoint exists: an interrupted run re-validates the candidates it recorded by
 ID when it resumes, and collecting one would cost it that resumption.
+`goatest cache flush` is the explicit "run the reusable checks again" boundary:
+it removes every exact-input entry (including checkpoints) and the mutation
+evidence file, even when that file is malformed. It does not remove traces,
+diagnostics, report history, repair candidates or patches, build objects,
+killed-run leftovers, or deliberately kept temporary directories. A second
+flush is an ordinary no-op. A directory at an evidence-file path, a malformed
+exact-input entry, or any symbolic link inside an exact-input entry is refused
+before the command removes reusable results; maintenance never follows links.
 Verification and maintenance hold one OS advisory lock rooted at
 `.goatest/cache`; a contending process reports `cache-wait`, and interrupting
 that wait does not start work or run GC without the lock.
@@ -134,9 +143,13 @@ holds other files is refused rather than collected.
 The mutation evidence store, `.goatest/cache/mutation-evidence-v1.json`, is
 one file beside the exact-input cache rather than an entry in it: it is
 rewritten by every full run of the whole project, pruned to the mutants the
-current catalogue still names, and never expires, so `cache gc` neither counts
-nor removes it. It holds the kills, survivals, unreached verdicts and timeouts
+current catalogue still names, and never expires, so `cache gc` reports it as
+retained and neither counts nor removes it. `cache status` strictly decodes and
+validates it and reports the record and outcome counts; a corrupt or irregular
+store is `invalid`, not silently empty and not a reason to hide the status of
+the other stores. It holds the kills, survivals, unreached verdicts and timeouts
 a run could state a checkable claim for; nothing in it expires, and a record is
-replaced when a later run contradicts it. Deleting the file only makes the next
-run execute every mutant; see [the assurance contract](assurance-contract.md)
-for what a run reuses from it and under which conditions.
+replaced when a later run contradicts it. `cache flush` removes the file, which
+only makes the next run execute every mutant; see
+[the assurance contract](assurance-contract.md) for what a run reuses from it
+and under which conditions.

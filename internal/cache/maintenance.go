@@ -55,6 +55,28 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (GCR
 	return collectUnlocked(root, maxBytes, ttl, now)
 }
 
+// Flush removes every exact-input cache entry. It deliberately has the same
+// confined-directory rules as Collect: a malformed entry stops the operation
+// before anything is removed, and neither operation follows symbolic links.
+func Flush(root string) (GCResult, error) {
+	cacheOperationMutex.Lock()
+	defer cacheOperationMutex.Unlock()
+	before, entries, err := inspectUnlocked(root, 0, time.Time{})
+	if err != nil {
+		return GCResult{}, err
+	}
+	result := GCResult{Before: before}
+	for _, entry := range entries {
+		if err := removeEntry(root, entry.path); err != nil {
+			return GCResult{}, err
+		}
+		result.RemovedEntries++
+		result.RemovedBytes += entry.size
+	}
+	result.After, _, err = inspectUnlocked(root, 0, time.Time{})
+	return result, err
+}
+
 func collectUnlocked(root string, maxBytes int64, ttl time.Duration, now time.Time) (GCResult, error) {
 	before, entries, err := inspectUnlocked(root, ttl, now)
 	if err != nil {

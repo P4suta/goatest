@@ -87,7 +87,7 @@ const help = `Usage:
 	goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 	goatest fix [ID...] [--apply]
 	goatest report [--latest-full|--run=ID]
-	goatest cache status|gc
+	goatest cache status|gc|flush
 	goatest trace summary [RUN]
 	goatest trace diff RUN-A RUN-B
 	goatest help [command]
@@ -166,16 +166,19 @@ worktree.
 Print the latest report, the latest full-project report, or one recorded run.
 `, true
 	case CommandCache:
-		return `Usage:	goatest cache status|gc
+		return `Usage:	goatest cache status|gc|flush
 
-Show the policy and contents of everything runs leave behind, or collect it:
+Show the policy and contents of everything runs leave behind, collect it by
+policy, or forget reusable assurance results explicitly:
 the evidence cache, trace recordings, diagnostics bundles, stored repair
 candidates and patches, the build cache, and the temporary directories runs
 were killed in or kept on purpose. 'gc' also bounds the run history under
 reports/runs to the newest [reports] keep runs plus the ones latest-any.json
 and latest-full.json name. Every run that holds the cache lease collects all of
 it when it ends, so this is the same collection on demand rather than the only
-one there is.
+one there is. 'flush' removes only the exact-input cache and reusable mutation
+evidence; it preserves diagnostics, reports, repairs, the build cache, and
+temporary directories.
 `, true
 	case CommandTrace:
 		return `Usage:	goatest trace summary [RUN]
@@ -400,8 +403,8 @@ func parse(args []string) (Command, Request, string, error) {
 		request.IDs = append([]string(nil), rest...)
 		return parsedCommand(command, request, "")
 	case CommandCache:
-		if len(rest) != 1 || rest[0] != "status" && rest[0] != "gc" {
-			return "", Request{}, "", usageError{command, errors.New("cache requires status or gc")}
+		if len(rest) != 1 || rest[0] != "status" && rest[0] != "gc" && rest[0] != "flush" {
+			return "", Request{}, "", usageError{command, errors.New("cache requires status, gc, or flush")}
 		}
 		return parsedCommand(command, request, rest[0])
 	case CommandTrace:

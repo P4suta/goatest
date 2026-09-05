@@ -120,6 +120,8 @@ type mutationHooks struct {
 	unmarshalStore func(data []byte, value any) error
 	// readStore reads a stored mutation evidence document.
 	readStore func(path string) ([]byte, error)
+	// lstat identifies the stored path without following a symbolic link.
+	lstat func(path string) (os.FileInfo, error)
 	// mkdirAll creates the directory a store is written in.
 	mkdirAll func(path string, perm os.FileMode) error
 	// createTemporary opens the temporary file a store is written to before it
@@ -142,6 +144,9 @@ func (hooks mutationHooks) resolved() mutationHooks {
 	}
 	if hooks.readStore == nil {
 		hooks.readStore = os.ReadFile
+	}
+	if hooks.lstat == nil {
+		hooks.lstat = os.Lstat
 	}
 	if hooks.mkdirAll == nil {
 		hooks.mkdirAll = os.MkdirAll

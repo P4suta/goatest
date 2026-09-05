@@ -53,7 +53,10 @@ the pass existed, which only executes more.
 
 Across runs, the mutation phase keeps a store of what it established about each
 mutant, `.goatest/cache/mutation-evidence-v1.json`, read once before the phase
-and written once after it. A full run — the whole project, in a first round —
+and written once after it. Cache status strictly validates and accounts for
+this store, policy GC retains it, and an explicit cache flush removes it along
+with exact-input results so the next run executes the reusable checks again.
+A full run — the whole project, in a first round —
 resolves a mutant from that store on a condition of the shape its verdict has.
 A kill is existential and is reused when the recorded killer still reaches the
 mutant, has the same behaviour key, and passed in this run's own baseline,

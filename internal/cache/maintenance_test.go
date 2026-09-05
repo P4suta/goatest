@@ -54,6 +54,50 @@ func TestCollectRejectsNegativePolicyAndConfinedIrregularEntries(t *testing.T) {
 	}
 }
 
+func TestFlushRemovesEveryExactInputEntryAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	writeCacheEntry(t, root, "first", 20, now.Add(-time.Hour))
+	writeCacheEntry(t, root, "second", 30, now)
+
+	result, err := cache.Flush(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Before.Entries != 2 || result.Before.Bytes != 50 ||
+		result.RemovedEntries != 2 || result.RemovedBytes != 50 ||
+		result.After.Entries != 0 || result.After.Bytes != 0 {
+		t.Fatalf("Flush = %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1", "first")); !os.IsNotExist(err) {
+		t.Fatalf("first entry remains: %v", err)
+	}
+
+	again, err := cache.Flush(root)
+	if err != nil || again.RemovedEntries != 0 || again.RemovedBytes != 0 || again.Before.Entries != 0 || again.After.Entries != 0 {
+		t.Fatalf("second Flush = %+v, %v", again, err)
+	}
+}
+
+func TestFlushRefusesMalformedEntriesBeforeRemovingAnything(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	writeCacheEntry(t, root, "valid", 20, now)
+	malformed := filepath.Join(root, "v1", "not-a-directory")
+	if err := os.WriteFile(malformed, []byte("unexpected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cache.Flush(root); err == nil {
+		t.Fatal("Flush accepted an irregular cache entry")
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1", "valid", "report.json")); err != nil {
+		t.Fatalf("valid entry was removed before malformed entry was refused: %v", err)
+	}
+}
+
 func writeCacheEntry(t *testing.T, root, id string, size int, modified time.Time) {
 	t.Helper()
 	path := filepath.Join(root, "v1", id, "report.json")
