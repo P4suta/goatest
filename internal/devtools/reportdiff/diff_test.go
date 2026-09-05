@@ -42,6 +42,86 @@ func kindLines(transitions []kindTransition) []string {
 	return lines
 }
 
+func TestTransitionComparatorsUseCountsThenBothLabels(t *testing.T) {
+	t.Parallel()
+	statusCases := []struct {
+		name          string
+		first, second statusTransition
+	}{
+		{
+			name: "count before labels",
+			first: statusTransition{
+				before: report.MutantSurvived, after: report.MutantSurvived, mutants: 2,
+			},
+			second: statusTransition{
+				before: report.MutantKilled, after: report.MutantKilled, mutants: 1,
+			},
+		},
+		{
+			name:   "before label",
+			first:  statusTransition{before: report.MutantKilled, after: report.MutantSurvived, mutants: 1},
+			second: statusTransition{before: report.MutantSurvived, after: report.MutantKilled, mutants: 1},
+		},
+		{
+			name:   "after label",
+			first:  statusTransition{before: report.MutantKilled, after: report.MutantKilled, mutants: 1},
+			second: statusTransition{before: report.MutantKilled, after: report.MutantSurvived, mutants: 1},
+		},
+	}
+	for _, test := range statusCases {
+		t.Run("status "+test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := compareStatusTransitions(test.first, test.second); got >= 0 {
+				t.Fatalf("compareStatusTransitions(first, second) = %d, want negative", got)
+			}
+			if got := compareStatusTransitions(test.second, test.first); got <= 0 {
+				t.Fatalf("compareStatusTransitions(second, first) = %d, want positive", got)
+			}
+		})
+	}
+
+	kindCases := []struct {
+		name          string
+		first, second kindTransition
+	}{
+		{
+			name:   "count before labels",
+			first:  kindTransition{before: "z", after: "z", mutants: 2},
+			second: kindTransition{before: "a", after: "a", mutants: 1},
+		},
+		{
+			name:   "before label",
+			first:  kindTransition{before: "a", after: "z", mutants: 1},
+			second: kindTransition{before: "b", after: "a", mutants: 1},
+		},
+		{
+			name:   "after label",
+			first:  kindTransition{before: "a", after: "a", mutants: 1},
+			second: kindTransition{before: "a", after: "b", mutants: 1},
+		},
+	}
+	for _, test := range kindCases {
+		t.Run("kind "+test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := compareKindTransitions(test.first, test.second); got >= 0 {
+				t.Fatalf("compareKindTransitions(first, second) = %d, want negative", got)
+			}
+			if got := compareKindTransitions(test.second, test.first); got <= 0 {
+				t.Fatalf("compareKindTransitions(second, first) = %d, want positive", got)
+			}
+		})
+	}
+
+	equalStatus := statusTransition{before: report.MutantKilled, after: report.MutantSurvived, mutants: 1}
+	if got := compareStatusTransitions(equalStatus, equalStatus); got != 0 {
+		t.Errorf("equal status transitions compare as %d", got)
+	}
+	equalKind := kindTransition{before: "a", after: "b", mutants: 1}
+	if got := compareKindTransitions(equalKind, equalKind); got != 0 {
+		t.Errorf("equal kind transitions compare as %d", got)
+	}
+}
+
 func TestCompareCountsStatusTransitionsOverCommonMutantsOnly(t *testing.T) {
 	t.Parallel()
 	before := report.Report{Mutants: []report.MutantDisposition{

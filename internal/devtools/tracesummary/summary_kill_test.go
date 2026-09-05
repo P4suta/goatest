@@ -129,7 +129,7 @@ func TestMutantTotalsSkipWhatCarriesNoPayloadAndAccumulateTheRest(t *testing.T) 
 	if len(mutants) != 1 || mutants[0].executions != 2 || mutants[0].duration != 12 {
 		t.Fatalf("mutants = %+v", mutants)
 	}
-	if len(outcomes) != 1 || outcomes[0].outcome != "killed" || outcomes[0].executions != 2 {
+	if len(outcomes) != 1 || outcomes[0].outcome != "killed" || outcomes[0].executions != 2 || outcomes[0].duration != 12 {
 		t.Fatalf("outcomes = %+v", outcomes)
 	}
 }

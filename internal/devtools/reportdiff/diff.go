@@ -262,16 +262,20 @@ func sortedStatuses(counted map[statusTransition]int) []statusTransition {
 		transition.mutants = mutants
 		transitions = append(transitions, transition)
 	}
-	slices.SortFunc(transitions, func(first, second statusTransition) int {
-		if order := cmp.Compare(second.mutants, first.mutants); order != 0 {
-			return order
-		}
-		if order := strings.Compare(string(first.before), string(second.before)); order != 0 {
-			return order
-		}
-		return strings.Compare(string(first.after), string(second.after))
-	})
+	slices.SortFunc(transitions, compareStatusTransitions)
 	return transitions
+}
+
+// compareStatusTransitions defines the complete status-matrix order without
+// depending on the map order from which its rows were collected.
+func compareStatusTransitions(first, second statusTransition) int {
+	if order := cmp.Compare(second.mutants, first.mutants); order != 0 {
+		return order
+	}
+	if order := strings.Compare(string(first.before), string(second.before)); order != 0 {
+		return order
+	}
+	return strings.Compare(string(first.after), string(second.after))
 }
 
 // sortedKinds orders the finding-kind matrix the same way.
@@ -281,14 +285,17 @@ func sortedKinds(counted map[kindTransition]int) []kindTransition {
 		transition.mutants = mutants
 		transitions = append(transitions, transition)
 	}
-	slices.SortFunc(transitions, func(first, second kindTransition) int {
-		if order := cmp.Compare(second.mutants, first.mutants); order != 0 {
-			return order
-		}
-		if order := strings.Compare(first.before, second.before); order != 0 {
-			return order
-		}
-		return strings.Compare(first.after, second.after)
-	})
+	slices.SortFunc(transitions, compareKindTransitions)
 	return transitions
+}
+
+// compareKindTransitions defines the matching order for finding-kind rows.
+func compareKindTransitions(first, second kindTransition) int {
+	if order := cmp.Compare(second.mutants, first.mutants); order != 0 {
+		return order
+	}
+	if order := strings.Compare(first.before, second.before); order != 0 {
+		return order
+	}
+	return strings.Compare(first.after, second.after)
 }
