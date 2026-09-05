@@ -155,7 +155,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			return report.Report{}, err
 		}
 		if mutationBefore.Present && !mutationBefore.Removable {
-			return report.Report{}, fmt.Errorf("goatest: refusing to flush mutation evidence directory %q", mutationEvidencePath)
+			return report.Report{}, fmt.Errorf("goatest: refusing to flush mutation evidence path %q: %s", mutationEvidencePath, mutationBefore.Problem)
 		}
 		flushed, err := cache.Flush(cacheRoot)
 		if err != nil {
@@ -287,6 +287,8 @@ func cacheStatusEvidence(id string, status cache.Status) report.Evidence {
 	return report.Evidence{Kind: "cache", ID: id, Status: "ready", Detail: detail}
 }
 
+// mutationEvidenceStatusEvidence renders missing and invalid stores distinctly
+// from a valid store whose caller chooses the ready or retained disposition.
 func mutationEvidenceStatusEvidence(id, validStatus string, status evidence.MutationStatus) report.Evidence {
 	detail := fmt.Sprintf("records=%d killed=%d survived=%d unreached=%d timed-out=%d bytes=%d",
 		status.Records, status.Killed, status.Survived, status.Unreached, status.TimedOut, status.Bytes)

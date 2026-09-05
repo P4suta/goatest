@@ -107,9 +107,10 @@ it removes every exact-input entry (including checkpoints) and the mutation
 evidence file, even when that file is malformed. It does not remove traces,
 diagnostics, report history, repair candidates or patches, build objects,
 killed-run leftovers, or deliberately kept temporary directories. A second
-flush is an ordinary no-op. A directory at an evidence-file path, a malformed
-exact-input entry, or any symbolic link inside an exact-input entry is refused
-before the command removes reusable results; maintenance never follows links.
+flush is an ordinary no-op. A directory or other irregular object at an
+evidence-file path, a malformed exact-input entry, or any symbolic link inside
+an exact-input entry is refused before the command removes reusable results;
+maintenance never follows links.
 Verification and maintenance hold one OS advisory lock rooted at
 `.goatest/cache`; a contending process reports `cache-wait`, and interrupting
 that wait does not start work or run GC without the lock.

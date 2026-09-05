@@ -98,6 +98,18 @@ func TestFlushRefusesMalformedEntriesBeforeRemovingAnything(t *testing.T) {
 	}
 }
 
+func TestInspectRefusesASymbolicLinkForTheVersionRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(root, "v1")); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+	if _, err := cache.Inspect(root); err == nil {
+		t.Fatal("Inspect followed a symbolic-link v1 root")
+	}
+}
+
 func writeCacheEntry(t *testing.T, root, id string, size int, modified time.Time) {
 	t.Helper()
 	path := filepath.Join(root, "v1", id, "report.json")

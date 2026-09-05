@@ -122,6 +122,19 @@ func TestMutationMaintenancePropagatesMetadataAndRemovalFailures(t *testing.T) {
 	if !errors.Is(err, metadataFailure) || status != (MutationStatus{}) {
 		t.Fatalf("metadata failure = %+v, %v", status, err)
 	}
+	readCalled := false
+	status, err = inspectMutationWithHooks("mutation.json", mutationHooks{
+		lstat: func(string) (os.FileInfo, error) {
+			return stubEvidenceInfo{name: "mutation.json", mode: os.ModeNamedPipe}, nil
+		},
+		readStore: func(string) ([]byte, error) {
+			readCalled = true
+			return nil, nil
+		},
+	})
+	if err != nil || !status.Present || status.Valid || status.Removable || readCalled || !strings.Contains(status.Problem, "not a regular file") {
+		t.Fatalf("irregular evidence = %+v, read=%t, %v", status, readCalled, err)
+	}
 
 	path := filepath.Join(t.TempDir(), MutationFileName)
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {

@@ -43,6 +43,8 @@ func InspectMutation(path string) (MutationStatus, error) {
 	return inspectMutationWithHooks(path, mutationHooks{})
 }
 
+// inspectMutationWithHooks is InspectMutation against a filesystem the caller
+// supplies.
 func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus, error) {
 	hooks = hooks.resolved()
 	info, err := hooks.lstat(path)
@@ -53,16 +55,18 @@ func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus,
 		return MutationStatus{}, fmt.Errorf("goatest: inspect mutation evidence: %w", err)
 	}
 	status := MutationStatus{
-		Present: true, Removable: !info.IsDir(), Bytes: info.Size(), Modified: info.ModTime(),
+		Present: true, Bytes: info.Size(), Modified: info.ModTime(),
 	}
 	switch {
 	case info.Mode()&os.ModeSymlink != 0:
+		status.Removable = true
 		status.Problem = "stored path is a symbolic link"
 		return status, nil
 	case !info.Mode().IsRegular():
 		status.Problem = "stored path is not a regular file"
 		return status, nil
 	}
+	status.Removable = true
 	data, err := hooks.readStore(path)
 	if err != nil {
 		status.Problem = fmt.Sprintf("read failed: %v", err)
@@ -97,13 +101,15 @@ func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus,
 	return status, nil
 }
 
-// FlushMutation removes exactly path without following it. A directory is
-// refused; a regular, malformed, or symbolic-link entry can be unlinked so an
-// operator can recover from a broken store safely.
+// FlushMutation removes exactly path without following it. An irregular object
+// is refused; a regular, malformed, or symbolic-link entry can be unlinked so
+// an operator can recover from a broken store safely.
 func FlushMutation(path string) (MutationFlushResult, error) {
 	return flushMutationWithHooks(path, mutationHooks{})
 }
 
+// flushMutationWithHooks is FlushMutation against a filesystem the caller
+// supplies.
 func flushMutationWithHooks(path string, hooks mutationHooks) (MutationFlushResult, error) {
 	hooks = hooks.resolved()
 	before, err := inspectMutationWithHooks(path, hooks)
@@ -115,7 +121,7 @@ func flushMutationWithHooks(path string, hooks mutationHooks) (MutationFlushResu
 		return result, nil
 	}
 	if !before.Removable {
-		return MutationFlushResult{}, fmt.Errorf("goatest: refusing to flush mutation evidence directory %q", path)
+		return MutationFlushResult{}, fmt.Errorf("goatest: refusing to flush mutation evidence path %q: %s", path, before.Problem)
 	}
 	if err := hooks.remove(path); err != nil {
 		return MutationFlushResult{}, fmt.Errorf("goatest: flush mutation evidence: %w", err)
