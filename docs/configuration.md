@@ -16,11 +16,16 @@ line. Loading the untouched skeleton yields exactly the defaults.
 - `[execution]`: `build_tags`, `test_binary_args`, environment-name allowlist,
   positive `timeout`, and non-negative `jobs`. `timeout` is the upper bound for
   one executed command. Mutation and probe commands normally get a smaller,
-  per-target budget calibrated from that target's measured baseline; see the
+  control-relative comparative deadline calibrated from durations measured in
+  the same run; the configured value is their final safety ceiling, not their routine
+  wait. A remaining whole-package fallback first runs one exact original
+  preflight whose result is shared by every mutant using that command. See the
   [assurance contract](assurance-contract.md#a-timeout). An explicit `jobs`
-  value is the mutation parallelism used as written; when it is absent the run
-  uses the logical CPU count capped at four, and an exclusive resource forces
-  one job regardless. The decided value is announced as the `mutation-jobs`
+  value bounds baseline target, probe, and mutation measurements and is used as
+  written; when it is absent the run uses the logical CPU count capped at four,
+  and an exclusive resource forces one job regardless. Results and checkpoints
+  are committed in deterministic target or mutant order even when measurements
+  finish out of order. The decided value is announced as the `mutation-jobs`
   progress note.
 - `[cache]`: non-negative `max_bytes` and positive `ttl`. The same policy is
   applied independently to exact-input cache entries, trace run directories,

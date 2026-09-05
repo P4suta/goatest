@@ -10,12 +10,17 @@ One exact input identity owns one checkpoint:
 
 ```text
 .goatest/cache/v1/<input-digest>/checkpoint-v1.json
+.goatest/cache/v1/<input-digest>/checkpoint-journal-v1.jsonl
 ```
 
-It sits beside, but is independent from, the completed cached `report.json`.
-Writes use a synced temporary file and atomic rename. Cache TTL and capacity GC
-remove the whole digest directory, so checkpoint state cannot outlive its cache
-policy.
+The JSON document is the strict complete base at phase boundaries. Between
+those boundaries, the JSONL journal durably appends each completely classified
+baseline target or mutant without rewriting the growing base. Both sit beside,
+but are independent from, the completed cached `report.json`. Base writes use a
+synced temporary file and atomic rename; journal appends are synced individually.
+Cache TTL and capacity GC remove the whole digest directory, so neither form of
+checkpoint state can outlive its cache policy. The crash protocol and its
+rationale are [ADR 0011](adr/0011-append-only-checkpoint-journal.md).
 
 Verification holds an OS advisory lock on `.goatest/cache/.lock` from before
 cache/checkpoint access through durable report persistence and checkpoint
@@ -37,22 +42,21 @@ promotion or generated source change deletes and disables the old checkpoint
 before the next round.
 
 A saved baseline target carries the files it reached and not the coverage
-blocks inside them. The whole checkpoint is rewritten and synced at every
-scheduling boundary, and this repository alone measures some four thousand
-blocks for each of several hundred targets, so storing them would multiply the
-bytes each run writes by orders of magnitude for state that is only a
-scheduling hint. A target
+blocks inside them. This repository alone measures some four thousand blocks
+for each of several hundred targets, so storing them would multiply durable
+checkpoint bytes by orders of magnitude for state that is only a scheduling
+hint. A target
 restored from a checkpoint is therefore routed by file for the rest of the run:
 it reaches every mutant in a file it covered. That is the conservative
 direction — a resumed run executes at least the work a cold run would, and the
 `route` events of a trace say which targets were included that way.
 
-The infection facts of the probe pass are in memory only for the same reason and
-under the same rule. A checkpoint carries none of them, so a restored target
-says it was never probed and is treated as infecting every mutant it reaches —
-the reading a run gave before the pass existed, and the only sound reading of a
-target nothing measured. The probe pass itself is not a save boundary and adds
-no field to `checkpoint-v1`.
+The target and package-suite infection facts of the probe pass, including their
+control durations, are in memory only for the same reason and under the same
+rule. A checkpoint carries none of them. A resumed run may establish fresh
+facts by repeating the probe phase; any route that has no fresh measurement is
+treated conservatively, as infecting rather than as proved unchanged. The
+probe pass itself is not a save boundary and adds no field to `checkpoint-v1`.
 
 Repository-read observation is different because a resumed mutation verdict
 must retain the input boundary established by its baseline. A saved target
@@ -63,14 +67,29 @@ restored as whole-tree rather than interpreted as a measured narrow result.
 
 ## Save boundaries
 
-A checkpoint is replaced after each complete scheduling boundary:
+The complete base checkpoint is atomically replaced at each structural phase
+boundary:
 
 - build and vet have both completed;
-- each baseline target has a terminal passed, skipped, failed, or not-run
-  classification;
+- the baseline phase has completed;
 - the complete selected race phase has finished;
-- after catalog validation, each mutant has one terminal result; and
+- mutation catalog validation or invalidation has completed; and
 - the mutation phase has completed.
+
+Inside the baseline and mutation phases, each terminal unit is instead one
+append-only journal record. A baseline target is appended after its passed,
+skipped, failed, or not-run classification is complete. A mutant is appended
+the moment nothing more can be learned about it. Each record names the input
+digest and the SHA-256 digest of the base document it extends, contains exactly
+one unit, carries its own checksum, ends in a newline commit marker, and is
+synced before publication returns. This retains per-unit durability without
+rewriting all earlier units after every process.
+
+Baseline workers may finish out of order, but only the longest fully measured
+prefix is published, in target order. A worker never writes checkpoint state
+itself. The completed base checkpoint is consequently byte-identical to serial
+execution, and interruption can expose only complete target journal records,
+never a partially decoded coverage profile or repository observation.
 
 A mutant is terminal the moment nothing more can be learned about it, not when
 the phase around it ends. A mutation every reaching test passed is saved as a
@@ -95,13 +114,22 @@ identities.
 
 ## Validation and safe fallback
 
-The decoder rejects unknown fields, trailing JSON, duplicate identities,
-invalid digests, and nonterminal saved units. Baseline target identities are
-checked against current discovery. The race package list must match exactly.
-The mutation fingerprint is SHA-256 over sorted mutant ID, path, package, rule,
-and line tuples. A changed mutation fingerprint discards only mutation state;
-a changed baseline inventory discards baseline, race, and mutation state; a
-changed race inventory discards race and mutation state.
+The base decoder rejects unknown fields, trailing JSON, duplicate identities,
+invalid digests, and nonterminal saved units. Journal replay rejects unknown
+fields, trailing data within a complete line, invalid identities or checksums,
+mixed base digests, and a record that does not carry exactly one allowed unit.
+An unterminated final line is an unpublished killed write and is ignored. A
+journal left after a new base was atomically published is ignored when its
+first record names the old base digest; the state it contains has already been
+compacted into the new base. Replay indexes identities in one pass, sorts once,
+and applies the same strict state validation as a decoded base.
+
+Baseline target identities are checked against current discovery. The race
+package list must match exactly. The mutation fingerprint is SHA-256 over sorted
+mutant ID, path, package, rule, and line tuples. A changed mutation fingerprint
+discards only mutation state; a changed baseline inventory discards baseline,
+race, and mutation state; a changed race inventory discards race and mutation
+state.
 
 Saved repair candidates must still load from the candidate store. A missing
 candidate discards mutation state rather than consuming incomplete evidence.
@@ -121,5 +149,5 @@ The optional report-v1 `resume` object records attempt count and reused target,
 race-package, and mutant counts. A checkpoint remains after cancellation,
 abnormal process exit, or infrastructure failure. After an ordinary
 `DEFECT`, `INSUFFICIENT`, or assured result is durably written, only
-`checkpoint-v1.json` is deleted; a completed cached report beside it is
-preserved.
+`checkpoint-v1.json` and `checkpoint-journal-v1.jsonl` are deleted; a completed
+cached report beside them is preserved.

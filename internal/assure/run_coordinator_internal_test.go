@@ -180,9 +180,11 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		race:       RaceResult{Evidence: []report.Evidence{{Kind: "race", ID: "race-a", Status: "passed"}}},
 		mutation:   MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}}},
 		generation: GenerationEvaluation{},
-		catalog:    gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-a", Accepted: true}}},
-		inputs:     evidence.Inputs{Contract: "digest-a"},
-		digest:     strings.Repeat("a", 64),
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{{
+			ID: "mutant-a", Accepted: true, Package: "fixture.example/module",
+		}}},
+		inputs: evidence.Inputs{Contract: "digest-a"},
+		digest: strings.Repeat("a", 64),
 	}
 	harness.dependencies = runDependencies{
 		repositoryRoot: func(root string) (string, error) {
@@ -402,9 +404,15 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 		!slices.Equal(harness.preparedOptions.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || !slices.Equal(harness.preparedOptions.VerifyEnv, []string{"DB=ready"}) {
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
+	if harness.baselineOptions.Jobs != 3 || harness.baselineOptions.CommandTimeout != 7*time.Minute ||
+		harness.baselineOptions.Contract != "standard-v1" || !harness.baselineOptions.PackageSuites ||
+		!slices.Equal(harness.baselineOptions.SuiteEnvironment, []string{"DB=ready"}) {
+		t.Fatalf("baseline options = %+v", harness.baselineOptions)
+	}
 	if harness.mutationOptions.Root != harness.root || harness.mutationOptions.Contract != "standard-v1" || !harness.mutationOptions.NoApply ||
 		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Timeout != 7*time.Minute || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
-		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
+		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil ||
+		!slices.Equal(harness.mutationOptions.SuiteEnvironment, []string{"DB=ready"}) {
 		t.Fatalf("mutation options = %+v", harness.mutationOptions)
 	}
 	if harness.generationOptions.Snapshot != harness.digest || !harness.generationOptions.NoApply || harness.generationOptions.RepositoryValidator.Root != harness.root ||
@@ -427,11 +435,17 @@ func TestRunCoordinatorHandsTheBaselineInstrumentationToMutationRouting(t *testi
 	harness.baseline.Instrumented = []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 		{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
 	}}}
+	harness.baseline.Suites = map[string]PackageSuiteCoverage{
+		"fixture.example/module": {Duration: 2 * time.Second, WholeTree: true},
+	}
 	if _, err := harness.run(Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(harness.mutationOptions.Instrumented, harness.baseline.Instrumented) {
 		t.Fatalf("routed instrumentation = %+v, want %+v", harness.mutationOptions.Instrumented, harness.baseline.Instrumented)
+	}
+	if !reflect.DeepEqual(harness.mutationOptions.SuiteCoverage, harness.baseline.Suites) {
+		t.Fatalf("routed suite coverage = %+v, want %+v", harness.mutationOptions.SuiteCoverage, harness.baseline.Suites)
 	}
 }
 
@@ -440,12 +454,26 @@ func TestRunCoordinatorHandsTheBaselineInstrumentationToMutationRouting(t *testi
 // the baseline evidence the pass was handed.
 func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants[0].Path = "value.go"
+	harness.catalog.Mutants[0].Line = 8
+	harness.catalog.Mutants[0].Column = 5
+	harness.catalog.Mutants[0].Probed = true
+	harness.baseline.Instrumented = blockRoutingInstrumentation()
+	harness.baseline.Targets[0].Covered = []goanalysis.FileCoverage{{
+		Path: "value.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3}},
+	}}
 	harness.dependencies.probeTargets = func(_ context.Context, _ MutationSession, targets []TargetEvidence, options ProbeOptions) (ProbeEvaluation, error) {
 		harness.probeCalls++
 		harness.probeOptions = options
 		probed := slices.Clone(targets)
 		probed[0].Probed, probed[0].Infected = true, []uint32{7}
-		return ProbeEvaluation{Targets: probed, Measured: 1}, nil
+		return ProbeEvaluation{
+			Targets: probed, Measured: 1,
+			Suites: map[string]PackageProbeEvidence{
+				"fixture.example/module": {Measured: true, Infected: []uint32{7}, Duration: 2 * time.Second},
+			},
+			SuitesMeasured: 1,
+		}, nil
 	}
 	if _, err := harness.run(Options{MutationJobs: 3, CommandTimeout: 5 * time.Minute, TestArgs: []string{"-test.short=true"}}); err != nil {
 		t.Fatal(err)
@@ -458,8 +486,16 @@ func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 	}
 	if harness.probeOptions.Contract != "standard-v1" || harness.probeOptions.Jobs != 3 ||
 		harness.probeOptions.Timeout != 5*time.Minute || !slices.Equal(harness.probeOptions.TestArgs, []string{"-test.short=true"}) ||
-		harness.probeOptions.Progress == nil {
+		harness.probeOptions.Progress == nil || harness.probeOptions.PackageSuites ||
+		!slices.Equal(harness.probeOptions.SuitePackages, []string{"fixture.example/module"}) ||
+		!slices.Equal(harness.probeOptions.SuiteEnvironment, []string{"DB=ready"}) {
 		t.Fatalf("probe options = %+v", harness.probeOptions)
+	}
+	wantSuites := map[string]PackageProbeEvidence{
+		"fixture.example/module": {Measured: true, Infected: []uint32{7}, Duration: 2 * time.Second},
+	}
+	if !reflect.DeepEqual(harness.mutationOptions.SuiteProbes, wantSuites) {
+		t.Fatalf("mutation suite probes = %+v, want %+v", harness.mutationOptions.SuiteProbes, wantSuites)
 	}
 	kinds := make([]string, 0, len(harness.events))
 	details := make(map[string]string, len(harness.events))
@@ -472,7 +508,8 @@ func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 			t.Fatalf("events = %v, want a %s note", kinds, kind)
 		}
 	}
-	if details["probe-target"] != "1 target" || details["probe-summary"] != "1 measured, 0 without facts" {
+	if details["probe-target"] != "1 target, 1 package suite" ||
+		details["probe-summary"] != "1 target measured, 0 without facts; 1 package suite measured, 0 without facts" {
 		t.Fatalf("probe notes = %q and %q", details["probe-target"], details["probe-summary"])
 	}
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/trace"
@@ -112,11 +113,12 @@ func TestDecideInfectionKeepsEveryKillerItHasNoFactsAgainst(t *testing.T) {
 		return facts
 	}
 	cases := []struct {
-		name   string
-		probed bool
-		probe  *probeFacts
-		want   conclusion
-		why    string
+		name        string
+		granularity string
+		probed      bool
+		probe       *probeFacts
+		want        conclusion
+		why         string
 	}{
 		{
 			name:  "a mutant the probe pass carried no site for",
@@ -154,13 +156,17 @@ func TestDecideInfectionKeepsEveryKillerItHasNoFactsAgainst(t *testing.T) {
 			name:   "a killer whose probe measured no infection by the mutant",
 			probed: true, probe: measuredWith(secondMutant), want: discharged, why: whyNeverInfected,
 		},
+		{
+			name: "a conservative file route", granularity: trace.GranularityFile,
+			probed: true, probe: measuredWith(secondMutant), want: inapplicable,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			pair := killPair{
 				mutant: firstMutant, path: subjectPath, target: killerTarget,
-				probed: testCase.probed, probe: testCase.probe,
+				granularity: testCase.granularity, probed: testCase.probed, probe: testCase.probe,
 			}
 
 			// The evidence is the coverage half of the run, and this layer reads
@@ -474,5 +480,32 @@ func TestAuditCountsProbeExecutionsAndMeasuredTargets(t *testing.T) {
 	}
 	if result.probeMeasured != 2 {
 		t.Errorf("counted %d targets the probe measured, want 2", result.probeMeasured)
+	}
+}
+
+func TestAuditCountsPackageSuiteControlsApartFromTargetFacts(t *testing.T) {
+	t.Parallel()
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(10, 2, 12, 16)}})
+	suite := probeEvent(3, trace.ProbeRecord{
+		Target: "package-suite:" + fixtureModule + "/pkg", Package: fixtureModule + "/pkg",
+		Suite: true, Outcome: trace.ProbeOutcomeMeasured, Infected: []string{firstMutant},
+	})
+	stream := recordedTrace(t,
+		measured(1, killerTarget), probeMeasured(2, killerTarget, firstMutant), suite,
+	)
+	result := auditFixture(t, stream, recorded)
+	if result.probeExecutions != 1 || result.probeMeasured != 1 ||
+		result.suiteProbeExecutions != 1 || result.suiteProbeMeasured != 1 {
+		t.Fatalf("probe counts = target %d/%d, suite %d/%d",
+			result.probeMeasured, result.probeExecutions,
+			result.suiteProbeMeasured, result.suiteProbeExecutions)
+	}
+	counts := strings.Join(countBlock(result), "\n")
+	for _, want := range []string{
+		"package-suite probe executions", "package suites the probe measured",
+	} {
+		if !strings.Contains(counts, want) {
+			t.Errorf("audit counters omit %q:\n%s", want, counts)
+		}
 	}
 }

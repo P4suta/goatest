@@ -5,9 +5,11 @@ package assure_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
@@ -57,6 +59,31 @@ func (session *killingSession) Probe(context.Context, gomutants.ProbeRequest) (g
 
 func (session *killingSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+}
+
+type suiteControlSession struct {
+	catalog  gomutants.Catalog
+	mu       sync.Mutex
+	requests []gomutants.ExecRequest
+}
+
+func (session *suiteControlSession) Catalog() gomutants.Catalog { return session.catalog }
+
+func (session *suiteControlSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
+func (session *suiteControlSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	session.mu.Lock()
+	session.requests = append(session.requests, request)
+	session.mu.Unlock()
+	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+}
+
+func (session *suiteControlSession) recordedRequests() []gomutants.ExecRequest {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return append([]gomutants.ExecRequest(nil), session.requests...)
 }
 
 func controlMutants() []gomutants.Mutant {
@@ -131,5 +158,62 @@ func TestEvaluateMemoizesAFailedControlWithoutRerunningIt(t *testing.T) {
 	}
 	if recorder.total() != 1 {
 		t.Fatalf("original controls = %d, want the failure observed once and remembered", recorder.total())
+	}
+}
+
+func TestEvaluateChecksAnUnreachedPackageControlOnceBeforeAnyMutant(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		control gomutants.CommandResult
+		kind    string
+	}{
+		{name: "failed", control: gomutants.CommandResult{ExitCode: 1, Output: []byte("suite setup failed")}, kind: "mutation-control-failure"},
+		{name: "timed out", control: gomutants.CommandResult{TimedOut: true}, kind: "mutation-control-timeout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutants := controlMutants()[:3]
+			session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: mutants}}
+			recorder := &controlRecorder{result: test.control}
+			evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
+				Root: t.TempDir(), Contract: "standard-v1", Jobs: len(mutants),
+				OriginalControl: recorder.run,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recorder.total() != 1 || len(session.recordedRequests()) != 0 || len(evaluation.Findings) != len(mutants) {
+				t.Fatalf("control calls = %d, mutant requests = %+v, findings = %+v",
+					recorder.total(), session.recordedRequests(), evaluation.Findings)
+			}
+			for _, finding := range evaluation.Findings {
+				if finding.Kind != test.kind {
+					t.Fatalf("finding = %+v, want kind %q", finding, test.kind)
+				}
+			}
+		})
+	}
+}
+
+func TestPassingUnreachedPackageControlCalibratesTheMutantWatchdog(t *testing.T) {
+	t.Parallel()
+	mutant := controlMutants()[0]
+	session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+	recorder := &controlRecorder{result: gomutants.CommandResult{Duration: 250 * time.Millisecond}}
+	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", OriginalControl: recorder.run,
+		SuiteEnvironment: []string{"DB=ready"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := session.recordedRequests()
+	if recorder.total() != 1 || len(requests) != 1 || requests[0].Timeout != 1250*time.Millisecond ||
+		!slices.Equal(requests[0].Env, []string{"DB=ready"}) {
+		t.Fatalf("control calls = %d, mutant requests = %+v", recorder.total(), requests)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "unreached-mutant" {
+		t.Fatalf("evaluation = %+v", evaluation)
 	}
 }

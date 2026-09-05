@@ -22,8 +22,9 @@ const profileSuffix = ".cover"
 // failed leaves no profile and therefore no evidence, which is a state of its
 // own rather than a target that covered nothing.
 type targetEvidence struct {
-	id      string
-	covered []goanalysis.FileCoverage
+	id           string
+	covered      []goanalysis.FileCoverage
+	instrumented []goanalysis.FileCoverage
 }
 
 // evidence is the coverage half of a recorded run: what each measured target
@@ -34,6 +35,21 @@ type targetEvidence struct {
 type evidence struct {
 	targets      map[string]targetEvidence
 	instrumented []goanalysis.FileCoverage
+}
+
+// profileCounts separates ordinary per-target profiles from the synthetic
+// whole-package profiles. The latter end in ".suite" before the common
+// profile suffix; keeping the counts apart prevents a new proof control from
+// looking like another discovered test target in the audit report.
+func (recorded evidence) profileCounts() (targets, suites int) {
+	for id := range recorded.targets {
+		if strings.HasSuffix(id, ".suite") {
+			suites++
+			continue
+		}
+		targets++
+	}
+	return targets, suites
 }
 
 // readEvidence reads every coverage profile of a run's temporary directory.
@@ -59,7 +75,9 @@ func readEvidence(directory, modulePath string) (evidence, error) {
 			return evidence{}, fmt.Errorf("parse the profile %s: %w", path, err)
 		}
 		target := strings.TrimSuffix(entry.Name(), profileSuffix)
-		recorded.targets[target] = targetEvidence{id: target, covered: coverage.Covered}
+		recorded.targets[target] = targetEvidence{
+			id: target, covered: coverage.Covered, instrumented: coverage.Instrumented,
+		}
 		recorded.instrumented = goanalysis.MergeFileCoverage(recorded.instrumented, coverage.Instrumented)
 	}
 	return recorded, nil
@@ -80,6 +98,18 @@ func (recorded evidence) coveredBy(target, path string) (goanalysis.FileCoverage
 func (recorded evidence) measured(target string) bool {
 	_, known := recorded.targets[target]
 	return known
+}
+
+// instrumentedBy returns the blocks one exact profile instrumented in one
+// file. Whole-suite reach must ask this narrower question: another target's
+// profile cannot make a gap in the suite profile into negative suite evidence.
+func (recorded evidence) instrumentedBy(target, path string) goanalysis.FileCoverage {
+	measured, known := recorded.targets[target]
+	if !known {
+		return goanalysis.FileCoverage{}
+	}
+	blocks, _ := goanalysis.FindFileCoverage(measured.instrumented, path)
+	return blocks
 }
 
 // instrumentedAt reports whether any profile instrumented a block containing

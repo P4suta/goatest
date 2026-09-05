@@ -341,6 +341,11 @@ type routeTotal struct {
 	// counts routes.
 	discharges       []labelCount
 	dischargedRoutes int
+	// suiteCoverage counts exact package-suite coverage decisions, split by
+	// whether the suite reached the mutant position or discharged its fallback.
+	suiteCoverage  int
+	suiteReached   int
+	suiteUnreached int
 	// probed counts the routes whose mutant the engine compiled a probe of. A
 	// recording made before the probe pass carries none, which is the absence
 	// the block reports rather than a count of zero.
@@ -424,6 +429,10 @@ func routingBlock(events []trace.Event) []string {
 			plural(total.dischargedRoutes, "route", "routes"),
 			formatLabelCounts(total.discharges)))
 	}
+	if total.suiteCoverage > 0 {
+		lines = append(lines, fmt.Sprintf("suite coverage: %s (%d reached, %d unreached)",
+			plural(total.suiteCoverage, "route", "routes"), total.suiteReached, total.suiteUnreached))
+	}
 	lines = append(lines, probedLines(total.probed)...)
 	if total.reused > 0 {
 		lines = append(lines, fmt.Sprintf("reused: %s of %d",
@@ -476,6 +485,14 @@ func routeTotals(events []trace.Event) routeTotal {
 		for _, discharge := range record.Discharged {
 			discharges[discharge.Reason]++
 		}
+		if record.SuiteCoverage != "" {
+			total.suiteCoverage++
+			if record.SuiteReached {
+				total.suiteReached++
+			} else {
+				total.suiteUnreached++
+			}
+		}
 		if record.Probed {
 			total.probed++
 		}
@@ -490,7 +507,7 @@ func routeTotals(events []trace.Event) routeTotal {
 		total.candidates += record.FileCandidates
 	}
 	total.mutants = len(mutants)
-	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonUnreached)
+	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonProbeReaching, trace.ReasonUnreached)
 	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile, unrecorded)
 	total.fallbacks = tally(fallbacks, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
 	total.discharges = tally(discharges, trace.DischargeBranchNeverTaken, trace.DischargeNeverInfected)
@@ -569,13 +586,15 @@ const probeError = "error"
 type probeTotal struct {
 	executions int
 	targets    int
+	suites     int
 	outcomes   []labelCount
 	// pairs counts every recorded infection, mutants the distinct mutants
 	// among them, and barren the measured targets that infected none: the
 	// targets the pass answered for outright.
-	pairs   int
-	mutants int
-	barren  int
+	pairs         int
+	mutants       int
+	barrenTargets int
+	barrenSuites  int
 }
 
 // probeBlock breaks the probe pass down: how many targets were probed, what
@@ -589,14 +608,20 @@ func probeBlock(events []trace.Event) []string {
 	if total.executions == 0 {
 		return []string{"probe: not recorded"}
 	}
+	scope := plural(total.targets, "target", "targets")
+	pair := "(target, mutant) pair"
+	pairs := "(target, mutant) pairs"
+	barren := plural(total.barrenTargets, "measured target", "measured targets") + " infected nothing"
+	if total.suites != 0 {
+		scope += " and " + plural(total.suites, "package suite", "package suites")
+		pair, pairs = "(probe, mutant) pair", "(probe, mutant) pairs"
+		barren += "; " + plural(total.barrenSuites, "measured package suite", "measured package suites") + " infected nothing"
+	}
 	return []string{
-		fmt.Sprintf("probe: %s across %s",
-			plural(total.executions, "execution", "executions"), plural(total.targets, "target", "targets")),
+		fmt.Sprintf("probe: %s across %s", plural(total.executions, "execution", "executions"), scope),
 		"outcomes: " + formatLabelCounts(total.outcomes),
-		fmt.Sprintf("infections: %s across %s; %s infected nothing",
-			plural(total.pairs, "(target, mutant) pair", "(target, mutant) pairs"),
-			plural(total.mutants, "mutant", "mutants"),
-			plural(total.barren, "measured target", "measured targets")),
+		fmt.Sprintf("infections: %s across %s; %s",
+			plural(total.pairs, pair, pairs), plural(total.mutants, "mutant", "mutants"), barren),
 	}
 }
 
@@ -604,11 +629,13 @@ func probeBlock(events []trace.Event) []string {
 func probeTotals(events []trace.Event) probeTotal {
 	outcomes := make(map[string]int)
 	targets := make(map[string]struct{})
+	suites := make(map[string]struct{})
 	mutants := make(map[string]struct{})
 	// measured says, of every target a measured execution ran, whether any of
 	// them infected a mutant, so that a target the pass answered for is
 	// counted once however often it was probed.
-	measured := make(map[string]bool)
+	measuredTargets := make(map[string]bool)
+	measuredSuites := make(map[string]bool)
 	total := probeTotal{}
 	for _, event := range events {
 		if event.Type != trace.TypeProbeExec || event.Probe == nil {
@@ -616,7 +643,11 @@ func probeTotals(events []trace.Event) probeTotal {
 		}
 		record := event.Probe
 		total.executions++
-		targets[record.Target] = struct{}{}
+		if record.Suite {
+			suites[record.Target] = struct{}{}
+		} else {
+			targets[record.Target] = struct{}{}
+		}
 		switch {
 		case record.Outcome != "":
 			outcomes[record.Outcome]++
@@ -624,6 +655,10 @@ func probeTotals(events []trace.Event) probeTotal {
 			outcomes[probeError]++
 		}
 		if record.Outcome == trace.ProbeOutcomeMeasured {
+			measured := measuredTargets
+			if record.Suite {
+				measured = measuredSuites
+			}
 			measured[record.Target] = measured[record.Target] || len(record.Infected) > 0
 		}
 		total.pairs += len(record.Infected)
@@ -632,12 +667,18 @@ func probeTotals(events []trace.Event) probeTotal {
 		}
 	}
 	total.targets = len(targets)
+	total.suites = len(suites)
 	total.mutants = len(mutants)
 	// The map is counted rather than iterated into the output, so no iteration
 	// order reaches a line.
-	for _, infected := range measured {
+	for _, infected := range measuredTargets {
 		if !infected {
-			total.barren++
+			total.barrenTargets++
+		}
+	}
+	for _, infected := range measuredSuites {
+		if !infected {
+			total.barrenSuites++
 		}
 	}
 	total.outcomes = tally(outcomes, trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,

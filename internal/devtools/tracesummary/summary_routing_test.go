@@ -131,7 +131,7 @@ func TestRoutingBlockReportsUnrecordedGranularityAndReduction(t *testing.T) {
 	}), "\n")
 	for _, want := range []string{
 		"routes: 2 across 2 mutants",
-		"reasons: coverage-reaching 1, unreached 1",
+		"reasons: coverage-reaching 1, probe-reaching 0, unreached 1",
 		"granularity: block 0, file 0, (unrecorded) 2",
 		"reduction: not recorded",
 		"reaching targets per route",
@@ -232,6 +232,19 @@ func TestRoutingBlockReportsDischargedTargetsAndRoutes(t *testing.T) {
 	// The proofs are tallied in the order the engine applies them, so one
 	// recording prints one line whichever of them removed which target.
 	if want := "discharged: 3 targets across 2 routes (branch-never-taken 2, never-infected 1)"; !strings.Contains(lines, want) {
+		t.Errorf("the block does not carry %q:\n%s", want, lines)
+	}
+}
+
+func TestRoutingBlockReportsWholeSuiteCoverageDecisions(t *testing.T) {
+	t.Parallel()
+	unreached := routeEvent("mutant-a", 0, trace.ReasonUnreached, trace.GranularityBlock, "", 2)
+	unreached.Route.SuiteCoverage = "package-suite-coverage:example.com/app"
+	reached := routeEvent("mutant-b", 0, trace.ReasonUnreached, trace.GranularityBlock, "", 2)
+	reached.Route.SuiteCoverage = "package-suite-coverage:example.com/app"
+	reached.Route.SuiteReached = true
+	lines := strings.Join(routingBlock([]trace.Event{unreached, reached}), "\n")
+	if want := "suite coverage: 2 routes (1 reached, 1 unreached)"; !strings.Contains(lines, want) {
 		t.Errorf("the block does not carry %q:\n%s", want, lines)
 	}
 }

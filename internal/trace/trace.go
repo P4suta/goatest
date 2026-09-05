@@ -110,8 +110,8 @@ func (recorder *Recorder) Route(record RouteRecord) {
 	recorder.emit(Event{Type: TypeRoute, Route: &record})
 }
 
-// ProbeExec records one probe execution of a test target: how it ran, what
-// became of it, and the mutants that target infected.
+// ProbeExec records one probe execution of a test target or package suite: how
+// it ran, what became of it, and the mutants that execution infected.
 func (recorder *Recorder) ProbeExec(record ProbeRecord) {
 	if recorder == nil {
 		return

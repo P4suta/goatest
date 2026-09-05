@@ -215,12 +215,14 @@ for it.
 performance breakdown of its run: phase durations, the command classes the run
 spent its time in, how coverage routed the mutants, what the probe pass
 measured, and what became of the ones it executed. The `probe` block counts the
-probe executions, tallies their outcomes, and reports the (target, mutant)
-infections they recorded together with the measured targets that infected
-nothing; a recording made without the pass reads `probe: not recorded` rather
-than a pass that infected nothing. The routing block counts the routes carrying
-a probe on its `probed:` line, which is absent from a recording that carries
-none. Every number comes from a recorded value, so summarizing a trace
+target and package-suite controls separately, tallies their outcomes, and
+reports the `(probe, mutant)` infections they recorded together with the
+measured executions that infected nothing; a recording made without the pass
+reads `probe: not recorded` rather than a pass that infected nothing. The
+routing block counts `probe-reaching` routes, whole-suite coverage decisions,
+and the routes carrying a probe on its `probed:` line, which is absent from a
+recording that carries none. Every
+number comes from a recorded value, so summarizing a trace
 twice prints the same bytes; a line the trace contract does not allow is an
 error naming the line, because a total that quietly skipped an event would be a
 confident wrong number. This is how the mutation phase was measured at 98% of a
@@ -251,10 +253,17 @@ actually killed, the narrowed rule must still route that mutant to that target.
 Why every speed-up is such a layer, and why a budget never is, is
 [ADR 0004](adr/0004-proof-layers-not-budgets.md).
 The `infection` layer reads the recording alone, so it is audited whenever the
-recording holds a probe pass and left out — with a line under the layer table
-saying so — whenever it holds none. Routing now discharges by the rule that layer
-audits, so a violation it reports is a killer a run actually skipped rather than
-one it would have skipped had the layer been switched on. Its
+recording holds a target probe pass and left out — with a line under the layer
+table saying so — whenever it holds none. The `suite-reach` layer is separate:
+it reconstructs passing whole-package coverage controls from recorded command
+arguments, then independently applies exact block containment to attributable
+package-suite kills. It deduplicates paired confirmations; a missing route,
+missing profile, or more than one profile identity for a package is
+unverifiable, never a pass. Infection suite probes are counted apart because
+they prove or calibrate a whole fallback and are not facts about one killer
+target. Routing now discharges by the rule each layer audits, so a violation it
+reports is a killer a run actually skipped rather than one it
+would have skipped had the layer been switched on. Its
 `infection discharge` block still measures what the layer would buy on top of
 the recording, which on a run that already applied it is nothing: the targets it
 discharged have left `reaching_targets`, and the trace's own `discharged`
@@ -746,14 +755,15 @@ Four Go benchmarks cover the critical self-application paths without an
 external repository harness:
 
 ```console
-go test -run '^$' -bench BenchmarkCheckpointIO ./internal/cache
+go test -run '^$' -bench 'BenchmarkCheckpoint(IO|JournalAppend)$' ./internal/cache
 go test -run '^$' -bench BenchmarkDigest ./internal/evidence
 go test -run '^$' -bench BenchmarkMutationAccounting ./internal/assure
 go test -run '^$' -bench BenchmarkReportGeneration ./internal/report
 ```
 
-They measure checkpoint write/read I/O, a 10,000-file input digest, accounting
-for a 10,000-mutant catalog, and JSON plus HTML rendering for a 5,000-mutant
-report. Record `benchstat` comparisons when changing one of those paths. The
-numbers are a local regression signal, not a compatibility or performance
-contract across unrelated repositories.
+They measure compacted checkpoint write/read I/O and one checksummed journal
+append, a 10,000-file input digest, accounting for a 10,000-mutant catalog, and
+JSON plus HTML rendering for a 5,000-mutant report. Record `benchstat`
+comparisons when changing one of those paths. The numbers are a local
+regression signal, not a compatibility or performance contract across
+unrelated repositories.

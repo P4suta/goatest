@@ -723,9 +723,11 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 		Path:            "internal/assure/run.go",
 		ReachingTargets: []string{"TestRun"},
 		Plan:            []string{"TestRun"},
-		Reason:          trace.ReasonCoverageReaching,
+		Reason:          trace.ReasonProbeReaching,
 		Granularity:     trace.GranularityBlock,
 		Discharged:      []trace.Discharge{{Target: "TestSkipped", Reason: trace.DischargeBranchNeverTaken}},
+		ProbeReaching:   []string{"TestRun"},
+		Probed:          true,
 	}
 	probe := &trace.ProbeRecord{
 		Target:   "TestRun",
@@ -751,6 +753,7 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	exec.ExitCode = 137
 	route.Plan[0] = "TestSomethingElse"
 	route.Discharged[0].Target = "TestSomethingElse"
+	route.ProbeReaching[0] = "TestSomethingElse"
 	route.Reason = trace.ReasonUnreached
 	probe.Args[0] = "-test.run=^TestSomethingElse$"
 	probe.Infected[0] = "m-0002"
@@ -762,11 +765,14 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	if string(kept[0].Exec.Output) != "--- FAIL: TestBoundary\n" {
 		t.Fatalf("a caller amended the output the sink kept: %q", kept[0].Exec.Output)
 	}
-	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonCoverageReaching {
+	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonProbeReaching {
 		t.Fatalf("a caller amended the route record the sink kept: %+v", kept[1].Route)
 	}
 	if kept[1].Route.Discharged[0].Target != "TestSkipped" {
 		t.Fatalf("a caller amended the discharges the sink kept: %+v", kept[1].Route.Discharged)
+	}
+	if kept[1].Route.ProbeReaching[0] != "TestRun" {
+		t.Fatalf("a caller amended the probe-reaching targets the sink kept: %+v", kept[1].Route.ProbeReaching)
 	}
 	if kept[2].Probe.Args[0] != "-test.run=^TestRun$" || kept[2].Probe.Infected[0] != "m-0001" {
 		t.Fatalf("a caller amended the probe record the sink kept: %+v", kept[2].Probe)
@@ -776,9 +782,11 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	kept[0].Exec.Argv[0] = "rm"
 	kept[0].Exec.Output[0] = 'X'
 	kept[1].Route.ReachingTargets[0] = "TestSomethingElse"
+	kept[1].Route.ProbeReaching[0] = "TestSomethingElse"
 	kept[2].Probe.Infected[0] = "m-0002"
 	again := sink.Events()
-	if again[0].Exec.Argv[0] != "go" || again[0].Exec.Output[0] != '-' || again[1].Route.ReachingTargets[0] != "TestRun" {
+	if again[0].Exec.Argv[0] != "go" || again[0].Exec.Output[0] != '-' ||
+		again[1].Route.ReachingTargets[0] != "TestRun" || again[1].Route.ProbeReaching[0] != "TestRun" {
 		t.Fatalf("a returned snapshot shares its payload with the sink: %+v %+v", again[0].Exec, again[1].Route)
 	}
 	if again[2].Probe.Infected[0] != "m-0001" {

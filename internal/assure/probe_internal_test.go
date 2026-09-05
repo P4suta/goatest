@@ -250,10 +250,112 @@ func TestProbePassSkipsFuzzTargets(t *testing.T) {
 	}
 }
 
+func TestProbePassMeasuresOneWholeSuitePerMutantPackage(t *testing.T) {
+	t.Parallel()
+	catalog := probeCatalog()
+	for index := range catalog.Mutants {
+		catalog.Mutants[index].Package = "fixture.example/module"
+	}
+	targets := []TargetEvidence{
+		probeEvidence("TestFirst", goanalysis.KindTest, 2*time.Second),
+		probeEvidence("TestSecond", goanalysis.KindTest, 3*time.Second),
+	}
+	session := &mutationUnitSession{catalog: catalog, probe: func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		if slices.ContainsFunc(request.Args, func(argument string) bool {
+			return strings.HasPrefix(argument, "-test.run=")
+		}) {
+			return measuredAnswer().result, nil
+		}
+		return gomutants.ProbeResult{
+			Outcome: gomutants.ProbeMeasured, Infected: []uint32{2, 0, 2}, Duration: 7 * time.Second,
+		}, nil
+	}}
+	recording, recorder := newProbeRecording()
+	var progress []int
+	evaluation, err := ProbeTargets(t.Context(), session, targets, ProbeOptions{
+		Contract: "standard-v1", TestArgs: []string{"-test.short=true"}, Jobs: 2,
+		PackageSuites: true, SuiteEnvironment: []string{"DB=ready"}, Trace: recorder,
+		Progress: func(completed, total int) {
+			if total != 3 {
+				t.Errorf("progress total = %d, want two targets and one suite", total)
+			}
+			progress = append(progress, completed)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluation.Measured != 2 || evaluation.Unmeasured != 0 ||
+		evaluation.SuitesMeasured != 1 || evaluation.SuitesUnmeasured != 0 {
+		t.Fatalf("evaluation counts = %+v", evaluation)
+	}
+	suite, present := evaluation.Suites["fixture.example/module"]
+	if !present || !suite.Measured || !slices.Equal(suite.Infected, []uint32{0, 2}) ||
+		suite.Duration != 7*time.Second || suite.WholeTree {
+		t.Fatalf("suite evidence = %+v", suite)
+	}
+	for _, target := range evaluation.Targets {
+		if !target.Probed || target.ProbeDuration != 250*time.Millisecond {
+			t.Fatalf("target evidence = %+v, want the probe control duration", target)
+		}
+	}
+	requests := session.probeRequests()
+	var suiteRequest *gomutants.ProbeRequest
+	for index := range requests {
+		if !slices.ContainsFunc(requests[index].Args, func(argument string) bool {
+			return strings.HasPrefix(argument, "-test.run=")
+		}) {
+			suiteRequest = &requests[index]
+		}
+	}
+	if suiteRequest == nil || suiteRequest.Package != "fixture.example/module" ||
+		!slices.Equal(suiteRequest.Args, []string{"-test.short=true"}) ||
+		!slices.Equal(suiteRequest.Env, []string{"DB=ready"}) ||
+		suiteRequest.Timeout != 10*time.Second {
+		t.Fatalf("suite request = %+v, want the five-second package control with relative headroom", suiteRequest)
+	}
+	validateProbeLines(t, recording.Lines())
+	record := probeRecords(t, recording)[packageSuiteProbeTarget("fixture.example/module")]
+	if !record.Suite || record.Package != "fixture.example/module" ||
+		!slices.Equal(record.Args, []string{"-test.short=true"}) || record.TimeoutMS != 10_000 ||
+		record.Outcome != trace.ProbeOutcomeMeasured || record.DurationMS != 7_000 ||
+		!slices.Equal(record.Infected, []string{"mutant-a", "mutant-c"}) {
+		t.Fatalf("suite record = %+v", record)
+	}
+	slices.Sort(progress)
+	if !slices.Equal(progress, []int{1, 2, 3}) {
+		t.Fatalf("progress = %v", progress)
+	}
+}
+
+func TestProbePassLeavesNoPackageFactsWhenTheSuiteIsNotMeasured(t *testing.T) {
+	t.Parallel()
+	catalog := probeCatalog()
+	for index := range catalog.Mutants {
+		catalog.Mutants[index].Package = "fixture.example/module"
+	}
+	session := &mutationUnitSession{catalog: catalog, probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{
+			Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: minimumMutationTimeout,
+		}, nil
+	}}
+	evaluation, err := ProbeTargets(t.Context(), session, nil, ProbeOptions{
+		Contract: "standard-v1", PackageSuites: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, present := evaluation.Suites["fixture.example/module"]
+	if !present || suite.Measured || suite.Infected != nil ||
+		evaluation.SuitesMeasured != 0 || evaluation.SuitesUnmeasured != 1 {
+		t.Fatalf("evaluation = %+v, want one suite without facts", evaluation)
+	}
+}
+
 // TestProbePassSendsTheRequestTheMutationPhaseWouldSend pins the pass to the
 // execution it is a measurement of: the same target, selected the same way,
-// under the same environment and the same calibrated timeout, minus the mutant
-// a probe tree never activates.
+// under the same environment and a timeout relative to its passing baseline,
+// minus the mutant a probe tree never activates.
 func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -278,7 +380,7 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 				t.Fatal(err)
 			}
 			seed := seedRequest(gomutants.Mutant{ID: "mutant-a"}, target,
-				calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
+				controlRelativeMutationTimeout(options.Contract, options.Timeout, target.Duration))
 			seed.Args = append(seed.Args, test.testArgs...)
 			requests := session.probeRequests()
 			if len(requests) != 1 {
@@ -561,7 +663,7 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 	if len(records) != 5 {
 		t.Fatalf("records = %+v, want one per probed target", records)
 	}
-	timeout := traceMilliseconds(calibratedMutationTimeout("standard-v1", time.Second, 0))
+	timeout := traceMilliseconds(controlRelativeMutationTimeout("standard-v1", 0, time.Second))
 	want := trace.ProbeRecord{
 		Target: "target-TestInfecting", Package: "fixture.example/module",
 		Args:      []string{"-test.run=^TestInfecting$", "-test.short=true"},

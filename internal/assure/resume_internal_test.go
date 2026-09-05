@@ -20,6 +20,29 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
+type journalCheckpointCache struct {
+	coordinatorCache
+	baselineUnits []checkpoint.BaselineTarget
+	mutationUnits []checkpoint.MutationResult
+	journalErr    error
+}
+
+func (cache *journalCheckpointCache) AppendBaselineCheckpoint(_ string, unit checkpoint.BaselineTarget) error {
+	if cache.journalErr != nil {
+		return cache.journalErr
+	}
+	cache.baselineUnits = append(cache.baselineUnits, unit)
+	return nil
+}
+
+func (cache *journalCheckpointCache) AppendMutationCheckpoint(_ string, unit checkpoint.MutationResult) error {
+	if cache.journalErr != nil {
+		return cache.journalErr
+	}
+	cache.mutationUnits = append(cache.mutationUnits, unit)
+	return nil
+}
+
 func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *testing.T) {
 	model := baselineModel()
 	targets := []BaselineTarget{{Target: baselineTestTarget("TestA")}, {Target: baselineTestTarget("TestB")}}
@@ -60,6 +83,56 @@ func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *test
 		if strings.Contains(strings.Join(command.Argv, " "), "TestA") {
 			t.Fatalf("completed target executed again: %+v", command.Argv)
 		}
+	}
+}
+
+func TestCheckpointControllerJournalsUnitsAndCompactsInDeterministicOrder(t *testing.T) {
+	t.Parallel()
+	digest := strings.Repeat("a", 64)
+	store := &journalCheckpointCache{}
+	controller := openRunCheckpoint(store, digest, Options{}, true)
+	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true})
+	targetA := checkpoint.BaselineTarget{
+		ID: "target-a", Executed: true,
+		Inventory: report.TargetDisposition{ID: "target-a", Name: "TestA", Status: "passed"},
+	}
+	targetB := checkpoint.BaselineTarget{
+		ID: "target-b", Executed: true,
+		Inventory: report.TargetDisposition{ID: "target-b", Name: "TestB", Status: "passed"},
+	}
+	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{targetA}})
+	// Baseline assembles checkpoint state from a completed-unit map. Journal
+	// eligibility is therefore a set extension, not a slice-prefix property.
+	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{targetB, targetA}})
+	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Complete: true, Targets: []checkpoint.BaselineTarget{targetA, targetB}})
+	if len(store.baselineUnits) != 2 {
+		t.Fatalf("baseline journal units = %+v, want two", store.baselineUnits)
+	}
+	if got := []string{store.baselineUnits[0].ID, store.baselineUnits[1].ID}; !slices.Equal(got, []string{"target-a", "target-b"}) {
+		t.Fatalf("baseline journal = %v", got)
+	}
+
+	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{
+		{ID: "mutant-z", Path: "z.go", Package: "fixture.example/module", Rule: "rule", Accepted: true},
+		{ID: "mutant-a", Path: "a.go", Package: "fixture.example/module", Rule: "rule", Accepted: true},
+	}}
+	controller.mutation(catalog, t.TempDir())
+	for _, id := range []string{"mutant-z", "mutant-a"} {
+		controller.saveMutant(id, MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: id, Status: "killed"}}})
+	}
+	controller.completeMutation()
+	if len(store.mutationUnits) != 2 {
+		t.Fatalf("mutation journal units = %+v, want two", store.mutationUnits)
+	}
+	if got := []string{store.mutationUnits[0].ID, store.mutationUnits[1].ID}; !slices.Equal(got, []string{"mutant-z", "mutant-a"}) {
+		t.Fatalf("mutation journal lost completions = %v", got)
+	}
+	results := store.checkpoint.Mutation.Results
+	if len(results) != 2 {
+		t.Fatalf("compacted mutation results = %+v, want two", results)
+	}
+	if got := []string{results[0].ID, results[1].ID}; !slices.Equal(got, []string{"mutant-a", "mutant-z"}) {
+		t.Fatalf("compacted mutation order = %v, want deterministic ID order", got)
 	}
 }
 
@@ -257,7 +330,8 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 		ID: "target", Name: "TestValue", Kind: goanalysis.KindTest, Package: "example.test/project", RelativeDir: ".", Path: "value_test.go", Line: 7,
 		Capabilities: []string{"db"}, Dependencies: []string{"example.test/dependency"},
 	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond,
-		WholeTree: true, RepositoryObserved: true, Probed: true, Infected: []uint32{1, 4},
+		ProbeDuration: 11 * time.Millisecond,
+		WholeTree:     true, RepositoryObserved: true, Probed: true, Infected: []uint32{1, 4},
 		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 			{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1},
 		}}}}
@@ -273,7 +347,7 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 	// Infection facts belong to the probe pass of one run and are never
 	// checkpointed, so a restored target says it was never probed and is
 	// treated as infecting every mutant it reaches.
-	if restored.Probed || restored.Infected != nil {
+	if restored.Probed || restored.Infected != nil || restored.ProbeDuration != 0 {
 		t.Fatalf("restored infection facts = %+v, want none", restored)
 	}
 }

@@ -195,7 +195,7 @@
         "column": { "type": "integer", "minimum": 0 },
         "reaching_targets": { "type": "array", "items": { "type": "string" } },
         "plan": { "type": "array", "items": { "type": "string" } },
-        "reason": { "enum": ["coverage-reaching", "unreached"] },
+        "reason": { "enum": ["coverage-reaching", "probe-reaching", "unreached"] },
         "granularity": {
           "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone. Absent in a recording made before routing reported it, and present on every route that carries any of the routing metadata beside it.",
           "enum": ["block", "file"]
@@ -222,6 +222,28 @@
               "reason": { "enum": ["branch-never-taken", "never-infected"] }
             }
           }
+        },
+        "probe_reaching": {
+          "description": "Targets added to reaching_targets because their measured probe execution positively infected the mutant even though coverage did not route them.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "suite_coverage": {
+          "description": "The synthetic identity of a passing whole-package coverage control whose instrumented blocks describe the mutant position. When suite_reached is absent, none of its covered blocks contained that position and the package-suite fallback is discharged.",
+          "type": "string",
+          "pattern": "^package-suite-coverage:.+"
+        },
+        "suite_reached": {
+          "description": "Whether the passing whole-package coverage control reached the exact mutant position. It is present only for a reached position; suite_coverage without it proves the position was instrumented but not covered.",
+          "type": "boolean",
+          "const": true
+        },
+        "suite_probe": {
+          "description": "The synthetic target identity of the measured package-suite probe that replaced or calibrated the conservative package-suite fallback.",
+          "type": "string",
+          "pattern": "^package-suite:.+"
         },
         "probed": {
           "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ and is discharged from the reaching set. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
@@ -268,11 +290,56 @@
           }
         },
         {
+          "if": { "required": ["probe_reaching"] },
+          "then": {
+            "description": "A positive probe route names both the probe-reaching reason and the fact that this mutant had a probe form.",
+            "required": ["probed"],
+            "properties": {
+              "reason": { "const": "probe-reaching" },
+              "probed": { "const": true }
+            }
+          }
+        },
+        {
+          "if": { "required": ["reason"], "properties": { "reason": { "const": "probe-reaching" } } },
+          "then": {
+            "description": "The probe-reaching reason always identifies the targets the positive measurement recovered.",
+            "required": ["probe_reaching"]
+          }
+        },
+        {
+          "if": { "required": ["suite_reached"] },
+          "then": {
+            "description": "A reached suite position is meaningful only with the coverage control that measured it.",
+            "required": ["suite_coverage"]
+          }
+        },
+        {
+          "if": { "required": ["suite_coverage"] },
+          "then": {
+            "description": "A suite coverage decision is made only at an exact position described by coverage blocks.",
+            "required": ["granularity"],
+            "properties": { "granularity": { "const": "block" } }
+          }
+        },
+        {
+          "if": { "required": ["suite_probe"] },
+          "then": {
+            "description": "A package-suite probe can speak only for a mutant the engine compiled a probe form for.",
+            "required": ["probed"],
+            "properties": { "probed": { "const": true } }
+          }
+        },
+        {
           "if": {
             "anyOf": [
               { "required": ["column"] },
               { "required": ["file_candidates"] },
               { "required": ["discharged"] },
+              { "required": ["probe_reaching"] },
+              { "required": ["suite_coverage"] },
+              { "required": ["suite_reached"] },
+              { "required": ["suite_probe"] },
               { "required": ["probed"] }
             ]
           },
@@ -307,6 +374,10 @@
       "properties": {
         "target": { "type": "string", "minLength": 1 },
         "package": { "type": "string" },
+        "suite": {
+          "description": "Whether this is one whole package-suite execution rather than one top-level target. Absent and false mean a target probe.",
+          "type": "boolean"
+        },
         "args": { "type": "array", "items": { "type": "string" } },
         "timeout_ms": { "type": "integer", "minimum": 0 },
         "outcome": {
@@ -328,6 +399,22 @@
         }
       },
       "allOf": [
+        {
+          "if": { "required": ["suite"], "properties": { "suite": { "const": true } } },
+          "then": {
+            "description": "A whole-suite probe names both its package and its synthetic package-suite target identity.",
+            "required": ["package"],
+            "properties": { "target": { "pattern": "^package-suite:.+" } }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "pattern": "^package-suite:" } } },
+          "then": {
+            "description": "A synthetic package-suite target identity belongs only to a whole-suite probe.",
+            "required": ["suite"],
+            "properties": { "suite": { "const": true } }
+          }
+        },
         {
           "description": "An execution either reached an outcome or was stopped by an error: a record saying neither describes no execution, and one saying both would be an error to one reader and a measurement to another.",
           "oneOf": [{ "required": ["outcome"] }, { "required": ["error"] }]

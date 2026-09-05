@@ -62,6 +62,11 @@ const (
 	infectionLayerName    = "infection"
 	whyNeverInfected      = "the killer target measured no infection by the mutant"
 	whyProbeRecordedTwice = "the killer target has more than one probe record"
+
+	suiteReachLayerName        = "suite-reach"
+	whyNoSuiteProfile          = "the package suite left no attributable coverage profile"
+	whyConflictingSuiteProfile = "the package suite has more than one coverage profile identity"
+	whyNoSuiteRoute            = "the package-suite kill has no preceding mutant route"
 )
 
 // probeFacts is what the probe pass measured of one target: the outcome it
@@ -96,6 +101,13 @@ type killPair struct {
 	column  int
 	target  string
 	killer  string
+	// granularity is the routing boundary on which a target could be
+	// discharged. The production infection layer narrows exact block routes;
+	// a file fallback is deliberately left conservative.
+	granularity string
+	// evidenceTarget is the profile this pair is decided against when target is
+	// a human-facing synthetic identity. Ordinary target pairs leave it empty.
+	evidenceTarget string
 	// probed is what the route in force said: the mutant carries a probe site,
 	// so the probe pass could have measured it. probe is what that pass
 	// recorded of the killer target, and is nil when it recorded nothing for
@@ -114,6 +126,13 @@ type pairKey struct {
 
 // key is the identity of a pair.
 func (pair killPair) key() pairKey { return pairKey{mutant: pair.mutant, target: pair.target} }
+
+func (pair killPair) coverageTarget() string {
+	if pair.evidenceTarget != "" {
+		return pair.evidenceTarget
+	}
+	return pair.target
+}
 
 // conclusion is what a layer decided about one kill pair.
 type conclusion int
@@ -195,10 +214,11 @@ func reachLayer() layer { return layer{name: reachLayerName, decide: decideReach
 // inside the file the killer ran, and outside every block the killer executed:
 // the killer would be dropped.
 func decideReach(pair killPair, recorded evidence) finding {
-	if !recorded.measured(pair.target) {
+	target := pair.coverageTarget()
+	if !recorded.measured(target) {
 		return finding{conclusion: unverifiable, why: whyNoProfile}
 	}
-	covered, candidate := recorded.coveredBy(pair.target, pair.path)
+	covered, candidate := recorded.coveredBy(target, pair.path)
 	if !candidate {
 		return finding{conclusion: discharged, why: whyCoversNoneOfTheFile}
 	}
@@ -209,6 +229,29 @@ func decideReach(pair killPair, recorded evidence) finding {
 		return finding{conclusion: kept}
 	}
 	if !recorded.instrumentedAt(pair.path, pair.line, pair.column) {
+		return finding{conclusion: kept}
+	}
+	return finding{conclusion: discharged, why: whyOutsideCoveredBlocks}
+}
+
+// decideSuiteReach independently states the narrower whole-suite rule. Unlike
+// target routing it never falls back through "the suite covered some of this
+// file": production discharges only when this exact suite profile instrumented
+// the mutant position and did not cover it. Instrumentation from another
+// profile is deliberately irrelevant.
+func decideSuiteReach(pair killPair, recorded evidence) finding {
+	target := pair.coverageTarget()
+	if !recorded.measured(target) {
+		return finding{conclusion: unverifiable, why: whyNoProfile}
+	}
+	if pair.line <= 0 || pair.column <= 0 {
+		return finding{conclusion: kept}
+	}
+	if !recorded.instrumentedBy(target, pair.path).Contains(pair.line, pair.column) {
+		return finding{conclusion: kept}
+	}
+	covered, _ := recorded.coveredBy(target, pair.path)
+	if covered.Contains(pair.line, pair.column) {
 		return finding{conclusion: kept}
 	}
 	return finding{conclusion: discharged, why: whyOutsideCoveredBlocks}
@@ -312,6 +355,8 @@ func infectionLayer() layer { return layer{name: infectionLayerName, decide: dec
 // killer with two records is a recording whose meaning the audit does not know.
 // What is left is a probed mutant whose killer was measured and whose measured
 // killer did not name it, which is the target the layer would drop.
+// A file-granularity route is deliberately inapplicable: production preserves
+// the conservative fallback when coverage could not place the position.
 //
 // There is no fuzz exemption here, unlike the branch layer. The probe pass
 // records nothing for a fuzz target, because fuzzing explores past the seed
@@ -319,9 +364,12 @@ func infectionLayer() layer { return layer{name: infectionLayerName, decide: dec
 // that keeps every killer with no record at all. A record that does exist is
 // held to whatever it says.
 //
-// The coverage evidence is not read: the pair carries every fact this rule
-// decides by.
+// The coverage profiles are not read: the pair carries the route granularity
+// and every infection fact this rule decides by.
 func decideInfection(pair killPair, _ evidence) finding {
+	if pair.granularity != "" && pair.granularity != trace.GranularityBlock {
+		return finding{conclusion: inapplicable}
+	}
 	if !pair.probed {
 		return finding{conclusion: inapplicable}
 	}
@@ -411,9 +459,17 @@ type auditResult struct {
 	// numbers have to be read against.
 	probeExecutions int
 	probeMeasured   int
-	layers          []layerResult
-	unverifiable    []auditRow
-	violations      []auditRow
+	// Suite probes are controls for the conservative package-suite route, not
+	// measurements of one killer target. They are counted separately and never
+	// entered into the per-target facts the infection layer audits.
+	suiteProbeExecutions  int
+	suiteProbeMeasured    int
+	suiteCoverageProfiles int
+	suitePairs            int
+	suiteReach            layerResult
+	layers                []layerResult
+	unverifiable          []auditRow
+	violations            []auditRow
 	// branchAudited says whether a catalog was given, and infectionAudited
 	// whether the recording held a probe pass, with branch and infection what
 	// each layer would have bought when it was audited. A layer nobody held the
@@ -505,20 +561,27 @@ func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, lay
 // executions are collected for the savings measurements alone, and both of them
 // read them, so they are collected whatever inputs the audit was given.
 type auditor struct {
-	recorded   evidence
-	catalog    *mutantCatalog
-	layers     []layer
-	routes     map[string]trace.RouteRecord
-	targets    map[string]targetIdentity
-	measuredBy map[targetIdentity]string
-	probes     map[string]*probeFacts
-	executions map[string][]targetIdentity
-	decided    map[pairKey]struct{}
-	result     auditResult
+	recorded              evidence
+	catalog               *mutantCatalog
+	layers                []layer
+	routes                map[string]trace.RouteRecord
+	targets               map[string]targetIdentity
+	measuredBy            map[targetIdentity]string
+	probes                map[string]*probeFacts
+	executions            map[string][]targetIdentity
+	suiteProfiles         map[string]string
+	suiteProfileConflicts map[string]bool
+	decided               map[pairKey]struct{}
+	suiteDecided          map[pairKey]struct{}
+	result                auditResult
 }
 
 func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *auditor {
-	result := auditResult{targets: len(recorded.targets), layers: make([]layerResult, len(layers))}
+	targetProfiles, suiteProfiles := recorded.profileCounts()
+	result := auditResult{
+		targets: targetProfiles, suiteCoverageProfiles: suiteProfiles,
+		layers: make([]layerResult, len(layers)),
+	}
 	for index, applied := range layers {
 		result.layers[index].name = applied.name
 		result.branchAudited = result.branchAudited || applied.name == branchLayerName
@@ -528,8 +591,9 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 		recorded: recorded, catalog: catalog, layers: layers,
 		routes: make(map[string]trace.RouteRecord), targets: make(map[string]targetIdentity),
 		measuredBy: make(map[targetIdentity]string), probes: make(map[string]*probeFacts),
-		executions: make(map[string][]targetIdentity),
-		decided:    make(map[pairKey]struct{}), result: result,
+		executions: make(map[string][]targetIdentity), suiteProfiles: make(map[string]string),
+		suiteProfileConflicts: make(map[string]bool),
+		decided:               make(map[pairKey]struct{}), suiteDecided: make(map[pairKey]struct{}), result: result,
 	}
 }
 
@@ -564,6 +628,13 @@ func (audit *auditor) read(event trace.Event) {
 // whichever came first would decide every pair of that killer on the order a
 // run happened to write. Both records are dropped for a mark that says so.
 func (audit *auditor) probe(record trace.ProbeRecord) {
+	if record.Suite {
+		audit.result.suiteProbeExecutions++
+		if record.Outcome == trace.ProbeOutcomeMeasured {
+			audit.result.suiteProbeMeasured++
+		}
+		return
+	}
 	audit.result.probeExecutions++
 	if _, recorded := audit.probes[record.Target]; recorded {
 		audit.probes[record.Target] = &probeFacts{conflicting: true}
@@ -607,6 +678,14 @@ func (audit *auditor) measurement(argv []string) {
 	}
 	audit.targets[target] = identity
 	if identity.test == "" {
+		if strings.HasSuffix(target, ".suite") && identity.packagePath != "" {
+			if previous, exists := audit.suiteProfiles[identity.packagePath]; exists && previous != target {
+				audit.suiteProfiles[identity.packagePath] = ""
+				audit.suiteProfileConflicts[identity.packagePath] = true
+			} else if !audit.suiteProfileConflicts[identity.packagePath] {
+				audit.suiteProfiles[identity.packagePath] = target
+			}
+		}
 		return
 	}
 	if claimed, measured := audit.measuredBy[identity]; measured && claimed != target {
@@ -672,6 +751,7 @@ func (audit *auditor) kill(record trace.MutantRecord) {
 	switch {
 	case !selective:
 		audit.result.packageSuiteKills++
+		audit.suiteKill(record)
 		return
 	case len(killers) > 1:
 		audit.result.batchKills++
@@ -693,8 +773,59 @@ func (audit *auditor) kill(record trace.MutantRecord) {
 	audit.decide(killPair{
 		mutant: record.ID, display: record.DisplayID, rule: route.Rule, path: route.Path,
 		line: route.Line, column: route.Column, target: target, killer: killers[0],
-		probed: route.Probed, probe: audit.probes[target],
+		granularity: route.Granularity, probed: route.Probed, probe: audit.probes[target],
 	})
+}
+
+// suiteKill holds the whole-package reach proof to a package-suite kill. The
+// profile identity is reconstructed from the baseline command rather than
+// trusted from the route, and block containment is decided by decideSuiteReach,
+// the audit's independent implementation of the exact negative-coverage rule. A
+// recording made with suite profiles but before suite discharge was enabled is
+// therefore a valid shadow run for the proof.
+func (audit *auditor) suiteKill(record trace.MutantRecord) {
+	target, profiled := audit.suiteProfiles[record.Package]
+	conflicting := audit.suiteProfileConflicts[record.Package]
+	if audit.result.suiteCoverageProfiles == 0 {
+		return
+	}
+	pair := killPair{
+		mutant: record.ID, display: record.DisplayID,
+		target: record.Package + " package suite", evidenceTarget: target,
+		killer: record.Package + " package suite",
+	}
+	if _, repeated := audit.suiteDecided[pair.key()]; repeated {
+		return
+	}
+	audit.suiteDecided[pair.key()] = struct{}{}
+	audit.result.suitePairs++
+	audit.result.suiteReach.audited++
+	route, routed := audit.routes[record.ID]
+	var concluded finding
+	switch {
+	case conflicting:
+		concluded = finding{conclusion: unverifiable, why: whyConflictingSuiteProfile}
+	case !profiled:
+		concluded = finding{conclusion: unverifiable, why: whyNoSuiteProfile}
+	case !routed:
+		concluded = finding{conclusion: unverifiable, why: whyNoSuiteRoute}
+	default:
+		pair.rule, pair.path, pair.line, pair.column = route.Rule, route.Path, route.Line, route.Column
+		concluded = decideSuiteReach(pair, audit.recorded)
+	}
+	row := auditRow{pair: pair, layer: suiteReachLayerName, why: concluded.why}
+	switch concluded.conclusion {
+	case kept:
+		audit.result.suiteReach.kept++
+	case inapplicable:
+		audit.result.suiteReach.inapplicable++
+	case unverifiable:
+		audit.result.suiteReach.unverifiable++
+		audit.result.unverifiable = append(audit.result.unverifiable, row)
+	case discharged:
+		audit.result.suiteReach.violations++
+		audit.result.violations = append(audit.result.violations, row)
+	}
 }
 
 // decide holds every layer to one kill pair, once. A run confirms a kill by
@@ -748,6 +879,10 @@ func (audit *auditor) finish() auditResult {
 	}
 	audit.result.branch = audit.measureBranchSavings()
 	audit.result.infection = audit.measureInfectionSavings()
+	if audit.result.suiteCoverageProfiles != 0 {
+		audit.result.suiteReach.name = suiteReachLayerName
+		audit.result.layers = append(audit.result.layers, audit.result.suiteReach)
+	}
 	slices.SortFunc(audit.result.unverifiable, compareRows)
 	slices.SortFunc(audit.result.violations, compareRows)
 	return audit.result
@@ -803,12 +938,10 @@ func (audit *auditor) measureBranchSavings() dischargeSavings {
 // measureInfectionSavings counts what the infection layer would have removed
 // from the run that was recorded.
 //
-// Every route of a probed mutant is counted, whatever decided it: a route
-// fallen back to the file, or one of file granularity, reaches its targets by a
-// rule the probe facts are independent of, and the layer narrows the reaching
-// set of all three the same way. That is the difference from the branch
-// measurement, which counts block routes alone because the proof it applies is
-// about the block the mutation sits in.
+// Only an exact block route is counted. A file route is the conservative
+// answer used when coverage cannot place the position and production does not
+// narrow it from a negative probe fact, so an audit of that implementation
+// must leave it alone as well.
 //
 // The mutants are walked in identity order so the totals are read off the
 // recording rather than off the order a map happened to be built in.
@@ -826,7 +959,7 @@ func (audit *auditor) measureInfectionSavings() dischargeSavings {
 	var measured dischargeSavings
 	for _, mutant := range slices.Sorted(maps.Keys(audit.routes)) {
 		route := audit.routes[mutant]
-		if !route.Probed {
+		if !route.Probed || route.Granularity != trace.GranularityBlock || route.Fallback != "" {
 			continue
 		}
 		measured.routes++

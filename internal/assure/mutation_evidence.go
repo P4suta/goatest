@@ -619,13 +619,14 @@ func (collected *MutationEvidence) exhausts(exhausted []evidence.TargetKey, reac
 // suiteAnswers reports whether a recorded statement about a package suite is
 // still this run's statement about the same mutant.
 //
-// The recorded verdict was reached by running the suite, because nothing else
-// could reach the mutation, so it applies here only while that is still true:
-// a mutant a target now reaches, or one a proof discharged the reaching set
-// of, has coverage to route by and is no longer the suite's business at all.
-// The suite itself must also still be the suite that ran, which its key says,
-// and this run must be able to name that key: a package it could not measure
-// whole is one it cannot compare against anything.
+// The recorded verdict was reached by running the suite with the mutant or by
+// its semantics-preserving control proving activation could not change it.
+// Either applies here only while nothing else reaches the mutation: a mutant a
+// target now reaches, or one a proof discharged the reaching set of, has
+// coverage to route by and is no longer the suite's business at all. The suite
+// itself must also still be the suite the verdict describes, which its key
+// says, and this run must be able to name that key: a package it could not
+// measure whole is one it cannot compare against anything.
 func (collected *MutationEvidence) suiteAnswers(mutant gomutants.Mutant, suite *evidence.SuiteKey, route mutationRoute) bool {
 	if suite == nil || len(route.reaching) != 0 || len(route.discharged) != 0 {
 		return false
@@ -633,8 +634,9 @@ func (collected *MutationEvidence) suiteAnswers(mutant gomutants.Mutant, suite *
 	return suite.Package == mutant.Package && collected.suiteMatches(mutant.Package, *suite)
 }
 
-// recordUnreached remembers that a mutant no measured target reached was left
-// to its package suite, which did not kill it.
+// recordUnreached remembers that the package suite of a mutant no measured
+// target reached was either run and did not kill it or proved unchanged by its
+// semantics-preserving control.
 func (collected *MutationEvidence) recordUnreached(mutant gomutants.Mutant, wholeTree bool, kind, summary string) {
 	collected.recordSuite(mutant, evidence.MutationOutcomeUnreached, wholeTree, kind, summary)
 }

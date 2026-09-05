@@ -213,6 +213,126 @@ func TestSchemaRejectsARouteWithoutAKnownReason(t *testing.T) {
 	}
 }
 
+func TestSchemaTiesProbeRoutingToItsPositiveMeasurements(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	cases := []struct {
+		name     string
+		amend    func(map[string]any)
+		accepted bool
+	}{
+		{
+			name: "a target recovered by a positive probe",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["reaching_targets"] = []any{"TestHidden"}
+				record["probe_reaching"] = []any{"TestHidden"}
+				record["probed"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "a probe-reaching reason without recovered targets",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["probed"] = true
+			},
+		},
+		{
+			name: "recovered targets without the probe reason",
+			amend: func(record map[string]any) {
+				record["probe_reaching"] = []any{"TestRun"}
+				record["probed"] = true
+			},
+		},
+		{
+			name: "an empty recovered target set",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["probe_reaching"] = []any{}
+				record["probed"] = true
+			},
+		},
+		{
+			name: "a suite coverage control that did not reach",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:example.com/app"
+			},
+			accepted: true,
+		},
+		{
+			name: "a suite coverage control that reached",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:example.com/app"
+				record["suite_reached"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "suite reach without its coverage control",
+			amend: func(record map[string]any) {
+				record["suite_reached"] = true
+			},
+		},
+		{
+			name: "an empty suite coverage identity",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:"
+			},
+		},
+		{
+			name: "a measured suite control",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:example.com/app"
+				record["probed"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "a suite control without a probe form",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:example.com/app"
+				delete(record, "probed")
+			},
+		},
+		{
+			name: "an empty suite identity",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:"
+				record["probed"] = true
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "probe_reaching")
+			delete(record, "suite_coverage")
+			delete(record, "suite_reached")
+			delete(record, "suite_probe")
+			testCase.amend(record)
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("probe route was rejected: %v", err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatal("malformed probe route passed the schema")
+			}
+		})
+	}
+}
+
 func TestSchemaRejectsARouteWithAnUnknownGranularityOrFallback(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
@@ -625,6 +745,35 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 			name:     "an execution carrying the error that stopped it",
 			record:   map[string]any{"target": "TestRun", "exit_code": -1, "error": "goatest: probe tree unavailable"},
 			accepted: true,
+		},
+		{
+			name: "a measured package suite",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "package": "example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "a package-suite identity without the suite marker",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "package": "example.com/app",
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a suite marker on an ordinary target",
+			record: map[string]any{
+				"target": "TestRun", "package": "example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a package suite without its package",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
 		},
 	}
 	for _, testCase := range cases {

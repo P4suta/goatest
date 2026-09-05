@@ -287,6 +287,247 @@ func TestEvaluateMutationsResolvesAMutantNoReachingTargetInfectsWithoutRunning(t
 	}
 }
 
+func TestEvaluateMutationsUsesAWholeSuiteProbeToResolveAnUnreachedMutant(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	target := blockTarget("TestLate", time.Second,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	target.Probed = true
+	sink, recorder := newTraceRecording()
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			t.Fatal("a package suite whose control never infected the mutant was executed")
+			return gomutants.MutantResult{}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder,
+		Instrumented: blockRoutingInstrumentation(),
+		SuiteProbes: map[string]PackageProbeEvidence{
+			mutant.Package: {Measured: true, Duration: 1500 * time.Millisecond},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 {
+		t.Fatalf("executions = %+v, want the package-suite proof to execute none", session.requests)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "unreached-mutant" ||
+		evaluation.Findings[0].Summary != mutationSuiteUninfectedSummary {
+		t.Fatalf("evaluation = %+v", evaluation)
+	}
+	want := trace.RouteRecord{
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: mutant.Line, Column: mutant.Column,
+		Reason: trace.ReasonUnreached, Granularity: trace.GranularityBlock, FileCandidates: 1,
+		SuiteProbe: packageSuiteProbeTarget(mutant.Package), Probed: true,
+	}
+	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
+		t.Fatalf("routes = %+v, want [%+v]", routes, want)
+	}
+}
+
+func TestEvaluateMutationsUsesWholeSuiteCoverageForAnUnprobedMutant(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	mutant.Probed = false
+	target := blockTarget("TestElsewhere", time.Second,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	sink, recorder := newTraceRecording()
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			t.Fatal("a package suite whose coverage never reached the mutant was executed")
+			return gomutants.MutantResult{}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder,
+		Instrumented: blockRoutingInstrumentation(),
+		SuiteCoverage: map[string]PackageSuiteCoverage{
+			mutant.Package: {
+				Instrumented: blockRoutingInstrumentation(), Duration: 2 * time.Second, WholeTree: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 0 || len(evaluation.Findings) != 1 ||
+		evaluation.Findings[0].Kind != "unreached-mutant" ||
+		evaluation.Findings[0].Summary != mutationSuiteUnreachedSummary {
+		t.Fatalf("evaluation = %+v, executions = %+v", evaluation, session.requests)
+	}
+	want := trace.RouteRecord{
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: mutant.Line, Column: mutant.Column,
+		Reason: trace.ReasonUnreached, Granularity: trace.GranularityBlock, FileCandidates: 1,
+		SuiteCoverage: packageSuiteCoverageTarget(mutant.Package),
+	}
+	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
+		t.Fatalf("routes = %+v, want [%+v]", routes, want)
+	}
+}
+
+func TestPositiveTargetProbeOverridesSilentSuiteCoverage(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	target := blockTarget("TestEnvironmentSpecific", 100*time.Millisecond,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	target.Probed, target.Infected = true, []uint32{mutant.Index}
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			if !slices.Equal(request.Args, []string{"-test.run=^TestEnvironmentSpecific$"}) {
+				t.Fatalf("counterexample request = %+v", request)
+			}
+			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Instrumented: blockRoutingInstrumentation(),
+		SuiteCoverage: map[string]PackageSuiteCoverage{
+			mutant.Package: {Instrumented: blockRoutingInstrumentation(), Duration: 2 * time.Second},
+		},
+	})
+	if err != nil || len(session.requests) != 1 || len(evaluation.Findings) != 1 ||
+		evaluation.Findings[0].Kind != "surviving-mutant" {
+		t.Fatalf("evaluation = (%+v, %v), executions = %+v", evaluation, err, session.requests)
+	}
+}
+
+func TestPositiveTargetProbeSurvivesMissingSuiteFacts(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	target := blockTarget("TestHidden", time.Millisecond,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	target.Probed, target.Infected = true, []uint32{mutant.Index}
+	for _, testCase := range []struct {
+		name   string
+		suites map[string]PackageProbeEvidence
+	}{
+		{name: "no suite probe requested"},
+		{name: "suite probe unavailable", suites: map[string]PackageProbeEvidence{
+			mutant.Package: {Measured: false},
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			route := routeMutant(mutant, []TargetEvidence{target}, blockRoutingInstrumentation())
+			route = applyProbeRouting(mutant, []TargetEvidence{target}, route, testCase.suites)
+			if want := []string{target.Target.Name}; !slices.Equal(routedNames(route), want) ||
+				!slices.Equal(route.probeReaching, []string{target.Target.ID}) {
+				t.Fatalf("route with absent suite facts = %+v, want positive target %v", route, want)
+			}
+		})
+	}
+}
+
+func TestNeededProbeSuitesExcludeAnsweredAndUnprobedFallbacks(t *testing.T) {
+	t.Parallel()
+	needed := probedMutant()
+	needed.Package = "fixture.example/needed"
+	answered := probedMutant()
+	answered.ID, answered.Package = "answered", "fixture.example/answered"
+	unprobed := probedMutant()
+	unprobed.ID, unprobed.Package, unprobed.Probed = "unprobed", "fixture.example/unprobed", false
+	suites := map[string]PackageSuiteCoverage{
+		answered.Package: {Instrumented: blockRoutingInstrumentation()},
+	}
+	got := neededProbeSuitePackages(gomutants.Catalog{Mutants: []gomutants.Mutant{
+		unprobed, answered, needed,
+	}}, nil, blockRoutingInstrumentation(), suites)
+	if want := []string{needed.Package}; !slices.Equal(got, want) {
+		t.Fatalf("needed package suites = %v, want %v", got, want)
+	}
+}
+
+func TestEvaluateMutationsCalibratesAnUnreachedMutantFromItsSuiteProbe(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	// This positive target fact is deliberately coverage-blind. Because the
+	// whole suite also infected the mutant, the suite is the compact execution
+	// that retains TestMain and cross-test interactions.
+	target := blockTarget("TestLate", 100*time.Millisecond,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	target.Probed, target.Infected = true, []uint32{probedMutantIndex}
+	sink, recorder := newTraceRecording()
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			if len(request.Args) != 0 || request.Package != mutant.Package || request.Timeout != 4*time.Second {
+				t.Fatalf("suite request = %+v, want the two-second control doubled", request)
+			}
+			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder,
+		Instrumented: blockRoutingInstrumentation(),
+		SuiteProbes: map[string]PackageProbeEvidence{
+			mutant.Package: {Measured: true, Infected: []uint32{probedMutantIndex}, Duration: 2 * time.Second},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || len(evaluation.Findings) != 1 ||
+		evaluation.Findings[0].Kind != "unreached-mutant" {
+		t.Fatalf("evaluation = %+v, executions = %+v", evaluation, session.requests)
+	}
+	want := trace.RouteRecord{
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: mutant.Line, Column: mutant.Column,
+		Plan: []string{mutationPlanPackageSuite}, Reason: trace.ReasonUnreached,
+		Granularity: trace.GranularityBlock, FileCandidates: 1,
+		SuiteProbe: packageSuiteProbeTarget(mutant.Package), Probed: true,
+	}
+	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
+		t.Fatalf("routes = %+v, want [%+v]", routes, want)
+	}
+}
+
+func TestEvaluateMutationsRecoversAReachableTargetFromAPositiveProbe(t *testing.T) {
+	t.Parallel()
+	mutant := probedMutant()
+	target := blockTarget("TestHidden", 100*time.Millisecond,
+		goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3})
+	target.Probed, target.Infected, target.ProbeDuration = true, []uint32{probedMutantIndex}, 50*time.Millisecond
+	sink, recorder := newTraceRecording()
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+			if !slices.Equal(request.Args, []string{"-test.run=^TestHidden$"}) ||
+				request.Timeout != 1100*time.Millisecond {
+				t.Fatalf("recovered target request = %+v", request)
+			}
+			return gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeSurvived}, nil
+		},
+	}
+	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder,
+		Instrumented: blockRoutingInstrumentation(),
+		SuiteProbes: map[string]PackageProbeEvidence{
+			mutant.Package: {Measured: true, Duration: time.Second},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.requests) != 1 || len(evaluation.Findings) != 1 ||
+		evaluation.Findings[0].Kind != "surviving-mutant" {
+		t.Fatalf("evaluation = %+v, executions = %+v", evaluation, session.requests)
+	}
+	want := trace.RouteRecord{
+		MutantID: mutant.ID, Rule: mutant.Rule, Path: mutant.Path, Line: mutant.Line, Column: mutant.Column,
+		ReachingTargets: []string{target.Target.ID}, Plan: []string{mutationPlanIndividual + target.Target.Name},
+		Reason: trace.ReasonProbeReaching, Granularity: trace.GranularityBlock, FileCandidates: 1,
+		ProbeReaching: []string{target.Target.ID}, SuiteProbe: packageSuiteProbeTarget(mutant.Package), Probed: true,
+	}
+	if routes := recordedRoutes(sink); len(routes) != 1 || !reflect.DeepEqual(routes[0], want) {
+		t.Fatalf("routes = %+v, want [%+v]", routes, want)
+	}
+}
+
 func TestMutationSurvivalSummaryNamesEachProof(t *testing.T) {
 	t.Parallel()
 	branch := trace.Discharge{Target: "target-TestSkipsIt", Reason: trace.DischargeBranchNeverTaken}

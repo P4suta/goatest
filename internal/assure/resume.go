@@ -5,6 +5,7 @@ package assure
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 
@@ -14,6 +15,15 @@ import (
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 )
+
+// runCheckpointJournal is the fast durable path implemented by the production
+// cache. It is optional so embedders of the assurance coordinator keep the
+// original full-state interface and semantics: stores without it receive the
+// same atomic PutCheckpoint call at every scheduling boundary.
+type runCheckpointJournal interface {
+	AppendBaselineCheckpoint(string, checkpoint.BaselineTarget) error
+	AppendMutationCheckpoint(string, checkpoint.MutationResult) error
+}
 
 type runCheckpointController struct {
 	mutex   sync.Mutex
@@ -108,8 +118,58 @@ func (controller *runCheckpointController) saveBaseline(state checkpoint.Baselin
 	if !controller.enabled {
 		return
 	}
+	previous := controller.state.Baseline
 	controller.state.Baseline = state
+	journal, journaled := controller.store.(runCheckpointJournal)
+	if journaled {
+		if suffix, ok := baselineCheckpointJournalSuffix(previous, state); ok {
+			for _, unit := range suffix {
+				if err := journal.AppendBaselineCheckpoint(controller.digest, unit); err != nil {
+					controller.disableCheckpointLocked(err)
+					return
+				}
+			}
+			return
+		}
+	}
 	controller.persistLocked()
+}
+
+func baselineCheckpointJournalSuffix(previous, next checkpoint.Baseline) ([]checkpoint.BaselineTarget, bool) {
+	if !previous.BuildVetComplete || !next.BuildVetComplete || previous.Complete || next.Complete ||
+		!reflect.DeepEqual(previous.Evidence, next.Evidence) || !reflect.DeepEqual(previous.Findings, next.Findings) ||
+		len(next.Targets) <= len(previous.Targets) {
+		return nil, false
+	}
+	before := make(map[string]checkpoint.BaselineTarget, len(previous.Targets))
+	for _, unit := range previous.Targets {
+		if _, duplicate := before[unit.ID]; duplicate {
+			return nil, false
+		}
+		before[unit.ID] = unit
+	}
+	suffix := make([]checkpoint.BaselineTarget, 0, len(next.Targets)-len(previous.Targets))
+	seen := make(map[string]bool, len(next.Targets))
+	for _, unit := range next.Targets {
+		if seen[unit.ID] {
+			return nil, false
+		}
+		seen[unit.ID] = true
+		if saved, exists := before[unit.ID]; exists {
+			if !reflect.DeepEqual(saved, unit) {
+				return nil, false
+			}
+			continue
+		}
+		suffix = append(suffix, unit)
+	}
+	if len(seen) != len(before)+len(suffix) {
+		return nil, false
+	}
+	slices.SortFunc(suffix, func(left, right checkpoint.BaselineTarget) int {
+		return compareText(left.ID, right.ID)
+	})
+	return suffix, true
 }
 
 func (controller *runCheckpointController) race(packages []string) (*checkpoint.Race, bool) {
@@ -225,6 +285,12 @@ func (controller *runCheckpointController) saveMutant(id string, evaluation Muta
 	if !replaced {
 		controller.state.Mutation.Results = append(controller.state.Mutation.Results, unit)
 	}
+	if journal, ok := controller.store.(runCheckpointJournal); ok {
+		if err := journal.AppendMutationCheckpoint(controller.digest, unit); err != nil {
+			controller.disableCheckpointLocked(err)
+		}
+		return
+	}
 	controller.persistLocked()
 }
 
@@ -237,6 +303,13 @@ func (controller *runCheckpointController) completeMutation() {
 	if !controller.enabled || controller.state.Mutation == nil {
 		return
 	}
+	// Worker completion order is deliberately unconstrained. Canonicalize once
+	// at the phase boundary instead of sorting the growing slice after every
+	// unit; this keeps the hot checkpoint path linear while preserving stable
+	// compacted bytes for every store implementation.
+	slices.SortFunc(controller.state.Mutation.Results, func(left, right checkpoint.MutationResult) int {
+		return compareText(left.ID, right.ID)
+	})
 	controller.state.Mutation.Complete = true
 	controller.persistLocked()
 }
@@ -270,8 +343,23 @@ func (controller *runCheckpointController) persistLocked() {
 		return
 	}
 	if err := controller.store.PutCheckpoint(controller.digest, controller.state); err != nil {
-		emit(controller.options, "checkpoint-warning", err.Error()+"; disabling checkpoint writes for this run")
-		controller.enabled = false
-		_ = controller.store.DeleteCheckpoint(controller.digest)
+		controller.disableCheckpointLocked(err)
+	}
+}
+
+func (controller *runCheckpointController) disableCheckpointLocked(err error) {
+	emit(controller.options, "checkpoint-warning", err.Error()+"; disabling checkpoint writes for this run")
+	controller.enabled = false
+	_ = controller.store.DeleteCheckpoint(controller.digest)
+}
+
+func compareText(left, right string) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
 	}
 }

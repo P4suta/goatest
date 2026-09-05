@@ -23,7 +23,7 @@ total: 11.262s across 6 calls in 5 classes
 
 routing
 routes: 1 across 1 mutant
-reasons: coverage-reaching 1, unreached 0
+reasons: coverage-reaching 1, probe-reaching 0, unreached 0
 granularity: block 1, file 0, (unrecorded) 0
 discharged: 2 targets across 1 route (branch-never-taken 1, never-infected 1)
 probed: 1 route

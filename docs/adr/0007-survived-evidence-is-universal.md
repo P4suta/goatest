@@ -65,13 +65,17 @@ survive.
    written as well as from being read, so the store never holds a record that
    could not be used.
 
-4. **A mutant no target reaches is a claim about the package suite.** The suite
-   runs every target of the package, fuzz targets included, as one command, so
-   its behaviour is the conjunction of its targets' behaviours and of what the
-   package-level run itself reads. The suite key is built from exactly those
-   two, in a hash domain of its own so that it can never be confused with the
-   behaviour key of one target. A package this run could not measure whole
-   names no suite key, and neither records nor reuses anything.
+4. **A mutant no target reaches is a claim about the package suite.** The claim
+   is established by exact negative suite coverage, by a semantics-preserving
+   whole-suite probe proving activation cannot change the execution, or by
+   executing that suite with the mutant active after a passing original
+   preflight. The suite runs every target of the package, fuzz targets included,
+   as one command, so its behaviour is the conjunction of its targets'
+   behaviours and of what the package-level run itself reads. The suite key is
+   built from exactly those two, in a hash domain of its own so that it can
+   never be confused with the behaviour key of one target. A package this run
+   could not measure whole names no suite key, and neither records nor reuses
+   anything.
 
 5. **A timeout is reused fail-closed, under an existential condition.** A
    timeout establishes nothing about the mutant: it says the run ran out of

@@ -56,6 +56,25 @@ func TestProbeBlockCountsExecutionsOutcomesAndInfections(t *testing.T) {
 	}
 }
 
+func TestProbeBlockCountsPackageSuitesApartFromTargets(t *testing.T) {
+	t.Parallel()
+	suite := probeEvent("package-suite:example.com/app", trace.ProbeOutcomeMeasured, "m-0001")
+	suite.Probe.Package, suite.Probe.Suite = "example.com/app", true
+	barrenSuite := probeEvent("package-suite:example.com/lib", trace.ProbeOutcomeMeasured)
+	barrenSuite.Probe.Package, barrenSuite.Probe.Suite = "example.com/lib", true
+	lines := strings.Join(probeBlock([]trace.Event{
+		probeEvent("target-a", trace.ProbeOutcomeMeasured, "m-0001"), suite, barrenSuite,
+	}), "\n")
+	for _, want := range []string{
+		"probe: 3 executions across 1 target and 2 package suites",
+		"infections: 2 (probe, mutant) pairs across 1 mutant; 0 measured targets infected nothing; 1 measured package suite infected nothing",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("the probe block does not carry %q:\n%s", want, lines)
+		}
+	}
+}
+
 func TestProbeBlockNamesARecordingWithoutProbes(t *testing.T) {
 	t.Parallel()
 	// A recording made before the probe pass existed carries no probe event,

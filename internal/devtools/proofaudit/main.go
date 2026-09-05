@@ -7,7 +7,9 @@
 // containing its position, the branch-never-taken proof behind it, which drops
 // a target whose coverage reaches a mutated condition through a body it never
 // entered, and the infection facts of the probe pass, which drop a target whose
-// measured probe run never saw the mutant's site differ.
+// measured probe run never saw the mutant's site differ, and whole-package
+// reach, which drops a package-suite fallback only when its own passing
+// coverage control instrumented but did not execute the mutant position.
 //
 // The invariant every such layer has to satisfy is that it drops no killer:
 // for every mutant a target actually killed, the narrowed rule must still
@@ -25,7 +27,7 @@
 // goatest-trace-v1 recording, whose route events say how each mutant was
 // routed and whose mutant-exec events say what became of it, and the temporary
 // directory of that run, which holds one Go coverage profile per measured
-// target. Every number printed comes from a recorded value, so auditing one
+// target and package suite. Every number printed comes from a recorded value, so auditing one
 // recording twice prints the same bytes on any machine at any moment.
 //
 // The branch layer needs a third input, the mutant catalog that carries the
@@ -35,6 +37,12 @@
 // the layer would have bought — the targets it would stop reaching, the mutants
 // it would stop executing — measured from the recording of a run that
 // discharged nothing.
+//
+// The suite-reach layer reads package-suite coverage commands from the trace
+// to attribute each synthetic .suite.cover profile independently of routing,
+// then holds the block-containment rule to package-suite kills. This also lets
+// a shadow run that records controls while retaining the fallback audit the
+// negative-reach proof before enabling its discharge.
 //
 // The infection layer needs no catalog: it reads the probe-exec events, which
 // say which mutants each probe run saw the target infect, against the probed

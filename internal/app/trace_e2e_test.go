@@ -173,13 +173,15 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	routed := map[string]int{}
 	blockRouted := 0
 	for _, event := range traceOfType(events, trace.TypeRoute) {
-		if event.Route.Reason != trace.ReasonCoverageReaching && event.Route.Reason != trace.ReasonUnreached {
+		if event.Route.Reason != trace.ReasonCoverageReaching &&
+			event.Route.Reason != trace.ReasonProbeReaching && event.Route.Reason != trace.ReasonUnreached {
 			t.Errorf("route %+v has no reason", event.Route)
 		}
 		// A route has a plan unless a proof answered for every target that
 		// reached it: the package suite behind an empty plan would run the very
 		// tests the proof just ruled out.
-		if len(event.Route.Plan) == 0 && len(event.Route.Discharged) == 0 {
+		if len(event.Route.Plan) == 0 && len(event.Route.Discharged) == 0 &&
+			event.Route.SuiteProbe == "" && event.Route.SuiteCoverage == "" {
 			t.Errorf("route %+v has no plan", event.Route)
 		}
 		if event.Route.Granularity != trace.GranularityBlock && event.Route.Granularity != trace.GranularityFile {

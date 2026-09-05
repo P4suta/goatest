@@ -30,7 +30,8 @@ const (
 	// recorded without a probe pass was never held to. It reads the same way
 	// and for the same reason as the branch line: a row of zeroes for a layer
 	// nobody checked would read exactly like a layer that came out clean.
-	whyInfectionNotAudited = "infection: not audited (the recording holds no probe pass)"
+	whyInfectionNotAudited  = "infection: not audited (the recording holds no probe pass)"
+	whySuiteReachNotAudited = "suite-reach: not audited (the recording holds no package-suite coverage profile)"
 	// branchDischargeHeading opens what the branch layer would have bought, and
 	// infectionDischargeHeading what the infection layer would have.
 	branchDischargeHeading    = "branch discharge"
@@ -84,11 +85,15 @@ func countBlock(result auditResult) []string {
 		{"routes", strconv.Itoa(result.routes)},
 		{"reused routes", strconv.Itoa(result.reusedRoutes)},
 		{"targets with profiles", strconv.Itoa(result.targets)},
+		{"package suites with coverage profiles", strconv.Itoa(result.suiteCoverageProfiles)},
 		{"probe executions", strconv.Itoa(result.probeExecutions)},
 		{"targets the probe measured", strconv.Itoa(result.probeMeasured)},
+		{"package-suite probe executions", strconv.Itoa(result.suiteProbeExecutions)},
+		{"package suites the probe measured", strconv.Itoa(result.suiteProbeMeasured)},
 		{"killed executions", strconv.Itoa(result.killedExecutions)},
-		{"kill pairs audited", strconv.Itoa(result.pairs)},
+		{"target kill pairs audited", strconv.Itoa(result.pairs)},
 		{"package-suite kills", strconv.Itoa(result.packageSuiteKills)},
+		{"package-suite kill pairs audited", strconv.Itoa(result.suitePairs)},
 		{"batch kills", strconv.Itoa(result.batchKills)},
 		{"unattributed kills", strconv.Itoa(result.unattributedKills)},
 		{"truncated trailing lines", strconv.Itoa(result.truncatedLines)},
@@ -126,6 +131,9 @@ func layerBlock(result auditResult) []string {
 	}
 	if !result.infectionAudited {
 		lines = append(lines, whyInfectionNotAudited)
+	}
+	if result.suiteCoverageProfiles == 0 {
+		lines = append(lines, whySuiteReachNotAudited)
 	}
 	return lines
 }
