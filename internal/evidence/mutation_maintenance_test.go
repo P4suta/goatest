@@ -97,7 +97,6 @@ func TestFlushMutationNeverTraversesAStoredSymlink(t *testing.T) {
 	if contents, err := os.ReadFile(target); err != nil || string(contents) != "keep me" {
 		t.Fatalf("symlink target = %q, %v", contents, err)
 	}
-
 }
 
 func TestFlushMutationRefusesADirectory(t *testing.T) {
