@@ -457,21 +457,23 @@ func TestCalibratedMutationTimeoutClampsEveryBoundaryWithoutOverflow(t *testing.
 	for _, test := range []struct {
 		contract string
 		baseline time.Duration
-		override time.Duration
+		limit    time.Duration
 		want     time.Duration
 	}{
-		{contract: "standard-v1", baseline: time.Second, override: 7 * time.Second, want: 7 * time.Second},
-		{contract: "standard-v1", baseline: time.Second, override: -time.Second, want: minimumMutationTimeout},
+		{contract: "standard-v1", baseline: time.Second, limit: 10 * time.Minute, want: minimumMutationTimeout},
+		{contract: "standard-v1", baseline: time.Second, limit: 7 * time.Second, want: 7 * time.Second},
+		{contract: "standard-v1", baseline: time.Second, limit: -time.Second, want: minimumMutationTimeout},
 		{contract: "standard-v1", baseline: -time.Second, want: minimumMutationTimeout},
 		{contract: "standard-v1", baseline: 0, want: minimumMutationTimeout},
 		{contract: "standard-v1", baseline: 5 * time.Second, want: minimumMutationTimeout},
 		{contract: "standard-v1", baseline: 12 * time.Second, want: 65 * time.Second},
+		{contract: "standard-v1", baseline: 12 * time.Second, limit: time.Minute, want: time.Minute},
 		{contract: "standard-v1", baseline: time.Duration(math.MaxInt64), want: standardMutationTimeoutLimit},
 		{contract: "deep-v1", baseline: 2 * time.Hour, want: deepMutationTimeoutLimit},
 		{contract: "unknown", baseline: time.Hour, want: standardMutationTimeoutLimit},
 	} {
-		if got := calibratedMutationTimeout(test.contract, test.baseline, test.override); got != test.want {
-			t.Errorf("calibratedMutationTimeout(%q, %s, %s) = %s, want %s", test.contract, test.baseline, test.override, got, test.want)
+		if got := calibratedMutationTimeout(test.contract, test.baseline, test.limit); got != test.want {
+			t.Errorf("calibratedMutationTimeout(%q, %s, %s) = %s, want %s", test.contract, test.baseline, test.limit, got, test.want)
 		}
 	}
 }

@@ -158,11 +158,13 @@ type MutationOptions struct {
 	ReplayMutantID string
 	TestArgs       []string
 	FuzzExecutions int
-	Timeout        time.Duration
-	Jobs           int
-	Accepted       map[string]bool
-	Progress       func(completed, total int)
-	Resume         map[string]MutationEvaluation
+	// Timeout bounds each calibrated mutation command. Zero leaves the
+	// contract's own ceiling in effect.
+	Timeout  time.Duration
+	Jobs     int
+	Accepted map[string]bool
+	Progress func(completed, total int)
+	Resume   map[string]MutationEvaluation
 	// Checkpoint records one terminal mutant evaluation. Worker goroutines may
 	// call it concurrently, so callers must provide a concurrency-safe callback.
 	Checkpoint      func(string, MutationEvaluation)
@@ -1380,17 +1382,18 @@ func fuzzExecutions(contract string, requested int) int {
 	return min(requested, maximum)
 }
 
-func calibratedMutationTimeout(contract string, baseline, override time.Duration) time.Duration {
-	if override > 0 {
-		return override
-	}
+func calibratedMutationTimeout(contract string, baseline, limit time.Duration) time.Duration {
 	maximum := standardMutationTimeoutLimit
 	if contract == "deep-v1" {
 		maximum = deepMutationTimeoutLimit
 	}
 	boundedBaseline := min(max(baseline, 0), maximum)
 	timeout := boundedBaseline*mutationTimeoutMultiplier + mutationTimeoutOverhead
-	return min(max(timeout, minimumMutationTimeout), maximum)
+	timeout = min(max(timeout, minimumMutationTimeout), maximum)
+	if limit > 0 {
+		timeout = min(timeout, limit)
+	}
+	return timeout
 }
 
 func promoteTargetArtifacts(root string, mutant gomutants.Mutant, targetName string, artifacts []gomutants.Artifact, evaluation *MutationEvaluation) (bool, error) {
