@@ -214,9 +214,9 @@ func CollectBaseline(ctx context.Context, workspace CommandWorkspace, model goan
 			command := targetCommand(binary, profile, pkg.RelativeDir, target, targetTimeout)
 			command.Argv = append(command.Argv, options.TestArgs...)
 			observedCommand := command
-			var finishObservation func() repositoryObservation
-			observedCommand.Argv, finishObservation = options.RepositoryObserver.instrument(
-				importPath, pkg.RelativeDir, observedCommand.Argv)
+			observedArguments, finishObservation := options.RepositoryObserver.instrumentPackage(
+				importPath, observedCommand.Argv)
+			observedCommand.Argv = observedArguments
 			if options.UseTest2JSON {
 				observedCommand = test2JSONCommand(importPath, observedCommand)
 				command = test2JSONCommand(importPath, command)

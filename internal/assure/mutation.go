@@ -274,19 +274,27 @@ func EvaluateMutations(ctx context.Context, session MutationSession, targets []T
 
 		unit := seed.evaluation
 		var killed, blocked bool
+		fuzzOptions := options
+		// A fuzz campaign cannot create reusable mutation evidence: a future
+		// budget is not guaranteed to rediscover its killing input. Repository
+		// observations therefore cannot affect its result or evidence key, while
+		// passing the action-log flag into fuzz workers adds work and a possible
+		// observation-failure retry. Keep both the campaign and its paired kill
+		// confirmation on the original, uninstrumented request.
+		fuzzOptions.RepositoryObserver = nil
 		for _, target := range seed.reaching {
 			if target.Target.Kind != goanalysis.KindFuzz {
 				continue
 			}
 			request := fuzzRequest(seed.mutant, target, executions, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
 			request.Args = append(request.Args, options.TestArgs...)
-			result, _, err := executeMutation(ctx, session, request, options)
+			result, _, err := executeMutation(ctx, session, request, fuzzOptions)
 			if err != nil {
 				return MutationEvaluation{}, fmt.Errorf("goatest: fuzz mutant %s with %s: %w", seed.mutant.DisplayID, target.Target.Name, err)
 			}
 			switch result.Outcome {
 			case gomutants.OutcomeKilled:
-				confirmed, confirmFinding, confirmedResult, _, confirmErr := confirmMutationKill(ctx, session, seed.mutant, request, result, options)
+				confirmed, confirmFinding, confirmedResult, _, confirmErr := confirmMutationKill(ctx, session, seed.mutant, request, result, fuzzOptions)
 				if confirmErr != nil {
 					return MutationEvaluation{}, confirmErr
 				}
