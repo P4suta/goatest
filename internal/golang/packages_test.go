@@ -23,7 +23,7 @@ func TestDecodePackageStreamComputesRelativeDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if model.ModulePath != "example.com/sample" || len(model.Packages) != 2 || model.Packages[0].RelativeDir != "." || model.Packages[1].RelativeDir != "sub" {
+	if model.ModulePath != "example.com/sample" || model.ModuleDir != "C:/snap" || len(model.Packages) != 2 || model.Packages[0].RelativeDir != "." || model.Packages[1].RelativeDir != "sub" {
 		t.Errorf("model = %+v", model)
 	}
 }
@@ -62,6 +62,9 @@ func TestDecodePackagesCanonicalizesPackages(t *testing.T) {
 	}
 	if model.ModulePath != "example.com/sample" {
 		t.Fatalf("ModulePath = %q", model.ModulePath)
+	}
+	if model.ModuleDir != moduleDir {
+		t.Fatalf("ModuleDir = %q, want %q", model.ModuleDir, moduleDir)
 	}
 	if len(model.Packages) != 2 {
 		t.Fatalf("Packages = %+v", model.Packages)

@@ -33,7 +33,11 @@ type Package struct {
 
 type Model struct {
 	ModulePath string
-	Packages   []Package
+	// ModuleDir is the absolute module root reported by go list in the command
+	// workspace. Runtime observations use it because test binaries execute in
+	// that same frozen workspace rather than in the caller's checkout.
+	ModuleDir string
+	Packages  []Package
 }
 
 type listedPackage struct {
@@ -81,7 +85,7 @@ decode:
 	for _, item := range listed {
 		listedDeps[item.ImportPath] = item.Deps
 	}
-	model := Model{ModulePath: modulePath}
+	model := Model{ModulePath: modulePath, ModuleDir: moduleDir}
 	for _, item := range listed {
 		if item.Module.Path != modulePath || item.Module.Dir != moduleDir {
 			return Model{}, fmt.Errorf("goatest: go list returned packages from multiple module roots; refusing partial package discovery")

@@ -146,6 +146,77 @@ func Loud() ([]string, error) {
 	}
 }
 
+func TestRepositoryReadCandidatesKeepPreRunAndGenericFSReadsConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "observed/observed_test.go", `package observed
+
+import "os"
+
+func read(path string) {
+	readDirectory := os.ReadDir
+	_, _ = readDirectory(path)
+}
+`)
+	writeGo(t, root, "initializer/initializer.go", `package initializer
+
+import "os"
+
+var readDirectory = os.ReadDir
+`)
+	writeGo(t, root, "initial/initial.go", `package initial
+
+import "os"
+
+func init() { _, _ = os.ReadDir(".") }
+`)
+	writeGo(t, root, "packagevalue/packagevalue.go", `package packagevalue
+
+import "os"
+
+var entries, readError = os.ReadDir(".")
+`)
+	writeGo(t, root, "main/main_test.go", `package main
+
+import (
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	_, _ = os.ReadDir(".")
+	os.Exit(m.Run())
+}
+`)
+	writeGo(t, root, "generic/generic.go", `package generic
+
+import "io/fs"
+
+func read(fileSystem fs.FS) { _, _ = fs.ReadDir(fileSystem, ".") }
+`)
+	packages := []gotest.Package{
+		{ImportPath: "example.com/module/observed", RelativeDir: "observed"},
+		{ImportPath: "example.com/module/initializer", RelativeDir: "initializer"},
+		{ImportPath: "example.com/module/initial", RelativeDir: "initial"},
+		{ImportPath: "example.com/module/packagevalue", RelativeDir: "packagevalue"},
+		{ImportPath: "example.com/module/main", RelativeDir: "main"},
+		{ImportPath: "example.com/module/generic", RelativeDir: "generic"},
+	}
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	for _, path := range []string{"example.com/module/observed", "example.com/module/initializer"} {
+		candidate, found := candidates[path]
+		if !found || candidate.Unobservable {
+			t.Errorf("observable candidate %s = %+v, %t", path, candidate, found)
+		}
+	}
+	for _, path := range []string{"example.com/module/initial", "example.com/module/packagevalue", "example.com/module/main", "example.com/module/generic"} {
+		candidate, found := candidates[path]
+		if !found || !candidate.Unobservable {
+			t.Errorf("candidate %s = %+v, %t; want conservative", path, candidate, found)
+		}
+	}
+}
+
 // readersOf yields the import paths the answer marked, so a test asserts on
 // the packages rather than on the shape of the map they arrive in.
 func readersOf(readers map[string]bool) func(func(string) bool) {

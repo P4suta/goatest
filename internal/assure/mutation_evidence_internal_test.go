@@ -5,6 +5,8 @@ package assure
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -18,6 +20,222 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
+
+func TestMutationExecutionThatReadsTheRepositoryRecordsAWholeTreeKey(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
+	target.RepositoryObserved = true
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	sources.model.ModuleDir = root
+	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
+		evidenceModule: {},
+	}, sources)
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, []TargetEvidence{target}, []report.TargetDisposition{{
+		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+	}}, digestText("snapshot"))
+	mutant := evidenceMutant("repository-reader")
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		log, _ := repositoryTestLogPath(request.Args)
+		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), 0o600); err != nil {
+			return gomutants.MutantResult{}, err
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
+
+	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := index.store(session.catalog, evidenceModule).Records
+	if len(records) != 1 || len(records[0].Exhausted) != 1 || !records[0].Exhausted[0].WholeTree {
+		t.Fatalf("recorded evidence = %+v, want a whole-tree exhausted target", records)
+	}
+	want := sources.targetKey(target.Target, true)
+	if records[0].Exhausted[0].Key != want {
+		t.Fatalf("whole-tree key = %q, want %q", records[0].Exhausted[0].Key, want)
+	}
+}
+
+func TestConfirmedKillJoinsBothMutantRepositoryObservations(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
+	target.RepositoryObserved = true
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	sources.model.ModuleDir = root
+	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
+		evidenceModule: {},
+	}, sources)
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, []TargetEvidence{target}, []report.TargetDisposition{{
+		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+	}}, digestText("snapshot"))
+	mutant := evidenceMutant("confirmed-repository-reader")
+	calls := 0
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		calls++
+		log, _ := repositoryTestLogPath(request.Args)
+		contents := "# test log\n"
+		if calls == 2 {
+			contents += "open " + root + "\n"
+		}
+		if err := os.WriteFile(log, []byte(contents), 0o600); err != nil {
+			return gomutants.MutantResult{}, err
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+	}}
+	control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		return gomutants.CommandResult{}, nil
+	}
+	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer, OriginalControl: control,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := index.store(session.catalog, evidenceModule).Records
+	if calls != 2 || len(records) != 1 || records[0].KilledBy == nil || !records[0].KilledBy.WholeTree {
+		t.Fatalf("calls = %d, records = %+v; want a confirmed whole-tree kill", calls, records)
+	}
+}
+
+func TestRepositoryObservationWidensAPackageSuiteRecord(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	sources.model.ModuleDir = root
+	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
+		evidenceModule: {},
+	}, sources)
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, nil, nil, digestText("snapshot"))
+	mutant := evidenceMutant("repository-suite")
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		log, _ := repositoryTestLogPath(request.Args)
+		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), 0o600); err != nil {
+			return gomutants.MutantResult{}, err
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
+
+	if _, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
+		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := index.store(session.catalog, evidenceModule).Records
+	if len(records) != 1 || records[0].Suite == nil || !records[0].Suite.WholeTree || records[0].Suite.Key != index.wholeSuites[evidenceModule] {
+		t.Fatalf("recorded evidence = %+v, want the whole-tree suite key", records)
+	}
+}
+
+func TestRepositoryObservationOfABatchWidensEverySelectedTarget(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	sources.model.ModuleDir = root
+	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
+		evidenceModule: {},
+	}, sources)
+	var targets []TargetEvidence
+	var inventory []report.TargetDisposition
+	for index := range individualMutationTargetLimit + 2 {
+		target := evidenceTarget("TestBatch"+strconv.Itoa(index), goanalysis.KindTest, 3*time.Millisecond)
+		target.RepositoryObserved = true
+		targets = append(targets, target)
+		inventory = append(inventory, report.TargetDisposition{
+			Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+		})
+	}
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, targets, inventory, digestText("snapshot"))
+	mutant := evidenceMutant("repository-batch")
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		log, _ := repositoryTestLogPath(request.Args)
+		contents := "# test log\n"
+		if strings.Contains(strings.Join(request.Args, " "), "|") {
+			contents += "open " + root + "\n"
+		}
+		if err := os.WriteFile(log, []byte(contents), 0o600); err != nil {
+			return gomutants.MutantResult{}, err
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
+
+	if _, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
+		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := index.store(session.catalog, evidenceModule).Records
+	if len(records) != 1 || len(records[0].Exhausted) != len(targets) {
+		t.Fatalf("recorded evidence = %+v, want %d exhausted targets", records, len(targets))
+	}
+	for _, target := range records[0].Exhausted {
+		wantWhole := target.Name == "TestBatch8" || target.Name == "TestBatch9"
+		if target.WholeTree != wantWhole {
+			t.Errorf("target %s whole_tree = %t, want %t", target.Name, target.WholeTree, wantWhole)
+		}
+	}
+}
+
+func TestWholeTreeMarkerMigratesOldReaderEvidenceWithoutUnsafeReuse(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("reader-migration")
+	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
+	target.RepositoryObserved = true
+	identity := identify(target.Target)
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	narrow := sources.targetKey(target.Target, false)
+	whole := sources.targetKey(target.Target, true)
+	passed := []report.TargetDisposition{{
+		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+	}}
+	route := mutationRoute{reaching: []TargetEvidence{target}}
+
+	record := func(key string, marked bool) evidence.MutationRecord {
+		return evidence.MutationRecord{
+			MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+			Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("earlier"),
+			KilledBy: &evidence.TargetKey{Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key, WholeTree: marked},
+		}
+	}
+	for _, test := range []struct {
+		name          string
+		baselineWhole bool
+		oldCheckpoint bool
+		record        evidence.MutationRecord
+		wantReuse     bool
+	}{
+		{name: "old narrow record", record: record(narrow, false), wantReuse: true},
+		{name: "old reader record without marker", record: record(whole, false)},
+		{name: "marked reader record", record: record(whole, true), wantReuse: true},
+		{name: "current baseline escaped an old narrow record", baselineWhole: true, record: record(narrow, false)},
+		{name: "old checkpoint cannot assert a narrow observation", oldCheckpoint: true, record: record(narrow, false)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := target
+			current.WholeTree = test.baselineWhole
+			current.RepositoryObserved = !test.oldCheckpoint
+			index := newRunMutationEvidence(evidence.MutationStore{Records: []evidence.MutationRecord{test.record}},
+				sources, []TargetEvidence{current}, passed, digestText("current"))
+			_, _, reused := index.reuseKill(mutant, route)
+			if reused != test.wantReuse {
+				t.Fatalf("reuse = %t, want %t", reused, test.wantReuse)
+			}
+		})
+	}
+}
 
 // evidenceModule is the module every fixture in this file belongs to, and the
 // identity a store is only trusted under.

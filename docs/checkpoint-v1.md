@@ -54,6 +54,13 @@ the reading a run gave before the pass existed, and the only sound reading of a
 target nothing measured. The probe pass itself is not a save boundary and adds
 no field to `checkpoint-v1`.
 
+Repository-read observation is different because a resumed mutation verdict
+must retain the input boundary established by its baseline. A saved target
+therefore carries whether observation covered its package and whether it
+selected the whole-tree key. An older checkpoint has neither optional field;
+when its package is a current reader candidate, that absence is conservatively
+restored as whole-tree rather than interpreted as a measured narrow result.
+
 ## Save boundaries
 
 A checkpoint is replaced after each complete scheduling boundary:

@@ -22,7 +22,7 @@ func checkpointFixture() checkpoint.State {
 			ID: "finding-baseline", Kind: "coverage", Path: "value.go", Line: 4, Summary: "baseline finding", Replay: "goatest replay finding-baseline", Mutant: "comparison", MutantID: "mutant-a",
 		}}, Targets: []checkpoint.BaselineTarget{{
 			ID: "target-a", Executed: true, Inventory: report.TargetDisposition{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/project", Path: "value_test.go", Line: 10, Status: "passed", DurationMS: 12},
-			Target: &checkpoint.TargetEvidence{Target: checkpoint.Target{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/project", Path: "value_test.go", Line: 10}, CoveredFiles: []string{"value.go"}, DurationNS: 12_000_000},
+			Target: &checkpoint.TargetEvidence{Target: checkpoint.Target{ID: "target-a", Name: "TestA", Kind: "test", Package: "example.test/project", Path: "value_test.go", Line: 10}, CoveredFiles: []string{"value.go"}, DurationNS: 12_000_000, WholeTree: true, RepositoryObserved: true},
 		}}},
 		Race: &checkpoint.Race{Complete: true, Packages: []string{"example.test/project"}, Evidence: []report.Evidence{{Kind: "race", ID: "example.test/project", Status: "passed"}}},
 		Mutation: &checkpoint.Mutation{CatalogFingerprint: strings.Repeat("b", 64), Results: []checkpoint.MutationResult{{
@@ -48,6 +48,9 @@ func TestCheckpointStrictRoundTripAndSchema(t *testing.T) {
 	// interrupted run reported rather than claiming it observed the verdict.
 	if got := decoded.Mutation.Results[0].Provenance; got != input.Mutation.Results[0].Provenance {
 		t.Fatalf("resumed provenance = %q, want %q", got, input.Mutation.Results[0].Provenance)
+	}
+	if target := decoded.Baseline.Targets[0].Target; target == nil || !target.WholeTree || !target.RepositoryObserved {
+		t.Fatalf("resumed repository observation = %+v, want a measured whole-tree target", target)
 	}
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(checkpoint.JSONSchema()))
 	if err != nil {

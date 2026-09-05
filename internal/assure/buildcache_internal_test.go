@@ -319,6 +319,9 @@ func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 		if err := os.Chtimes(buildCacheActionPath(base, key), aged, aged); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chtimes(buildCacheObjectPath(base, key+0x10), aged, aged); err != nil {
+			t.Fatal(err)
+		}
 	}
 	collected, ran, err := cache.collectBase(buildcache.Policy{
 		MaxBytes: 20, TTL: 30 * 24 * time.Hour, MinIdle: layer.MinIdle(),
@@ -386,6 +389,13 @@ func buildCacheTestKey(value byte) []byte {
 func buildCacheActionPath(dir string, key byte) string {
 	name := hex.EncodeToString(buildCacheTestKey(key))
 	return filepath.Join(dir, "actions", name[:2], name)
+}
+
+// buildCacheObjectPath is where a layer stores one cached output, as this test
+// knows the layout rather than as the package computes it.
+func buildCacheObjectPath(dir string, key byte) string {
+	name := hex.EncodeToString(buildCacheTestKey(key))
+	return filepath.Join(dir, "objects", name[:2], name)
 }
 
 func TestReleaseBuildCacheKeepsAndNamesTheScratchItWasAskedToKeep(t *testing.T) {

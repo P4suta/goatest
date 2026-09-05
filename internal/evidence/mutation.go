@@ -36,6 +36,9 @@ type TargetKey struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 	Key     string `json:"key"`
+	// WholeTree says Key includes every file of the frozen snapshot. Its
+	// absence is the narrow form and remains the meaning of an older record.
+	WholeTree bool `json:"whole_tree,omitempty"`
 }
 
 // SuiteKey names a package's whole test suite and the behaviour it had. An
@@ -43,6 +46,8 @@ type TargetKey struct {
 type SuiteKey struct {
 	Package string `json:"package"`
 	Key     string `json:"key"`
+	// WholeTree has the same additive compatibility rule as TargetKey.
+	WholeTree bool `json:"whole_tree,omitempty"`
 }
 
 // FindingSeed is what a reused verdict has to be able to report, so a run that

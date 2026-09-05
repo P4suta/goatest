@@ -53,6 +53,7 @@ func JSONSchema() []byte {
 				"target":        map[string]any{"$ref": "#/$defs/target"},
 				"covered_files": map[string]any{"type": "array", "items": stringType},
 				"environment":   map[string]any{"type": "array", "items": stringType}, "duration_ns": nonNegative,
+				"whole_tree": map[string]any{"type": "boolean"}, "repository_observed": map[string]any{"type": "boolean"},
 			}),
 			"baselineTarget": checkpointObject([]string{"id", "executed", "skipped", "evidence", "findings", "inventory"}, map[string]any{
 				"id": nonEmpty, "executed": map[string]any{"type": "boolean"}, "skipped": map[string]any{"type": "boolean"},
