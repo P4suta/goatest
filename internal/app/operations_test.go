@@ -14,6 +14,7 @@ import (
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/cli"
+	"github.com/P4suta/goatest/internal/evidence"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
@@ -111,6 +112,136 @@ func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
 	if err != nil || collected.Verdict != report.VerdictCompleted || !strings.Contains(collected.Evidence[2].Detail, "removed-entries=1") {
 		t.Fatalf("cache gc = %+v, %v", collected, err)
+	}
+}
+
+func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t *testing.T) {
+	root := t.TempDir()
+	service := app.Service{Root: root, TempDirectory: t.TempDir()}
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	store := cache.New(cacheRoot)
+	if err := store.Put("entry-a", report.Report{Schema: report.SchemaV1, Snapshot: "entry-a"}); err != nil {
+		t.Fatal(err)
+	}
+	digest := func(character string) string { return strings.Repeat(character, 64) }
+	mutationPath := filepath.Join(cacheRoot, evidence.MutationFileName)
+	if err := evidence.SaveMutation(mutationPath, evidence.MutationStore{
+		ModulePath: "example/module",
+		Records: []evidence.MutationRecord{{
+			MutantID: digest("a"), Path: "value.go", Package: "example/module/pkg",
+			Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digest("f"),
+			KilledBy: &evidence.TargetKey{
+				Package: "example/module/pkg", Name: "TestValue", Kind: "test", Key: digest("1"),
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	preserved := []string{
+		filepath.Join(root, ".goatest", "trace", "run-a", "events.jsonl"),
+		filepath.Join(root, ".goatest", "diagnostics", "run-a", "detail.txt"),
+		filepath.Join(root, ".goatest", "candidates", "candidate.json"),
+		filepath.Join(root, ".goatest", "patches", "patch.json"),
+		filepath.Join(root, "reports", "runs", "run-a", "report.json"),
+	}
+	for _, path := range preserved {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	status, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationStatus, _ := findEvidence(t, status, "mutation-evidence", "status")
+	if mutationStatus.Status != "ready" || !strings.Contains(mutationStatus.Detail, "records=1 killed=1") ||
+		!strings.Contains(mutationStatus.Detail, "module=example/module") {
+		t.Fatalf("mutation status = %+v", mutationStatus)
+	}
+	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationGC, _ := findEvidence(t, collected, "mutation-evidence", "gc")
+	if mutationGC.Status != "retained" || !strings.Contains(mutationGC.Detail, "records=1 killed=1") {
+		t.Fatalf("mutation gc status = %+v", mutationGC)
+	}
+	if _, found, err := evidence.LoadMutation(mutationPath, "example/module"); err != nil || !found {
+		t.Fatalf("mutation evidence after gc found=%v err=%v", found, err)
+	}
+
+	flushed, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "flush")
+	if err != nil || flushed.Verdict != report.VerdictCompleted {
+		t.Fatalf("cache flush = %+v, %v", flushed, err)
+	}
+	flushEvidence, _ := findEvidence(t, flushed, "cache", "flush")
+	if !strings.Contains(flushEvidence.Detail, "removed-entries=1") ||
+		!strings.Contains(flushEvidence.Detail, "mutation-removed=true mutation-records=1") {
+		t.Fatalf("flush evidence = %+v", flushEvidence)
+	}
+	mutationAfter, _ := findEvidence(t, flushed, "mutation-evidence", "flush-after")
+	if mutationAfter.Status != "missing" {
+		t.Fatalf("mutation after flush = %+v", mutationAfter)
+	}
+	if _, found, err := store.Get("entry-a"); err != nil || found {
+		t.Fatalf("exact cache after flush found=%v err=%v", found, err)
+	}
+	if _, err := os.Stat(mutationPath); !os.IsNotExist(err) {
+		t.Fatalf("mutation evidence remains after flush: %v", err)
+	}
+	for _, path := range preserved {
+		if contents, err := os.ReadFile(path); err != nil || string(contents) != "preserve" {
+			t.Fatalf("preserved artifact %s = %q, %v", path, contents, err)
+		}
+	}
+
+	again, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "flush")
+	if err != nil {
+		t.Fatal(err)
+	}
+	againEvidence, _ := findEvidence(t, again, "cache", "flush")
+	if !strings.Contains(againEvidence.Detail, "removed-entries=0") || !strings.Contains(againEvidence.Detail, "mutation-removed=false") {
+		t.Fatalf("idempotent flush = %+v", againEvidence)
+	}
+	if err := os.WriteFile(mutationPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
+	if err != nil {
+		t.Fatalf("status of malformed evidence: %v", err)
+	}
+	invalidEvidence, _ := findEvidence(t, invalid, "mutation-evidence", "status")
+	if invalidEvidence.Status != "invalid" || !strings.Contains(invalidEvidence.Detail, "decode mutation evidence") {
+		t.Fatalf("malformed mutation status = %+v", invalidEvidence)
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "flush"); err != nil {
+		t.Fatalf("flush of malformed evidence: %v", err)
+	}
+	if _, err := os.Stat(mutationPath); !os.IsNotExist(err) {
+		t.Fatalf("malformed mutation evidence remains: %v", err)
+	}
+}
+
+func TestCacheFlushPreflightsEvidenceBeforeRemovingExactCache(t *testing.T) {
+	root := t.TempDir()
+	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	store := cache.New(cacheRoot)
+	if err := store.Put("entry-a", report.Report{Schema: report.SchemaV1, Snapshot: "entry-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(cacheRoot, evidence.MutationFileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service := app.Service{Root: root, TempDirectory: t.TempDir()}
+	if _, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "flush"); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("cache flush error = %v", err)
+	}
+	if _, found, err := store.Get("entry-a"); err != nil || !found {
+		t.Fatalf("exact cache changed before evidence refusal: found=%v err=%v", found, err)
 	}
 }
 

@@ -82,7 +82,7 @@ goatest replay ID
 goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
 goatest fix [ID...] [--apply]
 goatest report [--latest-full|--run=ID]
-goatest cache status|gc
+goatest cache status|gc|flush
 goatest trace summary [RUN]
 goatest trace diff RUN-A RUN-B
 goatest help [command]
@@ -213,9 +213,12 @@ variables (plus the minimum process-launch environment) reach resource or
 generation providers. Values are not written to reports.
 
 The cache capacity and TTL also bound `.goatest/trace/` and
-`.goatest/diagnostics/`, independently. `goatest cache status` reports all
-three stores and `goatest cache gc` collects all three while holding the same
-repository lock.
+`.goatest/diagnostics/`, independently. `goatest cache status` reports those
+stores and the reusable mutation evidence beside the exact-input cache;
+`goatest cache gc` collects the bounded stores while retaining that evidence.
+`goatest cache flush` explicitly forgets only the exact-input cache and
+mutation evidence, preserving diagnostics, reports, repairs, build objects,
+and temporary directories. All three commands hold the same repository lock.
 
 See [configuration and protocols](docs/configuration.md) for details.
 

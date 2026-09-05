@@ -12,6 +12,7 @@ import (
 	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/evidence"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/retention"
 )
@@ -22,6 +23,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		return report.Report{}, err
 	}
 	cacheRoot := filepath.Join(root, ".goatest", "cache")
+	mutationEvidencePath := filepath.Join(cacheRoot, evidence.MutationFileName)
 	lease, err := cache.Acquire(ctx, cacheRoot, func() {
 		service.note("cache-wait", "another goatest process is using this repository cache")
 	})
@@ -42,6 +44,10 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 	switch action {
 	case "status":
 		status, err := cache.Inspect(cacheRoot)
+		if err != nil {
+			return report.Report{}, err
+		}
+		mutationStatus, err := evidence.InspectMutation(mutationEvidencePath)
 		if err != nil {
 			return report.Report{}, err
 		}
@@ -75,9 +81,17 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 		// holds, and what is reported here is what runs left on the machine.
 		result.Evidence = append(result.Evidence, service.temporaryStatus(service.clock()().UTC()))
 		result.Evidence = append(result.Evidence, keptTemporaryStatus(root)...)
+		result.Evidence = append(result.Evidence, mutationEvidenceStatusEvidence("status", "ready", mutationStatus))
 		return result, nil
 	case "gc":
 		moment := service.clock()().UTC()
+		// GC deliberately retains the mutation evidence store. Inspect it before
+		// changing any other store so a filesystem failure cannot leave a
+		// partially collected result merely because reporting it failed late.
+		mutationStatus, err := evidence.InspectMutation(mutationEvidencePath)
+		if err != nil {
+			return report.Report{}, err
+		}
 		collected, err := cache.Collect(cacheRoot, loaded.Cache.MaxBytes, loaded.Cache.TTL, moment)
 		if err != nil {
 			return report.Report{}, err
@@ -126,6 +140,41 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			buildCacheStatusEvidence("build-after", buildCollected.After),
 			service.temporarySweep(moment),
 			collectKeptTemporaries(root, loaded.Cache.TTL, moment))
+		result.Evidence = append(result.Evidence, mutationEvidenceStatusEvidence("gc", "retained", mutationStatus))
+		return result, nil
+	case "flush":
+		// Inspect both stores before removing either. The exact-input inspection
+		// rejects malformed entries, and a directory at the evidence path is not
+		// a file this command owns. Holding the repository lease makes the two
+		// preflight answers stable against other goatest processes.
+		if _, err := cache.Inspect(cacheRoot); err != nil {
+			return report.Report{}, err
+		}
+		mutationBefore, err := evidence.InspectMutation(mutationEvidencePath)
+		if err != nil {
+			return report.Report{}, err
+		}
+		if mutationBefore.Present && !mutationBefore.Removable {
+			return report.Report{}, fmt.Errorf("goatest: refusing to flush mutation evidence path %q: %s", mutationEvidencePath, mutationBefore.Problem)
+		}
+		flushed, err := cache.Flush(cacheRoot)
+		if err != nil {
+			return report.Report{}, err
+		}
+		mutationFlushed, err := evidence.FlushMutation(mutationEvidencePath)
+		if err != nil {
+			return report.Report{}, err
+		}
+		result.Evidence = append(result.Evidence,
+			cacheStatusEvidence("flush-before", flushed.Before),
+			mutationEvidenceStatusEvidence("flush-before", "ready", mutationFlushed.Before),
+			report.Evidence{Kind: "cache", ID: "flush", Status: "completed", Detail: fmt.Sprintf(
+				"removed-entries=%d removed-bytes=%d mutation-removed=%t mutation-records=%d mutation-bytes=%d",
+				flushed.RemovedEntries, flushed.RemovedBytes, mutationFlushed.Removed,
+				mutationFlushed.Before.Records, mutationFlushed.Before.Bytes)},
+			cacheStatusEvidence("flush-after", flushed.After),
+			mutationEvidenceStatusEvidence("flush-after", "ready", mutationFlushed.After),
+		)
 		return result, nil
 	default:
 		return report.Report{}, fmt.Errorf("goatest: cache action %q is unsupported", action)
@@ -236,4 +285,25 @@ func cacheStatusEvidence(id string, status cache.Status) report.Evidence {
 		detail += " newest=" + status.Newest.UTC().Format(time.RFC3339Nano)
 	}
 	return report.Evidence{Kind: "cache", ID: id, Status: "ready", Detail: detail}
+}
+
+// mutationEvidenceStatusEvidence renders missing and invalid stores distinctly
+// from a valid store whose caller chooses the ready or retained disposition.
+func mutationEvidenceStatusEvidence(id, validStatus string, status evidence.MutationStatus) report.Evidence {
+	detail := fmt.Sprintf("records=%d killed=%d survived=%d unreached=%d timed-out=%d bytes=%d",
+		status.Records, status.Killed, status.Survived, status.Unreached, status.TimedOut, status.Bytes)
+	if status.ModulePath != "" {
+		detail += " module=" + status.ModulePath
+	}
+	if !status.Modified.IsZero() {
+		detail += " modified=" + status.Modified.UTC().Format(time.RFC3339Nano)
+	}
+	switch {
+	case !status.Present:
+		return report.Evidence{Kind: "mutation-evidence", ID: id, Status: "missing", Detail: detail}
+	case !status.Valid:
+		return report.Evidence{Kind: "mutation-evidence", ID: id, Status: "invalid", Detail: detail + fmt.Sprintf(" problem=%q", status.Problem)}
+	default:
+		return report.Evidence{Kind: "mutation-evidence", ID: id, Status: validStatus, Detail: detail}
+	}
 }

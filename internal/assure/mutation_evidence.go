@@ -22,7 +22,7 @@ import (
 // established about its mutants. It sits beside the cache rather than inside
 // it, because cache maintenance walks `v1/` and refuses an entry there that is
 // not a confined directory.
-const mutationEvidenceFileName = "mutation-evidence-v1.json"
+const mutationEvidenceFileName = evidence.MutationFileName
 
 // moduleManifestFiles are read by every build in the module, so a change to
 // either of them is a change to every test binary.

@@ -15,7 +15,13 @@ import (
 	"strings"
 )
 
-const MutationSchemaV1 = "mutation-evidence-v1"
+const (
+	MutationSchemaV1 = "mutation-evidence-v1"
+	// MutationFileName is the one repository-local file that carries reusable
+	// mutation verdicts. The evidence package owns the name so verification and
+	// cache maintenance cannot silently address different stores.
+	MutationFileName = "mutation-evidence-v1.json"
+)
 
 // Outcomes a record may carry. Only dispositions a later run can reuse are
 // stored: flaky and inconclusive results and compile rejections are never
@@ -105,14 +111,9 @@ func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (Mutati
 	if err != nil {
 		return MutationStore{}, false, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var store MutationStore
-	if err := decoder.Decode(&store); err != nil {
-		return MutationStore{}, false, fmt.Errorf("goatest: decode mutation evidence: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return MutationStore{}, false, fmt.Errorf("goatest: mutation evidence has trailing data")
+	store, err := decodeMutation(data)
+	if err != nil {
+		return MutationStore{}, false, err
 	}
 	// A store written under another schema or for another module is never
 	// trusted, however plausible its records look.
@@ -123,6 +124,22 @@ func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (Mutati
 		return MutationStore{}, false, err
 	}
 	return store, true, nil
+}
+
+// decodeMutation is the strict on-disk decoder shared by reuse and
+// maintenance. Status therefore calls a document valid only when a later run
+// would parse and validate the same bytes.
+func decodeMutation(data []byte) (MutationStore, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var store MutationStore
+	if err := decoder.Decode(&store); err != nil {
+		return MutationStore{}, fmt.Errorf("goatest: decode mutation evidence: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return MutationStore{}, fmt.Errorf("goatest: mutation evidence has trailing data")
+	}
+	return store, nil
 }
 
 // SaveMutation writes store to path in canonical form, replacing whatever was
