@@ -478,6 +478,34 @@ func TestCalibratedMutationTimeoutClampsEveryBoundaryWithoutOverflow(t *testing.
 	}
 }
 
+func TestControlRelativeMutationTimeoutUsesMeasurementsAndKeepsAHardCeiling(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		contract string
+		limit    time.Duration
+		samples  []time.Duration
+		want     time.Duration
+	}{
+		{name: "tiny process gets scheduling room", contract: "standard-v1", samples: []time.Duration{10 * time.Millisecond}, want: 1010 * time.Millisecond},
+		{name: "stable control gets one copy of headroom", contract: "standard-v1", samples: []time.Duration{12 * time.Second, 12 * time.Second}, want: 24 * time.Second},
+		{name: "control disagreement widens the comparison", contract: "standard-v1", samples: []time.Duration{time.Second, 3 * time.Second}, want: 19 * time.Second},
+		{name: "missing control fails closed", contract: "standard-v1", samples: []time.Duration{0, -time.Second}, want: minimumMutationTimeout},
+		{name: "standard hard ceiling", contract: "standard-v1", samples: []time.Duration{20 * time.Minute}, want: standardMutationTimeoutLimit},
+		{name: "deep hard ceiling", contract: "deep-v1", samples: []time.Duration{4 * time.Hour}, want: deepMutationTimeoutLimit},
+		{name: "explicit hard ceiling", contract: "deep-v1", limit: 7 * time.Second, samples: []time.Duration{time.Minute}, want: 7 * time.Second},
+		{name: "overflowing sample is bounded", contract: "standard-v1", samples: []time.Duration{time.Duration(math.MaxInt64)}, want: standardMutationTimeoutLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := controlRelativeMutationTimeout(test.contract, test.limit, test.samples...); got != test.want {
+				t.Fatalf("controlRelativeMutationTimeout(%q, %s, %v) = %s, want %s",
+					test.contract, test.limit, test.samples, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSeedAndFuzzRequestsAreExactAndCloneEnvironment(t *testing.T) {
 	t.Parallel()
 	mutant := internalMutation("mutant-a")

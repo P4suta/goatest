@@ -383,8 +383,8 @@ contract = "standard-v1"
 # build_tags = ["integration"]   # tags applied to every build and test
 # test_binary_args = ["-short"]  # only -short and -test.parallel are accepted
 # environment = ["FEATURE_MODE"] # variable names tests may read; values never reach reports
-# timeout = "10m"                # upper budget for each executed command
-# jobs = 4                       # mutation workers (bounded at 4)
+# timeout = "10m"                # hard ceiling; mutation deadlines normally follow same-run controls
+# jobs = 4                       # baseline/probe/mutation workers; the automatic default is capped at 4
 
 # [cache]
 # max_bytes = 5368709120        # 5 GiB evidence cache budget

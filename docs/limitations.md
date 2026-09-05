@@ -26,12 +26,31 @@ self-dogfood is not external compatibility evidence.
   and the mutant may be run without the test that would kill it. The second
   case is reported as a surviving mutant, never as a kill: routing errs toward
   a finding.
-- Only execution the baseline coverage profiles record can narrow routing. A
+- Coverage-blind execution can be recovered only from a positive probe fact. A
   test that reaches code another way — re-executing the test binary as a
-  subprocess, for instance — leaves no block behind. A mutant only that test
-  covers is treated as unreached and confirmed by its package suite, where the
-  test still runs; a mutant that other targets also cover is run by those
-  targets alone and, if only the blind test kills it, is reported as surviving.
+  subprocess, for instance — may leave no block behind. When its measured probe
+  execution names the mutant, routing adds that target despite the silent
+  profile. If the probe is unmeasured, the mutant has no probe form, or the
+  child does not participate in the probe runtime, goatest cannot invent that
+  reachability. An otherwise-unreached mutant still has its exact package-suite
+  fallback measured first with coverage and, where useful, infection; anything
+  neither control answers receives a prepared semantic-original preflight and
+  is then executed with the mutant. A blind target omitted from a non-empty
+  route remains a possible surviving mutant rather than a manufactured kill.
+- Negative package-suite coverage is one measured execution, not a liveness
+  theorem. It discharges a fallback only when the exact mutant position lies in
+  a block cmd/cover instrumented but the passing suite did not cover. A clock,
+  map order, unseeded random source, or external state may make another run
+  reach a position the control did not. A subprocess or other execution that
+  does not contribute to the profile can be invisible, and coverage
+  instrumentation can itself perturb timing or scheduling. Unknown positions,
+  gaps between instrumented blocks, failed controls, and missing profiles are
+  kept; a positive target or suite infection overrides contradictory coverage
+  silence. Remaining fallbacks run the prepared semantic-original package
+  first and then the mutant, so the proof never substitutes a guess for an
+  unknown. `proofaudit` independently checks the rule against attributable
+  package-suite kills in full recordings, reporting missing or conflicting
+  profiles as unverifiable.
 - Discharging a test a branch proof rules out inherits that same blind spot,
   and is fail-closed everywhere else. A test that evaluates the condition
   in-process but enters the gated body only through a subprocess leaves no
@@ -39,8 +58,9 @@ self-dogfood is not external compatibility evidence.
   the mutant is reported as surviving — the outcome block routing already gives
   a mutant that only a blind test covers. A test that reaches the file only
   through a subprocess is not in the reaching set at all, so there is nothing to
-  discharge from it, and a mutant no measured target reaches is still confirmed
-  by its package suite, where the test runs. go-mutants states
+  discharge from it unless its positive target probe recovers the execution. A
+  mutant no measured target reaches is still settled by its measured or
+  executed package suite. go-mutants states
   no proof over a `//line` directive, because the coverage toolchain would then
   measure the span in one file's numbering and the profile in another's. The
   span is the body's braces and is closed at both ends, which is safe under
@@ -53,8 +73,10 @@ self-dogfood is not external compatibility evidence.
   not the blocks inside them, so it is routed at file granularity for the rest
   of the run. A resumed run therefore executes at least the work a cold run
   would, never less. See [checkpoint v1](checkpoint-v1.md).
-- Infection facts are taken from one execution of each target. A target whose
-  behaviour differs between runs — a clock, a map iteration order, an unseeded
+- Infection facts are taken from one execution of each eligible target and each
+  package suite for which infection can still answer an unresolved mutant. A
+  target or suite whose behaviour differs between runs — a clock, a
+  map iteration order, an unseeded
   random source — may make a mutant's site differ in the run that would kill it
   and not in the one the probe measured; the probe pass is as blind to that as
   reach is to a flaky target. A target discharged as `never-infected` is an
@@ -63,7 +85,9 @@ self-dogfood is not external compatibility evidence.
   blind spot is the same as the cost of reach's: a mutant reported as surviving
   where a rerun of the discharged test might have killed it. The offline
   `proofaudit` infection layer is how the project checks the rule against the
-  kills a full run actually proved. The pass also sees only
+  kills a full run actually proved. A package suite proved uninfected has the
+  same single-observation limitation: nondeterminism can make a later mutant
+  execution take a path its control did not. The pass also sees only
   what its probe tree records: a mutant the engine has no probe form for is
   absent from every measurement there will ever be, and is read as infected by
   every target rather than as one nothing infected. Fuzz targets are not probed
@@ -143,6 +167,18 @@ self-dogfood is not external compatibility evidence.
   outside the model and can outlive a file they depended on. This is an
   execution-observation boundary, not an exclusion: every mutant is still
   tested, and uncertain evidence is widened rather than trusted.
+- A finite cancellation ceiling remains. Arbitrary mutated code can loop,
+  deadlock, recurse without bound, or simply compute for a long time, and no
+  finite supervisor can distinguish every slow terminating execution from a
+  nonterminating one. Ordinary mutation deadlines are therefore comparative to
+  same-run passing controls rather than project-independent waits, and their
+  expiration is inconclusive rather than a verdict. When a package fallback
+  has no positive duration sample, the legacy 30-second-floor calibration may
+  still be paid once by its memoized prepared original preflight; compilation
+  is outside that deadline and it is not paid independently by every mutant.
+  Replay has no prepared probe tree and can still pay for its pristine fallback
+  compilation. Fuzz campaigns retain a separate fixed safety bound because a
+  seed-corpus duration does not predict the configured search.
 - A reused timeout keeps its finding rather than resolving anything, so it can
   only ever cost a run work it did not need to do, never assurance. Its
   condition is existential — the target time ran out under still reaches the

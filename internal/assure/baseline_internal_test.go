@@ -11,11 +11,13 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/checkpoint"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -215,6 +217,303 @@ func TestCollectBaselineMergesInstrumentationAcrossTargetsInTargetOrder(t *testi
 	}
 	if reversed := collect("TestTwo", "TestOne"); !reflect.DeepEqual(reversed, forward) {
 		t.Fatalf("reversed instrumented = %+v, want %+v", reversed, forward)
+	}
+}
+
+func TestPackageSuiteCoverageMeasuresTheExactFallbackAndFailsClosed(t *testing.T) {
+	t.Parallel()
+	block := "fixture.example/module/value.go:7.2,9.3 1 1\n"
+	targets := []TargetEvidence{
+		{Target: baselineTestTarget("TestOne"), Duration: 100 * time.Millisecond},
+		{Target: baselineTestTarget("TestTwo"), Duration: 200 * time.Millisecond},
+	}
+	t.Run("passing suite", func(t *testing.T) {
+		workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+			if command.Dir != "internal/example" || command.Timeout != 1300*time.Millisecond ||
+				!slices.Equal(command.Env, []string{"DB=ready"}) ||
+				!slices.Contains(command.Argv, "-test.count=1") ||
+				!slices.Contains(command.Argv, "-test.short=true") || baselineCommandTarget(command) != "" {
+				t.Fatalf("suite command = %+v", command)
+			}
+			if err := os.WriteFile(coverageProfileArgument(command), []byte("mode: set\n"+block), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return gomutants.CommandResult{Duration: 275 * time.Millisecond}, nil
+		}}
+		got, measured, err := collectPackageSuiteCoverage(
+			t.Context(), workspace, "fixture.example/module", "fixture.example/module",
+			"internal/example", "/tmp/example.test", 5*time.Second, targets,
+			BaselineOptions{
+				ArtifactDirectory: t.TempDir(), Contract: "standard-v1",
+				TestArgs: []string{"-test.short=true"}, SuiteEnvironment: []string{"DB=ready"},
+			},
+		)
+		want := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{infectionBlock()}}}
+		if err != nil || !measured || got.Duration != 275*time.Millisecond || !reflect.DeepEqual(got.Covered, want) || !reflect.DeepEqual(got.Instrumented, want) {
+			t.Fatalf("package suite = (%+v, %t, %v), want measured coverage %+v", got, measured, err, want)
+		}
+	})
+	t.Run("failed suite supplies no fact", func(t *testing.T) {
+		workspace := &baselineFakeWorkspace{exec: func(gomutants.Command) (gomutants.CommandResult, error) {
+			return gomutants.CommandResult{ExitCode: 1}, nil
+		}}
+		got, measured, err := collectPackageSuiteCoverage(
+			t.Context(), workspace, "fixture.example/module", "fixture.example/module",
+			".", "/tmp/example.test", 5*time.Second, targets,
+			BaselineOptions{ArtifactDirectory: t.TempDir(), Contract: "standard-v1"},
+		)
+		if err != nil || measured || !reflect.DeepEqual(got, PackageSuiteCoverage{}) {
+			t.Fatalf("failed package suite = (%+v, %t, %v), want no fact", got, measured, err)
+		}
+	})
+}
+
+type parallelPackageSuiteWorkspace struct {
+	mu       sync.Mutex
+	active   int
+	maximum  int
+	started  chan string
+	finished chan string
+	gates    map[string]chan struct{}
+	failures map[string]error
+}
+
+func (workspace *parallelPackageSuiteWorkspace) Exec(_ context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
+	name := command.Dir
+	workspace.mu.Lock()
+	workspace.active++
+	workspace.maximum = max(workspace.maximum, workspace.active)
+	workspace.mu.Unlock()
+	workspace.started <- name
+	<-workspace.gates[name]
+	err := workspace.failures[name]
+	if err == nil {
+		err = os.WriteFile(coverageProfileArgument(command), []byte(
+			"mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n",
+		), 0o600)
+	}
+	workspace.mu.Lock()
+	workspace.active--
+	workspace.mu.Unlock()
+	workspace.finished <- name
+	return gomutants.CommandResult{Duration: 50 * time.Millisecond}, err
+}
+
+func TestPackageSuiteCoverageRunsAcrossPackagesAndPublishesInInputOrder(t *testing.T) {
+	t.Parallel()
+	controls := []packageSuiteControl{
+		{importPath: "fixture.example/module/a", relativeDir: "a", binary: "/tmp/a.test"},
+		{importPath: "fixture.example/module/b", relativeDir: "b", binary: "/tmp/b.test"},
+	}
+	firstErr := errors.New("first package failed")
+	workspace := &parallelPackageSuiteWorkspace{
+		started: make(chan string, len(controls)), finished: make(chan string, len(controls)),
+		gates:    map[string]chan struct{}{"a": make(chan struct{}), "b": make(chan struct{})},
+		failures: map[string]error{"a": firstErr},
+	}
+	artifactDirectory := t.TempDir()
+	answers := make(chan []packageSuiteCoverageRun, 1)
+	go func() {
+		answers <- collectPackageSuiteCoverages(
+			t.Context(), workspace, "fixture.example/module", controls, time.Second, nil,
+			BaselineOptions{ArtifactDirectory: artifactDirectory, Contract: "standard-v1", Jobs: 2},
+		)
+	}()
+	for range controls {
+		select {
+		case <-workspace.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("package-suite controls did not start concurrently")
+		}
+	}
+	close(workspace.gates["b"])
+	if finished := <-workspace.finished; finished != "b" {
+		t.Fatalf("first completion = %q, want b", finished)
+	}
+	close(workspace.gates["a"])
+	if finished := <-workspace.finished; finished != "a" {
+		t.Fatalf("second completion = %q, want a", finished)
+	}
+	runs := <-answers
+	workspace.mu.Lock()
+	maximum := workspace.maximum
+	workspace.mu.Unlock()
+	if maximum != 2 || len(runs) != 2 {
+		t.Fatalf("maximum concurrent controls = %d, runs = %+v", maximum, runs)
+	}
+	if runs[0].importPath != controls[0].importPath || !errors.Is(runs[0].err, firstErr) ||
+		runs[1].importPath != controls[1].importPath || runs[1].err != nil || !runs[1].measured {
+		t.Fatalf("ordered suite results = %+v", runs)
+	}
+}
+
+type parallelBaselineWorkspace struct {
+	mu       sync.Mutex
+	active   int
+	maximum  int
+	started  chan string
+	finished chan string
+	gates    map[string]chan struct{}
+	failures map[string]error
+}
+
+func (workspace *parallelBaselineWorkspace) Exec(_ context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
+	name := baselineCommandTarget(command)
+	if name == "" {
+		return gomutants.CommandResult{Duration: 1250 * time.Millisecond}, nil
+	}
+	workspace.mu.Lock()
+	workspace.active++
+	workspace.maximum = max(workspace.maximum, workspace.active)
+	workspace.mu.Unlock()
+	workspace.started <- name
+	<-workspace.gates[name]
+	err := workspace.failures[name]
+	if err == nil {
+		profile := coverageProfileArgument(command)
+		contents := "mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n"
+		err = os.WriteFile(profile, []byte(contents), 0o600)
+	}
+	workspace.mu.Lock()
+	workspace.active--
+	workspace.mu.Unlock()
+	workspace.finished <- name
+	return gomutants.CommandResult{Duration: 1250 * time.Millisecond}, err
+}
+
+func TestCollectBaselineSelectsTheFirstTargetErrorAfterConcurrentCompletion(t *testing.T) {
+	names := []string{"TestOne", "TestTwo"}
+	targets := make([]BaselineTarget, len(names))
+	gates := make(map[string]chan struct{}, len(names))
+	firstErr := errors.New("first target failed")
+	secondErr := errors.New("second target failed")
+	for index, name := range names {
+		targets[index] = BaselineTarget{Target: baselineTestTarget(name)}
+		gates[name] = make(chan struct{})
+	}
+	workspace := &parallelBaselineWorkspace{
+		started: make(chan string, len(names)), finished: make(chan string, len(names)), gates: gates,
+		failures: map[string]error{"TestOne": firstErr, "TestTwo": secondErr},
+	}
+	type answer struct{ err error }
+	answers := make(chan answer, 1)
+	go func() {
+		_, err := CollectBaseline(t.Context(), workspace, baselineModel(), targets, BaselineOptions{
+			ArtifactDirectory: t.TempDir(), Jobs: len(names),
+		})
+		answers <- answer{err: err}
+	}()
+	for range names {
+		select {
+		case <-workspace.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("concurrent failing baseline controls did not start")
+		}
+	}
+	close(gates["TestTwo"])
+	if finished := <-workspace.finished; finished != "TestTwo" {
+		t.Fatalf("first completion = %s, want TestTwo", finished)
+	}
+	close(gates["TestOne"])
+	if finished := <-workspace.finished; finished != "TestOne" {
+		t.Fatalf("second completion = %s, want TestOne", finished)
+	}
+	got := (<-answers).err
+	if !errors.Is(got, firstErr) || errors.Is(got, secondErr) || !strings.Contains(got.Error(), "baseline target TestOne") {
+		t.Fatalf("concurrent baseline error = %v, want first target error", got)
+	}
+}
+
+func baselineCommandTarget(command gomutants.Command) string {
+	for _, argument := range command.Argv {
+		if name, found := strings.CutPrefix(argument, "-test.run=^"); found {
+			return strings.TrimSuffix(name, "$")
+		}
+	}
+	return ""
+}
+
+// TestCollectBaselineMeasuresInParallelAndCommitsInTargetOrder holds both
+// halves of baseline concurrency: three controls really overlap, while their
+// reverse completion order cannot change the serial result or checkpoint
+// sequence.
+func TestCollectBaselineMeasuresInParallelAndCommitsInTargetOrder(t *testing.T) {
+	names := []string{"TestOne", "TestTwo", "TestThree"}
+	targets := make([]BaselineTarget, len(names))
+	for index, name := range names {
+		targets[index] = BaselineTarget{Target: baselineTestTarget(name)}
+	}
+	serialWorkspace := &baselineFakeWorkspace{exec: passingBaselineExec(t, "fixture.example/module", true)}
+	serial, err := CollectBaseline(t.Context(), serialWorkspace, baselineModel(), targets, BaselineOptions{ArtifactDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gates := make(map[string]chan struct{}, len(names))
+	for _, name := range names {
+		gates[name] = make(chan struct{})
+	}
+	workspace := &parallelBaselineWorkspace{
+		started: make(chan string, len(names)), finished: make(chan string, len(names)), gates: gates,
+	}
+	checkpointSizes := make([]int, 0, len(names)+2)
+	type answer struct {
+		result BaselineResult
+		err    error
+	}
+	answers := make(chan answer, 1)
+	artifactDirectory := t.TempDir()
+	go func() {
+		result, collectErr := CollectBaseline(t.Context(), workspace, baselineModel(), targets, BaselineOptions{
+			ArtifactDirectory: artifactDirectory,
+			Jobs:              len(names),
+			Checkpoint: func(state checkpoint.Baseline) {
+				checkpointSizes = append(checkpointSizes, len(state.Targets))
+			},
+		})
+		answers <- answer{result: result, err: collectErr}
+	}()
+
+	started := make(map[string]bool, len(names))
+	for range names {
+		select {
+		case name := <-workspace.started:
+			started[name] = true
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d baseline controls started concurrently", len(started), len(names))
+		}
+	}
+	for index := len(names) - 1; index >= 0; index-- {
+		close(gates[names[index]])
+		select {
+		case finished := <-workspace.finished:
+			if finished != names[index] {
+				t.Fatalf("finished %s, want released target %s", finished, names[index])
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("baseline target %s did not finish", names[index])
+		}
+	}
+	var parallel answer
+	select {
+	case parallel = <-answers:
+	case <-time.After(10 * time.Second):
+		t.Fatal("parallel baseline did not return")
+	}
+	if parallel.err != nil {
+		t.Fatal(parallel.err)
+	}
+	workspace.mu.Lock()
+	maximum := workspace.maximum
+	workspace.mu.Unlock()
+	if maximum != len(names) || len(started) != len(names) {
+		t.Fatalf("maximum concurrent controls = %d, started = %v", maximum, started)
+	}
+	if !reflect.DeepEqual(parallel.result, serial) {
+		t.Fatalf("parallel result = %+v, want serial %+v", parallel.result, serial)
+	}
+	if want := []int{0, 1, 2, 3, 3}; !slices.Equal(checkpointSizes, want) {
+		t.Fatalf("checkpoint target counts = %v, want %v", checkpointSizes, want)
 	}
 }
 

@@ -17,6 +17,12 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
+const (
+	packageSuiteProbePrefix    = "package-suite:"
+	packageSuiteCoveragePrefix = "package-suite-coverage:"
+	pairedControlProbePrefix   = "paired-control:"
+)
+
 // readBufferSize is the read buffer one line is assembled in. A line is not
 // bounded by it: a route event naming every target that reaches a mutant can
 // be far larger than any fixed buffer, so lines are read whole rather than
@@ -358,9 +364,10 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	if err != nil {
 		return err
 	}
-	if record.Reason != trace.ReasonCoverageReaching && record.Reason != trace.ReasonUnreached {
-		return fmt.Errorf("unknown route reason %q, want %q or %q",
-			record.Reason, trace.ReasonCoverageReaching, trace.ReasonUnreached)
+	if record.Reason != trace.ReasonCoverageReaching &&
+		record.Reason != trace.ReasonProbeReaching && record.Reason != trace.ReasonUnreached {
+		return fmt.Errorf("unknown route reason %q, want %q, %q, or %q",
+			record.Reason, trace.ReasonCoverageReaching, trace.ReasonProbeReaching, trace.ReasonUnreached)
 	}
 	// The routing labels are additive, so an empty one is a recording made
 	// before the field existed rather than a deviation. A value outside the
@@ -385,6 +392,9 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	if err := checkDischarges(record); err != nil {
 		return err
 	}
+	if err := checkProbeRouting(record, inner); err != nil {
+		return err
+	}
 	if err := checkReuse(record); err != nil {
 		return err
 	}
@@ -402,10 +412,55 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	// would read as metadata-free while it carries some. Presence is what
 	// matters, not the value: a recorded zero is metadata too.
 	if record.Granularity == "" {
-		for _, field := range []string{"column", "file_candidates", "discharged", "probed"} {
+		for _, field := range []string{"column", "file_candidates", "discharged", "probe_reaching", "suite_coverage", "suite_reached", "suite_probe", "probed"} {
 			if _, present := inner[field]; present {
 				return fmt.Errorf("route %s recorded without a granularity: the granularity is what marks a route as carrying its routing metadata", field)
 			}
+		}
+	}
+	return nil
+}
+
+func checkProbeRouting(record trace.RouteRecord, fields map[string]json.RawMessage) error {
+	_, recovered := fields["probe_reaching"]
+	if recovered {
+		if len(record.ProbeReaching) == 0 {
+			return errors.New("route probe_reaching is empty: a positive probe route names at least one recovered target")
+		}
+		if record.Reason != trace.ReasonProbeReaching || !record.Probed {
+			return fmt.Errorf("route records probe-reaching targets with reason %q and probed=%t, want reason %q and probed=true",
+				record.Reason, record.Probed, trace.ReasonProbeReaching)
+		}
+		reaching := make(map[string]bool, len(record.ReachingTargets))
+		for _, target := range record.ReachingTargets {
+			reaching[target] = true
+		}
+		seen := make(map[string]bool, len(record.ProbeReaching))
+		for _, target := range record.ProbeReaching {
+			if target == "" || seen[target] || !reaching[target] {
+				return fmt.Errorf("route probe_reaching target %q is empty, repeated, or absent from reaching_targets", target)
+			}
+			seen[target] = true
+		}
+	} else if record.Reason == trace.ReasonProbeReaching {
+		return errors.New("route has reason probe-reaching without naming probe_reaching targets")
+	}
+	_, suiteCoverage := fields["suite_coverage"]
+	if suiteCoverage {
+		if !strings.HasPrefix(record.SuiteCoverage, packageSuiteCoveragePrefix) ||
+			len(record.SuiteCoverage) == len(packageSuiteCoveragePrefix) || record.Granularity != trace.GranularityBlock {
+			return fmt.Errorf("route suite_coverage %q on granularity %q, want a package-suite-coverage identity on block granularity",
+				record.SuiteCoverage, record.Granularity)
+		}
+	}
+	if _, reached := fields["suite_reached"]; reached && (!suiteCoverage || !record.SuiteReached) {
+		return fmt.Errorf("route suite_reached=%t without a suite_coverage control", record.SuiteReached)
+	}
+	if _, recorded := fields["suite_probe"]; recorded {
+		if !strings.HasPrefix(record.SuiteProbe, packageSuiteProbePrefix) ||
+			len(record.SuiteProbe) == len(packageSuiteProbePrefix) || !record.Probed {
+			return fmt.Errorf("route suite_probe %q with probed=%t, want a package-suite identity and probed=true",
+				record.SuiteProbe, record.Probed)
 		}
 	}
 	return nil
@@ -495,6 +550,33 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 	if err := checkNotEmpty("probe.target", record.Target); err != nil {
 		return err
 	}
+	_, suiteRecorded := probe["suite"]
+	_, infectionsRecorded := probe["infected"]
+	if record.Control {
+		target := pairedControlProbePrefix + record.Package
+		if record.Package == "" {
+			target = pairedControlProbePrefix + "all"
+		}
+		if record.Target != target {
+			return fmt.Errorf("paired control target %q in package %q, want %q for that exact package",
+				record.Target, record.Package, target)
+		}
+		if suiteRecorded || infectionsRecorded {
+			return errors.New("paired control carries suite or infected: a control is neither a routing suite nor a source of infection facts")
+		}
+	} else if strings.HasPrefix(record.Target, pairedControlProbePrefix) {
+		return fmt.Errorf("probe target %q has a paired-control identity without control=true", record.Target)
+	}
+	if record.Suite {
+		if !strings.HasPrefix(record.Target, packageSuiteProbePrefix) ||
+			len(record.Target) == len(packageSuiteProbePrefix) || record.Package == "" ||
+			record.Target != packageSuiteProbePrefix+record.Package {
+			return fmt.Errorf("suite probe target %q in package %q, want the package-suite identity of that exact package",
+				record.Target, record.Package)
+		}
+	} else if strings.HasPrefix(record.Target, packageSuiteProbePrefix) {
+		return fmt.Errorf("probe target %q has a package-suite identity without suite=true", record.Target)
+	}
 	if err := checkNotNegative("probe.timeout_ms", record.TimeoutMS); err != nil {
 		return err
 	}
@@ -524,8 +606,7 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 			return err
 		}
 	}
-	_, infected := probe["infected"]
-	return checkInfections(record, infected)
+	return checkInfections(record, infectionsRecorded)
 }
 
 // checkInfections holds the mutants a probe execution infected to the

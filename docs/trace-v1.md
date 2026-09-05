@@ -2,7 +2,8 @@
 
 The first trace contract is `goatest-trace-v1`. A trace is the diagnostic
 exhaust of a run: the phases it passed through, the commands it executed, how
-coverage routed each mutant, and what became of every mutant execution.
+coverage and probe evidence routed each mutant, and what became of every mutant
+execution.
 
 A trace is never evidence. It takes no part in a verdict and no part in the
 identity a cached result is keyed on, and a trace that cannot be written costs
@@ -131,8 +132,8 @@ many goroutines record at once.
 | `phase-end` | `phase` | the phase ends, with its duration |
 | `exec` | `exec` | a command of the mutation workspace returned |
 | `mutant-exec` | `mutant` | one mutant execution returned |
-| `route` | `route` | coverage decided a mutant's execution plan |
-| `probe-exec` | `probe` | one probe execution of a test target returned |
+| `route` | `route` | coverage and probe evidence decided a mutant's execution plan |
+| `probe-exec` | `probe` | one infection probe or prepared paired-original control returned |
 | `progress` | `progress` | the run reported a progress note |
 | `artifact` | `artifact` | the run wrote a file |
 | `run-end` | `run` | the recording closes; always the last line |
@@ -219,19 +220,25 @@ How coverage routed one mutant, recorded before the executions it explains.
 | `path` | the mutated file |
 | `line` | the line the mutation starts on |
 | `column` | the byte column it starts at on that line, 1-based |
-| `reaching_targets` | the target IDs coverage says reach the mutation |
+| `reaching_targets` | the target IDs coverage or a positive probe says reach the mutation |
 | `plan` | the executions the mutant will be given |
-| `reason` | `coverage-reaching` or `unreached` |
+| `reason` | `coverage-reaching`, `probe-reaching`, or `unreached` |
 | `granularity` | `block` or `file`: what the reaching set was decided on |
 | `fallback` | `position-unknown` or `outside-blocks`, when a block decision dropped back to the file |
 | `file_candidates` | how many targets cover the mutated file at all |
 | `discharged` | the reaching targets a proof removed, each with the proof that removed it: `branch-never-taken` or `never-infected` |
+| `probe_reaching` | the targets a positive infection measurement added despite silent coverage |
+| `suite_coverage` | the synthetic identity of the passing package-suite coverage control that decided the exact mutant position |
+| `suite_reached` | `true` when that control covered the position; absence beside `suite_coverage` means instrumented but uncovered |
+| `suite_probe` | the synthetic identity of the measured package-suite control used by this route |
 | `probed` | whether the engine compiled a probe of this mutant into the probe tree |
 | `reused` | whether the run resolved this mutant from evidence an earlier run recorded instead of executing it |
 
-`column`, `granularity`, `fallback`, `file_candidates`, `discharged`, `probed`
-and `reused` are additive: a recording made before they existed carries none of
-them, and each is omitted when it is empty.
+`column`, `granularity`, `fallback`, `file_candidates`, `discharged`,
+`probe_reaching`, `suite_coverage`, `suite_reached`, `suite_probe`, `probed`,
+and `reused` are additive: a
+recording made before they existed carries none of them, and each is omitted
+when it is empty.
 
 `reused` is where a run says it did not observe a verdict itself. Such a route
 carries `plan: ["reused"]` and nothing else, and the recording holds no
@@ -248,8 +255,9 @@ route that names one, an absent `file_candidates` means zero candidates; on a
 route that names none, the metadata was never recorded, and a reader reports
 the absence rather than a reduction of nothing. The marker is therefore
 required beside the rest: a route carrying a `column`, a `file_candidates`, a
-`discharged` or a `probed` without a `granularity` would read as metadata-free
-while carrying some, and both the schema and the trace reader reject it.
+`discharged`, a `probe_reaching`, a `suite_probe`, or a `probed` without a
+`granularity` would read as metadata-free while carrying some, and both the
+schema and the trace reader reject it.
 
 `discharged` is the other half of the reaching measurement. On a route of
 `granularity: block`, `reaching_targets` together with the targets of
@@ -297,6 +305,37 @@ neither does a recording made before the pass existed: an absent marker is an
 absent measurement rather than a mutant nothing infected, and nothing is
 discharged by it.
 
+`probe_reaching` is the positive half of the same evidence. Every named target
+also appears in `reaching_targets`: its measured probe execution named this
+mutant even though coverage did not, so routing widened rather than narrowed.
+Such a route has reason `probe-reaching` and carries `probed: true`; the schema
+and summary reader reject the reason, target list, or marker without the other
+two. The list is separate so an audit can distinguish a coverage route widened
+by evidence from one coverage produced on its own.
+
+`suite_coverage` links an otherwise-unreached route to the passing baseline
+coverage command that measured the exact fallback. Its synthetic identity is
+`package-suite-coverage:<import-path>`. When `suite_reached: true` is present,
+one of the suite's covered blocks contained the exact mutant position and the
+package suite remains the conservative route. When `suite_coverage` is present
+without `suite_reached`, cmd/cover instrumented that position but the suite did
+not cover it, so the package fallback is discharged for every mutation
+operator. Unknown positions and positions outside all instrumented blocks carry
+neither field and remain fail-closed. A positive target or suite infection is a
+counterexample to negative coverage silence and prevents that silence from
+removing the execution.
+
+`suite_probe` links an otherwise-unreached route to the whole-package control
+that measured its fallback. It is the synthetic `target` of a `probe-exec`, in
+the form `package-suite:<import-path>`. If that execution was measured and did
+not infect the probed mutant, the route has no plan: the control proved that
+activating the mutant cannot change the suite. If it did infect the mutant, the
+plan is `package-suite`, and the control's duration is one reference for the
+mutant execution's comparative deadline. A route can carry both `suite_probe`
+and `probe_reaching` when the whole-package command under the merged resource
+environment was unchanged but a target-specific environment positively
+infected the mutant.
+
 A mutation spanning several lines is placed by the position it starts at, which
 is the position these two fields carry.
 
@@ -325,10 +364,13 @@ which is omitted from the wire as the zero it is.
 A plan entry is `individual:<target>` for a target run on its own,
 `batch:<package>(<count>)` for related targets of one package run together,
 `fuzz:<target>` for the fuzzing of one target, and `package-suite` for the
-whole package suite. A mutant
-no measured target reaches has reason `unreached`, no `reaching_targets`, and
-the package suite as its plan; a mutant whose whole reaching set was discharged
-has no plan at all; every other plan is derived from the targets that reach it.
+whole package suite. A mutant no measured target reaches has reason `unreached`
+and no `reaching_targets`. It has the package suite as its plan unless
+`suite_coverage` proved its position unreached or `suite_probe` proved that
+exact execution unchanged, in which case it has no plan. A mutant whose whole
+reaching set was discharged has no plan as well; the proof fields distinguish
+those zero-execution routes. Every other plan is derived from the targets that
+reach it.
 
 Reading `route` beside the `mutant-exec` events that follow it is how a trace
 answers "why did this mutant run *that*" — the question a report can only
@@ -336,54 +378,87 @@ answer with its outcome.
 
 ### `probe`
 
-One probe execution of a test target, recorded after the engine answered so
-that the execution and what it measured are one line.
+One execution through the prepared probe tree, recorded after the engine
+answered so that the execution and what it established are one line. Most are
+infection probes; a `control` execution is the semantic original used for
+mutation confirmation and establishes no routing fact.
 
 | Field | Meaning |
 | --- | --- |
-| `target` | the target that ran, the identity `discharged` and `killed_by` name it by |
-| `package` | the package the target belongs to |
+| `target` | the target that ran, `package-suite:<import-path>` for a whole-suite probe, or `paired-control:<package>` for a paired original |
+| `package` | the package the target or suite belongs to |
+| `suite` | `true` for a whole-package control; absent for a top-level target |
+| `control` | `true` only when this is the prepared semantic-original half of mutation confirmation |
 | `args` | the test flags the execution ran with |
 | `timeout_ms` | the timeout the execution was given |
 | `outcome` | `measured`, `test-failed`, `timed-out`, or `unavailable` |
 | `exit_code` | the exit status |
 | `duration_ms` | how long it ran |
-| `infected` | the mutants the target made differ, by their full mutant identity |
+| `infected` | the mutants the target or suite made differ, by their full mutant identity |
 | `error` | the error the execution failed with, if it failed |
 
-A probe pass runs every baseline target once against a probe-instrumented tree
-no mutant is active in, and records per mutant whether the value at its site
-ever differed from the constant the mutant would put there.
+A probe pass runs every eligible baseline target and only the package suites
+where a probed mutant still needs the conservative fallback after suite
+coverage. It runs them against a probe-instrumented tree where no mutant is
+active, and records per mutant whether the value at its site ever differed from
+the constant the mutant would put there.
 
 Which targets. goatest probes the test and example targets, the ones the
 mutation phase runs under `-test.run=^Name$`, and sends each of them the
 request that phase would send for that single target: the same package, the
 same `-test.run` selection followed by the run's extra test flags, the same
-environment, and the same calibrated timeout — everything but the mutant, which
-a probe tree never activates. That is what makes the answer a statement about
-the execution the mutation phase will run rather than about some other one.
-Fuzz targets are never probed and produce no `probe-exec` event: the mutation
-phase fuzzes them beyond the seed corpus the probe would measure, so a
-measurement of the corpus would speak for inputs it never saw, and a fuzz run on
-the probe tree would write corpus files into that tree.
+environment, and a comparative deadline derived from its passing baseline —
+everything but the mutant, which a probe tree never activates. That is what
+makes the answer a statement about the execution the mutation phase will run
+rather than about some other one.
+Fuzz targets receive no infection probe: the mutation phase fuzzes them beyond
+the seed corpus such a probe would measure, so a measurement of the corpus
+would speak for inputs it never saw. A fuzz target can still produce a
+`control: true` event when a mutation needs paired confirmation; that event
+asserts only that the semantic original passed.
 
-A target the pass could not measure keeps no facts at all. A `test-failed`, a
-`timed-out`, an `unavailable`, and an execution stopped by an `error` each leave
-their target exactly as it was before the pass: infecting every mutant it
-reaches. Only two failures stop the pass rather than costing one target its
-facts — a cancelled run, and a session prepared without a probe tree, which is a
-programming error rather than a measurement. Everything else is recorded and the
-pass continues.
+Which suites. A package-suite probe carries `suite: true`, the synthetic target
+identity `package-suite:<import-path>`, the run's extra test flags without a
+`-test.run` selector, and the union of all acquired resource environments. It
+is therefore the same execution as the conservative package-suite mutant
+request apart from the tree and mutant activation. Its first comparative
+deadline is relative to the sum of the passing baseline durations for targets
+in that package; once measured, its own duration is a control for every
+unreached mutant of the package. The schema requires the suite marker and a
+synthetic identity; the summary reader additionally requires that identity to
+name the exact `package` in the same record, so no consumer can attribute the
+control to another package or count it as one top-level target.
+
+Which controls. In a full run, every original preflight and paired kill
+confirmation reuses the session's already-compiled probe binaries with no
+mutant active. The package, arguments, environment, and comparative deadline
+are exactly those of the mutant request; only the tree is the
+semantics-preserving probe form of the original program. The synthetic identity
+is `paired-control:<package>`, or `paired-control:all` for an all-package
+request, and `control: true` is required. A control never carries `suite` or
+`infected`: incidental probe logging is not infection evidence, `proofaudit`
+ignores it, and `tracesummary` accounts for it in a separate paired-controls
+block. A mutant replay deliberately prepares no probe tree and instead uses a
+lazy pristine-workspace control, recorded as an ordinary `exec` event.
+
+A target or suite the pass could not measure keeps no facts at all. A
+`test-failed`, a `timed-out`, an `unavailable`, and an execution stopped by an
+`error` each leave the older conservative execution in place. Only two failures
+stop the pass rather than costing one execution its facts — a cancelled run,
+and a session prepared without a probe tree, which is a programming error rather
+than a measurement. Everything else is recorded and the pass continues.
 
 A run replaying one mutant runs no pass and records no `probe-exec` event: it
 would pay for a probe tree to measure against once, and its routing without the
 measurement is the conservative one.
 
-The `probed` field of a `route` is produced from the same pass: it says the
+The `probed` field of a `route` is produced from the same prepared tree: it says the
 engine compiled a probe of that mutant, which is what lets a reader tell a
 mutant a measured target proved it cannot observe from one no measurement could
-ever have named. Routing acts on it, discharging each measured reaching target
-whose `infected` omits the mutant.
+ever have named. Routing acts on it in both directions: it discharges a measured
+coverage-reaching target whose `infected` omits the mutant, and adds a target
+whose positive measurement names a mutant coverage missed. A `suite_probe`
+with no infection replaces the package-suite mutant execution outright.
 
 An execution ended in exactly one way: it reached an `outcome`, or an `error`
 stopped it before one. A record carries one of the two fields and never both

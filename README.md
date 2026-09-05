@@ -21,13 +21,17 @@ For `standard-v1`, goatest:
    toolchain, platform, declared environment, configuration, and tool versions;
 2. classifies native `TestX`, `FuzzX`, and `ExampleX` results through
    `test2json`, including skips and setup failures;
-3. routes tests by coverage blocks and mutant spans, and discharges the
-   reaching tests a branch proof shows cannot observe a mutant and the ones a
-   probe pass measured never make the mutated value differ;
+3. routes tests by coverage blocks and mutant spans, recovers coverage-blind
+   targets from positive infection probes, discharges targets proved unable to
+   observe the mutation, and uses one exact package-suite coverage control plus
+   filtered infection controls to eliminate or calibrate otherwise-unreached
+   mutants;
 4. runs relevant race checks (reported as a static estimate in
    `standard-v1`; `deep-v1` races every package);
-5. evaluates every selected `go-mutants` mutant, with a passing original
-   control immediately before a repeated kill confirmation;
+5. evaluates every selected `go-mutants` mutant with control-relative
+   comparative deadlines, memoizing an exact original package preflight before
+   remaining suite fallbacks and requiring a passing original control before a
+   repeated kill confirmation;
 6. records survivors, inconclusive/flaky outcomes, compile rejections,
    acceptances, and out-of-scope mutants as a complete ID-level inventory; and
 7. stores any killing corpus or generated test as a candidate. `verify` never
@@ -112,10 +116,13 @@ durations without replaying either run.
 
 Verification holds an OS advisory lock on `.goatest/cache/` for the whole run.
 A second process reports `cache-wait` and waits interruptibly. If a run stops
-before producing its durable report, a strict exact-input checkpoint remains
-under `.goatest/cache/v1/<digest>/checkpoint-v1.json`; the next identical run
-automatically reuses completed baseline targets, the complete race phase, and
-terminal mutant results. There is no resume flag. See
+before producing its durable report, a strict exact-input base checkpoint and
+checksummed append-only journal remain under `.goatest/cache/v1/<digest>/`;
+the next identical run automatically reuses completed baseline targets, the
+complete race phase, and terminal mutant results. Phase boundaries atomically
+compact the journal into `checkpoint-v1.json`; per-target and per-mutant appends
+retain crash durability without repeatedly rewriting the growing document.
+There is no resume flag. See
 [checkpoint v1](docs/checkpoint-v1.md) for invalidation and lifecycle rules.
 
 ## Verdicts and report history
@@ -253,7 +260,7 @@ The complete list is maintained in [limitations](docs/limitations.md).
 go test ./...
 go test -race ./...
 go vet ./...
-go test -run '^$' -bench 'Benchmark(CheckpointIO|Digest|MutationAccounting|ReportGeneration)$' ./internal/cache ./internal/evidence ./internal/assure ./internal/report
+go test -run '^$' -bench 'Benchmark(Checkpoint(IO|JournalAppend)|Digest|MutationAccounting|ReportGeneration)$' ./internal/cache ./internal/evidence ./internal/assure ./internal/report
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the `mise`-based workflow, pull

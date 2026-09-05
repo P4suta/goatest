@@ -24,10 +24,11 @@ const (
 )
 
 // Routing reasons explain why a mutant was given the execution plan it was
-// given. A mutant no test reaches is unreached; every other plan is derived
-// from the coverage of the targets that reach it.
+// given. A mutant no test reaches is unreached; an execution a positive probe
+// recovered is probe-reaching; every other plan is derived from coverage.
 const (
 	ReasonCoverageReaching = "coverage-reaching"
+	ReasonProbeReaching    = "probe-reaching"
 	ReasonUnreached        = "unreached"
 )
 
@@ -142,13 +143,14 @@ type MutantRecord struct {
 	Error      string   `json:"error,omitempty"`
 }
 
-// RouteRecord explains how a mutant was routed: the targets coverage says reach
-// it, the plan derived from them, and the reason that plan was chosen.
+// RouteRecord explains how a mutant was routed: the targets coverage or a
+// positive probe says reach it, the plan derived from them, and the reason that
+// plan was chosen.
 //
-// Granularity, Fallback, FileCandidates, Column and Probed describe how the
-// reaching set was narrowed. They are additive: a recording made before they
-// existed carries none of them, so every one of them is omitted when it is
-// empty.
+// Granularity, Fallback, FileCandidates, Column, ProbeReaching, SuiteCoverage,
+// SuiteReached, SuiteProbe and Probed describe how the reaching set was
+// decided. They are additive: a recording made before they existed carries
+// none of them, so every one of them is omitted when it is empty.
 //
 // Granularity is what marks a route as carrying that metadata at all. On a
 // route that names one, an absent FileCandidates is a count of zero — a file
@@ -171,6 +173,13 @@ type MutantRecord struct {
 // before the probe pass existed and on a mutant the engine has no probe form
 // for.
 //
+// ProbeReaching names the targets a positive infection measurement added even
+// though coverage did not route them. SuiteCoverage names the passing
+// whole-suite coverage control that decided the exact mutant position;
+// SuiteReached says its covered blocks contained that position. SuiteProbe
+// names the package-suite infection probe used to replace the conservative
+// package-suite fallback.
+//
 // Reused says the run resolved this mutant from evidence an earlier run
 // recorded instead of executing it. Nothing ran, so the recording carries no
 // execution of the mutant at all and the plan is the reuse itself: a reader
@@ -190,6 +199,10 @@ type RouteRecord struct {
 	Fallback        string      `json:"fallback,omitempty"`
 	FileCandidates  int         `json:"file_candidates,omitempty"`
 	Discharged      []Discharge `json:"discharged,omitempty"`
+	ProbeReaching   []string    `json:"probe_reaching,omitempty"`
+	SuiteCoverage   string      `json:"suite_coverage,omitempty"`
+	SuiteReached    bool        `json:"suite_reached,omitempty"`
+	SuiteProbe      string      `json:"suite_probe,omitempty"`
 	Probed          bool        `json:"probed,omitempty"`
 	Reused          bool        `json:"reused,omitempty"`
 }
@@ -203,12 +216,15 @@ type Discharge struct {
 	Reason string `json:"reason"`
 }
 
-// ProbeRecord describes one probe execution: which target ran against the
-// probe tree, how it ran, and which mutants it infected.
+// ProbeRecord describes one prepared probe-tree execution: which target,
+// package suite, or paired semantic-original control ran, how it ran, and —
+// for an infection probe — which mutants it infected.
 //
 // Target is the target ID, the same string a Discharge and the KilledBy of a
-// MutantRecord name. Outcome is one of the ProbeOutcome constants, and is
-// empty only on an execution carrying the Error that stopped it instead.
+// MutantRecord name. A package suite carries a synthetic package-suite: ID and
+// Suite true so it cannot be mistaken for one top-level target. Outcome is one
+// of the ProbeOutcome constants, and is empty only on an execution carrying
+// the Error that stopped it instead.
 //
 // Infected names the mutants whose site the target made differ from the
 // constant the mutant would put there, by their full mutant ID, each once and
@@ -217,12 +233,18 @@ type Discharge struct {
 // measured execution carries it, so a consumer reading any other outcome, or
 // an execution that errored, treats every mutant as infected by that target.
 //
+// Control marks a second use of the probe tree: an execution with no mutant
+// active between two mutant executions, used only to confirm that a kill
+// belongs to the mutant. Its infections are deliberately not routing facts.
+//
 // Args are the test flags the execution ran with. The record carries no
 // environment and no path into the probe tree: a probe execution is described
 // by the target that ran and the mutants it infected.
 type ProbeRecord struct {
 	Target     string   `json:"target"`
 	Package    string   `json:"package,omitempty"`
+	Suite      bool     `json:"suite,omitempty"`
+	Control    bool     `json:"control,omitempty"`
 	Args       []string `json:"args,omitempty"`
 	TimeoutMS  int64    `json:"timeout_ms,omitempty"`
 	Outcome    string   `json:"outcome,omitempty"`

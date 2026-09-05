@@ -173,27 +173,30 @@ func TestEvaluateTriesTheShortestMeasuredReachingTargetFirst(t *testing.T) {
 	}
 }
 
-func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
+func TestEvaluateBoundsEachMutationBySameRunControlDuration(t *testing.T) {
 	mutant := acceptedMutant()
 	for _, testCase := range []struct {
 		name     string
 		contract string
 		duration time.Duration
+		probe    time.Duration
 		limit    time.Duration
 		want     time.Duration
 	}{
-		{name: "minimum", contract: "standard-v1", duration: time.Second, want: 30 * time.Second},
-		{name: "configured-limit-above-calibration", contract: "standard-v1", duration: time.Second, limit: 10 * time.Minute, want: 30 * time.Second},
-		{name: "measured", contract: "standard-v1", duration: 12 * time.Second, want: 65 * time.Second},
-		{name: "standard-cap", contract: "standard-v1", duration: 10 * time.Minute, want: 30 * time.Minute},
-		{name: "deep-cap", contract: "deep-v1", duration: 2 * time.Hour, want: 5 * time.Hour},
+		{name: "small control", contract: "standard-v1", duration: time.Second, want: 2 * time.Second},
+		{name: "configured limit above budget", contract: "standard-v1", duration: time.Second, limit: 10 * time.Minute, want: 2 * time.Second},
+		{name: "measured", contract: "standard-v1", duration: 12 * time.Second, want: 24 * time.Second},
+		{name: "two disagreeing controls", contract: "standard-v1", duration: time.Second, probe: 3 * time.Second, want: 19 * time.Second},
+		{name: "standard below cap", contract: "standard-v1", duration: 10 * time.Minute, want: 20 * time.Minute},
+		{name: "deep below cap", contract: "deep-v1", duration: 2 * time.Hour, want: 4 * time.Hour},
 		{name: "configured-limit-below-calibration", contract: "standard-v1", duration: time.Hour, limit: 7 * time.Second, want: 7 * time.Second},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
 			session.On(mutant.ID).Return(gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled})
 			_, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
-				Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: testCase.duration,
+				Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"},
+				Duration: testCase.duration, ProbeDuration: testCase.probe,
 			}}, assure.MutationOptions{Root: t.TempDir(), Contract: testCase.contract, Timeout: testCase.limit})
 			if err != nil {
 				t.Fatal(err)

@@ -55,7 +55,7 @@ const goMutantsModulePath = "github.com/P4suta/go-mutants"
 // The pin is a pseudo-version of go-mutants' main branch: the branch proof
 // goatest routes by is only there, and the tagged releases sit on another
 // branch, which is why the pseudo-version reads as v0.0.0 while being ahead.
-const goMutantsFallbackVersion = "v0.0.0-20260903165727-64b2dbc5a1b7"
+const goMutantsFallbackVersion = "v0.0.0-20260905062555-c0533e78ca6c"
 
 // GoMutantsVersion resolves the go-mutants version linked into this binary
 // from its build info, honoring a replace directive because the replacement
@@ -421,6 +421,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			_ = closeWorkspace(workspace)
 			return report.Report{}, err
 		}
+		mutationJobs := mutationJobLimit(options, loaded)
 		var mutationSources targetKeySources
 		var repositoryObserver *RepositoryObserver
 		if mutationEvidenceGuarded(round, loaded, options) {
@@ -441,12 +442,25 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				repositoryObserver = newRepositoryObserver(metadata.model.ModuleDir, observationDirectory, candidates, mutationSources)
 			}
 		}
-		var controlMutex sync.Mutex
+		// Replay deliberately prepares no probe tree, so its original controls use
+		// this lazy second workspace. Once opened, read ownership lets independent
+		// paired controls overlap; go-mutants gives every Exec its own frozen tree
+		// and temporary environment. Full runs replace this callback below with
+		// their already-prepared semantic-original probe binaries. Close takes
+		// write ownership, so it waits for all controls already in flight and no
+		// execution can race the workspace teardown.
+		var controlMutex sync.RWMutex
+		var controlOpenOnce sync.Once
 		var controlWorkspace *mutationbridge.Workspace
+		var controlOpenErr error
+		var controlClosed bool
 		originalControl := func(controlContext context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			controlMutex.Lock()
-			defer controlMutex.Unlock()
-			if controlWorkspace == nil {
+			controlMutex.RLock()
+			defer controlMutex.RUnlock()
+			if controlClosed {
+				return gomutants.CommandResult{}, errors.New("goatest: original-control workspace is closed")
+			}
+			controlOpenOnce.Do(func() {
 				// The control workspace runs the project's tests, so it carries
 				// the cache program whose writes land in the run's scratch and
 				// is never wrapped: nothing it compiles is the machine's to
@@ -458,20 +472,27 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					Trace:           options.Trace, KeepTemp: options.KeepTemp,
 				})
 				if openErr != nil {
-					return gomutants.CommandResult{}, openErr
+					controlOpenErr = openErr
+					return
 				}
 				reportMutationSweep(options, opened.Swept())
 				controlWorkspace = opened
+			})
+			if controlOpenErr != nil {
+				return gomutants.CommandResult{}, controlOpenErr
 			}
 			return runOriginalMutationControl(controlContext, controlWorkspace, request, options.BuildTags, scratch)
 		}
 		closeControl := func() error {
 			controlMutex.Lock()
 			defer controlMutex.Unlock()
+			controlClosed = true
 			if controlWorkspace == nil {
 				return nil
 			}
-			return closeWorkspace(controlWorkspace)
+			err := closeWorkspace(controlWorkspace)
+			controlWorkspace = nil
+			return err
 		}
 		closeRound := func() error {
 			return errors.Join(closeControl(), manager.Close(), closeWorkspace(workspace))
@@ -488,10 +509,12 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			emit(options, "baseline-target", target.Name+":"+target.ID)
 		}
 		baseline, err := dependencies.collectBaseline(ctx, commands, metadata.model, baselineTargets, BaselineOptions{
-			ArtifactDirectory: artifactDirectory, Packages: slices.Clone(options.Packages),
-			BuildTags: slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
+			ArtifactDirectory: artifactDirectory, Contract: contract, PackageSuites: true,
+			SuiteEnvironment: slices.Clone(resourceEnv),
+			Packages:         slices.Clone(options.Packages),
+			BuildTags:        slices.Clone(options.BuildTags), TestArgs: slices.Clone(options.TestArgs), UseTest2JSON: true,
 			ClassifyUserFailures: true,
-			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout,
+			CommandTimeout:       options.CommandTimeout, TargetTimeout: options.TargetTimeout, Jobs: mutationJobs,
 			Resume: baselineResume, Checkpoint: checkpointController.saveBaseline,
 			RepositoryObserver: repositoryObserver,
 		})
@@ -615,7 +638,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			include = scopedMutationInclude(metadata.model)
 		}
 		verifyArgv := plannedVerifyArgv(options)
-		mutationJobs := mutationJobLimit(options, loaded)
 		emit(options, "mutation-jobs", strconv.Itoa(mutationJobs))
 		session, err := dependencies.prepareSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract:  contract,
@@ -642,6 +664,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		emit(options, "mutation-target", mutationDetail)
 
+		var suiteProbes map[string]PackageProbeEvidence
 		if options.ReplayMutantID == "" {
 			// The probe pass measures which mutants each target could observe
 			// at all, and routing discharges a measured target that never made
@@ -649,15 +672,19 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			// recorded, so the layer is held to the proofaudit infection layer
 			// on every dogfood recording rather than trusted.
 			phases.enter(phaseProbe)
-			probeCount := probeTargetCount(baseline.Targets)
-			probeDetail := fmt.Sprintf("%d targets", probeCount)
-			if probeCount == 1 {
-				probeDetail = "1 target"
-			}
+			probeTargets := probeTargetCount(baseline.Targets)
+			probeSuitePackages := neededProbeSuitePackages(
+				catalog, baseline.Targets, baseline.Instrumented, baseline.Suites,
+			)
+			probeSuites := len(probeSuitePackages)
+			probeDetail := countedNoun(probeTargets, "target", "targets") + ", " +
+				countedNoun(probeSuites, "package suite", "package suites")
 			emit(options, "probe-target", probeDetail)
 			probed, probeErr := dependencies.probeTargets(ctx, session, baseline.Targets, ProbeOptions{
 				Contract: contract, Timeout: options.CommandTimeout, TestArgs: slices.Clone(options.TestArgs),
 				Jobs: mutationJobs, Trace: options.Trace, Progress: probeProgress(options),
+				SuitePackages: probeSuitePackages, SuiteEnvironment: slices.Clone(resourceEnv),
+				RepositoryObserver: repositoryObserver,
 			})
 			if probeErr != nil {
 				_ = closeRound()
@@ -666,7 +693,22 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			// The only later reader of these targets is the mutation phase; the
 			// checkpoint keeps a form of its own, written while the baseline ran.
 			baseline.Targets = probed.Targets
-			emit(options, "probe-summary", fmt.Sprintf("%d measured, %d without facts", probed.Measured, probed.Unmeasured))
+			suiteProbes = probed.Suites
+			emit(options, "probe-summary",
+				countedNoun(probed.Measured, "target", "targets")+" measured, "+
+					fmt.Sprintf("%d without facts; ", probed.Unmeasured)+
+					countedNoun(probed.SuitesMeasured, "package suite", "package suites")+" measured, "+
+					fmt.Sprintf("%d without facts", probed.SuitesUnmeasured))
+		}
+		mutationOriginalControl := originalControl
+		if options.ReplayMutantID == "" {
+			// A full run already paid to compile the semantics-preserving probe
+			// tree. Reuse those prepared binaries for the original half of paired
+			// kill confirmation: no mutant is active, the exact package/flags/env
+			// are retained, and the deadline now measures test execution rather
+			// than a second workspace's cold compilation. Replay deliberately has
+			// no probe tree and keeps the lazy pristine-workspace fallback above.
+			mutationOriginalControl = preparedProbeMutationControl(session, options.Trace)
 		}
 
 		// The evidence of earlier runs is read once, here, where everything a
@@ -698,11 +740,14 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Jobs: mutationJobs, Accepted: accepted,
 			Progress: mutationProgress(options),
 			Resume:   mutationResume, Checkpoint: checkpointController.saveMutant,
-			OriginalControl:    originalControl,
+			OriginalControl:    mutationOriginalControl,
 			Trace:              options.Trace,
 			Instrumented:       baseline.Instrumented,
 			Evidence:           mutationEvidence,
 			RepositoryObserver: repositoryObserver,
+			SuiteProbes:        suiteProbes,
+			SuiteCoverage:      baseline.Suites,
+			SuiteEnvironment:   slices.Clone(resourceEnv),
 		})
 		if err != nil {
 			_ = closeRound()
@@ -833,6 +878,67 @@ func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace,
 	return workspace.Exec(ctx, gomutants.Command{
 		Argv: argv, Env: slices.Clone(request.Env), Timeout: request.Timeout, OutputLimit: 32 << 20,
 	})
+}
+
+const pairedControlProbePrefix = "paired-control:"
+
+// preparedProbeMutationControl runs the semantic original through binaries
+// the current run has already compiled. A probe tree never activates a mutant;
+// its logging is an incidental side effect here and none of its infection facts
+// are used. Recording the execution as a control probe keeps it out of the
+// routing proof while retaining a complete account of paired confirmation.
+func preparedProbeMutationControl(session MutationSession, recorder *trace.Recorder) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		probeRequest := gomutants.ProbeRequest{
+			Package: request.Package, Args: slices.Clone(request.Args),
+			Env: slices.Clone(request.Env), Timeout: request.Timeout,
+		}
+		record := trace.ProbeRecord{
+			Target: pairedControlProbeTarget(request.Package), Package: request.Package,
+			Args: slices.Clone(request.Args), TimeoutMS: traceMilliseconds(request.Timeout), Control: true,
+		}
+		result, err := session.Probe(ctx, probeRequest)
+		if err != nil {
+			record.Error = err.Error()
+			recorder.ProbeExec(record)
+			return gomutants.CommandResult{}, fmt.Errorf("goatest: prepared original control: %w", err)
+		}
+		record.ExitCode = result.ExitCode
+		record.DurationMS = traceMilliseconds(result.Duration)
+		switch {
+		case result.Duration < 0:
+			err = fmt.Errorf("goatest: prepared original control returned negative duration %s", result.Duration)
+		case result.Outcome == gomutants.ProbeMeasured:
+			if result.ExitCode != 0 {
+				err = fmt.Errorf("goatest: prepared original control returned measured with exit code %d", result.ExitCode)
+			}
+		case result.Outcome == gomutants.ProbeTestFailed || result.Outcome == gomutants.ProbeUnavailable:
+			if result.ExitCode == 0 {
+				err = fmt.Errorf("goatest: prepared original control returned %s with exit code 0", result.Outcome)
+			}
+		case result.Outcome == gomutants.ProbeTimedOut:
+		default:
+			err = fmt.Errorf("goatest: prepared original control returned unknown outcome %q", result.Outcome)
+		}
+		if err != nil {
+			record.Error = err.Error()
+			recorder.ProbeExec(record)
+			return gomutants.CommandResult{}, err
+		}
+		record.Outcome = string(result.Outcome)
+		recorder.ProbeExec(record)
+		return gomutants.CommandResult{
+			ExitCode: result.ExitCode, TimedOut: result.Outcome == gomutants.ProbeTimedOut,
+			Duration: result.Duration, Output: []byte(result.OutputTail),
+		}, nil
+	}
+}
+
+func pairedControlProbeTarget(pkg string) string {
+	if pkg == "" {
+		return pairedControlProbePrefix + "all"
+	}
+	return pairedControlProbePrefix + pkg
 }
 
 func hasTestArgument(arguments []string, name string) bool {
@@ -1315,6 +1421,13 @@ func mutationJobLimit(options Options, loaded config.Config) int {
 		return options.MutationJobs
 	}
 	return max(1, min(runtime.GOMAXPROCS(0), 4))
+}
+
+func countedNoun(count int, singular, plural string) string {
+	if count == 1 {
+		return "1 " + singular
+	}
+	return strconv.Itoa(count) + " " + plural
 }
 
 func mutationProgress(options Options) func(completed, total int) {

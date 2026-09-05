@@ -332,6 +332,7 @@ func cloneEvent(event Event) Event {
 		record.ReachingTargets = slices.Clone(record.ReachingTargets)
 		record.Plan = slices.Clone(record.Plan)
 		record.Discharged = slices.Clone(record.Discharged)
+		record.ProbeReaching = slices.Clone(record.ProbeReaching)
 		event.Route = &record
 	}
 	if event.Probe != nil {

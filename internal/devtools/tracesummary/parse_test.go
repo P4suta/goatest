@@ -468,6 +468,21 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "route probed", "granularity"},
 		},
 		{
+			name:   "probe-reaching route without recovered targets",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"probe-reaching","granularity":"block","probed":true}}`),
+			want:   []string{"line 2", "probe-reaching", "without naming probe_reaching"},
+		},
+		{
+			name:   "probe-reaching target absent from the reaching set",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"probe-reaching","granularity":"block","reaching_targets":["TestRun"],"probe_reaching":["TestHidden"],"probed":true}}`),
+			want:   []string{"line 2", `probe_reaching target "TestHidden"`, "absent"},
+		},
+		{
+			name:   "suite probe route without a probe form",
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","suite_probe":"package-suite:example.com/app"}}`),
+			want:   []string{"line 2", "suite_probe", "probed=false"},
+		},
+		{
 			name:   "probe without the target it ran",
 			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"exit_code":0}}`),
 			want:   []string{"line 2", `"probe.target"`},
@@ -481,6 +496,41 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			name:   "probe with an empty target",
 			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"","exit_code":0}}`),
 			want:   []string{"line 2", "probe.target"},
+		},
+		{
+			name:   "package-suite identity without a suite marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"package-suite:example.com/app","package":"example.com/app","exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "without suite=true"},
+		},
+		{
+			name:   "suite marker without a suite identity",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","package":"example.com/app","suite":true,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "suite probe target", "package-suite"},
+		},
+		{
+			name:   "suite identity names another package",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"package-suite:example.com/other","package":"example.com/app","suite":true,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "suite probe target", "exact package"},
+		},
+		{
+			name:   "paired control identity without its marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired-control identity", "control=true"},
+		},
+		{
+			name:   "paired control names another package",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/other","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired control target", "exact package"},
+		},
+		{
+			name:   "paired control carries infection facts",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured","infected":[]}}`),
+			want:   []string{"line 2", "paired control carries suite or infected"},
+		},
+		{
+			name:   "paired control carries a false suite marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"suite":false,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "paired control carries suite or infected"},
 		},
 		{
 			name:   "probe with a negative timeout",
@@ -646,6 +696,19 @@ func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
 				t.Fatalf("read (%d events, %v), want the run-start and the route", len(events), err)
 			}
 		})
+	}
+}
+
+func TestReadEventsAcceptsProbeRecoveredAndSuiteControlledRoutes(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		`{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"probe-reaching","granularity":"block","reaching_targets":["TestHidden"],"probe_reaching":["TestHidden"],"probed":true}}`,
+		`{"seq":3,"type":"route","timestamp":"2026-01-01T00:00:02Z","elapsed_ms":2,"route":{"path":"b.go","reason":"unreached","granularity":"block","suite_probe":"package-suite:example.com/app","probed":true}}`,
+		`{"seq":4,"type":"probe-exec","timestamp":"2026-01-01T00:00:03Z","elapsed_ms":3,"probe":{"target":"package-suite:example.com/app","package":"example.com/app","suite":true,"exit_code":0,"outcome":"measured"}}`,
+	}
+	events, err := readEvents(strings.NewReader(stream(append([]string{runStart}, lines...)...)))
+	if err != nil || len(events) != 4 {
+		t.Fatalf("read (%d events, %v), want the run-start and three probe records", len(events), err)
 	}
 }
 

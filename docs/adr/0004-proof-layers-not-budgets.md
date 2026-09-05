@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted, 2026-09-02. Implemented by the block routing of `internal/assure`
-(`routeMutant`, #18), the branch-never-taken discharge it performs with
+Accepted, 2026-09-02; its coverage-blind consequence was amended by
+[ADR 0008](0008-controls-before-timeouts.md) and
+[ADR 0010](0010-whole-suite-reach-before-fallback.md). Implemented by the block routing
+of `internal/assure` (`routeMutant`, #18), the branch-never-taken discharge it performs with
 go-mutants' branch proof (`dischargeNarrowedBranch`, #23), the `route` events
 of `internal/trace` that name what each layer decided (#18, #19), and the
 `internal/devtools/proofaudit` audit that holds every layer to recorded kills
@@ -76,11 +78,12 @@ known.
   catalog, and goatest gains a rule that consumes it, a trace vocabulary that
   shows it, documentation that states it, and an audit layer that checks it. A
   proof without all four is not finished.
-- The layers share one blind spot: they see the coverage a test left behind,
-  so a test that reaches or takes a branch only from a subprocess that wrote no
-  profile is invisible to every layer alike. The limitations document names it
-  once per layer, and the package suite that settles an unreached mutant is
-  the one execution the layers never remove.
+- Coverage still has a blind spot when a test reaches code only from a process
+  that wrote no profile. ADR 0008 recovers it when a positive probe records the
+  execution. ADR 0010 first asks an exact package-suite coverage control whether
+  the fallback reached the position at all, then uses an infection-suite proof
+  only where it can still answer; an unmeasured or unresolved execution remains
+  fail-closed as the limitations document states.
 - An audit needs a recording made with `--trace --keep-temp` and, for a layer
   that reads the catalog, the catalog of the same tree. Measurement runs are
   part of development here, and are run beside it rather than in its place.

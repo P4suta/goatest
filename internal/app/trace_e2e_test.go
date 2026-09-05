@@ -131,6 +131,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	// pass has something to measure and the test that runs both branches
 	// measures it.
 	var measured int
+	measuredProbes := make(map[string][]string)
 	for _, event := range traceOfType(events, trace.TypeProbeExec) {
 		if event.Probe.Target == "" {
 			t.Errorf("probe %+v names no target", event.Probe)
@@ -138,8 +139,9 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		if (event.Probe.Outcome == "") == (event.Probe.Error == "") {
 			t.Errorf("probe %+v reached neither an outcome nor an error, or both", event.Probe)
 		}
-		if event.Probe.Outcome == trace.ProbeOutcomeMeasured {
+		if !event.Probe.Control && event.Probe.Outcome == trace.ProbeOutcomeMeasured {
 			measured++
+			measuredProbes[event.Probe.Target] = event.Probe.Infected
 		}
 	}
 	if measured == 0 {
@@ -173,13 +175,14 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	routed := map[string]int{}
 	blockRouted := 0
 	for _, event := range traceOfType(events, trace.TypeRoute) {
-		if event.Route.Reason != trace.ReasonCoverageReaching && event.Route.Reason != trace.ReasonUnreached {
+		if event.Route.Reason != trace.ReasonCoverageReaching &&
+			event.Route.Reason != trace.ReasonProbeReaching && event.Route.Reason != trace.ReasonUnreached {
 			t.Errorf("route %+v has no reason", event.Route)
 		}
 		// A route has a plan unless a proof answered for every target that
 		// reached it: the package suite behind an empty plan would run the very
 		// tests the proof just ruled out.
-		if len(event.Route.Plan) == 0 && len(event.Route.Discharged) == 0 {
+		if !routeHasPlanOrProof(*event.Route, measuredProbes) {
 			t.Errorf("route %+v has no plan", event.Route)
 		}
 		if event.Route.Granularity != trace.GranularityBlock && event.Route.Granularity != trace.GranularityFile {
@@ -209,6 +212,72 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		}
 	}
 	assertInfectionDischargesAreSelfConsistent(t, result, events)
+}
+
+// routeHasPlanOrProof answers whether one route either schedules an execution
+// or names evidence that settles every execution it removed. Positive suite
+// evidence always wins: a suite that reached or infected the mutant still has
+// to be in the plan even if another observation was silent.
+func routeHasPlanOrProof(record trace.RouteRecord, measuredProbes map[string][]string) bool {
+	if len(record.Plan) != 0 {
+		return true
+	}
+	settled := record.SuiteCoverage != "" && !record.SuiteReached
+	requiresPlan := record.SuiteCoverage != "" && record.SuiteReached
+	if record.SuiteProbe != "" {
+		infected, measured := measuredProbes[record.SuiteProbe]
+		if measured && slices.Contains(infected, record.MutantID) {
+			requiresPlan = true
+		} else if measured {
+			settled = true
+		}
+	}
+	if requiresPlan {
+		return false
+	}
+	return len(record.Discharged) != 0 || settled
+}
+
+func TestRouteHasPlanOrProofRequiresExecutionForPositiveSuiteEvidence(t *testing.T) {
+	t.Parallel()
+	mutant := "mutant-a"
+	probe := "package-suite:example.com/app"
+	measured := map[string][]string{probe: {"mutant-b"}}
+	tests := []struct {
+		name   string
+		route  trace.RouteRecord
+		probes map[string][]string
+		want   bool
+	}{
+		{name: "an explicit plan", route: trace.RouteRecord{Plan: []string{"package-suite"}}, want: true},
+		{name: "an explicit discharge", route: trace.RouteRecord{Discharged: []trace.Discharge{{Target: "target-a"}}}, want: true},
+		{name: "no disposition", route: trace.RouteRecord{MutantID: mutant}},
+		{name: "unreached suite coverage", route: trace.RouteRecord{MutantID: mutant, SuiteCoverage: "coverage"}, want: true},
+		{name: "reached suite coverage", route: trace.RouteRecord{MutantID: mutant, SuiteCoverage: "coverage", SuiteReached: true}},
+		{name: "non-infecting suite probe", route: trace.RouteRecord{MutantID: mutant, SuiteProbe: probe}, probes: measured, want: true},
+		{name: "missing suite probe", route: trace.RouteRecord{MutantID: mutant, SuiteProbe: probe}},
+		{name: "infecting suite probe", route: trace.RouteRecord{MutantID: mutant, SuiteProbe: probe}, probes: map[string][]string{probe: {mutant}}},
+		{
+			name:   "positive infection overrides silent coverage",
+			route:  trace.RouteRecord{MutantID: mutant, SuiteCoverage: "coverage", SuiteProbe: probe},
+			probes: map[string][]string{probe: {mutant}},
+		},
+		{
+			name: "positive suite evidence overrides target discharges",
+			route: trace.RouteRecord{
+				MutantID: mutant, SuiteCoverage: "coverage", SuiteReached: true,
+				Discharged: []trace.Discharge{{Target: "target-a"}},
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := routeHasPlanOrProof(testCase.route, testCase.probes); got != testCase.want {
+				t.Fatalf("routeHasPlanOrProof(%+v) = %t, want %t", testCase.route, got, testCase.want)
+			}
+		})
+	}
 }
 
 // assertInfectionDischargesAreSelfConsistent holds every never-infected

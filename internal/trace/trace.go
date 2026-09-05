@@ -110,8 +110,9 @@ func (recorder *Recorder) Route(record RouteRecord) {
 	recorder.emit(Event{Type: TypeRoute, Route: &record})
 }
 
-// ProbeExec records one probe execution of a test target: how it ran, what
-// became of it, and the mutants that target infected.
+// ProbeExec records one infection probe or paired semantic-original control:
+// how it ran, what became of it, and, for a routing probe, the mutants it
+// infected.
 func (recorder *Recorder) ProbeExec(record ProbeRecord) {
 	if recorder == nil {
 		return

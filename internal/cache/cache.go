@@ -27,6 +27,7 @@ type Store struct {
 }
 
 var cacheOperationMutex sync.RWMutex
+var checkpointBaseDigests = make(map[string]string)
 
 type cacheWritableFile interface {
 	Name() string

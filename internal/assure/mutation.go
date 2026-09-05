@@ -34,6 +34,7 @@ const (
 	deepFuzzExecutions              = 100_000
 	minimumMutationTimeout          = 30 * time.Second
 	mutationTimeoutOverhead         = 5 * time.Second
+	mutationTimeoutSpreadMultiplier = 8
 	standardMutationTimeoutLimit    = 30 * time.Minute
 	deepMutationTimeoutLimit        = 5 * time.Hour
 	mutationTimeoutMultiplier       = 5
@@ -86,8 +87,12 @@ const (
 // runs report the same verdict differently.
 const (
 	mutationUnreachedSummary          = "no measured top-level target reached this mutation; its package suite survived"
+	mutationSuiteUnreachedSummary     = "the measured package suite never reached this mutation"
+	mutationSuiteUninfectedSummary    = "no measured top-level target reached this mutation; its measured package suite never made the mutated value differ"
 	mutationSuiteTimeoutSummary       = "package suite timed out while confirming an unreached mutation"
 	mutationSuiteInconclusiveSummary  = "package suite could not establish an outcome for an unreached mutation"
+	mutationSuiteControlTimeout       = "the original package suite timed out before the mutation could be evaluated"
+	mutationSuiteControlFailure       = "the original package suite failed before the mutation could be evaluated"
 	mutationTargetTimeoutSummary      = "target timed out while this mutation was active"
 	mutationTargetInconclusiveSummary = "target could not establish a deterministic mutation outcome"
 )
@@ -124,6 +129,11 @@ type TargetEvidence struct {
 	Covered      []goanalysis.FileCoverage
 	Environment  []string
 	Duration     time.Duration
+	// ProbeDuration is a second, same-run control sample for this target. The
+	// mutation phase uses the slower of baseline and probe as the centre of a
+	// relative stall budget instead of making every mutant wait out one fixed
+	// timeout. It is in-memory evidence only, like Infected below.
+	ProbeDuration time.Duration
 	// WholeTree reports that the baseline or mutant execution consulted the
 	// frozen repository beyond the target's ordinary closure inputs, or that
 	// observation of a static reader candidate was not trustworthy. It selects
@@ -158,8 +168,8 @@ type MutationOptions struct {
 	ReplayMutantID string
 	TestArgs       []string
 	FuzzExecutions int
-	// Timeout bounds each calibrated mutation command. Zero leaves the
-	// contract's own ceiling in effect.
+	// Timeout is the hard ceiling for each control-relative mutation command.
+	// Zero leaves the contract's own ceiling in effect.
 	Timeout  time.Duration
 	Jobs     int
 	Accepted map[string]bool
@@ -186,6 +196,18 @@ type MutationOptions struct {
 	// full run. It adds no user-facing execution option and fails closed to a
 	// whole-tree key whenever it cannot observe a candidate.
 	RepositoryObserver *RepositoryObserver
+	// SuiteProbes are same-run measurements of each package suite on the
+	// semantics-preserving probe tree. They recover executions coverage could
+	// not see and prove when the suite cannot observe a probed mutant at all.
+	SuiteProbes map[string]PackageProbeEvidence
+	// SuiteCoverage is the passing whole-suite baseline control for each
+	// package. Exact absence from its covered blocks proves that the fallback
+	// suite never executes a mutant, including one with no probe form.
+	SuiteCoverage map[string]PackageSuiteCoverage
+	// SuiteEnvironment is the merged resource environment used by every
+	// whole-package control and mutant request. Target requests retain their
+	// target-specific overlays.
+	SuiteEnvironment []string
 }
 
 type MutationEvaluation struct {
@@ -614,6 +636,8 @@ func evaluateMutationSeeds(ctx context.Context, session MutationSession, mutants
 
 func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant gomutants.Mutant, targets []TargetEvidence, options MutationOptions) mutationSeed {
 	route := routeMutant(mutant, targets, options.Instrumented)
+	route = applySuiteCoverageRouting(mutant, route, options.SuiteCoverage)
+	route = applyProbeRouting(mutant, targets, route, options.SuiteProbes)
 	seed := mutationSeed{mutant: mutant, reaching: route.reaching, discharged: route.discharged}
 	if killer, provenance, reused := options.Evidence.reuseKill(mutant, route); reused {
 		// An earlier run watched this target kill this mutant, and every
@@ -622,6 +646,32 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		options.Trace.Route(reusedMutationRoute(mutant, route))
 		seed.evaluation.addKill(mutant, mutationKillDetail(killer.Target.Name, options))
 		seed.evaluation.Provenance = provenance
+		seed.resolved = true
+		return seed
+	}
+	if len(seed.reaching) == 0 && len(route.discharged) == 0 && route.suiteCoverage != "" && !route.suiteReached {
+		// This is the exact fallback package suite, observed with coverage on
+		// the original program. Its instrumented blocks describe the mutant's
+		// position and none of its covered blocks contains it, so activating
+		// the mutant cannot affect this execution. Unlike an infection proof,
+		// this applies to every mutation operator, including unprobed ones.
+		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
+		seed.evaluation.addFinding(mutant, "unreached-mutant", mutationSuiteUnreachedSummary, options.Accepted)
+		options.Evidence.recordUnreached(mutant, route.suiteWholeTree,
+			"unreached-mutant", mutationSuiteUnreachedSummary)
+		seed.resolved = true
+		return seed
+	}
+	if len(seed.reaching) == 0 && len(route.discharged) == 0 && route.suiteProbe != "" && !route.suiteInfected {
+		// This is the exact package-suite execution the old conservative route
+		// would have run, measured on the semantics-preserving probe tree. The
+		// mutant's probe never differed anywhere in it, so activating the mutant
+		// cannot change that execution and running it again would only repeat the
+		// already known surviving outcome.
+		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
+		seed.evaluation.addFinding(mutant, "unreached-mutant", mutationSuiteUninfectedSummary, options.Accepted)
+		options.Evidence.recordUnreached(mutant, route.suiteWholeTree,
+			"unreached-mutant", mutationSuiteUninfectedSummary)
 		seed.resolved = true
 		return seed
 	}
@@ -651,7 +701,37 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		options.Trace.Route(mutationSeedRoute(mutant, route, nil))
 		request := gomutants.ExecRequest{
 			Mutant: mutant.ID, Package: mutant.Package, Args: slices.Clone(options.TestArgs),
-			Timeout: calibratedMutationTimeout(options.Contract, 0, options.Timeout),
+			Env:     slices.Clone(options.SuiteEnvironment),
+			Timeout: controlRelativeMutationTimeout(options.Contract, options.Timeout, route.suiteDuration),
+		}
+		if options.OriginalControl != nil {
+			// No isolated baseline target speaks for this execution. Run the
+			// exact unmutated package command first, once per package/argument/
+			// environment key through memoizedOriginalControl. A control that
+			// does not pass cannot distinguish a mutant failure from the suite's
+			// own failure, so every waiting mutant is settled as inconclusive
+			// without repeating the same doomed package execution. A passing
+			// control supplies the closest duration sample for the watchdog and
+			// is reused if this mutant later needs paired kill confirmation.
+			control, controlErr := options.OriginalControl(ctx, request)
+			if controlErr != nil {
+				seed.err = fmt.Errorf("goatest: original package-suite control for mutant %s: %w", mutant.DisplayID, controlErr)
+				return seed
+			}
+			if control.TimedOut || control.ExitCode != 0 {
+				kind, summary := "mutation-control-failure", mutationSuiteControlFailure
+				if control.TimedOut {
+					kind, summary = "mutation-control-timeout", mutationSuiteControlTimeout
+				} else if output := summarize(control.Output); output != "no output" {
+					summary += ": " + output
+				}
+				seed.evaluation.addFinding(mutant, kind, summary, options.Accepted)
+				seed.resolved = true
+				return seed
+			}
+			request.Timeout = controlRelativeMutationTimeout(
+				options.Contract, options.Timeout, route.suiteDuration, control.Duration,
+			)
 		}
 		result, observation, err := executeMutation(ctx, session, request, options)
 		if err != nil {
@@ -939,7 +1019,8 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 	individual := min(len(targets), individualMutationTargetLimit)
 	executions := make([]mutationSeedExecution, 0, individual+len(targets[individual:]))
 	for _, target := range targets[:individual] {
-		request := seedRequest(mutant, target, calibratedMutationTimeout(options.Contract, target.Duration, options.Timeout))
+		request := seedRequest(mutant, target, controlRelativeMutationTimeout(
+			options.Contract, options.Timeout, target.Duration, target.ProbeDuration))
 		request.Args = append(request.Args, options.TestArgs...)
 		executions = append(executions, mutationSeedExecution{
 			request: request,
@@ -949,8 +1030,9 @@ func mutationSeedExecutions(mutant gomutants.Mutant, targets []TargetEvidence, o
 		})
 	}
 	for _, batch := range mutationTargetBatches(targets[individual:]) {
-		duration := batchMutationDuration(batch)
-		request := batchSeedRequest(mutant, batch, calibratedMutationTimeout(options.Contract, duration, options.Timeout))
+		baseline, probe := batchMutationControlDurations(batch)
+		request := batchSeedRequest(mutant, batch, controlRelativeMutationTimeout(
+			options.Contract, options.Timeout, baseline, probe))
 		request.Args = append(request.Args, options.TestArgs...)
 		executions = append(executions, mutationSeedExecution{
 			request: request,
@@ -991,6 +1073,20 @@ func batchMutationDuration(targets []TargetEvidence) time.Duration {
 		total = min(total+duration, deepMutationTimeoutLimit)
 	}
 	return total
+}
+
+func batchMutationControlDurations(targets []TargetEvidence) (time.Duration, time.Duration) {
+	var baseline, probe time.Duration
+	for _, target := range targets {
+		baseline = boundedDurationSum(baseline, target.Duration)
+		probe = boundedDurationSum(probe, target.ProbeDuration)
+	}
+	return baseline, probe
+}
+
+func boundedDurationSum(total, duration time.Duration) time.Duration {
+	duration = min(max(duration, 0), deepMutationTimeoutLimit)
+	return min(total+duration, deepMutationTimeoutLimit)
 }
 
 func batchMutationDetail(targets []TargetEvidence) string {
@@ -1035,10 +1131,16 @@ func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions 
 		Line: max(mutant.Line, 0), Column: max(mutant.Column, 0),
 		Reason:      trace.ReasonCoverageReaching,
 		Granularity: route.granularity, Fallback: route.fallback, FileCandidates: route.fileCandidates,
-		Discharged: route.discharged, Probed: mutant.Probed,
+		Discharged: route.discharged, ProbeReaching: slices.Clone(route.probeReaching),
+		SuiteCoverage: route.suiteCoverage, SuiteReached: route.suiteReached,
+		SuiteProbe: route.suiteProbe, Probed: mutant.Probed,
 	}
 	if len(route.reaching) == 0 && len(route.discharged) == 0 {
-		record.Plan, record.Reason = []string{mutationPlanPackageSuite}, trace.ReasonUnreached
+		if (route.suiteCoverage == "" || route.suiteReached) &&
+			(route.suiteProbe == "" || route.suiteInfected) {
+			record.Plan = []string{mutationPlanPackageSuite}
+		}
+		record.Reason = trace.ReasonUnreached
 		return record
 	}
 	if len(route.reaching) == 0 {
@@ -1047,6 +1149,9 @@ func mutationSeedRoute(mutant gomutants.Mutant, route mutationRoute, executions 
 	record.ReachingTargets = make([]string, len(route.reaching))
 	for index, target := range route.reaching {
 		record.ReachingTargets[index] = target.Target.ID
+	}
+	if len(route.probeReaching) != 0 {
+		record.Reason = trace.ReasonProbeReaching
 	}
 	record.Plan = make([]string, 0, len(executions)+len(route.reaching))
 	for _, execution := range executions {
@@ -1099,9 +1204,136 @@ func (evaluation *MutationEvaluation) append(other MutationEvaluation) {
 type mutationRoute struct {
 	reaching       []TargetEvidence
 	discharged     []trace.Discharge
+	probeReaching  []string
+	suiteCoverage  string
+	suiteReached   bool
+	suiteProbe     string
+	suiteInfected  bool
+	suiteDuration  time.Duration
+	suiteWholeTree bool
 	granularity    string
 	fallback       string
 	fileCandidates int
+}
+
+// applySuiteCoverageRouting attaches the one original-program control that
+// matches the conservative package-suite fallback. A passing control always
+// calibrates that fallback. It decides reachability only when cmd/cover
+// instrumented the exact mutant position: a covered block means the suite
+// reached it, while an instrumented but uncovered block proves it did not.
+// Unknown positions and gaps between blocks remain undecided.
+func applySuiteCoverageRouting(mutant gomutants.Mutant, route mutationRoute, suites map[string]PackageSuiteCoverage) mutationRoute {
+	if len(route.reaching) != 0 || len(route.discharged) != 0 {
+		return route
+	}
+	suite, measured := suites[mutant.Package]
+	if !measured {
+		return route
+	}
+	route.suiteDuration = suite.Duration
+	if mutant.Line <= 0 || mutant.Column <= 0 {
+		return route
+	}
+	path := filepath.ToSlash(mutant.Path)
+	instrumented, _ := goanalysis.FindFileCoverage(suite.Instrumented, path)
+	if !instrumented.Contains(mutant.Line, mutant.Column) {
+		return route
+	}
+	covered, _ := goanalysis.FindFileCoverage(suite.Covered, path)
+	route.suiteCoverage = packageSuiteCoverageTarget(mutant.Package)
+	route.suiteReached = covered.Contains(mutant.Line, mutant.Column)
+	route.suiteWholeTree = suite.WholeTree
+	return route
+}
+
+// neededProbeSuitePackages returns only the package suites whose infection
+// measurement can still replace a conservative fallback. Target probes are
+// always measured separately. A mutant that already has reaching or
+// discharged targets needs no suite fallback, an unprobed mutant cannot be
+// answered by infection facts, and exact suite coverage that did not reach the
+// position has already supplied the stronger operator-independent proof.
+func neededProbeSuitePackages(catalog gomutants.Catalog, targets []TargetEvidence, instrumented []goanalysis.FileCoverage, suites map[string]PackageSuiteCoverage) []string {
+	needed := make(map[string]bool)
+	for _, mutant := range catalog.Mutants {
+		if !mutant.Accepted || !mutant.Probed || mutant.Package == "" {
+			continue
+		}
+		route := routeMutant(mutant, targets, instrumented)
+		if len(route.reaching) != 0 || len(route.discharged) != 0 {
+			continue
+		}
+		route = applySuiteCoverageRouting(mutant, route, suites)
+		if route.suiteCoverage != "" && !route.suiteReached {
+			continue
+		}
+		needed[mutant.Package] = true
+	}
+	packages := make([]string, 0, len(needed))
+	for pkg := range needed {
+		packages = append(packages, pkg)
+	}
+	slices.Sort(packages)
+	return packages
+}
+
+// applyProbeRouting adds only positive reachability facts, then attaches the
+// package-suite control that can replace the conservative fallback. Coverage
+// remains the ordinary route: a probe is allowed to widen it when an execution
+// actually infected the mutant, never to narrow it merely because a target was
+// absent from coverage.
+func applyProbeRouting(mutant gomutants.Mutant, targets []TargetEvidence, route mutationRoute, suites map[string]PackageProbeEvidence) mutationRoute {
+	coverageEmpty := len(route.reaching) == 0 && len(route.discharged) == 0
+	if coverageEmpty && mutant.Probed {
+		if suite, measured := suites[mutant.Package]; measured && suite.Measured {
+			route.suiteProbe = packageSuiteProbeTarget(mutant.Package)
+			route.suiteInfected = packageProbeInfects(suite, mutant.Index)
+			if route.suiteDuration == 0 {
+				route.suiteDuration = suite.Duration
+			}
+			route.suiteWholeTree = suite.WholeTree
+		}
+	}
+	if route.suiteCoverage != "" && !route.suiteReached && route.suiteInfected {
+		// Two same-run controls disagree about whether the site executed. The
+		// positive infection is a concrete counterexample to treating coverage
+		// silence as absence, so the suite runs and neither narrowing is used.
+		route.suiteCoverage = ""
+	}
+
+	// When a measured fallback suite positively reached or infected the site,
+	// it is the one compact execution that preserves every cross-test
+	// interaction, so it remains the route. Otherwise positive per-target facts
+	// recover executions coverage could not see (including target-specific
+	// environments). An unavailable suite measurement is no reason to suppress
+	// those positive facts: absence of a control is not a negative fact.
+	checkPositiveCounterexample := route.suiteCoverage != "" && !route.suiteReached
+	suitePositivelyReached := route.suiteProbe == "" && route.suiteCoverage != "" && route.suiteReached
+	if coverageEmpty && !checkPositiveCounterexample && (suitePositivelyReached || route.suiteInfected) {
+		return route
+	}
+	known := make(map[string]bool, len(route.reaching)+len(route.discharged))
+	for _, target := range route.reaching {
+		known[target.Target.ID] = true
+	}
+	for _, discharge := range route.discharged {
+		known[discharge.Target] = true
+	}
+	for _, target := range targets {
+		if known[target.Target.ID] || !mutant.Probed || !target.Probed || !target.infects(mutant.Index) {
+			continue
+		}
+		route.reaching = append(route.reaching, target)
+		route.probeReaching = append(route.probeReaching, target.Target.ID)
+		known[target.Target.ID] = true
+	}
+	if len(route.probeReaching) != 0 {
+		route.reaching = orderReachingTargets(route.reaching)
+	}
+	return route
+}
+
+func packageProbeInfects(evidence PackageProbeEvidence, index uint32) bool {
+	return slices.Contains(evidence.Infected, index)
 }
 
 // routeMutant chooses the targets that must run one mutant.
@@ -1390,6 +1622,42 @@ func calibratedMutationTimeout(contract string, baseline, limit time.Duration) t
 	boundedBaseline := min(max(baseline, 0), maximum)
 	timeout := boundedBaseline*mutationTimeoutMultiplier + mutationTimeoutOverhead
 	timeout = min(max(timeout, minimumMutationTimeout), maximum)
+	if limit > 0 {
+		timeout = min(timeout, limit)
+	}
+	return timeout
+}
+
+// controlRelativeMutationTimeout turns same-run control durations into a
+// comparative deadline. The slowest sample gets one more copy of itself as ordinary
+// headroom, while disagreement between samples gets eight copies so transient
+// machine load widens rather than invalidates the comparison. One second pays
+// for process scheduling when the test itself is tiny. The contract and an
+// explicit command timeout remain hard safety ceilings, not the routine wait.
+//
+// With no control fact there is nothing to compare against, so the legacy
+// conservative calibration is retained as a fail-closed fallback.
+func controlRelativeMutationTimeout(contract string, limit time.Duration, samples ...time.Duration) time.Duration {
+	maximum := standardMutationTimeoutLimit
+	if contract == "deep-v1" {
+		maximum = deepMutationTimeoutLimit
+	}
+	var fastest, slowest time.Duration
+	for _, sample := range samples {
+		sample = min(max(sample, 0), maximum)
+		if sample == 0 {
+			continue
+		}
+		if fastest == 0 || sample < fastest {
+			fastest = sample
+		}
+		slowest = max(slowest, sample)
+	}
+	if slowest == 0 {
+		return calibratedMutationTimeout(contract, 0, limit)
+	}
+	margin := max(time.Second, slowest, mutationTimeoutSpreadMultiplier*(slowest-fastest))
+	timeout := min(slowest+margin, maximum)
 	if limit > 0 {
 		timeout = min(timeout, limit)
 	}

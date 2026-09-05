@@ -50,10 +50,12 @@ executed the file, which is what routing did before blocks were read. A target
 restored from a checkpoint carries no blocks and keeps reaching its whole file.
 
 A position that instrumentation describes and no measured target executed
-reaches nothing, and the package suite establishes its disposition, exactly as
-for a mutant in a file no target covers. Such a mutant is `unreached`, not
-`surviving`; both are `survived` in the mutant inventory, so the accounting
-equations below are unaffected by how a mutant was routed.
+initially reaches nothing, exactly as for a mutant in a file no target covers.
+The positive probe and package-suite control below then decide whether a hidden
+target is recovered, the suite is already proved unchanged, or the suite must
+run with the mutant. Such a mutant is `unreached` unless a target is recovered;
+both an unreached and an ordinary surviving mutant are `survived` in the mutant
+inventory, so the accounting equations below are unaffected by that route.
 
 ### Discharging a test a branch proof rules out
 
@@ -91,12 +93,13 @@ of reading a coverage profile.
 ### Discharging a test the probe pass shows cannot observe the mutation
 
 A reaching set decided by block is narrowed a second time by what the probe pass
-measured. Write reaching for the routing decision as a whole:
+measured. Write coverage-reaching for the block decision after both discharge
+proofs:
 
 ```text
-reaching(m, t) = covered-block(m, t)
-               ∧ ¬branch-discharged(m, t)
-               ∧ ¬(probed(m) ∧ measured(t) ∧ m ∉ infected(t))
+coverage-reaching(m, t) = covered-block(m, t)
+                        ∧ ¬branch-discharged(m, t)
+                        ∧ ¬(probed(m) ∧ measured(t) ∧ m ∉ infected(t))
 ```
 
 The probe tree is the program the user wrote, with no mutant ever active. For
@@ -139,14 +142,77 @@ each of them. A mutant every reaching target was discharged for is resolved
 without a single execution and reported as a `surviving-mutant`, whichever proof
 or pair of proofs answered.
 
-Both narrowings share the reach layer's one blind spot: each rests on one
-measured execution per target. A target whose behaviour differs between runs may
-enter a body, or make a site differ, in the run that would kill the mutant and
-not in the one that was measured. That is the same evidence coverage-based
-routing has always rested on, and it is recorded in
-[limitations](limitations.md).
+### Recovering reach and proving the package-suite fallback
 
-All three narrowings are proof layers in the sense of
+Probe absence narrows only a block route whose coverage already named the
+target. Probe presence is different: a measured target that positively names a
+probed mutant demonstrably executed its site, so it is added to the reaching
+set even when coverage did not name it. The route records that widening as
+`probe-reaching` and names the added targets separately. A target already
+discharged by the branch proof is not re-added: that proof establishes equal
+behaviour even when the condition itself computes a value the probe can see.
+
+Before mutation preparation, goatest measures one coverage run of the exact
+package suite used by the conservative fallback. It uses the same package and
+test-binary arguments, and the union of every acquired resource environment;
+a package suite may run targets with different resource declarations, so one
+target's overlay is not an exact package command. For any mutation operator:
+
+```text
+passing(suite(m))
+∧ instrumented(suite(m), position(m))
+∧ ¬covered(suite(m), position(m))
+    ⇒ execute(mutant(m), suite(m)) cannot observe m
+```
+
+The implication is used only for the exact start position inside a block the
+coverage toolchain says it instrumented. An unknown position, a gap between
+instrumented blocks, a failed or timed-out suite, and a missing profile are not
+negative facts. They retain the package fallback. A positive target infection
+is a concrete counterexample to coverage silence and recovers that target; a
+positive suite infection likewise clears a conflicting negative coverage
+decision. The route names the coverage control as `suite_coverage` and carries
+`suite_reached` only when the measured suite covered the position.
+
+Only packages that still contain an unresolved probed mutant receive the
+second, semantics-preserving suite infection control. It is the same package,
+arguments, and merged environment as the fallback, on a tree where no mutant
+is active. For a probed mutant `m`:
+
+```text
+measured(probe-suite(m)) ∧ m ∉ infected(probe-suite(m))
+    ⇒ execute(mutant(m), suite(m)) would survive
+```
+
+Every value the mutant could replace was equal to its replacement throughout
+that execution, so activating it cannot change the suite. goatest records the
+unreached finding and starts no mutant process. If the suite reached or infected
+the mutant, goatest runs that whole suite: it is the compact execution that
+retains `TestMain`, package setup, ordering, and cross-test interactions. If
+neither proof is available, silence proves nothing and the suite remains.
+
+Immediately before any remaining mutant package-suite command, goatest runs
+the semantic original from the already-compiled probe tree with no mutant
+active and memoizes its result by package, arguments, and merged environment.
+A failed or timed-out original cannot distinguish a mutant failure from the
+suite's own state, so all mutants sharing it become inconclusive without
+repeating the command. A passing original supplies the closest duration control
+and also serves paired kill confirmation. The deadline covers test execution,
+not a second workspace's cold compilation. Mutant replay deliberately skips
+probe preparation and retains a lazy pristine-workspace fallback.
+
+These reach statements rest on one measured execution. A target or suite whose
+behaviour differs between runs may enter a block, or make a site differ, in the
+run that would kill the mutant and not in the one that was measured. Coverage
+instrumentation and subprocess execution have their ordinary observational
+limits as well. Positive infection overrides negative coverage, and every
+unknown case falls through to the prepared semantic-original preflight and
+mutant suite.
+The full boundary is recorded in [limitations](limitations.md), and the
+negative suite-coverage rule and its independent audit are specified by
+[ADR 0010](adr/0010-whole-suite-reach-before-fallback.md).
+
+These narrowings are proof layers in the sense of
 [ADR 0004](adr/0004-proof-layers-not-budgets.md): an execution is removed only
 where evidence the run already holds proves it could not observe the mutant,
 never by a time budget, a sample, or an exclusion of slow targets, and a layer
@@ -238,14 +304,16 @@ verdict on the next run without running anything.
 
 #### A mutant no target reaches
 
-Such a mutant is settled by running the package suite, so the verdict is a
-statement about that suite. Its key is the conjunction of every target of the
-package — all kinds, fuzz targets included, because the suite runs them as
-ordinary unit tests — each with its own behaviour key, and of what the
-package-level run itself reads. A recorded verdict is reused when the suite
-still has that key and nothing has come to reach the mutant; a package this run
-could not measure whole, because a target of it was restored from a checkpoint
-or did not pass, names no key at all and neither records nor reuses anything.
+Such a mutant is settled by the package suite, either by executing it with the
+mutant or by its same-run probe proving that activation cannot change it. The
+verdict is therefore a statement about that suite. Its key is the conjunction
+of every target of the package — all kinds, fuzz targets included, because the
+suite runs them as ordinary unit tests — each with its own behaviour key, and
+of what the package-level run itself reads. A recorded verdict is reused when
+the suite still has that key and nothing has come to reach the mutant; a
+package this run could not measure whole, because a target of it was restored
+from a checkpoint or did not pass, names no key at all and neither records nor
+reuses anything.
 
 #### A timeout
 
@@ -253,15 +321,40 @@ A timeout is not a proof about the mutant: it says the run could not settle it.
 Reusing one therefore keeps a finding and never removes one, which is the only
 direction in which a question nobody answered may be carried forward.
 
-Each mutation command, and the probe command that measures the same target,
-gets five times its measured baseline duration plus five seconds, with a
-30-second floor. That floor is applied before `[execution].timeout`: a positive
-configured ceiling shorter than 30 seconds, such as seven seconds, remains the
-effective limit. The contract otherwise caps calibration at 30 minutes for
-`standard-v1` and five hours for `deep-v1`; the configured timeout is a further
-upper bound, not a switch that disables calibration. An expired budget remains
-inconclusive under every bound, so a shorter calibrated command can reduce
-waiting without manufacturing a kill or a survival.
+An ordinary mutation command is bounded relative to controls from the same
+run, not by one fixed routine timeout. A target mutation uses its passing
+baseline and measured probe durations. A package-suite mutation uses its
+passing whole-suite coverage control and, when available, the suite probe; the
+prepared semantic-original preflight immediately before the mutant is another
+sample.
+Let `slow` and `fast` be the slowest and fastest positive control samples
+available for that request:
+
+```text
+margin = max(1 second, slow, 8 × (slow - fast))
+comparative deadline = slow + margin
+```
+
+The extra copy of `slow` admits ordinary slowdown, the spread term admits the
+load variation the controls actually observed, and one second covers process
+scheduling for tiny tests. The probe that obtains a first control uses the same
+rule from the passing baseline; the first whole-suite controls use the sum of
+that package's passing target durations. If no positive control exists, goatest
+fails closed to the legacy five-times-baseline-plus-five-seconds calibration
+with a 30-second floor. On an ordinary package-suite route that legacy wait can
+occur at most once, in the memoized prepared original preflight; a failure or
+expiration settles every dependent mutant as inconclusive without running them.
+Fuzz campaigns retain that legacy bound because the duration of their seed
+corpus does not predict a fixed 10,000- or 100,000-input campaign.
+
+The contract caps every derived deadline at 30 minutes for `standard-v1` and
+five hours for `deep-v1`; `[execution].timeout` is a further hard cancellation
+ceiling, not the normal amount of time each mutant waits. No finite verifier
+can distinguish every slow computation from nontermination, so removing an
+absolute cancellation boundary would permit a mutant to hang the run forever.
+The contract instead removes fixed time from ordinary classification: a
+deadline is comparative evidence for when to stop waiting, and its expiration
+is always inconclusive. It never manufactures a kill or a survival.
 
 Its condition is existential, not universal, because a timeout is one
 observation about one target: this target did not finish in the time it was
@@ -290,8 +383,11 @@ selected environment, the contract, the test arguments, the build tags, both
 timeouts, the goatest and go-mutants versions, and a fuzz target's corpus. A
 dependency's own `_test.go` files are outside the key, because they are never
 compiled into the binary; the target's own package's test files are always in
-it. Diagnostics — tracing, kept temporaries — and parallelism are outside
-every key, because neither changes what a test observes.
+it. Diagnostics — tracing and kept temporaries — are outside every key. The job
+count is also outside: it changes only which independent processes overlap,
+while their evidence is committed in a fixed order; an exclusive declared
+resource forces one job, and any timeout caused by contention is inconclusive
+rather than reusable positive proof.
 
 Sources that use `os.ReadDir`, `os.DirFS`, `os.OpenRoot`, `filepath.Walk`,
 `filepath.WalkDir`, `filepath.Glob`, `fs.WalkDir`, `fs.ReadDir`, `fs.Glob`, or

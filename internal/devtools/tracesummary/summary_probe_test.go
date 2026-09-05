@@ -56,6 +56,46 @@ func TestProbeBlockCountsExecutionsOutcomesAndInfections(t *testing.T) {
 	}
 }
 
+func TestProbeBlockCountsPackageSuitesApartFromTargets(t *testing.T) {
+	t.Parallel()
+	suite := probeEvent("package-suite:example.com/app", trace.ProbeOutcomeMeasured, "m-0001")
+	suite.Probe.Package, suite.Probe.Suite = "example.com/app", true
+	barrenSuite := probeEvent("package-suite:example.com/lib", trace.ProbeOutcomeMeasured)
+	barrenSuite.Probe.Package, barrenSuite.Probe.Suite = "example.com/lib", true
+	lines := strings.Join(probeBlock([]trace.Event{
+		probeEvent("target-a", trace.ProbeOutcomeMeasured, "m-0001"), suite, barrenSuite,
+	}), "\n")
+	for _, want := range []string{
+		"probe: 3 executions across 1 target and 2 package suites",
+		"infections: 2 (probe, mutant) pairs across 1 mutant; 0 measured targets infected nothing; 1 measured package suite infected nothing",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("the probe block does not carry %q:\n%s", want, lines)
+		}
+	}
+}
+
+func TestProbeBlockExcludesPairedControlsAndReportsThemApart(t *testing.T) {
+	t.Parallel()
+	control := probeEvent("paired-control:example.com/app", trace.ProbeOutcomeMeasured)
+	control.Probe.Package, control.Probe.Control, control.Probe.DurationMS = "example.com/app", true, 2500
+	timedOut := probeEvent("paired-control:example.com/lib", trace.ProbeOutcomeTimedOut)
+	timedOut.Probe.Package, timedOut.Probe.Control, timedOut.Probe.DurationMS = "example.com/lib", true, 1000
+	probe := probeEvent("target-a", trace.ProbeOutcomeMeasured, "m-0001")
+	events := []trace.Event{control, probe, timedOut}
+
+	if lines := strings.Join(probeBlock(events), "\n"); !strings.Contains(lines, "probe: 1 execution across 1 target") || strings.Contains(lines, "paired-control") {
+		t.Fatalf("infection probe block mixed in paired controls:\n%s", lines)
+	}
+	want := []string{
+		"paired controls: 2 executions in 3.5s",
+		"outcomes: measured 1, test-failed 0, timed-out 1, unavailable 0, error 0",
+	}
+	if got := controlBlock(events); !slices.Equal(got, want) {
+		t.Fatalf("control block = %q, want %q", got, want)
+	}
+}
+
 func TestProbeBlockNamesARecordingWithoutProbes(t *testing.T) {
 	t.Parallel()
 	// A recording made before the probe pass existed carries no probe event,
