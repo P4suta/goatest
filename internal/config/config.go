@@ -383,7 +383,7 @@ contract = "standard-v1"
 # build_tags = ["integration"]   # tags applied to every build and test
 # test_binary_args = ["-short"]  # only -short and -test.parallel are accepted
 # environment = ["FEATURE_MODE"] # variable names tests may read; values never reach reports
-# timeout = "10m"                # budget for each executed command
+# timeout = "10m"                # upper budget for each executed command
 # jobs = 4                       # mutation workers (bounded at 4)
 
 # [cache]

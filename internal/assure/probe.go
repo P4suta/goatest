@@ -24,8 +24,8 @@ type ProbeOptions struct {
 	// Contract is the contract the mutation phase runs under; it calibrates the
 	// per-target timeout exactly as the mutation phase calibrates its own.
 	Contract string
-	// Timeout is the run's CommandTimeout override. Zero calibrates from the
-	// target's baseline duration.
+	// Timeout is the run's CommandTimeout ceiling. Zero leaves only the
+	// contract ceiling around calibration from the target's baseline duration.
 	Timeout time.Duration
 	// TestArgs are the run's extra test flags, appended after -test.run exactly
 	// as the mutation requests append them.

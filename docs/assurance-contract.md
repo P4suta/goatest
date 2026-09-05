@@ -253,6 +253,16 @@ A timeout is not a proof about the mutant: it says the run could not settle it.
 Reusing one therefore keeps a finding and never removes one, which is the only
 direction in which a question nobody answered may be carried forward.
 
+Each mutation command, and the probe command that measures the same target,
+gets five times its measured baseline duration plus five seconds, with a
+30-second floor. That floor is applied before `[execution].timeout`: a positive
+configured ceiling shorter than 30 seconds, such as seven seconds, remains the
+effective limit. The contract otherwise caps calibration at 30 minutes for
+`standard-v1` and five hours for `deep-v1`; the configured timeout is a further
+upper bound, not a switch that disables calibration. An expired budget remains
+inconclusive under every bound, so a shorter calibrated command can reduce
+waiting without manufacturing a kill or a survival.
+
 Its condition is existential, not universal, because a timeout is one
 observation about one target: this target did not finish in the time it was
 given. The targets that ran before it neither caused that nor say anything

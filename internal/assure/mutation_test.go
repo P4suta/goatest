@@ -179,21 +179,22 @@ func TestEvaluateCalibratesEachMutationTimeoutFromItsBaseline(t *testing.T) {
 		name     string
 		contract string
 		duration time.Duration
-		override time.Duration
+		limit    time.Duration
 		want     time.Duration
 	}{
 		{name: "minimum", contract: "standard-v1", duration: time.Second, want: 30 * time.Second},
+		{name: "configured-limit-above-calibration", contract: "standard-v1", duration: time.Second, limit: 10 * time.Minute, want: 30 * time.Second},
 		{name: "measured", contract: "standard-v1", duration: 12 * time.Second, want: 65 * time.Second},
 		{name: "standard-cap", contract: "standard-v1", duration: 10 * time.Minute, want: 30 * time.Minute},
 		{name: "deep-cap", contract: "deep-v1", duration: 2 * time.Hour, want: 5 * time.Hour},
-		{name: "explicit-override", contract: "standard-v1", duration: time.Hour, override: 7 * time.Second, want: 7 * time.Second},
+		{name: "configured-limit-below-calibration", contract: "standard-v1", duration: time.Hour, limit: 7 * time.Second, want: 7 * time.Second},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			session := testkit.NewSession(gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}})
 			session.On(mutant.ID).Return(gomutants.MutantResult{ID: mutant.ID, Outcome: gomutants.OutcomeKilled})
 			_, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
 				Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: testCase.duration,
-			}}, assure.MutationOptions{Root: t.TempDir(), Contract: testCase.contract, Timeout: testCase.override})
+			}}, assure.MutationOptions{Root: t.TempDir(), Contract: testCase.contract, Timeout: testCase.limit})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -258,11 +258,11 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name     string
-		override time.Duration
+		limit    time.Duration
 		testArgs []string
 	}{
 		{name: "calibrated"},
-		{name: "override", override: 90 * time.Second},
+		{name: "configured ceiling", limit: 90 * time.Second},
 		{name: "extra test flags", testArgs: []string{"-test.short=true", "-test.parallel=4"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -272,7 +272,7 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 				return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{}}, nil
 			}}
 			options := ProbeOptions{
-				Contract: "standard-v1", Timeout: test.override, TestArgs: slices.Clone(test.testArgs),
+				Contract: "standard-v1", Timeout: test.limit, TestArgs: slices.Clone(test.testArgs),
 			}
 			if _, err := ProbeTargets(t.Context(), session, []TargetEvidence{target}, options); err != nil {
 				t.Fatal(err)
