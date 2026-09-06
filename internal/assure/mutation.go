@@ -460,8 +460,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 		}
 		var finding controlFinding
 		var controlErr error
-		var control time.Duration
-		request, control, finding, controlErr = prepareMutationRequest(
+		request, finding, controlErr = prepareMutationRequest(
 			ctx, mutant, request, options,
 			"mutation-control-failure", mutationSuiteControlFailure,
 			"mutation-control-timeout", mutationSuiteControlTimeout,
@@ -475,7 +474,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			seed.resolved = true
 			return seed
 		}
-		result, observation, err := executeMutationUnderMeasuredBudget(ctx, session, request, control, options)
+		result, observation, err := executeMutationUnderMeasuredBudget(ctx, session, request, options)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute unreached mutant %s: %w", mutant.DisplayID, err)
 			return seed
@@ -509,8 +508,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 	for _, execution := range executions {
 		var finding controlFinding
 		var controlErr error
-		var control time.Duration
-		execution.request, control, finding, controlErr = prepareMutationRequest(
+		execution.request, finding, controlErr = prepareMutationRequest(
 			ctx, mutant, execution.request, options,
 			"mutation-control-failure", mutationTargetControlFailure,
 			"mutation-control-timeout", mutationTargetControlTimeout,
@@ -523,7 +521,7 @@ func evaluateMutationSeed(ctx context.Context, session MutationSession, mutant g
 			unknown = append(unknown, mutationGroupUnknown{detail: execution.detail, finding: finding})
 			continue
 		}
-		result, observation, err := executeMutationUnderMeasuredBudget(ctx, session, execution.request, control, options)
+		result, observation, err := executeMutationUnderMeasuredBudget(ctx, session, execution.request, options)
 		if err != nil {
 			seed.err = fmt.Errorf("goatest: execute mutant %s with %s: %w", mutant.DisplayID, execution.detail, err)
 			return seed
@@ -678,63 +676,61 @@ func prepareMutationRequest(
 	request gomutants.ExecRequest,
 	options MutationOptions,
 	failureKind, failureSummary, timeoutKind, timeoutSummary string,
-) (gomutants.ExecRequest, time.Duration, controlFinding, error) {
+) (gomutants.ExecRequest, controlFinding, error) {
 	unavailable := controlFinding{
 		kind: "mutation-control-unavailable", summary: mutationControlUnavailable,
 	}
 	if options.OriginalControl == nil || request.Timeout <= 0 {
-		return request, 0, unavailable, nil
+		return request, unavailable, nil
 	}
 	controlRequest := request
 	controlRequest.Timeout = options.Timeout
 	control, err := runOriginalControl(ctx, controlRequest, options)
 	if err != nil {
-		return gomutants.ExecRequest{}, 0, controlFinding{},
+		return gomutants.ExecRequest{}, controlFinding{},
 			fmt.Errorf("goatest: original budget control for mutant %s: %w", mutant.DisplayID, err)
 	}
 	if control.TimedOut {
-		return request, 0, controlFinding{kind: timeoutKind, summary: timeoutSummary}, nil
+		return request, controlFinding{kind: timeoutKind, summary: timeoutSummary}, nil
 	}
 	if control.ExitCode != 0 {
 		summary := failureSummary
 		if output := summarize(control.Output); output != "no output" {
 			summary += ": " + output
 		}
-		return request, 0, controlFinding{kind: failureKind, summary: summary}, nil
+		return request, controlFinding{kind: failureKind, summary: summary}, nil
 	}
 	request.Timeout = mutationExecutionTimeout(options.Timeout, request.Timeout, control.Duration)
 	if request.Timeout <= 0 {
-		return request, 0, unavailable, nil
+		return request, unavailable, nil
 	}
-	return request, control.Duration, controlFinding{}, nil
+	return request, controlFinding{}, nil
 }
 
 func executeMutationUnderMeasuredBudget(
 	ctx context.Context,
 	session MutationSession,
 	request gomutants.ExecRequest,
-	control time.Duration,
 	options MutationOptions,
 ) (gomutants.MutantResult, repositoryObservation, error) {
 	result, observation, err := executeMutation(ctx, session, request, options)
 	if err != nil || result.Outcome != gomutants.OutcomeTimedOut {
 		return result, observation, err
 	}
-	widened, slower := budgetAfterMeasuredSlowdown(ctx, request, control, options)
-	if !slower {
+	ceiling, healthy := containmentAfterHealthyControl(ctx, request, options)
+	if !healthy {
 		return result, observation, nil
 	}
-	request.Timeout = widened
+	request.Timeout = ceiling
 	return executeMutation(ctx, session, request, options)
 }
 
-func budgetAfterMeasuredSlowdown(
+func containmentAfterHealthyControl(
 	ctx context.Context,
 	request gomutants.ExecRequest,
-	control time.Duration,
 	options MutationOptions,
 ) (time.Duration, bool) {
-	if options.freshControl == nil || control <= 0 || request.Timeout <= 0 {
+	if options.freshControl == nil || request.Timeout <= 0 || options.Timeout <= request.Timeout {
 		return 0, false
 	}
 	controlRequest := request
@@ -743,29 +739,7 @@ func budgetAfterMeasuredSlowdown(
 	if err != nil || fresh.TimedOut || fresh.ExitCode != 0 || fresh.Duration <= 0 {
 		return 0, false
 	}
-	widened := max(
-		mutationExecutionTimeout(options.Timeout, request.Timeout, fresh.Duration),
-		scaledMutationTimeout(options.Timeout, request.Timeout, control, fresh.Duration),
-	)
-	if widened <= request.Timeout {
-		return 0, false
-	}
-	return widened, true
-}
-
-func scaledMutationTimeout(limit, budget, before, after time.Duration) time.Duration {
-	if budget <= 0 || before <= 0 || after <= before {
-		return budget
-	}
-	maximum := time.Duration(math.MaxInt64)
-	scaled := maximum
-	if budget <= maximum/after {
-		scaled = budget * after / before
-	}
-	if limit > 0 && scaled > limit {
-		return limit
-	}
-	return scaled
+	return options.Timeout, true
 }
 
 func executeMutation(ctx context.Context, session MutationSession, request gomutants.ExecRequest, options MutationOptions) (gomutants.MutantResult, repositoryObservation, error) {

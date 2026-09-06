@@ -202,11 +202,12 @@ self-dogfood is not evidence about other repositories.
   a narrower deadline could only lose the observation the mutant budget comes
   from; if it fails, expires, or leaves no positive duration, no mutant starts
   for that group. A mutant expiration is answered by measuring that original
-  once more: a completed second control joins the budget, and one the machine
-  also ran slower additionally scales it by that measured ratio, buying exactly
-  one more execution. A second control that fails or expires buys none. No
-  compatible group runs a mutant more than twice, so a mutation that never
-  returns costs two budgets and is then left inconclusive.
+  once more: a second control that completes buys exactly one more execution,
+  under the containment ceiling rather than a derived budget the expiration has
+  just falsified, and one that fails or expires buys none. No compatible group
+  runs a mutant more than twice, so a mutation that never returns costs one
+  derived budget plus one containment ceiling and is then left inconclusive.
+  That ceiling is the one number the operator sets.
   Other groups continue because a completed failure in any one is a kill; if
   none kills, the unknown groups prevent survival. Replay has
   no prepared probe tree and can still pay for its pristine fallback

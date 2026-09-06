@@ -241,13 +241,13 @@ treat repetition as stronger evidence.
 
 A mutant that exhausts its budget is the one exception, and what answers it is
 a fresh measurement rather than the expiration. goatest measures the exact
-original once more, outside the memo. A completed second control is another
-clean observation of the same request: it joins the sum, and when the machine
-also completed it slower than the first, the budget is additionally scaled by
-that measured ratio. The larger of the two, capped by the ceiling, buys exactly
-one more execution. A second control that fails or expires buys none, and the
-group is inconclusive. Expiration is never the premise — the second control's
-completed duration is — and no compatible group runs a mutant more than twice.
+original once more, outside the memo. A second control that completes says the
+request is still healthy on this machine, and buys exactly one more execution
+under the containment ceiling — every derived budget is a claim about how long
+the work takes, and this one has just been falsified. A second control that
+fails or expires buys nothing, and the group is inconclusive. Expiration is
+never the premise, the second control's completed duration is, and no
+compatible group runs a mutant more than twice.
 
 An original control failure or timeout at the ceiling is inconclusive and
 prevents the mutant from starting. A mutation that does not compile is `compile-rejected`, never

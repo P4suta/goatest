@@ -222,35 +222,25 @@ func TestPassingUnreachedPackageControlCalibratesTheMutantWatchdog(t *testing.T)
 	}
 }
 
-func TestTimeoutRunsAgainOnceUnderARemeasuredBudget(t *testing.T) {
+func TestTimeoutRunsAgainOnceUnderTheContainmentCeiling(t *testing.T) {
 	t.Parallel()
-	const (
-		controlDuration = time.Millisecond
-		slowedDuration  = 4 * controlDuration
-	)
+	const controlDuration = time.Millisecond
 	for _, test := range []struct {
-		name         string
-		controls     []gomutants.CommandResult
-		outcomes     []gomutants.Outcome
-		wantKind     string
-		wantControls int
+		name               string
+		controls           []gomutants.CommandResult
+		outcomes           []gomutants.Outcome
+		wantKind           string
+		wantControls       int
+		wantSecondDeadline time.Duration
 	}{
 		{
-			name:     "a completed second control widens the budget",
+			name:     "a completed second control buys the containment ceiling",
 			controls: []gomutants.CommandResult{{Duration: controlDuration}},
 			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
-			wantKind: "unreached-mutant", wantControls: 2,
+			wantKind: "unreached-mutant", wantControls: 2, wantSecondDeadline: time.Second,
 		},
 		{
-			name: "a slower second control widens it by the measured ratio",
-			controls: []gomutants.CommandResult{
-				{Duration: controlDuration}, {Duration: slowedDuration},
-			},
-			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
-			wantKind: "unreached-mutant", wantControls: 2,
-		},
-		{
-			name: "a second control that expires widens nothing",
+			name: "a second control that expires buys nothing",
 			controls: []gomutants.CommandResult{
 				{Duration: controlDuration}, {TimedOut: true},
 			},
@@ -288,8 +278,12 @@ func TestTimeoutRunsAgainOnceUnderARemeasuredBudget(t *testing.T) {
 			if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != test.wantKind {
 				t.Fatalf("findings = %+v, want %q", evaluation.Findings, test.wantKind)
 			}
-			if controlCalls != test.wantControls || len(session.recordedRequests()) != len(test.outcomes) {
-				t.Fatalf("control calls = %d, mutant requests = %+v", controlCalls, session.recordedRequests())
+			requests := session.recordedRequests()
+			if controlCalls != test.wantControls || len(requests) != len(test.outcomes) {
+				t.Fatalf("control calls = %d, mutant requests = %+v", controlCalls, requests)
+			}
+			if test.wantSecondDeadline != 0 && requests[1].Timeout != test.wantSecondDeadline {
+				t.Fatalf("second deadline = %s, want the containment ceiling %s", requests[1].Timeout, test.wantSecondDeadline)
 			}
 		})
 	}

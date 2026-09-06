@@ -45,13 +45,13 @@ into a proof. Persisting the result merely made an unanswered question durable.
 5. After the exact original passes, one completed mutant execution decides that
    compatible group's comparative outcome — unless its budget expires. On
    expiration the exact original is measured once more, outside the memo. A
-   completed second control is a new distinct clean observation of the same
-   request: it joins the sum, and when the machine also completed it slower than
-   the first, the budget is additionally scaled by that measured ratio. The
-   larger of the two, capped by the ceiling, buys exactly one more execution. A
-   second control that fails or expires buys none and the group is
-   inconclusive. There is no split, no post-timeout confirmation, and no third
-   execution. Other compatible
+   second control that completes says the request is still healthy on this
+   machine, so the mutant runs exactly once more, under the containment ceiling
+   itself. Any derived budget is a claim about how long the work takes, and the
+   first one was just falsified; the ceiling is the only bound that makes no
+   such claim. A second control that fails or expires buys nothing and the group
+   is inconclusive. There is no split, no post-timeout confirmation, and no
+   third execution. Other compatible
    groups still run because any completed failure establishes the existential
    kill claim. If none kills, unknown groups are combined deterministically.
 6. Timeout findings are never written to mutation evidence. Reusable mutation
@@ -81,11 +81,16 @@ completed executions or remains inconclusive again.
 Re-measuring after an expiration does not turn the expiration into evidence.
 The premise for the second run is the second control's completed duration — a
 clean observation of the same request on the machine as it is now — and never
-the expiration itself. A mutation that never returns spends that second budget
-and is then left inconclusive, exactly as a slow one that still does not finish
-is. Executions per compatible group are bounded at two however slow the machine
-becomes, and a group whose second control cannot be measured runs no second
-execution at all.
+the expiration itself. Executions per compatible group are bounded at two
+however slow the machine becomes, and a group whose second control cannot be
+measured runs no second execution at all.
+
+The price is explicit: a mutation that never returns costs one derived budget
+plus one containment ceiling before its group is inconclusive. That is what
+`[execution].timeout` is for, and it is the only number in this rule the
+operator sets. Paying it once per nonterminating mutation is the cost of never
+reporting inconclusive for work the machine could have finished — which is the
+answer a verifier exists to give.
 
 The budget affects liveness, not proof validity. Summing only distinct positive
 clean observations makes the bound wholly data-derived, and the one ratio in the
@@ -109,8 +114,8 @@ result in that case is still inconclusive.
 - Target and package-suite observations contribute together, in the probe pass
   as well as the mutation pass, so measured scheduling variation does not
   require a fixed margin or multiplier.
-- A nonterminating mutant consumes at most two data-derived budgets, the second
-  only when a second control could be measured. A request with no justified
-  budget consumes no mutant process at all.
+- A nonterminating mutant consumes one derived budget and then one containment
+  ceiling, and only when a second control could be measured. A request with no
+  justified budget consumes no mutant process at all.
 - Timeout findings must be re-evaluated on a later run; they are not durable
   evidence and cannot make a warm run inherit an old non-answer.
