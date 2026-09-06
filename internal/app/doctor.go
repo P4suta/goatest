@@ -19,6 +19,7 @@ import (
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/filemode"
+	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/processtree"
 	"github.com/P4suta/goatest/internal/report"
@@ -26,6 +27,9 @@ import (
 
 const (
 	doctorOutputLimit           = 1 << 20
+	doctorListingLimit          = 64 << 20
+	doctorNameSampleSize        = 5
+	doctorTruncationNotice      = "[goatest: doctor output truncated]"
 	doctorQuickCommandTimeout   = 30 * time.Second
 	doctorDefaultCommandTimeout = 10 * time.Minute
 	doctorMinimumFreeBytes      = 512 << 20
@@ -107,6 +111,11 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "dependency", "offline-dependencies", err), nil
 	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "offline-dependencies", Status: "ready", Detail: strings.Join(packages, ",")})
+	keys, keysErr := doctorBehaviourKeys(ctx, root, offline, loaded, goBinary, packages)
+	if keysErr != nil {
+		return doctorFailure(result, "dependency", "behaviour-keys", keysErr), nil
+	}
+	result.Evidence = append(result.Evidence, keys)
 	raceArgs := []string{"test", "-run=^$", "-race"}
 	if len(loaded.Execution.BuildTags) != 0 {
 		raceArgs = append(raceArgs, "-tags="+strings.Join(loaded.Execution.BuildTags, ","))
@@ -249,7 +258,71 @@ func doctorFailure(input report.Report, kind, id string, cause error) report.Rep
 	return input
 }
 
+func doctorBehaviourKeys(
+	ctx context.Context,
+	root string,
+	environment []string,
+	loaded config.Config,
+	goBinary string,
+	packages []string,
+) (report.Evidence, error) {
+	arguments := []string{"list", "-json", "-mod=readonly"}
+	if len(loaded.Execution.BuildTags) != 0 {
+		arguments = append(arguments, "-tags="+strings.Join(loaded.Execution.BuildTags, ","))
+	}
+	arguments = append(arguments, packages...)
+	listing, err := doctorCommandWithLimit(ctx, root, environment, loaded.Execution.Timeout, doctorListingLimit, goBinary, arguments...)
+	if err != nil {
+		return report.Evidence{}, err
+	}
+	if strings.Contains(listing, doctorTruncationNotice) {
+		return report.Evidence{}, errors.New("go list -json produced more output than goatest will read")
+	}
+	model, err := goanalysis.DecodePackages(strings.NewReader(listing))
+	if err != nil {
+		return report.Evidence{}, err
+	}
+	widened := make([]string, 0, len(model.Packages))
+	for path, candidate := range goanalysis.RepositoryReadCandidates(root, model.Packages) {
+		if candidate.Unobservable {
+			widened = append(widened, path)
+		}
+	}
+	slices.Sort(widened)
+	if len(widened) == 0 {
+		return report.Evidence{
+			Kind: "doctor", ID: "behaviour-keys", Status: "ready",
+			Detail: fmt.Sprintf("%d packages, none statically widened", len(model.Packages)),
+		}, nil
+	}
+	return report.Evidence{
+		Kind: "doctor", ID: "behaviour-keys", Status: "widened",
+		Detail: fmt.Sprintf("%d of %d packages read past the test action log and key the whole tree: %s",
+			len(widened), len(model.Packages), strings.Join(doctorNameSample(widened), ", ")),
+	}, nil
+}
+
+func doctorNameSample(names []string) []string {
+	if len(names) <= doctorNameSampleSize {
+		return names
+	}
+	sample := slices.Clone(names[:doctorNameSampleSize])
+	return append(sample, fmt.Sprintf("and %d more", len(names)-doctorNameSampleSize))
+}
+
 func doctorCommand(ctx context.Context, root string, environment []string, timeout time.Duration, name string, arguments ...string) (string, error) {
+	return doctorCommandWithLimit(ctx, root, environment, timeout, doctorOutputLimit, name, arguments...)
+}
+
+func doctorCommandWithLimit(
+	ctx context.Context,
+	root string,
+	environment []string,
+	timeout time.Duration,
+	limit int,
+	name string,
+	arguments ...string,
+) (string, error) {
 	if timeout <= 0 {
 		timeout = doctorDefaultCommandTimeout
 	}
@@ -258,7 +331,7 @@ func doctorCommand(ctx context.Context, root string, environment []string, timeo
 	command := exec.Command(name, arguments...)
 	command.Dir = root
 	command.Env = slices.Clone(environment)
-	var output limitedDoctorBuffer
+	output := limitedDoctorBuffer{limit: limit}
 	command.Stdout, command.Stderr = &output, &output
 	tree, err := startDoctorProcess(command)
 	if err != nil {
@@ -284,12 +357,17 @@ func doctorCommand(ctx context.Context, root string, environment []string, timeo
 
 type limitedDoctorBuffer struct {
 	bytes.Buffer
+	limit     int
 	truncated bool
 }
 
 func (buffer *limitedDoctorBuffer) Write(data []byte) (int, error) {
 	original := len(data)
-	remaining := doctorOutputLimit - buffer.Len()
+	limit := buffer.limit
+	if limit <= 0 {
+		limit = doctorOutputLimit
+	}
+	remaining := limit - buffer.Len()
 	if remaining <= 0 {
 		buffer.truncated = true
 		return original, nil
@@ -305,7 +383,7 @@ func (buffer *limitedDoctorBuffer) Write(data []byte) (int, error) {
 func (buffer *limitedDoctorBuffer) String() string {
 	result := buffer.Buffer.String()
 	if buffer.truncated {
-		result += "\n[goatest: doctor output truncated]"
+		result += "\n" + doctorTruncationNotice
 	}
 	return result
 }

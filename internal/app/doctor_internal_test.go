@@ -5,11 +5,16 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/filemode"
 )
 
@@ -97,5 +102,52 @@ func TestLimitedDoctorBufferBoundsOutputAndMarksTruncation(t *testing.T) {
 	}
 	if got := buffer.String(); len(got) <= doctorOutputLimit || !strings.HasSuffix(got, "[goatest: doctor output truncated]") {
 		t.Fatalf("bounded output length/suffix = %d / %q", len(got), got[len(got)-min(50, len(got)):])
+	}
+}
+
+func TestDoctorNameSampleKeepsTheListShortAndSaysWhatItLeftOut(t *testing.T) {
+	t.Parallel()
+	short := []string{"a", "b"}
+	if got := doctorNameSample(short); !slices.Equal(got, short) {
+		t.Fatalf("sample of a short list = %v, want it whole", got)
+	}
+	const beyondTheSample = 2
+	long := make([]string, 0, doctorNameSampleSize+beyondTheSample)
+	for index := range cap(long) {
+		long = append(long, fmt.Sprintf("pkg%02d", index))
+	}
+	got := doctorNameSample(long)
+	if len(got) != doctorNameSampleSize+1 || got[doctorNameSampleSize] != "and 2 more" {
+		t.Fatalf("sample of %d names = %v", len(long), got)
+	}
+}
+
+func TestDoctorBehaviourKeysNamesThePackagesThatWidenTheirKey(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("Go toolchain is unavailable: %v", err)
+	}
+	root := t.TempDir()
+	for name, contents := range map[string]string{
+		"go.mod":           "module fixture.example/keys\n\ngo 1.26.0\n",
+		"quiet/quiet.go":   "package quiet\n\nfunc Quiet() int { return 1 }\n",
+		"opaque/opaque.go": "package opaque\n\nimport \"os/exec\"\n\nfunc Run() error { return exec.Command(\"true\").Run() }\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), filemode.ReadableFile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded := config.Config{Execution: config.Execution{Timeout: time.Minute}}
+	evidence, err := doctorBehaviourKeys(t.Context(), root, os.Environ(), loaded, "go", []string{"./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Status != "widened" || !strings.Contains(evidence.Detail, "fixture.example/keys/opaque") ||
+		strings.Contains(evidence.Detail, "fixture.example/keys/quiet") {
+		t.Fatalf("behaviour keys = %+v, want the subprocess package named alone", evidence)
 	}
 }
