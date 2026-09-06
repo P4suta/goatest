@@ -42,7 +42,18 @@ const (
 	nativeActionTimestampField
 )
 
-const NativeDirectoryPrefix = "goatest-native-cache-"
+const (
+	NativeDirectoryPrefix = "goatest-native-cache-"
+
+	NativeSharedDirectoryPrefix = "goatest-native-shared-"
+
+	nativeSharedNameHexDigits = 16
+)
+
+func NativeSharedDirectoryName(base string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(base)))
+	return NativeSharedDirectoryPrefix + hex.EncodeToString(sum[:])[:nativeSharedNameHexDigits]
+}
 
 const NativeCollectInterval = time.Minute
 

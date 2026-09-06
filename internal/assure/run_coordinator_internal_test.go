@@ -482,8 +482,11 @@ func TestRunCoordinatorUsesTheNativeProjectionForMutationPreparation(t *testing.
 				program = strings.TrimPrefix(entry, "GOCACHEPROG=")
 			}
 		}
-		if cacheDirectory == "" || program != "" || !strings.HasPrefix(filepath.Base(cacheDirectory), buildcache.NativeDirectoryPrefix) {
-			t.Fatalf("%s cache environment = %q, want the run-owned native projection", name, environment)
+		base := filepath.Base(cacheDirectory)
+		projected := strings.HasPrefix(base, buildcache.NativeDirectoryPrefix) ||
+			strings.HasPrefix(base, buildcache.NativeSharedDirectoryPrefix)
+		if cacheDirectory == "" || program != "" || !projected {
+			t.Fatalf("%s cache environment = %q, want the native projection", name, environment)
 		}
 	}
 	assertCacheMode("preparation", harness.workspaceOptions.Environment)

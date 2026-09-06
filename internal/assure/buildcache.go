@@ -39,8 +39,9 @@ type runBuildCache struct {
 
 	native string
 
-	nativeOwner *tempowner.Owner
-	nativeSweep tempowner.Result
+	nativeOwner  *tempowner.Owner
+	nativeShared bool
+	nativeSweep  tempowner.Result
 
 	projection *nativeCacheProjection
 
@@ -107,7 +108,7 @@ func openRunBuildCache(program, base, source string, runScratch runScratch, maxB
 	}); err != nil {
 		return discard(err)
 	}
-	cache.native, cache.nativeOwner, cache.nativeSweep, err = openNativeBuildCache(base, runScratch, time.Now())
+	cache.native, cache.nativeOwner, cache.nativeShared, cache.nativeSweep, err = openNativeBuildCache(base, runScratch, time.Now())
 	if err != nil {
 		cache.projection.once.Do(func() {
 			cache.projection.attempted = true
@@ -117,21 +118,49 @@ func openRunBuildCache(program, base, source string, runScratch runScratch, maxB
 	return cache, nil
 }
 
-func openNativeBuildCache(base string, scratch runScratch, now time.Time) (string, *tempowner.Owner, tempowner.Result, error) {
+func openNativeBuildCache(base string, scratch runScratch, now time.Time) (string, *tempowner.Owner, bool, tempowner.Result, error) {
 	parent := filepath.Dir(base)
 	swept, sweepErr := tempowner.Sweep(parent, []string{buildcache.NativeDirectoryPrefix}, now)
+	marker := tempowner.Marker{RunID: scratch.id, Root: scratch.root}
+	if directory, owner, claimed, err := claimSharedNativeBuildCache(parent, base, marker, now); err != nil {
+		return "", nil, false, swept, errors.Join(sweepErr, err)
+	} else if claimed {
+		if sweepErr != nil {
+			swept.Errors = append(swept.Errors, sweepErr)
+		}
+		return directory, owner, true, swept, nil
+	}
 	directory, err := os.MkdirTemp(parent, buildcache.NativeDirectoryPrefix)
 	if err != nil {
-		return "", nil, swept, errors.Join(sweepErr, fmt.Errorf("goatest: create native build cache scratch: %w", err))
+		return "", nil, false, swept, errors.Join(sweepErr, fmt.Errorf("goatest: create native build cache scratch: %w", err))
 	}
-	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: scratch.id, Root: scratch.root}, now)
+	owner, err := tempowner.Claim(directory, marker, now)
 	if err != nil {
-		return "", nil, swept, errors.Join(sweepErr, fmt.Errorf("goatest: claim native build cache scratch: %w", err), removeBuildCacheScratch(directory))
+		return "", nil, false, swept, errors.Join(sweepErr, fmt.Errorf("goatest: claim native build cache scratch: %w", err), removeBuildCacheScratch(directory))
 	}
 	if sweepErr != nil {
 		swept.Errors = append(swept.Errors, sweepErr)
 	}
-	return directory, owner, swept, nil
+	return directory, owner, false, swept, nil
+}
+
+func claimSharedNativeBuildCache(
+	parent, base string,
+	marker tempowner.Marker,
+	now time.Time,
+) (string, *tempowner.Owner, bool, error) {
+	directory := filepath.Join(parent, buildcache.NativeSharedDirectoryName(base))
+	if err := os.MkdirAll(directory, filemode.PrivateDirectory); err != nil {
+		return "", nil, false, fmt.Errorf("goatest: create shared native build cache: %w", err)
+	}
+	owner, err := tempowner.Claim(directory, marker, now)
+	if errors.Is(err, tempowner.ErrOwned) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, fmt.Errorf("goatest: claim shared native build cache: %w", err)
+	}
+	return directory, owner, true, nil
 }
 
 func removeBuildCacheScratch(scratch string) error {
@@ -473,11 +502,20 @@ func (cache runBuildCache) close(keep bool) error {
 		}
 		return nil
 	}
+	native := cache.native
+	if cache.nativeShared {
+		native = ""
+		if cache.projection != nil {
+			cache.projection.mutex.Lock()
+			cache.collectNativeLocked(false, time.Now())
+			cache.projection.mutex.Unlock()
+		}
+	}
 	var releaseErr error
 	if cache.nativeOwner != nil {
 		releaseErr = cache.nativeOwner.Release()
 	}
-	return errors.Join(releaseErr, removeBuildCacheScratch(cache.scratch), removeBuildCacheScratch(cache.native))
+	return errors.Join(releaseErr, removeBuildCacheScratch(cache.scratch), removeBuildCacheScratch(native))
 }
 
 type buildCacheWorkspace struct {
