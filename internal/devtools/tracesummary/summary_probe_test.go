@@ -186,8 +186,24 @@ func TestProbeBlockNamesWhyEachPackageSuiteWidenedItsKey(t *testing.T) {
 		wholeTreeSuiteEvent("example.com/tool", trace.WholeTreeStaticUnobservable),
 		wholeTreeSuiteEvent("example.com/quiet", ""),
 	}), "\n")
-	want := "whole-tree keys: 3 package suites of 4 observed; " +
+	want := "whole-tree keys: 0 of 0 targets, 3 of 4 package suites; " +
 		"static-unobservable 2, log-unavailable 0, log-ambiguous 0, directory-access 0, outside-input 1"
+	if !strings.Contains(lines, want) {
+		t.Fatalf("the probe block does not carry %q:\n%s", want, lines)
+	}
+}
+
+func TestProbeBlockCountsWidenedTargetsBesideWidenedSuites(t *testing.T) {
+	t.Parallel()
+	widened := probeEvent("target-a", trace.ProbeOutcomeMeasured)
+	widened.Probe.WholeTree, widened.Probe.WholeTreeReason = true, trace.WholeTreeDirectoryAccess
+	lines := strings.Join(probeBlock([]trace.Event{
+		widened,
+		probeEvent("target-b", trace.ProbeOutcomeMeasured),
+		wholeTreeSuiteEvent("example.com/app", trace.WholeTreeStaticUnobservable),
+	}), "\n")
+	want := "whole-tree keys: 1 of 2 targets, 1 of 1 package suites; " +
+		"static-unobservable 1, log-unavailable 0, log-ambiguous 0, directory-access 1, outside-input 0"
 	if !strings.Contains(lines, want) {
 		t.Fatalf("the probe block does not carry %q:\n%s", want, lines)
 	}

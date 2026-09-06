@@ -371,3 +371,47 @@ func writeObservationFile(t *testing.T, root, relative, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestWholeTreeKeyLimitationCountsWhatTheRunWidened(t *testing.T) {
+	t.Parallel()
+	narrow := TargetEvidence{Target: goanalysis.Target{ID: "narrow"}}
+	widened := TargetEvidence{Target: goanalysis.Target{ID: "widened"}, WholeTree: true}
+	for _, test := range []struct {
+		name    string
+		targets []TargetEvidence
+		suites  map[string]PackageSuiteCoverage
+		want    string
+	}{
+		{
+			name:    "nothing widened",
+			targets: []TargetEvidence{narrow},
+			suites:  map[string]PackageSuiteCoverage{"example.com/app": {}},
+		},
+		{
+			name:    "one target widened",
+			targets: []TargetEvidence{narrow, widened},
+			suites:  map[string]PackageSuiteCoverage{"example.com/app": {}},
+			want:    "1 of 2 targets and 0 of 1 package suites",
+		},
+		{
+			name:    "one suite widened",
+			targets: []TargetEvidence{narrow},
+			suites:  map[string]PackageSuiteCoverage{"example.com/app": {WholeTree: true}},
+			want:    "0 of 1 targets and 1 of 1 package suites",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			limitation, widened := wholeTreeKeyLimitation(test.targets, test.suites)
+			if test.want == "" {
+				if widened {
+					t.Fatalf("limitation = %+v, want none", limitation)
+				}
+				return
+			}
+			if !widened || limitation.Code != "whole-tree-behaviour-keys" || !strings.Contains(limitation.Summary, test.want) {
+				t.Fatalf("limitation = %+v, want %q", limitation, test.want)
+			}
+		})
+	}
+}

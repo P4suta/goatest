@@ -6,12 +6,14 @@ package assure
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
@@ -200,6 +202,30 @@ func (observer *RepositoryObserver) wholeTreeSuiteReason(pkg string, observation
 	return observer.wholeTreeReason(goanalysis.Target{
 		Package: pkg, RelativeDir: owner.RelativeDir, Dependencies: owner.Dependencies,
 	}, observation)
+}
+
+func wholeTreeKeyLimitation(targets []TargetEvidence, suites map[string]PackageSuiteCoverage) (report.Limitation, bool) {
+	widenedTargets := 0
+	for _, target := range targets {
+		if target.WholeTree {
+			widenedTargets++
+		}
+	}
+	widenedSuites := 0
+	for _, suite := range suites {
+		if suite.WholeTree {
+			widenedSuites++
+		}
+	}
+	if widenedTargets == 0 && widenedSuites == 0 {
+		return report.Limitation{}, false
+	}
+	return report.Limitation{
+		Code: "whole-tree-behaviour-keys",
+		Summary: fmt.Sprintf(
+			"%d of %d targets and %d of %d package suites read outside their ordinary inputs, so their evidence is reused only while nothing in the tree changes; goatest trace summary names which boundary widened each one",
+			widenedTargets, len(targets), widenedSuites, len(suites)),
+	}, true
 }
 
 func parseRepositoryTestLog(data []byte, root, initialDirectory string) repositoryObservation {
