@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
 
@@ -291,12 +292,6 @@ func TestSelectImpactFallsBackBroadAndSelectsCoveredPackageDependents(t *testing
 	}
 }
 
-// TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage
-// walks the pipeline a run walks - go list output becomes packages, packages
-// become targets, targets become the persisted graph - for the one shape only
-// the dependency closure can connect: example.com/m/app imports
-// example.com/m/testutil from its test file and nowhere else, and testutil
-// declares a constant, so no executed statement of it ever reaches coverage.
 func TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage(t *testing.T) {
 	preserveImpactHooks(t)
 	root := t.TempDir()
@@ -306,10 +301,10 @@ func TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage(t 
 		"testutil/fixtures.go": "package testutil\n\nconst Greeting = \"hi\"\n",
 	} {
 		full := filepath.Join(root, filepath.FromSlash(path))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(full), filemode.ReadableDirectory); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(full, []byte(contents), 0o600); err != nil {
+		if err := os.WriteFile(full, []byte(contents), filemode.PrivateFile); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -355,7 +350,6 @@ func TestSelectImpactReselectsTargetsWhoseTestFilesAloneImportAChangedPackage(t 
 	}
 }
 
-// goListStream renders package objects the way `go list -json` streams them.
 func goListStream(t *testing.T, packages ...map[string]any) string {
 	t.Helper()
 	var stream strings.Builder
@@ -382,7 +376,7 @@ func TestDependsOnChangedChecksEveryDependency(t *testing.T) {
 func TestBuildGraphMapsGoFilesAndClonesTargetEvidence(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "pkg", "nested"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "nested"), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	for path, contents := range map[string]string{
@@ -390,7 +384,7 @@ func TestBuildGraphMapsGoFilesAndClonesTargetEvidence(t *testing.T) {
 		"pkg/value.go": "package pkg\n", "pkg/value_test.go": "package pkg\n", "pkg/nested/ignored.go": "package nested\n",
 	} {
 		full := filepath.Join(root, filepath.FromSlash(path))
-		if err := os.WriteFile(full, []byte(contents), 0o600); err != nil {
+		if err := os.WriteFile(full, []byte(contents), filemode.PrivateFile); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -414,7 +408,7 @@ func TestBuildGraphMapsGoFilesAndClonesTargetEvidence(t *testing.T) {
 	if !reflect.DeepEqual(graph.FilePackages, wantFiles) || len(graph.Targets) != 1 {
 		t.Fatalf("graph = %+v", graph)
 	}
-	wantTarget := evidence.Target{ID: "target-a", Package: "example", Kind: "test", Dependencies: dependencies, CoveredFiles: covered}
+	wantTarget := evidence.Target{ID: "target-a", Package: "example", Dependencies: dependencies, CoveredFiles: covered}
 	if !reflect.DeepEqual(graph.Targets[0], wantTarget) {
 		t.Fatalf("target = %+v, want %+v", graph.Targets[0], wantTarget)
 	}
@@ -453,14 +447,32 @@ func TestMutationScopeIsDeterministicNarrowAndPackageRelative(t *testing.T) {
 		t.Fatalf("broad scope = (%v, %v)", include, packages)
 	}
 	selection := impactSelection{
-		changed: []string{"z.go", "a_test.go", "README.md", "a.go", "z.go"},
+		changed: []string{"z.go", "a_test.go", "README.md", "docs/README.md", "a.go", "z.go", "nested/value.go", "pkg/value_test.go"},
 		targets: []goanalysis.Target{
 			{RelativeDir: "pkg"}, {RelativeDir: "./pkg"}, {RelativeDir: "."}, {RelativeDir: ""},
 		},
 	}
 	include, packages := mutationScope(selection)
-	if !slices.Equal(include, []string{"a.go", "z.go"}) || !slices.Equal(packages, []string{".", "./pkg"}) {
+	if !slices.Equal(include, []string{"*.go", "nested/value.go", "pkg/*.go"}) || !slices.Equal(packages, []string{".", "./pkg"}) {
 		t.Fatalf("narrow scope = (%v, %v)", include, packages)
+	}
+}
+
+func TestMutationDiscoveryPackagesCoverCandidatesAndTests(t *testing.T) {
+	t.Parallel()
+	got := mutationDiscoveryPackages(
+		[]string{"value.go", "internal/cache/*.go", "internal/cache/item.go", "nested/pkg/value.go"},
+		[]string{"./tests", ".", "./tests"},
+	)
+	want := []string{".", "./internal/cache", "./nested/pkg"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("discovery packages = %q, want %q", got, want)
+	}
+	if got := mutationDiscoveryPackages(nil, nil); got != nil {
+		t.Fatalf("unbounded discovery packages = %q, want nil", got)
+	}
+	if got := mutationDiscoveryPackages(nil, []string{"./tests"}); !slices.Equal(got, []string{"./tests"}) {
+		t.Fatalf("package-only discovery = %q", got)
 	}
 }
 
@@ -479,7 +491,7 @@ func TestScopedMutationIncludeIsOneNonRecursiveGlobPerResolvedPackage(t *testing
 		{ImportPath: "fixture.example/module", RelativeDir: "."},
 		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
 		{ImportPath: "fixture.example/module/internal/report", RelativeDir: "internal/report"},
-		// RelativeDir carries the platform separator; the glob must not.
+
 		{ImportPath: "fixture.example/module/windows", RelativeDir: filepath.FromSlash("windows/sub")},
 	}}
 	got := scopedMutationInclude(model)

@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package testargs validates and canonicalizes arguments passed directly to a
-// compiled Go test binary.
 package testargs
 
 import (
@@ -11,10 +9,6 @@ import (
 	"strings"
 )
 
-// Normalize converts go test's -short shorthand to the equivalent test-binary
-// flag and rejects standard test flags whose ownership is required for
-// assurance routing. Short mode and the parallel worker limit are the only
-// standard test-binary settings exposed as user execution conditions.
 func Normalize(arguments []string) ([]string, error) {
 	result := slices.Clone(arguments)
 	for index, argument := range result {

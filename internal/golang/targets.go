@@ -36,7 +36,6 @@ type Target struct {
 	RelativeDir  string
 	Path         string
 	Line         int
-	Capability   string
 	Capabilities []string
 	Dependencies []string
 }
@@ -73,15 +72,11 @@ func DiscoverTargets(root string, packages []Package) ([]Target, error) {
 				relativePath := filepath.ToSlash(filepath.Join(filepath.FromSlash(pkg.RelativeDir), entry.Name()))
 				line := fset.Position(function.Pos()).Line
 				capabilities := targetCapabilities(function, goatestAliases)
-				firstCapability := ""
-				if len(capabilities) != 0 {
-					firstCapability = capabilities[0]
-				}
 				targets = append(targets, Target{
 					ID:   TargetID(pkg.ImportPath, function.Name.Name, kind, relativePath, line),
 					Name: function.Name.Name, Kind: kind, Package: pkg.ImportPath,
 					RelativeDir: pkg.RelativeDir, Path: relativePath, Line: line,
-					Capability: firstCapability, Capabilities: capabilities,
+					Capabilities: capabilities,
 					Dependencies: slices.Clone(pkg.Dependencies),
 				})
 			}
@@ -207,23 +202,6 @@ func targetCapabilities(function *ast.FuncDecl, goatestAliases map[string]bool) 
 			result = append(result, value)
 		}
 	}
-	return result
-}
-
-// capability is kept as the single-resource parser seam used by focused
-// tests; production target discovery records the complete capability set.
-func capability(body *ast.BlockStmt, goatestAliases map[string]bool) string {
-	result := ""
-	ast.Inspect(body, func(node ast.Node) bool {
-		if result != "" {
-			return false
-		}
-		values, ok := integrationCapabilities(node, goatestAliases)
-		if ok && len(values) != 0 {
-			result = strings.TrimSpace(values[0])
-		}
-		return true
-	})
 	return result
 }
 

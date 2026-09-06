@@ -9,14 +9,11 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	gotest "github.com/P4suta/goatest/internal/golang"
 )
 
-// TestRepositoryReadersNamesEveryPackageThatReadsAPathItComputes pins the
-// detection from both sides. A package that walks, globs, or lists a directory
-// can change its verdict when a file no key of its own describes changes, and
-// a package that only opens files it names cannot.
-func TestRepositoryReadersNamesEveryPackageThatReadsAPathItComputes(t *testing.T) {
+func TestRepositoryReadCandidatesNameEveryPackageThatReadsAPathItComputes(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeGo(t, root, "listing/listing_test.go", `package listing
@@ -59,8 +56,6 @@ import "strings"
 
 type dir struct{}
 
-// ReadDir is this package's own method, and a selector that only looks like
-// the call the rule names: nothing here imports the package it belongs to.
 func (dir) ReadDir(string) error { return nil }
 
 func Local(name string) error {
@@ -75,8 +70,8 @@ func Local(name string) error {
 		{ImportPath: "example.com/module/named", RelativeDir: "named"},
 	}
 
-	readers := gotest.RepositoryReaders(root, packages)
-	got := slices.Sorted(readersOf(readers))
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	got := slices.Sorted(candidatesOf(candidates))
 	want := []string{
 		"example.com/module/aliased", "example.com/module/listing", "example.com/module/walking",
 	}
@@ -85,12 +80,7 @@ func Local(name string) error {
 	}
 }
 
-// TestRepositoryReadersAnswersConservativelyForAPackageItCannotRead pins the
-// direction a failure has to fall in. A directory that cannot be listed and a
-// file that cannot be parsed both leave the question unanswered, and an
-// unanswered question about what a test reads is answered with the whole tree
-// rather than with nothing.
-func TestRepositoryReadersAnswersConservativelyForAPackageItCannotRead(t *testing.T) {
+func TestRepositoryReadCandidatesAnswerConservativelyForAPackageItCannotRead(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeGo(t, root, "broken/broken.go", "package broken\n\nfunc Broken( {}\n")
@@ -99,18 +89,15 @@ func TestRepositoryReadersAnswersConservativelyForAPackageItCannotRead(t *testin
 		{ImportPath: "example.com/module/absent", RelativeDir: "absent"},
 	}
 
-	readers := gotest.RepositoryReaders(root, packages)
-	got := slices.Sorted(readersOf(readers))
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	got := slices.Sorted(candidatesOf(candidates))
 	want := []string{"example.com/module/absent", "example.com/module/broken"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("repository readers = %v, want %v", got, want)
 	}
 }
 
-// TestRepositoryReadersReadsTheDirectoryAndNothingUnderIt pins the unit the
-// answer is about: a package is its own directory, and a package below it is a
-// package of its own with a question of its own.
-func TestRepositoryReadersReadsTheDirectoryAndNothingUnderIt(t *testing.T) {
+func TestRepositoryReadCandidatesReadTheDirectoryAndNothingUnderIt(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeGo(t, root, "quiet/quiet.go", "package quiet\n\nfunc Quiet() int { return 1 }\n")
@@ -130,7 +117,7 @@ func Loud() ([]string, error) {
 	return names, nil
 }
 `)
-	if err := os.WriteFile(filepath.Join(root, "quiet", "notes.txt"), []byte("not go\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "quiet", "notes.txt"), []byte("not go\n"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	packages := []gotest.Package{
@@ -138,8 +125,8 @@ func Loud() ([]string, error) {
 		{ImportPath: "example.com/module/quiet/loud", RelativeDir: "quiet/loud"},
 	}
 
-	readers := gotest.RepositoryReaders(root, packages)
-	got := slices.Sorted(readersOf(readers))
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	got := slices.Sorted(candidatesOf(candidates))
 	want := []string{"example.com/module/quiet/loud"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("repository readers = %v, want %v", got, want)
@@ -217,17 +204,366 @@ func read(fileSystem fs.FS) { _, _ = fs.ReadDir(fileSystem, ".") }
 	}
 }
 
-// readersOf yields the import paths the answer marked, so a test asserts on
-// the packages rather than on the shape of the map they arrive in.
-func readersOf(readers map[string]bool) func(func(string) bool) {
+func TestRepositoryReadCandidatesFollowOnlyProductionDependencies(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "production/production.go", `package production
+
+import "os"
+
+func Entries() { _, _ = os.ReadDir(".") }
+`)
+	writeGo(t, root, "testonly/testonly_test.go", `package testonly
+
+import (
+	"os"
+	"testing"
+)
+
+func TestEntries(t *testing.T) { _, _ = os.ReadDir(".") }
+`)
+	writeGo(t, root, "initial/initial.go", `package initial
+
+import "os"
+
+func init() { _, _ = os.ReadDir(".") }
+`)
+	writeGo(t, root, "consumer/consumer_test.go", "package consumer\n")
+	writeGo(t, root, "quiet/quiet_test.go", "package quiet\n")
+	writeGo(t, root, "preinit/preinit_test.go", "package preinit\n")
+	packages := []gotest.Package{
+		{ImportPath: "example.com/module/production", RelativeDir: "production"},
+		{ImportPath: "example.com/module/testonly", RelativeDir: "testonly"},
+		{ImportPath: "example.com/module/initial", RelativeDir: "initial"},
+		{
+			ImportPath: "example.com/module/consumer", RelativeDir: "consumer",
+			Dependencies: []string{"example.com/module/production"},
+		},
+		{
+			ImportPath: "example.com/module/quiet", RelativeDir: "quiet",
+			Dependencies: []string{"example.com/module/testonly"},
+		},
+		{
+			ImportPath: "example.com/module/preinit", RelativeDir: "preinit",
+			Dependencies: []string{"example.com/module/initial"},
+		},
+	}
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	if candidate, found := candidates["example.com/module/consumer"]; !found || candidate.Unobservable {
+		t.Fatalf("production reader dependency = (%+v, %t)", candidate, found)
+	}
+	if _, found := candidates["example.com/module/quiet"]; found {
+		t.Fatal("dependency test source leaked into a consumer test binary")
+	}
+	if candidate, found := candidates["example.com/module/preinit"]; !found || !candidate.Unobservable {
+		t.Fatalf("production initializer dependency = (%+v, %t)", candidate, found)
+	}
+}
+
+func TestRepositoryReadCandidatesCoverLoggedAndUnloggedPathOperations(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "logged/logged_test.go", `package logged
+
+import (
+	"os"
+	"path/filepath"
+)
+
+func TestPaths() {
+	_, _ = os.Open("input")
+	_, _ = os.OpenFile("input", os.O_RDONLY, 0)
+	_, _ = os.ReadFile("input")
+	_, _ = os.ReadDir(".")
+	_, _ = os.Stat("input")
+	_, _ = os.Lstat("input")
+	_ = os.Chdir(".")
+	_, _ = os.Create("output")
+	_ = os.WriteFile("output", nil, 0)
+	_ = os.DirFS(".")
+	_, _ = os.OpenRoot(".")
+	_, _ = os.OpenInRoot(".", "input")
+	_, _ = filepath.Glob("*")
+	_, _ = filepath.EvalSymlinks("input")
+}
+`)
+	writeGo(t, root, "unlogged/unlogged_test.go", `package unlogged
+
+import (
+	"io/fs"
+	"os"
+)
+
+func TestPaths(fileSystem fs.FS) {
+	_, _ = os.Readlink("input")
+	_, _ = fs.ReadFile(fileSystem, "input")
+}
+`)
+	packages := []gotest.Package{
+		{ImportPath: "example.com/module/logged", RelativeDir: "logged"},
+		{ImportPath: "example.com/module/unlogged", RelativeDir: "unlogged"},
+	}
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	if candidate, found := candidates["example.com/module/logged"]; !found || candidate.Unobservable {
+		t.Fatalf("logged path operations = (%+v, %t)", candidate, found)
+	}
+	if candidate, found := candidates["example.com/module/unlogged"]; !found || !candidate.Unobservable {
+		t.Fatalf("unlogged path operations = (%+v, %t)", candidate, found)
+	}
+}
+
+func TestRepositoryReadCandidatesFollowPreRunHelpersAcrossFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "main/main_test.go", `package main
+
+import "testing"
+
+func TestMain(m *testing.M) {
+	beforeTests()
+	_ = m.Run()
+	afterTests()
+}
+`)
+	writeGo(t, root, "main/helpers_test.go", `package main
+
+import "os"
+
+func beforeTests() { readRepository() }
+func afterTests() { readRepository() }
+func readRepository() { _, _ = os.ReadFile("input") }
+`)
+	writeGo(t, root, "initial/initial.go", `package initial
+
+func init() { prepare() }
+`)
+	writeGo(t, root, "initial/helper.go", `package initial
+
+import "os"
+
+func prepare() { _, _ = os.Stat("input") }
+`)
+	writeGo(t, root, "ordinary/ordinary_test.go", `package ordinary
+
+import "testing"
+
+func TestRead(t *testing.T) { readRepository() }
+`)
+	writeGo(t, root, "ordinary/helper_test.go", `package ordinary
+
+import "os"
+
+func readRepository() { _, _ = os.ReadFile("input") }
+`)
+	packages := []gotest.Package{
+		{ImportPath: "example.com/module/main", RelativeDir: "main"},
+		{ImportPath: "example.com/module/initial", RelativeDir: "initial"},
+		{ImportPath: "example.com/module/ordinary", RelativeDir: "ordinary"},
+	}
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	for _, path := range []string{"example.com/module/main", "example.com/module/initial"} {
+		candidate, found := candidates[path]
+		if !found || !candidate.Unobservable {
+			t.Errorf("pre-run helper %s = (%+v, %t)", path, candidate, found)
+		}
+	}
+	if candidate, found := candidates["example.com/module/ordinary"]; !found || candidate.Unobservable {
+		t.Fatalf("ordinary helper = (%+v, %t)", candidate, found)
+	}
+}
+
+func TestRepositoryReadCandidatesFollowFunctionAliasesFromTestMain(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "alias/alias_test.go", `package alias
+
+import (
+	"os"
+	"testing"
+)
+
+var read = readRepository
+
+func readRepository() { _, _ = os.ReadFile("input") }
+
+func TestMain(m *testing.M) {
+	local := read
+	local()
+	_ = m.Run()
+}
+`)
+	candidates := gotest.RepositoryReadCandidates(root, []gotest.Package{{ImportPath: "example.com/module/alias", RelativeDir: "alias"}})
+	if candidate, found := candidates["example.com/module/alias"]; !found || !candidate.Unobservable {
+		t.Fatalf("aliased pre-run helper = (%+v, %t)", candidate, found)
+	}
+}
+
+func TestRepositoryReadCandidatesKeepPreRunDependencyReadersConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "reader/reader.go", `package reader
+
+import "os"
+
+func Read() ([]byte, error) { return os.ReadFile("input") }
+`)
+	writeGo(t, root, "bridge/bridge.go", `package bridge
+
+import "example.com/module/reader"
+
+func Load() ([]byte, error) { return reader.Read() }
+`)
+	writeGo(t, root, "main/main_test.go", `package main
+
+import (
+	"example.com/module/bridge"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	_, _ = bridge.Load()
+	_ = m.Run()
+}
+`)
+	writeGo(t, root, "initfn/initfn.go", `package initfn
+
+import "example.com/module/bridge"
+
+func init() { _, _ = bridge.Load() }
+`)
+	writeGo(t, root, "initvar/initvar.go", `package initvar
+
+import "example.com/module/bridge"
+
+var loaded, loadErr = bridge.Load()
+`)
+	writeGo(t, root, "ordinary/ordinary_test.go", `package ordinary
+
+import (
+	"example.com/module/bridge"
+	"testing"
+)
+
+func TestLoad(t *testing.T) { _, _ = bridge.Load() }
+`)
+	reader := "example.com/module/reader"
+	bridge := "example.com/module/bridge"
+	packages := []gotest.Package{
+		{ImportPath: reader, RelativeDir: "reader"},
+		{ImportPath: bridge, RelativeDir: "bridge", Dependencies: []string{reader}},
+		{ImportPath: "example.com/module/main", RelativeDir: "main", Dependencies: []string{bridge, reader}},
+		{ImportPath: "example.com/module/initfn", RelativeDir: "initfn", Dependencies: []string{bridge, reader}},
+		{ImportPath: "example.com/module/initvar", RelativeDir: "initvar", Dependencies: []string{bridge, reader}},
+		{ImportPath: "example.com/module/ordinary", RelativeDir: "ordinary", Dependencies: []string{bridge, reader}},
+	}
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	for _, path := range []string{"example.com/module/main", "example.com/module/initfn", "example.com/module/initvar"} {
+		if candidate, found := candidates[path]; !found || !candidate.Unobservable {
+			t.Errorf("pre-run dependency reader %s = (%+v, %t)", path, candidate, found)
+		}
+	}
+	if candidate, found := candidates["example.com/module/ordinary"]; !found || candidate.Unobservable {
+		t.Fatalf("ordinary dependency reader = (%+v, %t)", candidate, found)
+	}
+}
+
+func candidatesOf(candidates map[string]gotest.RepositoryReadCandidate) func(func(string) bool) {
 	return func(yield func(string) bool) {
-		for path, reader := range readers {
-			if !reader {
-				continue
-			}
+		for path := range candidates {
 			if !yield(path) {
 				return
 			}
 		}
+	}
+}
+
+func TestRepositoryReadCandidatesWidenEveryPathTheActionLogCannotSee(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeGo(t, root, "rawsyscall/rawsyscall.go", `package rawsyscall
+
+import "syscall"
+
+func Read(name string) error {
+	var info syscall.Stat_t
+	return syscall.Stat(name, &info)
+}
+`)
+	writeGo(t, root, "extended/extended.go", `package extended
+
+import "golang.org/x/sys/unix"
+
+func Read(name string) error {
+	var info unix.Stat_t
+	return unix.Stat(name, &info)
+}
+`)
+	writeGo(t, root, "child/child.go", `package child
+
+import "os/exec"
+
+func Run(name string) error {
+	return exec.Command("cat", name).Run()
+}
+`)
+	writeGo(t, root, "loaded/loaded.go", `package loaded
+
+import "plugin"
+
+func Load(name string) error {
+	_, err := plugin.Open(name)
+	return err
+}
+`)
+	writeGo(t, root, "native/native.go", `package native
+
+import "C"
+
+func Native() {}
+`)
+	writeGo(t, root, "booted/booted.go", `package booted
+
+import "os/exec"
+
+func init() { _ = exec.Command("true").Run() }
+`)
+	writeGo(t, root, "consumer/consumer.go", `package consumer
+
+func Consume() int { return 1 }
+`)
+	writeGo(t, root, "ordinary/ordinary.go", `package ordinary
+
+import "os"
+
+func Read(name string) ([]byte, error) { return os.ReadFile(name) }
+`)
+	packages := []gotest.Package{
+		{ImportPath: "example.com/module/rawsyscall", RelativeDir: "rawsyscall"},
+		{ImportPath: "example.com/module/extended", RelativeDir: "extended"},
+		{ImportPath: "example.com/module/child", RelativeDir: "child"},
+		{ImportPath: "example.com/module/loaded", RelativeDir: "loaded"},
+		{ImportPath: "example.com/module/native", RelativeDir: "native"},
+		{ImportPath: "example.com/module/booted", RelativeDir: "booted"},
+		{
+			ImportPath: "example.com/module/consumer", RelativeDir: "consumer",
+			Dependencies: []string{"example.com/module/child"},
+		},
+		{ImportPath: "example.com/module/ordinary", RelativeDir: "ordinary"},
+	}
+
+	candidates := gotest.RepositoryReadCandidates(root, packages)
+	for _, path := range []string{
+		"example.com/module/rawsyscall", "example.com/module/extended",
+		"example.com/module/child", "example.com/module/loaded",
+		"example.com/module/native", "example.com/module/booted",
+		"example.com/module/consumer",
+	} {
+		candidate, found := candidates[path]
+		if !found || !candidate.Unobservable {
+			t.Errorf("unobservable reader %s = (%+v, %t)", path, candidate, found)
+		}
+	}
+	if candidate, found := candidates["example.com/module/ordinary"]; !found || candidate.Unobservable {
+		t.Fatalf("observable reader = (%+v, %t)", candidate, found)
 	}
 }

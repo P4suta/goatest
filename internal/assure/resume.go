@@ -5,15 +5,21 @@ package assure
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/checkpoint"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
-	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
 )
+
+type runCheckpointJournal interface {
+	AppendBaselineCheckpoint(string, checkpoint.BaselineTarget) error
+	AppendBaselineSuiteCheckpoint(string, checkpoint.BaselineSuite) error
+	AppendMutationCheckpoint(string, checkpoint.MutationResult) error
+}
 
 type runCheckpointController struct {
 	mutex   sync.Mutex
@@ -46,8 +52,7 @@ func openRunCheckpoint(store runCache, digest string, options Options, enabled b
 	} else {
 		controller.state = checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}
 	}
-	// Claim the attempt before consuming saved work. A disk that cannot accept
-	// this write gets a true cold run and never contributes prior evidence.
+
 	if err := store.PutCheckpoint(digest, controller.state); err != nil {
 		emit(options, "checkpoint-warning", err.Error()+"; starting cold")
 		_ = store.DeleteCheckpoint(digest)
@@ -65,8 +70,10 @@ func (controller *runCheckpointController) baseline(targets []goanalysis.Target)
 	controller.mutex.Lock()
 	defer controller.mutex.Unlock()
 	current := make(map[string]goanalysis.Target, len(targets))
+	currentPackages := make(map[string]bool, len(targets))
 	for _, target := range targets {
 		current[target.ID] = target
+		currentPackages[target.Package] = true
 	}
 	valid := true
 	for _, unit := range controller.state.Baseline.Targets {
@@ -82,6 +89,12 @@ func (controller *runCheckpointController) baseline(targets []goanalysis.Target)
 	}
 	if controller.state.Baseline.Complete && len(controller.state.Baseline.Targets) != len(targets) {
 		valid = false
+	}
+	for _, suite := range controller.state.Baseline.Suites {
+		if !currentPackages[suite.Package] {
+			valid = false
+			break
+		}
 	}
 	if !valid {
 		emit(controller.options, "checkpoint-warning", "baseline target inventory changed; discarding saved baseline, race, and mutation work")
@@ -108,8 +121,112 @@ func (controller *runCheckpointController) saveBaseline(state checkpoint.Baselin
 	if !controller.enabled {
 		return
 	}
+
+	slices.SortFunc(state.Targets, func(left, right checkpoint.BaselineTarget) int {
+		return compareText(left.ID, right.ID)
+	})
+	slices.SortFunc(state.Suites, func(left, right checkpoint.BaselineSuite) int {
+		return compareText(left.Package, right.Package)
+	})
+	previous := controller.state.Baseline
 	controller.state.Baseline = state
+	journal, journaled := controller.store.(runCheckpointJournal)
+	if journaled {
+		if suffix, ok := baselineCheckpointJournalSuffix(previous, state); ok {
+			for _, unit := range suffix {
+				if err := journal.AppendBaselineCheckpoint(controller.digest, unit); err != nil {
+					controller.disableCheckpointLocked(err)
+					return
+				}
+			}
+			return
+		}
+		if suffix, ok := baselineSuiteCheckpointJournalSuffix(previous, state); ok {
+			for _, unit := range suffix {
+				if err := journal.AppendBaselineSuiteCheckpoint(controller.digest, unit); err != nil {
+					controller.disableCheckpointLocked(err)
+					return
+				}
+			}
+			return
+		}
+	}
 	controller.persistLocked()
+}
+
+func baselineCheckpointJournalSuffix(previous, next checkpoint.Baseline) ([]checkpoint.BaselineTarget, bool) {
+	if !previous.BuildVetComplete || !next.BuildVetComplete || previous.Complete || next.Complete ||
+		!reflect.DeepEqual(previous.Evidence, next.Evidence) || !reflect.DeepEqual(previous.Findings, next.Findings) ||
+		!reflect.DeepEqual(previous.Suites, next.Suites) ||
+		len(next.Targets) <= len(previous.Targets) {
+		return nil, false
+	}
+	before := make(map[string]checkpoint.BaselineTarget, len(previous.Targets))
+	for _, unit := range previous.Targets {
+		if _, duplicate := before[unit.ID]; duplicate {
+			return nil, false
+		}
+		before[unit.ID] = unit
+	}
+	suffix := make([]checkpoint.BaselineTarget, 0, len(next.Targets)-len(previous.Targets))
+	seen := make(map[string]bool, len(next.Targets))
+	for _, unit := range next.Targets {
+		if seen[unit.ID] {
+			return nil, false
+		}
+		seen[unit.ID] = true
+		if saved, exists := before[unit.ID]; exists {
+			if !reflect.DeepEqual(saved, unit) {
+				return nil, false
+			}
+			continue
+		}
+		suffix = append(suffix, unit)
+	}
+	if len(seen) != len(before)+len(suffix) {
+		return nil, false
+	}
+	slices.SortFunc(suffix, func(left, right checkpoint.BaselineTarget) int {
+		return compareText(left.ID, right.ID)
+	})
+	return suffix, true
+}
+
+func baselineSuiteCheckpointJournalSuffix(previous, next checkpoint.Baseline) ([]checkpoint.BaselineSuite, bool) {
+	if !previous.BuildVetComplete || !next.BuildVetComplete || previous.Complete || next.Complete ||
+		!reflect.DeepEqual(previous.Evidence, next.Evidence) || !reflect.DeepEqual(previous.Findings, next.Findings) ||
+		!reflect.DeepEqual(previous.Targets, next.Targets) || len(next.Suites) <= len(previous.Suites) {
+		return nil, false
+	}
+	before := make(map[string]checkpoint.BaselineSuite, len(previous.Suites))
+	for _, unit := range previous.Suites {
+		if _, duplicate := before[unit.Package]; duplicate {
+			return nil, false
+		}
+		before[unit.Package] = unit
+	}
+	suffix := make([]checkpoint.BaselineSuite, 0, len(next.Suites)-len(previous.Suites))
+	seen := make(map[string]bool, len(next.Suites))
+	for _, unit := range next.Suites {
+		if seen[unit.Package] {
+			return nil, false
+		}
+		seen[unit.Package] = true
+		if saved, exists := before[unit.Package]; exists {
+			if !reflect.DeepEqual(saved, unit) {
+				return nil, false
+			}
+			continue
+		}
+		suffix = append(suffix, unit)
+	}
+	if len(seen) != len(before)+len(suffix) {
+		return nil, false
+	}
+	slices.SortFunc(suffix, func(left, right checkpoint.BaselineSuite) int {
+		return compareText(left.Package, right.Package)
+	})
+	return suffix, true
 }
 
 func (controller *runCheckpointController) race(packages []string) (*checkpoint.Race, bool) {
@@ -153,7 +270,7 @@ func (controller *runCheckpointController) saveRace(packages []string, result Ra
 	controller.persistLocked()
 }
 
-func (controller *runCheckpointController) mutation(catalog gomutants.Catalog, root string) map[string]MutationEvaluation {
+func (controller *runCheckpointController) mutation(catalog gomutants.Catalog) map[string]MutationEvaluation {
 	if controller == nil || !controller.enabled {
 		return nil
 	}
@@ -174,14 +291,14 @@ func (controller *runCheckpointController) mutation(catalog gomutants.Catalog, r
 	}
 	result := make(map[string]MutationEvaluation, len(controller.state.Mutation.Results))
 	for _, saved := range controller.state.Mutation.Results {
-		if _, exists := catalogIDs[saved.ID]; !exists || !checkpointArtifactsPresent(root, saved) {
-			emit(controller.options, "checkpoint-warning", "saved mutation artifact or catalog entry is unavailable; discarding saved mutation work")
+		if _, exists := catalogIDs[saved.ID]; !exists {
+			emit(controller.options, "checkpoint-warning", "saved mutation catalog entry is unavailable; discarding saved mutation work")
 			controller.state.Mutation = &checkpoint.Mutation{CatalogFingerprint: fingerprint}
 			controller.persistLocked()
 			return nil
 		}
 		result[saved.ID] = MutationEvaluation{
-			Evidence: slices.Clone(saved.Evidence), Findings: slices.Clone(saved.Findings), Repairs: slices.Clone(saved.Repairs), Applied: saved.Applied,
+			Evidence: slices.Clone(saved.Evidence), Findings: slices.Clone(saved.Findings),
 			Provenance: saved.Provenance,
 		}
 	}
@@ -189,16 +306,38 @@ func (controller *runCheckpointController) mutation(catalog gomutants.Catalog, r
 	return result
 }
 
-func checkpointArtifactsPresent(root string, saved checkpoint.MutationResult) bool {
-	for _, item := range saved.Repairs {
-		if item.Status != string(repair.StatusCandidate) {
-			continue
-		}
-		if _, err := repair.LoadCandidate(root, item.ID); err != nil {
-			return false
-		}
+func (controller *runCheckpointController) probe(catalog gomutants.Catalog, targets []TargetEvidence, packages []string) (evaluation ProbeEvaluation, reused, valid bool) {
+	if controller == nil || !controller.enabled {
+		return ProbeEvaluation{}, false, true
 	}
-	return true
+	controller.mutex.Lock()
+	defer controller.mutex.Unlock()
+	if controller.state.Mutation == nil || controller.state.Mutation.Probe == nil {
+		return ProbeEvaluation{}, false, true
+	}
+	restored, ok := restoreMutationProbe(catalog, targets, packages, *controller.state.Mutation.Probe)
+	if ok {
+		return restored, true, true
+	}
+	emit(controller.options, "checkpoint-warning", "mutation probe inventory changed; discarding saved probe and mutation work")
+	controller.state.Mutation = &checkpoint.Mutation{CatalogFingerprint: MutationCatalogFingerprint(catalog)}
+	controller.reusedMutants = 0
+	controller.persistLocked()
+	return ProbeEvaluation{}, false, false
+}
+
+func (controller *runCheckpointController) saveProbe(catalog gomutants.Catalog, evaluation ProbeEvaluation) {
+	if controller == nil {
+		return
+	}
+	controller.mutex.Lock()
+	defer controller.mutex.Unlock()
+	if !controller.enabled || controller.state.Mutation == nil ||
+		controller.state.Mutation.CatalogFingerprint != MutationCatalogFingerprint(catalog) {
+		return
+	}
+	controller.state.Mutation.Probe = checkpointMutationProbe(catalog, evaluation)
+	controller.persistLocked()
 }
 
 func (controller *runCheckpointController) saveMutant(id string, evaluation MutationEvaluation) {
@@ -211,7 +350,7 @@ func (controller *runCheckpointController) saveMutant(id string, evaluation Muta
 		return
 	}
 	unit := checkpoint.MutationResult{
-		ID: id, Evidence: slices.Clone(evaluation.Evidence), Findings: slices.Clone(evaluation.Findings), Repairs: slices.Clone(evaluation.Repairs), Applied: evaluation.Applied,
+		ID: id, Evidence: slices.Clone(evaluation.Evidence), Findings: slices.Clone(evaluation.Findings),
 		Provenance: evaluation.Provenance,
 	}
 	replaced := false
@@ -225,6 +364,12 @@ func (controller *runCheckpointController) saveMutant(id string, evaluation Muta
 	if !replaced {
 		controller.state.Mutation.Results = append(controller.state.Mutation.Results, unit)
 	}
+	if journal, ok := controller.store.(runCheckpointJournal); ok {
+		if err := journal.AppendMutationCheckpoint(controller.digest, unit); err != nil {
+			controller.disableCheckpointLocked(err)
+		}
+		return
+	}
 	controller.persistLocked()
 }
 
@@ -237,6 +382,10 @@ func (controller *runCheckpointController) completeMutation() {
 	if !controller.enabled || controller.state.Mutation == nil {
 		return
 	}
+
+	slices.SortFunc(controller.state.Mutation.Results, func(left, right checkpoint.MutationResult) int {
+		return compareText(left.ID, right.ID)
+	})
 	controller.state.Mutation.Complete = true
 	controller.persistLocked()
 }
@@ -270,8 +419,23 @@ func (controller *runCheckpointController) persistLocked() {
 		return
 	}
 	if err := controller.store.PutCheckpoint(controller.digest, controller.state); err != nil {
-		emit(controller.options, "checkpoint-warning", err.Error()+"; disabling checkpoint writes for this run")
-		controller.enabled = false
-		_ = controller.store.DeleteCheckpoint(controller.digest)
+		controller.disableCheckpointLocked(err)
+	}
+}
+
+func (controller *runCheckpointController) disableCheckpointLocked(err error) {
+	emit(controller.options, "checkpoint-warning", err.Error()+"; disabling checkpoint writes for this run")
+	controller.enabled = false
+	_ = controller.store.DeleteCheckpoint(controller.digest)
+}
+
+func compareText(left, right string) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
 	}
 }

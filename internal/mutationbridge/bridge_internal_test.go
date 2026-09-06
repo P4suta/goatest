@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 func TestOpenMapsOptionsWithoutAliasingAndWrapsFailure(t *testing.T) {
@@ -25,14 +26,19 @@ func TestOpenMapsOptionsWithoutAliasingAndWrapsFailure(t *testing.T) {
 			return engine, nil
 		}
 		environment := []string{"A=1", "B=2"}
+		exclusions := []string{"reports", "dist"}
 		workspace, err := Open(context.Background(), "repository", Options{
-			GoBinary: "custom-go", TempDirectory: "temporary", ReportDirectory: "reports", Environment: environment,
+			GoBinary: "custom-go", TempDirectory: "temporary", ReportDirectory: "reports",
+			SnapshotExclude: exclusions, Environment: environment,
 		})
 		if err != nil || workspace == nil || workspace.inner != engine {
 			t.Fatalf("Open = (%+v, %v)", workspace, err)
 		}
 		environment[0] = "MUTATED=1"
-		if gotRoot != "repository" || gotOptions.GoBinary != "custom-go" || gotOptions.TempDirectory != "temporary" || gotOptions.ReportDirectory != "reports" || !slices.Equal(gotOptions.Env, []string{"A=1", "B=2"}) {
+		exclusions[0] = "mutated"
+		if gotRoot != "repository" || gotOptions.GoBinary != "custom-go" || gotOptions.TempDirectory != "temporary" ||
+			gotOptions.ReportDirectory != "reports" || !slices.Equal(gotOptions.SnapshotExclude, []string{"reports", "dist"}) ||
+			!slices.Equal(gotOptions.Env, []string{"A=1", "B=2"}) {
 			t.Fatalf("Open arguments = %q %+v", gotRoot, gotOptions)
 		}
 	})
@@ -53,6 +59,9 @@ func TestOpenMapsOptionsWithoutAliasingAndWrapsFailure(t *testing.T) {
 func TestWorkspaceNilMethodsFailClosed(t *testing.T) {
 	t.Parallel()
 	for _, workspace := range []*Workspace{nil, {}} {
+		if version := workspace.ToolchainVersion(); version != "" {
+			t.Errorf("ToolchainVersion = %q, want empty", version)
+		}
 		if _, err := workspace.Exec(context.Background(), gomutants.Command{}); err == nil || err.Error() != "goatest: nil mutation workspace" {
 			t.Errorf("Exec error = %v", err)
 		}
@@ -62,6 +71,13 @@ func TestWorkspaceNilMethodsFailClosed(t *testing.T) {
 		if err := workspace.Close(); err != nil {
 			t.Errorf("Close error = %v", err)
 		}
+	}
+}
+
+func TestWorkspaceToolchainVersionComesFromTheOpenedEngine(t *testing.T) {
+	workspace := &Workspace{inner: &fakeMutationWorkspace{}}
+	if got := workspace.ToolchainVersion(); got != "go version go1.26.6 test/arch" {
+		t.Fatalf("ToolchainVersion = %q", got)
 	}
 }
 
@@ -88,8 +104,8 @@ func TestWorkspacePrepareMapsAndClonesEveryOption(t *testing.T) {
 	workspace := &Workspace{inner: engine}
 	options := PrepareOptions{
 		Contract: "deep-v1", Operators: []string{"comparison"}, Include: []string{"internal/**"},
-		Exclude:  []string{"generated/**"},
-		Packages: []string{"./internal/..."}, Jobs: 3,
+		Exclude: []string{"generated/**"}, DiscoveryPackages: []string{"./internal/codec"},
+		Packages: []string{"./internal/..."}, ProbeCoverPackages: []string{"fixture.example/module/..."}, Jobs: 3,
 		BuildTimeout: time.Minute, MutantTimeout: 2 * time.Second,
 		VerifyArgv: []string{"go", "test", "./..."}, VerifyEnv: []string{"A=1"}, VerifyTimeout: 3 * time.Minute,
 	}
@@ -97,30 +113,73 @@ func TestWorkspacePrepareMapsAndClonesEveryOption(t *testing.T) {
 	if err != nil || got != session {
 		t.Fatalf("Prepare = (%p, %v)", got, err)
 	}
-	options.Operators[0], options.Include[0], options.Exclude[0], options.Packages[0] = "mutated", "mutated", "mutated", "mutated"
+	options.Operators[0], options.Include[0], options.Exclude[0], options.DiscoveryPackages[0], options.Packages[0], options.ProbeCoverPackages[0] = "mutated", "mutated", "mutated", "mutated", "mutated", "mutated"
 	options.VerifyArgv[0], options.VerifyEnv[0] = "mutated", "mutated"
 	prepared := engine.prepare
-	if prepared.Profile != "all" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.Include, []string{"internal/**"}) || !slices.Equal(prepared.Exclude, []string{"generated/**"}) || !slices.Equal(prepared.Packages, []string{"./internal/..."}) || prepared.Jobs != 3 || prepared.BuildTimeout != time.Minute || prepared.MutantTimeout != 2*time.Second || !slices.Equal(prepared.Verify.Argv, []string{"go", "test", "./..."}) || !slices.Equal(prepared.Verify.Env, []string{"A=1"}) || prepared.Verify.Timeout != 3*time.Minute {
+	if prepared.Profile != "all" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.Include, []string{"internal/**"}) || !slices.Equal(prepared.Exclude, []string{"generated/**"}) || !slices.Equal(prepared.DiscoveryPackages, []string{"./internal/codec"}) || !slices.Equal(prepared.Packages, []string{"./internal/..."}) || !slices.Equal(prepared.ProbeCoverPackages, []string{"fixture.example/module/..."}) || prepared.Jobs != 3 || prepared.BuildTimeout != time.Minute || prepared.MutantTimeout != 2*time.Second || !slices.Equal(prepared.Verify.Argv, []string{"go", "test", "./..."}) || !slices.Equal(prepared.Verify.Env, []string{"A=1"}) || prepared.Verify.Timeout != 3*time.Minute || prepared.SkipVerify {
 		t.Fatalf("Prepare options = %+v", prepared)
 	}
 }
 
-// TestPrepareForwardsTheProbeFlag pins the one option that decides whether a
-// session can answer the infection question at all. A probe tree costs a second
-// instrumentation and a second set of test binaries, so a caller that never
-// asks for one must never be given one, and a caller that asks must get one:
-// Session.Probe answers with ErrProbeNotPrepared otherwise.
-func TestPrepareForwardsTheProbeFlag(t *testing.T) {
+func TestPrepareForwardsSessionFlags(t *testing.T) {
 	t.Parallel()
-	for _, probe := range []bool{false, true} {
+	for _, options := range []PrepareOptions{
+		{Contract: "standard-v1"},
+		{Contract: "standard-v1", Probe: true},
+		{Contract: "standard-v1", SkipVerify: true},
+		{Contract: "standard-v1", Probe: true, SkipVerify: true},
+	} {
 		engine := &fakeMutationWorkspace{session: &gomutants.Session{}}
 		workspace := &Workspace{inner: engine}
-		if _, err := workspace.Prepare(context.Background(), PrepareOptions{Contract: "standard-v1", Probe: probe}); err != nil {
-			t.Fatalf("Prepare(Probe=%t) error = %v", probe, err)
+		if _, err := workspace.Prepare(context.Background(), options); err != nil {
+			t.Fatalf("Prepare(%+v) error = %v", options, err)
 		}
-		if engine.prepare.Probe != probe {
-			t.Errorf("prepared Probe = %t, want %t", engine.prepare.Probe, probe)
+		if engine.prepare.Probe != options.Probe || engine.prepare.SkipVerify != options.SkipVerify {
+			t.Errorf("prepared flags = probe:%t skip-verify:%t, want probe:%t skip-verify:%t", engine.prepare.Probe, engine.prepare.SkipVerify, options.Probe, options.SkipVerify)
 		}
+	}
+}
+
+func TestWorkspacePrepareRecordsEnginePreparation(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(0)
+	recorder := trace.New(sink, func() time.Time { return time.Time{} })
+	engine := &fakeMutationWorkspace{session: &gomutants.Session{}}
+	workspace := &Workspace{inner: engine, trace: recorder}
+	if _, err := workspace.Prepare(context.Background(), PrepareOptions{Contract: "standard-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.prepare.Trace == nil {
+		t.Fatal("prepare trace was not forwarded")
+	}
+	engine.prepare.Trace(gomutants.PrepareEvent{
+		Phase: gomutants.PreparePhaseBinaryBuild, State: gomutants.PrepareEventFinished,
+		Result: gomutants.PreparePhaseSucceeded, Duration: 2 * time.Second,
+	})
+	var record *trace.PrepareRecord
+	for _, event := range sink.Events() {
+		if event.Type == trace.TypePrepare {
+			record = event.Prepare
+		}
+	}
+	if record == nil {
+		t.Fatalf("events = %+v", sink.Events())
+	}
+	if record.Phase != trace.PreparePhaseBinaryBuild || record.State != trace.PrepareStateFinished ||
+		record.Result != trace.PrepareResultSucceeded || record.DurationMS == nil || *record.DurationMS != 2_000 {
+		t.Fatalf("prepare record = %+v", record)
+	}
+}
+
+func TestWorkspacePrepareLeavesEngineTraceNilWithoutRecorder(t *testing.T) {
+	t.Parallel()
+	engine := &fakeMutationWorkspace{session: &gomutants.Session{}}
+	workspace := &Workspace{inner: engine}
+	if _, err := workspace.Prepare(context.Background(), PrepareOptions{Contract: "standard-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.prepare.Trace != nil {
+		t.Fatal("prepare trace is non-nil")
 	}
 }
 
@@ -176,6 +235,10 @@ func (workspace *fakeMutationWorkspace) Prepare(_ context.Context, options gomut
 	workspace.prepareCalls++
 	workspace.prepare = options
 	return workspace.session, workspace.prepareErr
+}
+
+func (workspace *fakeMutationWorkspace) ToolchainVersion() string {
+	return "go version go1.26.6 test/arch"
 }
 
 func (workspace *fakeMutationWorkspace) Close() error {

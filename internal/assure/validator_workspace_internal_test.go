@@ -16,6 +16,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/provider"
@@ -85,13 +86,13 @@ func TestRepositoryValidatorOpenPassesFrozenBridgeOptions(t *testing.T) {
 	validator := NewRepositoryValidator(RepositoryValidatorOptions{
 		GoBinary: "go-custom", TempDirectory: "temp", Environment: []string{"DB=ready"}, Trace: recorder,
 	})
-	workspace, err := validator.open(t.Context(), "snapshot")
+	workspace, err := validator.open(t.Context(), "snapshot", "temp")
 	if err != nil || workspace != wantWorkspace || gotRoot != "snapshot" || gotOptions.GoBinary != "go-custom" || gotOptions.TempDirectory != "temp" ||
-		gotOptions.ReportDirectory != ".goatest" || !slices.Equal(gotOptions.Environment, []string{"MUTATED=yes"}) || validator.options.Environment[0] != "DB=ready" {
+		gotOptions.ReportDirectory != internalOutputDirectory || !slices.Equal(gotOptions.SnapshotExclude, assuranceSnapshotExclusions()) ||
+		!slices.Equal(gotOptions.Environment, []string{"MUTATED=yes"}) || validator.options.Environment[0] != "DB=ready" {
 		t.Fatalf("open = (%T, %v), root=%q options=%+v validator=%+v", workspace, err, gotRoot, gotOptions, validator.options)
 	}
-	// A candidate is validated in a copy of the repository, and the commands
-	// that validate it belong to the recording of the run that generated it.
+
 	if gotOptions.Trace != recorder {
 		t.Fatalf("bridge recorder = %p, want %p", gotOptions.Trace, recorder)
 	}
@@ -133,33 +134,39 @@ func TestRunPassingCoversSuccessInfrastructureExitAndTimeout(t *testing.T) {
 	}
 }
 
-func TestRepositoryValidatorOriginalStableUsesIsolatedCandidateAndClosesWorkspace(t *testing.T) {
+func TestRepositoryValidatorOriginalPassesUsesIsolatedCandidateAndClosesWorkspace(t *testing.T) {
 	root, candidate := validationFixture(t)
 	workspace := &scriptedValidationWorkspace{}
-	installValidationOpener(t, func(_ context.Context, snapshot string, _ mutationbridge.Options) (validationWorkspace, error) {
+	var openedSnapshot, openedTemporary string
+	installValidationOpener(t, func(_ context.Context, snapshot string, options mutationbridge.Options) (validationWorkspace, error) {
+		openedSnapshot, openedTemporary = snapshot, options.TempDirectory
 		contents, err := os.ReadFile(filepath.Join(snapshot, candidate.Path))
 		if err != nil || !slices.Equal(contents, candidate.Content) || snapshot == root {
 			t.Fatalf("candidate snapshot = %q contents=%q err=%v", snapshot, contents, err)
 		}
 		return workspace, nil
 	})
-	validator := NewRepositoryValidator(RepositoryValidatorOptions{Root: root, TempDirectory: t.TempDir()})
-	if err := validator.OriginalStable(t.Context(), candidate); err != nil {
+	temporary := t.TempDir()
+	validator := NewRepositoryValidator(RepositoryValidatorOptions{Root: root, TempDirectory: temporary})
+	if err := validator.OriginalPasses(t.Context(), candidate); err != nil {
 		t.Fatal(err)
 	}
 	if workspace.closed != 1 || len(workspace.commands) != 1 || !slices.Equal(workspace.commands[0].Argv, []string{"go", "test", "-count=1", "./..."}) {
 		t.Fatalf("workspace = %+v", workspace)
 	}
+	if filepath.Dir(openedTemporary) != temporary || !strings.HasPrefix(filepath.Base(openedTemporary), runScratchPrefix) || filepath.Dir(openedSnapshot) != openedTemporary {
+		t.Fatalf("validation topology = scratch %q candidate %q, want one run below %q", openedTemporary, openedSnapshot, temporary)
+	}
 }
 
-func TestRepositoryValidatorOriginalStablePropagatesOpenAndCommandErrors(t *testing.T) {
+func TestRepositoryValidatorOriginalPassesPropagatesOpenAndCommandErrors(t *testing.T) {
 	root, candidate := validationFixture(t)
 	cause := errors.New("open failed")
 	installValidationOpener(t, func(context.Context, string, mutationbridge.Options) (validationWorkspace, error) {
 		return nil, cause
 	})
 	validator := NewRepositoryValidator(RepositoryValidatorOptions{Root: root, TempDirectory: t.TempDir()})
-	if err := validator.OriginalStable(t.Context(), candidate); !errors.Is(err, cause) {
+	if err := validator.OriginalPasses(t.Context(), candidate); !errors.Is(err, cause) {
 		t.Fatalf("open error = %v", err)
 	}
 
@@ -167,7 +174,7 @@ func TestRepositoryValidatorOriginalStablePropagatesOpenAndCommandErrors(t *test
 	openValidationWorkspace = func(context.Context, string, mutationbridge.Options) (validationWorkspace, error) {
 		return workspace, nil
 	}
-	if err := validator.OriginalStable(t.Context(), candidate); err == nil || workspace.closed != 1 {
+	if err := validator.OriginalPasses(t.Context(), candidate); err == nil || workspace.closed != 1 {
 		t.Fatalf("command error = %v, closed=%d", err, workspace.closed)
 	}
 }
@@ -244,7 +251,7 @@ func TestRepositoryValidatorKillsRequiresIdentityAndCoversSessionOutcomes(t *tes
 			if (err != nil) != test.wantErr || workspace.closed != 1 {
 				t.Fatalf("Kills = %v, closed=%d", err, workspace.closed)
 			}
-			if prepared.Contract != "deep-v1" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) {
+			if prepared.Contract != "deep-v1" || !slices.Equal(prepared.Operators, []string{"comparison"}) || !slices.Equal(prepared.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || prepared.SkipVerify {
 				t.Fatalf("prepare options = %+v", prepared)
 			}
 			if test.execErr != nil && !errors.Is(err, test.execErr) {
@@ -345,7 +352,7 @@ func validationCatalog() gomutants.Catalog {
 func validationFixture(t *testing.T) (string, provider.Candidate) {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	return root, provider.Candidate{Kind: "patch", Path: "value_test.go", Content: []byte("package fixture\n")}

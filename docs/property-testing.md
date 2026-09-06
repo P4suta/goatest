@@ -19,10 +19,21 @@ func FuzzRoundTrip(f *testing.F) {
 }
 ```
 
-goatest discovers this as an ordinary `FuzzX` target. When coverage shows that
-it reaches a surviving mutant, goatest can run targeted native fuzzing. A
-killing input is stored as a standard `testdata/fuzz/FuzzRoundTrip/...`
-candidate and remains usable by `go test -fuzz`.
+goatest discovers this as an ordinary `FuzzX` target and executes its registered
+seed corpus deterministically during baseline, probe, and mutation evaluation.
+The corpus digest is part of the target evidence key, so an unchanged seed kill
+or survival can be reused and any corpus change invalidates that evidence.
+
+Exploration remains an explicit Go workflow. Run it separately, inspect the
+result, and commit useful inputs to the standard corpus before verification:
+
+```sh
+go test ./path/to/package -fuzz=FuzzRoundTrip
+goatest verify
+```
+
+`go test -fuzz` controls its own random campaign, shrinking, cache, and timeout.
+goatest never treats a bounded random search as a proof.
 
 For typed generators, shrinking, or state-machine testing, use an established
 library such as Rapid in an ordinary `TestX`. goatest treats it like any other

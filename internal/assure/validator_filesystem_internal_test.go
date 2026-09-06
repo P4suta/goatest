@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 )
 
@@ -84,7 +85,7 @@ func TestRepositoryValidatorWithCandidateCleansEveryLifecycleOutcome(t *testing.
 			preserveCandidateLifecycleSeams(t)
 			removed, copied, written, acted := 0, 0, 0, 0
 			makeCandidateTemp = func(parent, pattern string) (string, error) {
-				if parent != "temporary-parent" || pattern != "goatest-candidate-" {
+				if parent != "temporary-parent" || pattern != "candidate-" {
 					t.Fatalf("MkdirTemp(%q, %q)", parent, pattern)
 				}
 				return "isolated-root", test.tempErr
@@ -111,10 +112,11 @@ func TestRepositoryValidatorWithCandidateCleansEveryLifecycleOutcome(t *testing.
 				return test.writeErr
 			}
 			validator := NewRepositoryValidator(RepositoryValidatorOptions{Root: "source-root", TempDirectory: "temporary-parent"})
-			err := validator.withCandidate(t.Context(), candidate, func(_ context.Context, root string) error {
+			validator.options.scratch = &runScratch{dir: "temporary-parent"}
+			err := validator.withCandidate(t.Context(), candidate, func(_ context.Context, root, temporary string) error {
 				acted++
-				if root != "isolated-root" {
-					t.Fatalf("action root = %q", root)
+				if root != "isolated-root" || temporary != "temporary-parent" {
+					t.Fatalf("action = (%q, %q)", root, temporary)
 				}
 				return test.actionErr
 			})
@@ -211,7 +213,7 @@ func TestCopyRepositoryPropagatesWalkEntryAndIOFailures(t *testing.T) {
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go", infoErr: cause}, nil)
 		}},
 		{name: "directory create failure", run: func(t *testing.T, source, _ string) {
-			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "pkg", mode: fs.ModeDir | 0o750}, nil)
+			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "pkg", mode: fs.ModeDir | filemode.GroupReadableDirectory}, nil)
 			makeCandidateDirectory = func(string, os.FileMode) error { return cause }
 		}},
 		{name: "irregular file", run: func(t *testing.T, source, _ string) {
@@ -340,7 +342,7 @@ func TestValidateCopyRootsCoversResolutionContainmentAndSiblingBoundaries(t *tes
 	parent := t.TempDir()
 	source := filepath.Join(parent, "source")
 	destination := filepath.Join(source, "nested")
-	if err := os.MkdirAll(destination, 0o755); err != nil {
+	if err := os.MkdirAll(destination, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateCopyRoots(source, destination); err == nil {
@@ -353,7 +355,7 @@ func TestValidateCopyRootsCoversResolutionContainmentAndSiblingBoundaries(t *tes
 		t.Fatal("identical roots accepted")
 	}
 	sibling := filepath.Join(parent, "source-other")
-	if err := os.MkdirAll(sibling, 0o755); err != nil {
+	if err := os.MkdirAll(sibling, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateCopyRoots(source, sibling); err != nil {
@@ -380,7 +382,7 @@ func TestWriteCandidateValidatesSafetyExistencePreimageAndWritesExactly(t *testi
 	if err := writeCandidate(root, provider.Candidate{Path: "value.go"}); err == nil || !strings.Contains(err.Error(), "unsafe") {
 		t.Fatalf("unsafe path error = %v", err)
 	}
-	if err := writeCandidate(root, provider.Candidate{Path: "missing_test.go", PreimageSHA256: strings.Repeat("a", 64)}); err == nil || !strings.Contains(err.Error(), "expects a missing file") {
+	if err := writeCandidate(root, provider.Candidate{Path: "missing_test.go", PreimageSHA256: strings.Repeat("a", hex.EncodedLen(sha256.Size))}); err == nil || !strings.Contains(err.Error(), "expects a missing file") {
 		t.Fatalf("missing preimage error = %v", err)
 	}
 
@@ -394,7 +396,7 @@ func TestWriteCandidateValidatesSafetyExistencePreimageAndWritesExactly(t *testi
 
 	existingPath := filepath.Join(root, "existing_test.go")
 	existing := []byte("old")
-	if err := os.WriteFile(existingPath, existing, 0o600); err != nil {
+	if err := os.WriteFile(existingPath, existing, filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	matching := provider.Candidate{Path: "existing_test.go", PreimageSHA256: candidateDigest(existing), Content: []byte("replacement")}
@@ -404,7 +406,7 @@ func TestWriteCandidateValidatesSafetyExistencePreimageAndWritesExactly(t *testi
 	if got, err := os.ReadFile(existingPath); err != nil || !slices.Equal(got, matching.Content) {
 		t.Fatalf("matching candidate = %q, %v", got, err)
 	}
-	if err := writeCandidate(root, provider.Candidate{Path: "existing_test.go", PreimageSHA256: strings.Repeat("f", 64)}); err == nil || !strings.Contains(err.Error(), "preimage does not match") {
+	if err := writeCandidate(root, provider.Candidate{Path: "existing_test.go", PreimageSHA256: strings.Repeat("f", hex.EncodedLen(sha256.Size))}); err == nil || !strings.Contains(err.Error(), "preimage does not match") {
 		t.Fatalf("dirty preimage error = %v", err)
 	}
 }
@@ -452,10 +454,10 @@ func singleCandidateWalk(root string, entry fs.DirEntry, walkErr error) func(str
 func writeCandidateFixture(t *testing.T, root, relative, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 }

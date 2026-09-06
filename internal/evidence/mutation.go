@@ -5,6 +5,8 @@ package evidence
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,75 +15,96 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 const (
 	MutationSchemaV1 = "mutation-evidence-v1"
-	// MutationFileName is the one repository-local file that carries reusable
-	// mutation verdicts. The evidence package owns the name so verification and
-	// cache maintenance cannot silently address different stores.
+
 	MutationFileName = "mutation-evidence-v1.json"
 )
 
-// Outcomes a record may carry. Only dispositions a later run can reuse are
-// stored: flaky and inconclusive results and compile rejections are never
-// recorded, because a run that reused one would be reusing an answer the
-// recording run did not have.
 const (
 	MutationOutcomeKilled    = "killed"
 	MutationOutcomeSurvived  = "survived"
 	MutationOutcomeUnreached = "unreached"
-	MutationOutcomeTimedOut  = "timed-out"
 )
 
-// TargetKey names one test target and the behaviour it had when the record was
-// written. The key is what a later run compares against: the same target with
-// a different key is, for the purpose of reuse, a different target.
 type TargetKey struct {
 	Package string `json:"package"`
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 	Key     string `json:"key"`
-	// WholeTree says Key includes every file of the frozen snapshot. Its
-	// absence is the narrow form and remains the meaning of an older record.
-	WholeTree bool `json:"whole_tree,omitempty"`
+
+	WholeTree bool `json:"whole_tree"`
 }
 
-// SuiteKey names a package's whole test suite and the behaviour it had. An
-// unreached mutant is a statement about the suite, not about one target.
 type SuiteKey struct {
 	Package string `json:"package"`
 	Key     string `json:"key"`
-	// WholeTree has the same additive compatibility rule as TargetKey.
-	WholeTree bool `json:"whole_tree,omitempty"`
+
+	WholeTree bool `json:"whole_tree"`
 }
 
-// FindingSeed is what a reused verdict has to be able to report, so a run that
-// reuses a record can raise the finding without executing anything.
+type targetKeyJSON struct {
+	Package   string `json:"package"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	Key       string `json:"key"`
+	WholeTree *bool  `json:"whole_tree"`
+}
+
+func (target *TargetKey) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded targetKeyJSON
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.WholeTree == nil {
+		return errors.New("mutation target key requires whole_tree")
+	}
+	*target = TargetKey{
+		Package: decoded.Package, Name: decoded.Name, Kind: decoded.Kind,
+		Key: decoded.Key, WholeTree: *decoded.WholeTree,
+	}
+	return nil
+}
+
+type suiteKeyJSON struct {
+	Package   string `json:"package"`
+	Key       string `json:"key"`
+	WholeTree *bool  `json:"whole_tree"`
+}
+
+func (suite *SuiteKey) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded suiteKeyJSON
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.WholeTree == nil {
+		return errors.New("mutation suite key requires whole_tree")
+	}
+	*suite = SuiteKey{Package: decoded.Package, Key: decoded.Key, WholeTree: *decoded.WholeTree}
+	return nil
+}
+
 type FindingSeed struct {
 	Kind    string `json:"kind"`
 	Summary string `json:"summary"`
 }
 
 type MutationRecord struct {
-	MutantID   string     `json:"mutant_id"`
-	Path       string     `json:"path"`
-	Package    string     `json:"package"`
-	Outcome    string     `json:"outcome"`
-	Provenance string     `json:"provenance"`
-	KilledBy   *TargetKey `json:"killed_by,omitempty"`
-	// Exhausted is the targets the recording run actually executed against the
-	// mutant. A target the run discharged by proof without executing it is
-	// never listed here: a later run has to be able to read this as "these
-	// targets ran", because that is the claim it reuses.
-	//
-	// What the list means depends on the outcome, and so does whether its order
-	// matters. On a survived record every one of them ran and passed, in any
-	// order, and the claim is about the set: a later run reuses it only when
-	// every target it now routes to the mutant is in it. On a timed-out record
-	// the last entry is the target time ran out under, and the ones before it
-	// are the targets that had already run; the claim is about that last target
-	// alone, so the order is the evidence and is preserved as written.
+	MutantID   string      `json:"mutant_id"`
+	Path       string      `json:"path"`
+	Package    string      `json:"package"`
+	Outcome    string      `json:"outcome"`
+	Provenance string      `json:"provenance"`
+	KilledBy   []TargetKey `json:"killed_by,omitempty"`
+
 	Exhausted []TargetKey  `json:"exhausted,omitempty"`
 	Suite     *SuiteKey    `json:"suite,omitempty"`
 	Finding   *FindingSeed `json:"finding,omitempty"`
@@ -93,16 +116,114 @@ type MutationStore struct {
 	Records    []MutationRecord `json:"records"`
 }
 
-// LoadMutation reads the mutation evidence stored for modulePath. A store that
-// is missing is not an error: there is simply nothing to reuse yet. A store
-// that exists but cannot be trusted is, because the caller must then discard
-// it and execute everything rather than reuse a verdict it cannot account for.
+type mutationStoreJSON struct {
+	Schema     string          `json:"schema"`
+	ModulePath string          `json:"module_path"`
+	Records    json.RawMessage `json:"records"`
+}
+
+func (store *MutationStore) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded mutationStoreJSON
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if len(decoded.Records) == 0 {
+		return errors.New("goatest: mutation evidence requires records")
+	}
+	*store = MutationStore{Schema: decoded.Schema, ModulePath: decoded.ModulePath}
+	return decodeMutationField("records", decoded.Records, &store.Records)
+}
+
+type mutationRecordJSON struct {
+	MutantID   string          `json:"mutant_id"`
+	Path       string          `json:"path"`
+	Package    string          `json:"package"`
+	Outcome    string          `json:"outcome"`
+	Provenance string          `json:"provenance"`
+	KilledBy   json.RawMessage `json:"killed_by"`
+	Exhausted  json.RawMessage `json:"exhausted"`
+	Suite      json.RawMessage `json:"suite"`
+	Finding    json.RawMessage `json:"finding"`
+}
+
+func (record *MutationRecord) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded mutationRecordJSON
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*record = MutationRecord{
+		MutantID: decoded.MutantID, Path: decoded.Path, Package: decoded.Package,
+		Outcome: decoded.Outcome, Provenance: decoded.Provenance,
+	}
+	for _, field := range []struct {
+		name string
+		raw  json.RawMessage
+		into any
+	}{
+		{"killed_by", decoded.KilledBy, &record.KilledBy},
+		{"exhausted", decoded.Exhausted, &record.Exhausted},
+		{"suite", decoded.Suite, &record.Suite},
+		{"finding", decoded.Finding, &record.Finding},
+	} {
+		if err := decodeMutationField(field.name, field.raw, field.into); err != nil {
+			return err
+		}
+	}
+	return record.validateOutcomeFields(decoded)
+}
+
+func decodeMutationField(name string, raw json.RawMessage, into any) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("goatest: mutation evidence %s is null", name)
+	}
+	return json.Unmarshal(raw, into)
+}
+
+func (record MutationRecord) validateOutcomeFields(decoded mutationRecordJSON) error {
+	required := mutationOutcomeFields(record.Outcome)
+	if required == nil {
+		return nil
+	}
+	for _, field := range []struct {
+		name    string
+		present bool
+	}{
+		{"killed_by", len(decoded.KilledBy) != 0},
+		{"exhausted", len(decoded.Exhausted) != 0},
+		{"suite", len(decoded.Suite) != 0},
+		{"finding", len(decoded.Finding) != 0},
+	} {
+		if slices.Contains(required, field.name) == field.present {
+			continue
+		}
+		return mutationOutcomeShapeError(record.Outcome, record.MutantID)
+	}
+	return nil
+}
+
+func mutationOutcomeFields(outcome string) []string {
+	switch outcome {
+	case MutationOutcomeKilled:
+		return []string{"killed_by"}
+	case MutationOutcomeSurvived:
+		return []string{"exhausted", "finding"}
+	case MutationOutcomeUnreached:
+		return []string{"suite", "finding"}
+	}
+	return nil
+}
+
 func LoadMutation(path, modulePath string) (MutationStore, bool, error) {
 	return loadMutationWithHooks(path, modulePath, mutationHooks{})
 }
 
-// loadMutationWithHooks is LoadMutation against a filesystem the caller
-// supplies.
 func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (MutationStore, bool, error) {
 	data, err := hooks.resolved().readStore(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -115,8 +236,7 @@ func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (Mutati
 	if err != nil {
 		return MutationStore{}, false, err
 	}
-	// A store written under another schema or for another module is never
-	// trusted, however plausible its records look.
+
 	if store.Schema != MutationSchemaV1 || store.ModulePath == "" || store.ModulePath != modulePath {
 		return MutationStore{}, false, fmt.Errorf("goatest: mutation evidence identity mismatch")
 	}
@@ -126,9 +246,6 @@ func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (Mutati
 	return store, true, nil
 }
 
-// decodeMutation is the strict on-disk decoder shared by reuse and
-// maintenance. Status therefore calls a document valid only when a later run
-// would parse and validate the same bytes.
 func decodeMutation(data []byte) (MutationStore, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -142,15 +259,10 @@ func decodeMutation(data []byte) (MutationStore, error) {
 	return store, nil
 }
 
-// SaveMutation writes store to path in canonical form, replacing whatever was
-// there. An inconsistent store is refused before anything is created, so the
-// only document that can exist is one this package would load back.
 func SaveMutation(path string, store MutationStore) error {
 	return saveMutationWithHooks(path, store, mutationHooks{})
 }
 
-// saveMutationWithHooks is SaveMutation against a filesystem the caller
-// supplies.
 func saveMutationWithHooks(path string, store MutationStore, hooks mutationHooks) error {
 	hooks = hooks.resolved()
 	store.Schema = MutationSchemaV1
@@ -161,9 +273,7 @@ func saveMutationWithHooks(path string, store MutationStore, hooks mutationHooks
 	if err != nil {
 		return err
 	}
-	// Read the encoding back and check it again. What reaches disk is then a
-	// document this package has loaded once already, so a later run cannot be
-	// handed a store that only looked consistent as a value.
+
 	var stored MutationStore
 	if err := hooks.unmarshalStore(data, &stored); err != nil {
 		return err
@@ -172,7 +282,7 @@ func saveMutationWithHooks(path string, store MutationStore, hooks mutationHooks
 		return err
 	}
 	data = append(data, '\n')
-	if err := hooks.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := hooks.mkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
 	temporary, err := hooks.createTemporary(filepath.Dir(path), ".mutation-*.tmp")
@@ -201,31 +311,16 @@ func saveMutationWithHooks(path string, store MutationStore, hooks mutationHooks
 	return nil
 }
 
-// canonical returns the store in the one form it is ever written in: records
-// ordered by mutant id and each record's exhausted targets ordered by package,
-// name, and kind. Two runs that recorded the same evidence then produce the
-// same bytes, so a diff of the store reads as the evidence that changed.
-//
-// A timed-out record is the exception, because its order is not a rendering of
-// a set: the last of its targets is the one time ran out under, which is the
-// only part of the record a later run reads. Sorting it would leave the record
-// naming an arbitrary target as the one that did not finish. It is written as
-// it was executed, which is equally canonical — two runs that executed the
-// same targets in the same order produce the same bytes — and it is the shape
-// the assurance contract states.
-//
-// The record list is always allocated, so an empty store is written as an
-// empty array rather than null and every stored document satisfies the array
-// contract the schema states.
 func (store MutationStore) canonical() MutationStore {
 	result := store
 	result.Records = make([]MutationRecord, len(store.Records))
 	copy(result.Records, store.Records)
 	for index := range result.Records {
+		killedBy := slices.Clone(result.Records[index].KilledBy)
+		slices.SortFunc(killedBy, compareTargetKeys)
+		result.Records[index].KilledBy = killedBy
 		exhausted := slices.Clone(result.Records[index].Exhausted)
-		if result.Records[index].Outcome != MutationOutcomeTimedOut {
-			slices.SortFunc(exhausted, compareTargetKeys)
-		}
+		slices.SortFunc(exhausted, compareTargetKeys)
 		result.Records[index].Exhausted = exhausted
 	}
 	slices.SortFunc(result.Records, func(first, second MutationRecord) int {
@@ -234,9 +329,6 @@ func (store MutationStore) canonical() MutationStore {
 	return result
 }
 
-// compareTargetKeys orders target keys by the identity of the target, not by
-// its behaviour key: two records of the same target are the duplicate the
-// store refuses, whatever key each carries.
 func compareTargetKeys(first, second TargetKey) int {
 	if order := strings.Compare(first.Package, second.Package); order != 0 {
 		return order
@@ -247,10 +339,6 @@ func compareTargetKeys(first, second TargetKey) int {
 	return strings.Compare(first.Kind, second.Kind)
 }
 
-// validate reports the first way in which a store contradicts itself. Both
-// LoadMutation and SaveMutation call it, so an inconsistent store is neither
-// written nor returned: the caller sees an error and executes everything,
-// which is the direction that can only cost time, never assurance.
 func (store MutationStore) validate() error {
 	if store.ModulePath == "" {
 		return fmt.Errorf("goatest: mutation evidence requires a module path")
@@ -268,7 +356,6 @@ func (store MutationStore) validate() error {
 	return nil
 }
 
-// validate reports the first way in which a record contradicts itself.
 func (record MutationRecord) validate() error {
 	if !isDigest(record.MutantID) {
 		return fmt.Errorf("goatest: mutation evidence mutant id %q is not a sha256 digest", record.MutantID)
@@ -280,7 +367,7 @@ func (record MutationRecord) validate() error {
 		return fmt.Errorf("goatest: mutation evidence record %s provenance %q is not a run snapshot", record.MutantID, record.Provenance)
 	}
 	switch record.Outcome {
-	case MutationOutcomeKilled, MutationOutcomeSurvived, MutationOutcomeUnreached, MutationOutcomeTimedOut:
+	case MutationOutcomeKilled, MutationOutcomeSurvived, MutationOutcomeUnreached:
 	default:
 		return fmt.Errorf("goatest: mutation evidence record %s outcome %q is not a reusable outcome", record.MutantID, record.Outcome)
 	}
@@ -290,13 +377,17 @@ func (record MutationRecord) validate() error {
 	return record.validateShape()
 }
 
-// validateKeys checks every target, suite, and finding the record carries,
-// whatever its outcome allows it to carry.
 func (record MutationRecord) validateKeys() error {
-	if record.KilledBy != nil {
-		if err := record.KilledBy.validate(record.MutantID, "killed_by"); err != nil {
+	seenKilledBy := make(map[TargetKey]struct{}, len(record.KilledBy))
+	for _, target := range record.KilledBy {
+		if err := target.validate(record.MutantID, "killed_by"); err != nil {
 			return err
 		}
+		identity := TargetKey{Package: target.Package, Name: target.Name, Kind: target.Kind}
+		if _, duplicate := seenKilledBy[identity]; duplicate {
+			return fmt.Errorf("goatest: mutation evidence record %s is killed by target %s %s twice", record.MutantID, identity.Package, identity.Name)
+		}
+		seenKilledBy[identity] = struct{}{}
 	}
 	seen := make(map[TargetKey]struct{}, len(record.Exhausted))
 	for _, target := range record.Exhausted {
@@ -323,43 +414,36 @@ func (record MutationRecord) validateKeys() error {
 	return nil
 }
 
-// validateShape checks that the record carries exactly what its outcome means.
-// The shape is the claim: a killed mutant names its killer and nothing else, a
-// survived mutant names the targets that ran without killing it, and an
-// unreached mutant names the suite that never reached it. A record whose shape
-// does not match its outcome states something the recording run cannot have
-// observed.
-//
-// A timed-out mutant is the one outcome with two shapes, because time can run
-// out in either place: under one of the targets that reach it, which names the
-// targets the run did execute, or under the package suite of a mutant no
-// target reached, which names the suite. It carries one or the other and never
-// both — a record naming both would claim the run did the two things it does
-// instead of each other.
 func (record MutationRecord) validateShape() error {
 	switch record.Outcome {
 	case MutationOutcomeKilled:
-		if record.KilledBy == nil || len(record.Exhausted) > 0 || record.Suite != nil || record.Finding != nil {
-			return fmt.Errorf("goatest: mutation evidence killed record %s requires a killer and nothing else", record.MutantID)
+		if len(record.KilledBy) == 0 || len(record.Exhausted) > 0 || record.Suite != nil || record.Finding != nil {
+			return mutationOutcomeShapeError(record.Outcome, record.MutantID)
 		}
 	case MutationOutcomeSurvived:
-		if record.KilledBy != nil || len(record.Exhausted) == 0 || record.Suite != nil || record.Finding == nil {
-			return fmt.Errorf("goatest: mutation evidence %s record %s requires exhausted targets and a finding", record.Outcome, record.MutantID)
-		}
-	case MutationOutcomeTimedOut:
-		if record.KilledBy != nil || record.Finding == nil || (len(record.Exhausted) == 0) == (record.Suite == nil) {
-			return fmt.Errorf("goatest: mutation evidence timed-out record %s requires either exhausted targets or a suite, and a finding", record.MutantID)
+		if len(record.KilledBy) > 0 || len(record.Exhausted) == 0 || record.Suite != nil || record.Finding == nil {
+			return mutationOutcomeShapeError(record.Outcome, record.MutantID)
 		}
 	case MutationOutcomeUnreached:
-		if record.KilledBy != nil || len(record.Exhausted) > 0 || record.Suite == nil || record.Finding == nil {
-			return fmt.Errorf("goatest: mutation evidence unreached record %s requires a suite and a finding", record.MutantID)
+		if len(record.KilledBy) > 0 || len(record.Exhausted) > 0 || record.Suite == nil || record.Finding == nil {
+			return mutationOutcomeShapeError(record.Outcome, record.MutantID)
 		}
 	}
 	return nil
 }
 
-// validate checks one target key, naming the field it was read from so the
-// error points at the record that has to be fixed.
+func mutationOutcomeShapeError(outcome, mutantID string) error {
+	switch outcome {
+	case MutationOutcomeKilled:
+		return fmt.Errorf("goatest: mutation evidence killed record %s requires a killer set that is non-empty and nothing else", mutantID)
+	case MutationOutcomeSurvived:
+		return fmt.Errorf("goatest: mutation evidence %s record %s requires exhausted targets and a finding", outcome, mutantID)
+	case MutationOutcomeUnreached:
+		return fmt.Errorf("goatest: mutation evidence unreached record %s requires a suite and a finding", mutantID)
+	}
+	return nil
+}
+
 func (target TargetKey) validate(mutantID, field string) error {
 	if target.Package == "" || target.Name == "" || target.Kind == "" {
 		return fmt.Errorf("goatest: mutation evidence record %s %s requires a package, a name, and a kind", mutantID, field)
@@ -370,12 +454,8 @@ func (target TargetKey) validate(mutantID, field string) error {
 	return nil
 }
 
-// isDigest reports whether a value is a sha256 digest in the lowercase hex
-// form go-mutants ids and behaviour keys are written in. An uppercase spelling
-// of the same bytes is a different string to every consumer that compares
-// them, so it is refused rather than folded.
 func isDigest(value string) bool {
-	if len(value) != 64 {
+	if len(value) != hex.EncodedLen(sha256.Size) {
 		return false
 	}
 	for _, character := range value {

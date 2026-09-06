@@ -12,7 +12,10 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/filemode"
 )
+
+const configuredReportsKeep = 5
 
 func TestLoadIsOptionalStrictAndVersioned(t *testing.T) {
 	empty, err := config.Load(t.TempDir())
@@ -46,7 +49,7 @@ id = "finding-a"
 reason = "equivalent"
 expires = "2026-12-31T00:00:00Z"
 `
-	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load(root)
@@ -85,16 +88,13 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 		{
 			name:     "configured",
 			contents: "[cache]\nbuild_max_bytes = 2048\nbuild_dir = \".goatest/build\"\n",
-			// A bound and a directory a project asked for are taken exactly as
-			// written: an unresolved relative path, because only the run knows
-			// the repository it is read from.
+
 			wantMaxBytes: 2048, wantDirectory: ".goatest/build",
 		},
 		{
 			name:     "zero is the default rather than an unbounded cache",
 			contents: "[cache]\nbuild_max_bytes = 0\n",
-			// Zero cannot mean unbounded here: a cache nothing collects fills
-			// the disk, which is the failure this whole layer exists to avoid.
+
 			wantMaxBytes: 2 << 30,
 		},
 		{
@@ -110,7 +110,7 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			loaded, err := config.Load(root)
@@ -130,17 +130,10 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 	}
 }
 
-func TestInitRoundTripsTheBuildCacheBound(t *testing.T) {
+func TestInitLoadsTheDefaultBuildCacheBound(t *testing.T) {
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
-	}
-	written, err := os.ReadFile(filepath.Join(root, config.FileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(written), "build_max_bytes") {
-		t.Fatalf("written config = %s, want the build cache bound in it", written)
 	}
 	loaded, err := config.Load(root)
 	if err != nil {
@@ -156,7 +149,7 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaults.Reports.Keep != 20 {
+	if defaults.Reports.Keep != config.DefaultReportsKeep {
 		t.Fatalf("report history defaults = %+v, want the newest twenty runs kept", defaults.Reports)
 	}
 	for _, test := range []struct {
@@ -173,9 +166,7 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 		{
 			name:     "zero is the default rather than a history of nothing",
 			contents: "[reports]\nkeep = 0\n",
-			// Zero cannot mean "keep none" here: the run that just finished is
-			// the newest entry, and a bound of nothing would collect the very
-			// report the person who asked for the run is about to read.
+
 			wantKeep: 20,
 		},
 		{
@@ -186,7 +177,7 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			loaded, err := config.Load(root)
@@ -206,30 +197,21 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 	}
 }
 
-func TestInitAndAcceptanceRoundTripTheReportHistoryBound(t *testing.T) {
+func TestInitAndAcceptanceUseTheReportHistoryBound(t *testing.T) {
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
-	}
-	written, err := os.ReadFile(filepath.Join(root, config.FileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(written), "[reports]") || !strings.Contains(string(written), "keep = 20") {
-		t.Fatalf("written config = %s, want the report history bound documented in it", written)
 	}
 	loaded, err := config.Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Reports.Keep != 20 {
+	if loaded.Reports.Keep != config.DefaultReportsKeep {
 		t.Fatalf("reloaded report history = %+v, want the default bound to have survived the round trip", loaded.Reports)
 	}
-	// 'goatest accept' rewrites the whole file from the configuration it loaded,
-	// so a section the save forgets is a setting the next acceptance silently
-	// reverts to its default.
+
 	configured := t.TempDir()
-	if err := os.WriteFile(filepath.Join(configured, config.FileName), []byte("version = 1\n[reports]\nkeep = 5\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(configured, config.FileName), []byte("version = 1\n[reports]\nkeep = 5\n"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.AddAcceptance(configured, config.Acceptance{
@@ -241,7 +223,7 @@ func TestInitAndAcceptanceRoundTripTheReportHistoryBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rewritten.Reports.Keep != 5 {
+	if rewritten.Reports.Keep != configuredReportsKeep {
 		t.Fatalf("rewritten report history = %+v, want the configured bound to have survived an acceptance", rewritten.Reports)
 	}
 }
@@ -249,7 +231,7 @@ func TestInitAndAcceptanceRoundTripTheReportHistoryBound(t *testing.T) {
 func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
 	root := t.TempDir()
 	contents := "version = 1\n[execution]\ntest_binary_args = [\"-short\", \"-custom=value\"]\n"
-	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load(root)
@@ -272,7 +254,7 @@ func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			contents := "version = 1\n[" + test.section + "]\nenvironment = [" + test.values + "]\n"
-			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -282,7 +264,7 @@ func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
 	}
 	root := t.TempDir()
 	contents := "version = 1\n[resources.db]\ncommand = [\"provider\"]\nenvironment = [\"TOKEN=value\"]\n"
-	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), `resource "db" environment name "TOKEN=value" is invalid`) {
@@ -311,7 +293,7 @@ func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := config.Load(root); err == nil {
@@ -329,7 +311,7 @@ func TestLoadRejectsUnsafeMalformedAndDuplicateProjectExcludes(t *testing.T) {
 			patterns = `"generated/**", "generated/**"`
 		}
 		contents := "version = 1\n[project]\nexclude = [" + patterns + "]\n"
-		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), "project exclude pattern") {
@@ -340,7 +322,7 @@ func TestLoadRejectsUnsafeMalformedAndDuplicateProjectExcludes(t *testing.T) {
 
 func TestLoadReportsReadErrorsAndPreservesDefaults(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, config.FileName), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, config.FileName), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), "read config") {
@@ -359,7 +341,7 @@ func TestLoadReportsReadErrorsAndPreservesDefaults(t *testing.T) {
 func TestLoadAppliesResourceDefaultsAndOwnsDecodedSlices(t *testing.T) {
 	root := t.TempDir()
 	contents := "version = 1\n[resources.db]\ncommand = [\"provider\", \"db\"]\n[generation]\ncommand = [\"generate\"]\nallowed_paths = [\"**/*_test.go\"]\n"
-	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load(root)
@@ -388,7 +370,7 @@ func TestLoadDistinguishesMalformedAndNonPositiveResourceTimeouts(t *testing.T) 
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
 			contents := "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"" + testCase.timeout + "\"\n"
-			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := config.Load(root); err == nil || !strings.Contains(err.Error(), testCase.want) {
@@ -424,7 +406,7 @@ func TestInitAndAddAcceptanceRoundTripWithoutWeakeningStrictness(t *testing.T) {
 	}
 }
 
-func TestInitWritesAnnotatedDefaultsAndReportsCreateFailure(t *testing.T) {
+func TestInitWritesMinimalDefaultsAndReportsCreateFailure(t *testing.T) {
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -433,26 +415,10 @@ func TestInitWritesAnnotatedDefaultsAndReportsCreateFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The template documents every section, but only version and contract are
-	// active: loading the file yields exactly the strict defaults.
-	var active []string
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			active = append(active, trimmed)
-		}
-	}
-	if want := []string{"version = 1", `contract = "standard-v1"`}; !slices.Equal(active, want) {
-		t.Fatalf("active lines = %q, want %q", active, want)
-	}
-	for _, section := range []string{
-		"[project]", "[execution]", "[cache]", "[reports]", "[resources.postgres]", "[generation]", "[[acceptance]]",
-		"packages", "exclude", "build_tags", "test_binary_args", "environment", "timeout", "jobs",
-		"max_bytes", "ttl", "command", "shared", "allowed_paths", "id", "reason", "expires",
-	} {
-		if !strings.Contains(string(data), section) {
-			t.Errorf("template omitted %q", section)
-		}
+
+	const minimalConfig = "version = 1\ncontract = \"standard-v1\"\n"
+	if string(data) != minimalConfig {
+		t.Fatalf("config = %q, want %q", data, minimalConfig)
 	}
 	loaded, err := config.Load(root)
 	if err != nil {
@@ -485,7 +451,7 @@ func TestAddAcceptanceRejectsEveryIncompleteFieldAndPropagatesLoadFailure(t *tes
 	}
 
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 2\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 2\n"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.AddAcceptance(root, config.Acceptance{ID: "finding", Reason: "reviewed", Expires: expires}); err == nil || !strings.Contains(err.Error(), "expected 1") {

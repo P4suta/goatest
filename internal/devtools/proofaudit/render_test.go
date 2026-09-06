@@ -11,11 +11,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// sampleAudit is the recording the golden report is rendered from: a run with
-// every outcome the audit distinguishes. One killer that block routing keeps,
-// one it would drop, one whose target left no profile, a mutant its package
-// suite settled, a batch execution that names no single killer, and a last
-// line the run was interrupted in the middle of, behind a blank one.
 func sampleAudit(t *testing.T) auditResult {
 	t.Helper()
 	recorded := recordedEvidence(t, map[string][]string{
@@ -53,22 +48,8 @@ func sampleAudit(t *testing.T) auditResult {
 	return auditFixture(t, stream, recorded)
 }
 
-// sampleCatalog is the fixture catalog the branch golden is audited against: a
-// hand-written `go-mutants list --json` document over the same subject file the
-// fixture profiles measure. It carries fields this audit does not read, because
-// the audit is run against catalogs older and newer than itself.
 const sampleCatalog = "sample-catalog.json"
 
-// branchSampleAudit is the recording the branch golden is rendered from: a run
-// whose catalog reaches every conclusion the layer has. One killer that took
-// the body its mutation gates, one that never took it, one mutant the catalog
-// proved nothing about, one the catalog does not list at all, one whose proof
-// does not survive the sanity check, and one whose body no profile
-// instrumented.
-//
-// The subject is one file: a head at 10-12 every target runs, a condition at 20
-// gating a body from 20:15 to 22:3, a second condition at 30 gating a body from
-// 30:15 to 32:3, and a third at 38-40.
 func branchSampleAudit(t *testing.T) auditResult {
 	t.Helper()
 	recorded := recordedEvidence(t, map[string][]string{
@@ -108,16 +89,6 @@ func branchSampleAudit(t *testing.T) auditResult {
 	return auditWithCatalog(t, stream, recorded, catalog)
 }
 
-// infectionSampleAudit is the recording the infection golden is rendered from:
-// a run whose probe pass reaches every conclusion the layer has. One killer the
-// pass saw the mutant infect, one it measured and never saw infect, one mutant
-// it carried no site for, and one killer it recorded twice. Every count around
-// them is non-zero as well, so a rendering regression cannot hide behind a
-// column of zeroes.
-//
-// The subject is one file whose head at 10-12 every target ran, so block
-// routing keeps every pair and the only violation the report names is the
-// infection layer's.
 func infectionSampleAudit(t *testing.T) auditResult {
 	t.Helper()
 	recorded := recordedEvidence(t, map[string][]string{
@@ -161,20 +132,16 @@ func infectionSampleAudit(t *testing.T) auditResult {
 	return auditFixture(t, stream, recorded)
 }
 
-// renderSample renders the sample audit under fixed paths, so the golden
-// records the report rather than the temporary directory it was read from.
 func renderSample(t *testing.T) string {
 	t.Helper()
 	return renderAudit("testdata/sample-trace.jsonl", "testdata/sample-profiles", fixtureModule, sampleAudit(t))
 }
 
-// renderBranchSample renders the branch sample under the same fixed paths.
 func renderBranchSample(t *testing.T) string {
 	t.Helper()
 	return renderAudit("testdata/sample-trace.jsonl", "testdata/sample-profiles", fixtureModule, branchSampleAudit(t))
 }
 
-// renderInfectionSample renders the infection sample under the same fixed paths.
 func renderInfectionSample(t *testing.T) string {
 	t.Helper()
 	return renderAudit("testdata/sample-trace.jsonl", "testdata/sample-profiles", fixtureModule, infectionSampleAudit(t))
@@ -213,8 +180,7 @@ func TestRenderAuditDependsOnTheRecordingAlone(t *testing.T) {
 
 func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 	t.Parallel()
-	// The clean report is the one a gate sees most, so what it says when
-	// there is nothing to report is part of the contract.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -228,12 +194,13 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 		"trace: trace.jsonl",
 		"profiles: profiles",
 		"module: " + fixtureModule,
-		"kill pairs audited              1",
-		"probe executions                0",
-		"targets the probe measured      0",
+		"target kill pairs audited                  1",
+		"probe executions                           0",
+		"targets the probe measured                 0",
 		"reach        1     1             0             0           0",
 		whyBranchNotAudited,
 		whyInfectionNotAudited,
+		whySuiteReachNotAudited,
 		"every layer could decide every kill pair",
 		"no layer drops a killer a recorded run proved",
 	} {
@@ -253,9 +220,7 @@ func TestRenderAuditReportsAnAuditWithNothingToSay(t *testing.T) {
 
 func TestRenderAuditSaysWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	t.Parallel()
-	// The savings are the reason to have the layer at all, and they are read
-	// off the recording of a run that discharged nothing, so the block says
-	// what would not have happened rather than what did.
+
 	got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditResult{
 		branchAudited: true,
 		branch:        dischargeSavings{routes: 635, reaching: 8535, discharged: 7318, emptied: 182, executions: 3102},
@@ -281,10 +246,7 @@ func TestRenderAuditSaysWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 
 func TestRenderAuditSaysWhenTheInfectionLayerWasNotAudited(t *testing.T) {
 	t.Parallel()
-	// A recording that holds no probe pass is a recording the layer was never
-	// held to, and a missing row reads exactly like a clean one to anyone
-	// skimming, so the report says which of the two it is — and says it only
-	// then, because a report that always said it would say nothing.
+
 	saved := dischargeSavings{routes: 412, reaching: 5104, discharged: 3990, emptied: 96, executions: 1877}
 	cases := []struct {
 		name    string
@@ -331,8 +293,7 @@ func TestRenderAuditSaysWhenTheInfectionLayerWasNotAudited(t *testing.T) {
 
 func TestRenderAuditSaysWhenNoLayerWasAudited(t *testing.T) {
 	t.Parallel()
-	// An audit of no layers is not a clean audit, and a table with no rows
-	// under a "layers" heading would read as one.
+
 	got := renderAudit("trace.jsonl", "profiles", fixtureModule, auditResult{})
 	if !strings.Contains(got, "no layer was audited") {
 		t.Errorf("an audit of no layers does not say so:\n%s", got)
@@ -341,9 +302,7 @@ func TestRenderAuditSaysWhenNoLayerWasAudited(t *testing.T) {
 
 func TestOrNoValueMarksAFieldTheRecordingLacked(t *testing.T) {
 	t.Parallel()
-	// A recording from before a field existed carries none of it, and an
-	// empty cell in a table reads as a rendering bug rather than as an
-	// absence.
+
 	if got := orNoValue(""); got != noValue {
 		t.Errorf("orNoValue rendered an absent value as %q, want %q", got, noValue)
 	}
@@ -354,9 +313,7 @@ func TestOrNoValueMarksAFieldTheRecordingLacked(t *testing.T) {
 
 func TestPositionRendersOnlyWhatTheRecordingCarried(t *testing.T) {
 	t.Parallel()
-	// A route records a position or nothing, and a mutant the engine could
-	// not place is exactly the mutant a reader wants to see as unplaced
-	// rather than as sitting at line zero.
+
 	cases := []struct {
 		name         string
 		line, column int
@@ -379,9 +336,7 @@ func TestPositionRendersOnlyWhatTheRecordingCarried(t *testing.T) {
 
 func TestMutantNameFallsBackToTheRecordedIdentity(t *testing.T) {
 	t.Parallel()
-	// The engine names a mutant by the first twenty characters of its content
-	// address. A recording that carries none is named by the same twenty, so
-	// one column stays one width whatever wrote the trace.
+
 	cases := []struct {
 		name string
 		pair killPair

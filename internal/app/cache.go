@@ -43,6 +43,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 	}
 	switch action {
 	case "status":
+		moment := service.clock()().UTC()
 		status, err := cache.Inspect(cacheRoot)
 		if err != nil {
 			return report.Report{}, err
@@ -76,18 +77,15 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			return report.Report{}, err
 		}
 		result.Evidence = append(result.Evidence, buildCacheStatusEvidence("build-status", buildStatus))
-		// The temporary directory last, because it is the one store that is not
-		// the repository's: what is reported before it is what this .goatest
-		// holds, and what is reported here is what runs left on the machine.
-		result.Evidence = append(result.Evidence, service.temporaryStatus(service.clock()().UTC()))
+		result.Evidence = append(result.Evidence, service.nativeCacheStatus(root, moment))
+
+		result.Evidence = append(result.Evidence, service.temporaryStatus(moment))
 		result.Evidence = append(result.Evidence, keptTemporaryStatus(root)...)
 		result.Evidence = append(result.Evidence, mutationEvidenceStatusEvidence("status", "ready", mutationStatus))
 		return result, nil
 	case "gc":
 		moment := service.clock()().UTC()
-		// GC deliberately retains the mutation evidence store. Inspect it before
-		// changing any other store so a filesystem failure cannot leave a
-		// partially collected result merely because reporting it failed late.
+
 		mutationStatus, err := evidence.InspectMutation(mutationEvidencePath)
 		if err != nil {
 			return report.Report{}, err
@@ -121,12 +119,7 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			reportsGCEvidence(history),
 		)
 		result.Evidence = append(result.Evidence, repair...)
-		// Every run already collects the build cache when it ends, so this is
-		// the same collection on demand rather than the only one there is. It
-		// takes the layer's own lock, so it yields to a run collecting beside
-		// it, and MinIdle comes from the layer rather than from a constant
-		// here: the window a collection must leave alone is two of the layer's
-		// touch intervals, and only the layer knows what its interval is.
+
 		buildLayer := service.buildCacheLayer(root)
 		buildCollected, ran, err := buildLayer.CollectLocked(buildcache.Policy{
 			MaxBytes: loaded.Cache.BuildMaxBytes, TTL: loaded.Cache.TTL, MinIdle: buildLayer.MinIdle(),
@@ -138,15 +131,13 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 			buildCacheStatusEvidence("build-before", buildCollected.Before),
 			buildCacheGCEvidence(buildCollected, ran),
 			buildCacheStatusEvidence("build-after", buildCollected.After),
+			service.nativeCacheSweep(root, moment),
 			service.temporarySweep(moment),
 			collectKeptTemporaries(root, loaded.Cache.TTL, moment))
 		result.Evidence = append(result.Evidence, mutationEvidenceStatusEvidence("gc", "retained", mutationStatus))
 		return result, nil
 	case "flush":
-		// Inspect both stores before removing either. The exact-input inspection
-		// rejects malformed entries, and a directory at the evidence path is not
-		// a file this command owns. Holding the repository lease makes the two
-		// preflight answers stable against other goatest processes.
+
 		if _, err := cache.Inspect(cacheRoot); err != nil {
 			return report.Report{}, err
 		}
@@ -181,27 +172,10 @@ func (service Service) cache(ctx context.Context, root, action string) (report.R
 	}
 }
 
-// buildCacheLayer names the build cache this repository's configuration points
-// at. A directory nothing could resolve is the zero layer, which holds nothing
-// and collects nothing, so status and gc report an empty cache rather than
-// refusing to run.
-//
-// It asks for the directory alone. Maintenance never serves the cache, so
-// whether this process could be re-executed as the cache program has nothing
-// to do with whether it can report on the layer or collect it.
 func (service Service) buildCacheLayer(root string) buildcache.Layer {
 	return buildcache.Layer{Dir: service.buildCacheDirectory(root)}
 }
 
-// buildCacheGCEvidence reports what the collection of the build cache did, and
-// a collection that did not run is not one that removed nothing.
-//
-// The layer the machine keeps is shared by every repository on it, so the
-// collection yields when another process already holds it, and a layer no
-// machine has built yet has nothing to hold at all. Both are ordinary answers
-// rather than failures, and both leave the bound unapplied for now — so a
-// reader who saw "completed, removed nothing" would draw the opposite
-// conclusion from the true one.
 func buildCacheGCEvidence(collected buildcache.Collected, ran bool) report.Evidence {
 	if !ran {
 		return report.Evidence{Kind: "build-cache", ID: "build-gc", Status: "skipped",
@@ -224,8 +198,6 @@ func retentionStatusEvidence(id string, status retention.Status) report.Evidence
 	return report.Evidence{Kind: "diagnostic-retention", ID: id, Status: "ready", Detail: retentionDetail(status)}
 }
 
-// retentionDetail is how every retained store describes itself, so that a
-// reader comparing two of them is comparing the same measurements.
 func retentionDetail(status retention.Status) string {
 	detail := fmt.Sprintf("entries=%d bytes=%d", status.Entries, status.Bytes)
 	if !status.Oldest.IsZero() {
@@ -256,14 +228,6 @@ func (service Service) collectDiagnosticRetention(root string) {
 	}
 }
 
-// collectVerdictCache applies the cache policy to the store that policy is
-// named after, at the end of the run that just read and wrote it.
-//
-// It belongs beside the diagnostic collection rather than after the report is
-// published, because the entry a run adds is written during the run: by the
-// time this runs the cache already holds it, and it is the newest, so the
-// budget falls on older entries. A failure is a note for the same reason every
-// collection here reports one — the run has already produced its verdict.
 func (service Service) collectVerdictCache(root string) {
 	loaded, err := config.Load(root)
 	if err != nil {
@@ -287,11 +251,9 @@ func cacheStatusEvidence(id string, status cache.Status) report.Evidence {
 	return report.Evidence{Kind: "cache", ID: id, Status: "ready", Detail: detail}
 }
 
-// mutationEvidenceStatusEvidence renders missing and invalid stores distinctly
-// from a valid store whose caller chooses the ready or retained disposition.
 func mutationEvidenceStatusEvidence(id, validStatus string, status evidence.MutationStatus) report.Evidence {
-	detail := fmt.Sprintf("records=%d killed=%d survived=%d unreached=%d timed-out=%d bytes=%d",
-		status.Records, status.Killed, status.Survived, status.Unreached, status.TimedOut, status.Bytes)
+	detail := fmt.Sprintf("records=%d killed=%d survived=%d unreached=%d bytes=%d",
+		status.Records, status.Killed, status.Survived, status.Unreached, status.Bytes)
 	if status.ModulePath != "" {
 		detail += " module=" + status.ModulePath
 	}

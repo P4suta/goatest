@@ -12,9 +12,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// The tests in this file pin behaviour a dogfood run proved untested: each of
-// them kills surviving mutants the assurance report named in this package.
-
 func TestRenderSummaryOfAnEmptyStreamSaysSo(t *testing.T) {
 	t.Parallel()
 	if got := renderSummary("empty.jsonl", nil); got != "trace: empty.jsonl\nthe stream carries no events\n" {
@@ -141,23 +138,94 @@ func TestMutantTotalsOrderTiesDeterministically(t *testing.T) {
 		mutantExecEvent("mutant-a", 3, "survived"),
 	}
 	mutants, _, _, _ := mutantTotals(events)
-	if len(mutants) != 2 || mutants[0].id != "mutant-a" || mutants[1].id != "mutant-b" {
+	if len(mutants) != len(events) || mutants[0].id != "mutant-a" || mutants[1].id != "mutant-b" {
 		t.Fatalf("tied mutants = %+v, want the identity as the last resort order", mutants)
+	}
+}
+
+func TestMutantTotalsOrderByExecutionsThenDuration(t *testing.T) {
+	t.Parallel()
+	const (
+		shortDuration      = int64(1)
+		longDuration       = int64(100)
+		expectedTotalCount = 2
+	)
+	byExecutions, _, _, _ := mutantTotals([]trace.Event{
+		mutantExecEvent("mutant-fewer", longDuration, "killed"),
+		mutantExecEvent("mutant-more", shortDuration, "killed"),
+		mutantExecEvent("mutant-more", shortDuration, "killed"),
+	})
+	if len(byExecutions) != expectedTotalCount || byExecutions[0].id != "mutant-more" {
+		t.Fatalf("execution order = %+v", byExecutions)
+	}
+	byDuration, _, _, _ := mutantTotals([]trace.Event{
+		mutantExecEvent("mutant-fast", shortDuration, "killed"),
+		mutantExecEvent("mutant-slow", longDuration, "killed"),
+	})
+	if len(byDuration) != expectedTotalCount || byDuration[0].id != "mutant-slow" {
+		t.Fatalf("duration order = %+v", byDuration)
+	}
+}
+
+func TestOutcomeTotalsOrderByExecutionsDurationAndIdentity(t *testing.T) {
+	t.Parallel()
+	const (
+		shortDuration      = int64(1)
+		longDuration       = int64(100)
+		expectedTotalCount = 2
+	)
+	for _, test := range []struct {
+		name   string
+		events []trace.Event
+		want   string
+	}{
+		{
+			name: "executions",
+			events: []trace.Event{
+				mutantExecEvent("mutant-a", longDuration, "few"),
+				mutantExecEvent("mutant-b", shortDuration, "many"),
+				mutantExecEvent("mutant-c", shortDuration, "many"),
+			},
+			want: "many",
+		},
+		{
+			name: "duration",
+			events: []trace.Event{
+				mutantExecEvent("mutant-a", shortDuration, "fast"),
+				mutantExecEvent("mutant-b", longDuration, "slow"),
+			},
+			want: "slow",
+		},
+		{
+			name: "identity",
+			events: []trace.Event{
+				mutantExecEvent("mutant-a", shortDuration, "z-outcome"),
+				mutantExecEvent("mutant-b", shortDuration, "a-outcome"),
+			},
+			want: "a-outcome",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, outcomes, _, _ := mutantTotals(test.events)
+			if len(outcomes) != expectedTotalCount || outcomes[0].outcome != test.want {
+				t.Fatalf("outcomes = %+v, want %q first", outcomes, test.want)
+			}
+		})
 	}
 }
 
 func TestMutantBlockAccountsForTheRestBeyondTheTop(t *testing.T) {
 	t.Parallel()
-	events := make([]trace.Event, 0, mutantLimit+2)
-	for index := range mutantLimit + 2 {
+	events := make([]trace.Event, 0, mutantLimit+summaryOverflowItemCount)
+	for index := range cap(events) {
 		events = append(events, mutantExecEvent(fmt.Sprintf("mutant-%02d", index), int64(100+index), "survived"))
 	}
 	lines := mutantBlock(events)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, fmt.Sprintf("(top %d of %d)", mutantLimit, mutantLimit+2)) {
+	if !strings.Contains(joined, fmt.Sprintf("(top %d of %d)", mutantLimit, len(events))) {
 		t.Fatalf("block does not name its cap:\n%s", joined)
 	}
-	// The two cheapest mutants fall past the cap: index 0 and 1, 100+101 ms.
+
 	if !strings.Contains(joined, "2 more mutants: 2 executions, 201ms") {
 		t.Fatalf("block does not account for the rest:\n%s", joined)
 	}
@@ -173,15 +241,15 @@ func TestMutantBlockAccountsForTheRestBeyondTheTop(t *testing.T) {
 
 func TestExecBlockCapsItsTableAndAccountsForTheRest(t *testing.T) {
 	t.Parallel()
-	events := make([]trace.Event, 0, execClassLimit+2)
-	for index := range execClassLimit + 2 {
+	events := make([]trace.Event, 0, execClassLimit+summaryOverflowItemCount)
+	for index := range cap(events) {
 		events = append(events, execEvent([]string{"tool", fmt.Sprintf("verb-%02d", index)}, int64(100+index)))
 	}
 	joined := strings.Join(execBlock(events), "\n")
-	if !strings.Contains(joined, fmt.Sprintf("(top %d of %d)", execClassLimit, execClassLimit+2)) {
+	if !strings.Contains(joined, fmt.Sprintf("(top %d of %d)", execClassLimit, len(events))) {
 		t.Fatalf("block does not name its cap:\n%s", joined)
 	}
-	// The two cheapest classes fall past the cap: 100+101 ms across 2 calls.
+
 	if !strings.Contains(joined, "2 more classes: 2 calls, 201ms") {
 		t.Fatalf("block does not account for the rest:\n%s", joined)
 	}
@@ -219,18 +287,17 @@ func phaseEndEvent(name string, duration int64) trace.Event {
 func TestPhaseTotalsAccumulatePassesAndOrderTies(t *testing.T) {
 	t.Parallel()
 	totals := phaseTotals([]trace.Event{
+		phaseEndEvent("baseline", 12),
 		phaseEndEvent("mutation", 5),
 		phaseEndEvent("mutation", 7),
-		phaseEndEvent("baseline", 12),
 	})
-	if len(totals) != 2 {
+	if len(totals) != phaseTotalCount {
 		t.Fatalf("totals = %+v", totals)
 	}
-	if totals[0].name != "mutation" || totals[0].passes != 2 || totals[0].duration != 12 {
+	if totals[0].name != "mutation" || totals[0].passes != phaseTotalCount || totals[0].duration != 12 {
 		t.Fatalf("repeated phase = %+v, want two passes summing 12", totals[0])
 	}
-	// Equal durations and passes fall back to the name, so two runs of the
-	// same recording list their phases in the same order.
+
 	tied := phaseTotals([]trace.Event{phaseEndEvent("race", 3), phaseEndEvent("impact", 3)})
 	if tied[0].name != "impact" || tied[1].name != "race" {
 		t.Fatalf("tied phases = %+v", tied)

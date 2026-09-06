@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestDoctorOptionalAndBooleanStatusesAreExplicit(t *testing.T) {
@@ -28,10 +30,10 @@ func TestDoctorOptionalAndBooleanStatusesAreExplicit(t *testing.T) {
 func TestDoctorProviderCommandResolvesRepositoryRelativePathsAndRejectsDirectories(t *testing.T) {
 	root := t.TempDir()
 	provider := filepath.Join(root, "tools", "provider.exe")
-	if err := os.MkdirAll(filepath.Dir(provider), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(provider), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(provider, []byte("fixture"), 0o755); err != nil {
+	if err := os.WriteFile(provider, []byte("fixture"), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := doctorProviderCommand(root, "tools/provider.exe"); err != nil {
@@ -42,9 +44,6 @@ func TestDoctorProviderCommandResolvesRepositoryRelativePathsAndRejectsDirectori
 	}
 }
 
-// The writability probe proves a directory can be written and leaves the tree
-// exactly as it found it: no probe file, and no directory the probe itself
-// created.
 func TestProbeWritableDirectoryRestoresWhatItCreated(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, ".goatest")
@@ -54,7 +53,7 @@ func TestProbeWritableDirectoryRestoresWhatItCreated(t *testing.T) {
 	if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("probe left the directory it created: %v", err)
 	}
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	if err := os.MkdirAll(directory, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := probeWritableDirectory(doctorProbeFilesystem{}, directory); err != nil {
@@ -90,8 +89,9 @@ func TestProbeWritableDirectoryReportsInjectedFailures(t *testing.T) {
 }
 
 func TestLimitedDoctorBufferBoundsOutputAndMarksTruncation(t *testing.T) {
+	const doctorOutputOverflow = 7
 	var buffer limitedDoctorBuffer
-	input := strings.Repeat("x", doctorOutputLimit+7)
+	input := strings.Repeat("x", doctorOutputLimit+doctorOutputOverflow)
 	if written, err := buffer.Write([]byte(input)); err != nil || written != len(input) {
 		t.Fatalf("Write = (%d, %v)", written, err)
 	}

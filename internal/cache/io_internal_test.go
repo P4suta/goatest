@@ -191,10 +191,6 @@ func TestPutTreatsPostCommitCollectionAsBestEffort(t *testing.T) {
 	}
 }
 
-// TestPutTrimsTheBoundedCacheAfterCommittingAnEntry pins the collection a
-// policy store runs for itself. Every other collection test replaces the
-// collector, so without this one nothing exercises the default: a store wired
-// to the locking Collect, or to no collector at all, would still pass them.
 func TestPutTrimsTheBoundedCacheAfterCommittingAnEntry(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

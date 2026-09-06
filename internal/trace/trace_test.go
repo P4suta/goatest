@@ -19,13 +19,8 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// traceOrigin is the wall clock a scripted recording starts from. A fake clock
-// makes every field of a recorded event deterministic except the ones the
-// recorder derives from the clock itself, which the fake also fixes.
 var traceOrigin = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 
-// fakeClock is the injected now function. It is safe for concurrent use so
-// that a test may record from several goroutines without racing the clock.
 type fakeClock struct {
 	mutex sync.Mutex
 	now   time.Time
@@ -33,29 +28,29 @@ type fakeClock struct {
 
 func newClock() *fakeClock { return &fakeClock{now: traceOrigin} }
 
-// Now is the func(time.Time) seam passed to trace.New.
 func (clock *fakeClock) Now() time.Time {
 	clock.mutex.Lock()
 	defer clock.mutex.Unlock()
 	return clock.now
 }
 
-// Advance moves the fake clock forward, standing in for elapsed work.
 func (clock *fakeClock) Advance(step time.Duration) {
 	clock.mutex.Lock()
 	defer clock.mutex.Unlock()
 	clock.now = clock.now.Add(step)
 }
 
-// recordScript performs one recording that reaches every event type exactly
-// once, advancing the clock a whole second before each event. Tests that pin
-// the wire format, assert determinism, or validate the schema all record the
-// same script, so the recorded events and their pinned bytes cannot drift
-// apart.
 func recordScript(clock *fakeClock, sink trace.Sink) {
 	recorder := trace.New(sink, clock.Now)
 	clock.Advance(time.Second)
 	endPhase := recorder.PhaseStart("mutation")
+	clock.Advance(time.Second)
+	recorder.Prepare(
+		trace.PreparePhaseBinaryBuild,
+		trace.PrepareStateFinished,
+		trace.PrepareResultSucceeded,
+		prepareFixtureDuration,
+	)
 	clock.Advance(time.Second)
 	recorder.Exec(trace.ExecRecord{
 		Argv:       []string{"go", "test", "./..."},
@@ -115,7 +110,6 @@ func recordScript(clock *fakeClock, sink trace.Sink) {
 	recorder.RunEnd("assured", nil)
 }
 
-// scriptedEvents records the script into an unbounded memory sink.
 func scriptedEvents(t *testing.T) []trace.Event {
 	t.Helper()
 	sink := trace.NewMemorySink(0)
@@ -126,21 +120,18 @@ func scriptedEvents(t *testing.T) []trace.Event {
 	return sink.Events()
 }
 
-// scriptedJSONL is the pinned wire format of the script, one event per line in
-// sequence order. It is the contract every consumer of a trace directory reads,
-// so a change to a field name, a field order, or an omitted zero value must
-// change this literal deliberately.
 var scriptedJSONL = []string{
 	`{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-02T03:04:05Z","elapsed_ms":0}`,
 	`{"seq":2,"type":"phase-start","timestamp":"2026-01-02T03:04:06Z","elapsed_ms":1000,"phase":{"name":"mutation"}}`,
-	`{"seq":3,"type":"exec","timestamp":"2026-01-02T03:04:07Z","elapsed_ms":2000,"exec":{"argv":["go","test","./..."],"dir":"internal/assure","env_names":["GOCACHE","GOFLAGS"],"timeout_ms":60000,"exit_code":1,"duration_ms":1200}}`,
-	`{"seq":4,"type":"mutant-exec","timestamp":"2026-01-02T03:04:08Z","elapsed_ms":3000,"mutant":{"id":"m-0001","display_id":"cond-negate internal/assure/run.go:42","package":"example.com/app/internal/assure","args":["-run","TestRun"],"timeout_ms":30000,"outcome":"killed","killed_by":"TestRun","duration_ms":900}}`,
-	`{"seq":5,"type":"route","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},{"target":"TestNeverInfects","reason":"never-infected"}],"probed":true}}`,
-	`{"seq":6,"type":"probe-exec","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"probe":{"target":"TestRun","package":"example.com/app/internal/assure","args":["-test.run=^TestRun$"],"timeout_ms":30000,"outcome":"measured","exit_code":0,"duration_ms":800,"infected":["m-0001"]}}`,
-	`{"seq":7,"type":"progress","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
-	`{"seq":8,"type":"artifact","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,
-	`{"seq":9,"type":"phase-end","timestamp":"2026-01-02T03:04:13Z","elapsed_ms":8000,"phase":{"name":"mutation","duration_ms":7000}}`,
-	`{"seq":10,"type":"run-end","timestamp":"2026-01-02T03:04:14Z","elapsed_ms":9000,"run":{"verdict":"assured","events_emitted":9,"events_dropped":0}}`,
+	`{"seq":3,"type":"prepare","timestamp":"2026-01-02T03:04:07Z","elapsed_ms":2000,"prepare":{"phase":"binary_build","state":"finished","result":"succeeded","duration_ms":875}}`,
+	`{"seq":4,"type":"exec","timestamp":"2026-01-02T03:04:08Z","elapsed_ms":3000,"exec":{"argv":["go","test","./..."],"dir":"internal/assure","env_names":["GOCACHE","GOFLAGS"],"timeout_ms":60000,"exit_code":1,"duration_ms":1200}}`,
+	`{"seq":5,"type":"mutant-exec","timestamp":"2026-01-02T03:04:09Z","elapsed_ms":4000,"mutant":{"id":"m-0001","display_id":"cond-negate internal/assure/run.go:42","package":"example.com/app/internal/assure","args":["-run","TestRun"],"timeout_ms":30000,"outcome":"killed","killed_by":"TestRun","duration_ms":900}}`,
+	`{"seq":6,"type":"route","timestamp":"2026-01-02T03:04:10Z","elapsed_ms":5000,"route":{"mutant_id":"m-0001","rule":"cond-negate","path":"internal/assure/run.go","line":42,"column":9,"reaching_targets":["TestRun"],"plan":["TestRun"],"reason":"coverage-reaching","granularity":"block","file_candidates":3,"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},{"target":"TestNeverInfects","reason":"never-infected"}],"probed":true}}`,
+	`{"seq":7,"type":"probe-exec","timestamp":"2026-01-02T03:04:11Z","elapsed_ms":6000,"probe":{"target":"TestRun","package":"example.com/app/internal/assure","args":["-test.run=^TestRun$"],"timeout_ms":30000,"outcome":"measured","exit_code":0,"duration_ms":800,"infected":["m-0001"]}}`,
+	`{"seq":8,"type":"progress","timestamp":"2026-01-02T03:04:12Z","elapsed_ms":7000,"progress":{"kind":"mutation-progress","detail":"3/10"}}`,
+	`{"seq":9,"type":"artifact","timestamp":"2026-01-02T03:04:13Z","elapsed_ms":8000,"artifact":{"kind":"report","path":"reports/runs/run-1/report.json"}}`,
+	`{"seq":10,"type":"phase-end","timestamp":"2026-01-02T03:04:14Z","elapsed_ms":9000,"phase":{"name":"mutation","duration_ms":8000}}`,
+	`{"seq":11,"type":"run-end","timestamp":"2026-01-02T03:04:15Z","elapsed_ms":10000,"run":{"verdict":"assured","events_emitted":10,"events_dropped":0}}`,
 }
 
 func TestRecordedEventsPinTheirJSONFieldNamesAndOrder(t *testing.T) {
@@ -163,7 +154,7 @@ func TestRecordedEventsPinTheirJSONFieldNamesAndOrder(t *testing.T) {
 func TestEveryEventTypeIsRecordedOnceInSequenceOrder(t *testing.T) {
 	t.Parallel()
 	want := []string{
-		trace.TypeRunStart, trace.TypePhaseStart, trace.TypeExec, trace.TypeMutantExec,
+		trace.TypeRunStart, trace.TypePhaseStart, trace.TypePrepare, trace.TypeExec, trace.TypeMutantExec,
 		trace.TypeRoute, trace.TypeProbeExec, trace.TypeProgress, trace.TypeArtifact,
 		trace.TypePhaseEnd, trace.TypeRunEnd,
 	}
@@ -188,17 +179,53 @@ func TestEveryEventTypeIsRecordedOnceInSequenceOrder(t *testing.T) {
 	}
 }
 
+func TestPrepareRecordsStartedAndFinishedShapes(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(0)
+	recorder := trace.New(sink, newClock().Now)
+	recorder.Prepare(trace.PreparePhaseDiscovery, trace.PrepareStateStarted, "", 0)
+	recorder.Prepare(trace.PreparePhaseDiscovery, trace.PrepareStateFinished, trace.PrepareResultSkipped, 0)
+
+	events := sink.Events()
+	if len(events) != threeEventTraceCount || events[1].Prepare == nil || events[2].Prepare == nil {
+		t.Fatalf("recorded %+v, want started and finished preparation events", events)
+	}
+	started, finished := events[1].Prepare, events[2].Prepare
+	if started.Result != "" || started.DurationMS != nil {
+		t.Fatalf("started preparation = %+v", started)
+	}
+	startedJSON, err := json.Marshal(events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{"result", "duration_ms"} {
+		if strings.Contains(string(startedJSON), absent) {
+			t.Fatalf("started preparation carries %s: %s", absent, startedJSON)
+		}
+	}
+	if finished.Result != trace.PrepareResultSkipped || finished.DurationMS == nil || *finished.DurationMS != 0 {
+		t.Fatalf("finished preparation = %+v", finished)
+	}
+	encoded, err := json.Marshal(events[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"duration_ms":0`) {
+		t.Fatalf("instantaneous finished preparation omitted its duration: %s", encoded)
+	}
+}
+
 func TestPhaseEndReportsTheElapsedPhaseDuration(t *testing.T) {
 	t.Parallel()
 	clock := newClock()
 	sink := trace.NewMemorySink(0)
 	recorder := trace.New(sink, clock.Now)
 	endPhase := recorder.PhaseStart("discover")
-	clock.Advance(1500 * time.Millisecond)
+	clock.Advance(phaseFixtureDuration)
 	endPhase()
 
 	events := sink.Events()
-	if len(events) != 3 {
+	if len(events) != threeEventTraceCount {
 		t.Fatalf("recorded %d events, want run-start, phase-start and phase-end", len(events))
 	}
 	start, end := events[1], events[2]
@@ -211,10 +238,10 @@ func TestPhaseEndReportsTheElapsedPhaseDuration(t *testing.T) {
 	if end.Type != trace.TypePhaseEnd || end.Phase == nil || end.Phase.Name != "discover" {
 		t.Fatalf("phase-end = %+v", end)
 	}
-	if end.Phase.DurationMS != 1500 {
+	if end.Phase.DurationMS != phaseFixtureDuration.Milliseconds() {
 		t.Errorf("phase-end duration = %d, want 1500", end.Phase.DurationMS)
 	}
-	if end.ElapsedMS != 1500 {
+	if end.ElapsedMS != phaseFixtureDuration.Milliseconds() {
 		t.Errorf("phase-end elapsed = %d, want 1500", end.ElapsedMS)
 	}
 }
@@ -229,7 +256,7 @@ func TestPhaseEndIsEmittedOnceHoweverOftenTheCloserRuns(t *testing.T) {
 	endPhase()
 
 	events := sink.Events()
-	if len(events) != 3 {
+	if len(events) != threeEventTraceCount {
 		t.Fatalf("recorded %d events, want one phase-end for a phase that ended twice", len(events))
 	}
 }
@@ -241,26 +268,26 @@ func TestNestedPhasesEndInTheirOwnOrder(t *testing.T) {
 	recorder := trace.New(sink, clock.Now)
 	endOuter := recorder.PhaseStart("mutation")
 	clock.Advance(time.Second)
-	endInner := recorder.PhaseStart("mutation-prepare")
+	endInner := recorder.PhaseStart("inner")
 	clock.Advance(time.Second)
 	endInner()
 	clock.Advance(time.Second)
 	endOuter()
 
 	events := sink.Events()
-	if len(events) != 5 {
+	if len(events) != nestedPhaseTraceCount {
 		t.Fatalf("recorded %d events, want two phase pairs after run-start", len(events))
 	}
-	if name := events[3].Phase.Name; name != "mutation-prepare" {
+	if name := events[3].Phase.Name; name != "inner" {
 		t.Errorf("first phase-end names %q, want the inner phase", name)
 	}
-	if events[3].Phase.DurationMS != 1000 {
+	if events[3].Phase.DurationMS != innerPhaseDurationMS {
 		t.Errorf("inner phase duration = %d, want 1000", events[3].Phase.DurationMS)
 	}
 	if name := events[4].Phase.Name; name != "mutation" {
 		t.Errorf("second phase-end names %q, want the outer phase", name)
 	}
-	if events[4].Phase.DurationMS != 3000 {
+	if events[4].Phase.DurationMS != outerPhaseDurationMS {
 		t.Errorf("outer phase duration = %d, want 3000", events[4].Phase.DurationMS)
 	}
 }
@@ -340,7 +367,10 @@ func TestRouteRecordsUnreachedMutantsWithoutTargets(t *testing.T) {
 	clock := newClock()
 	sink := trace.NewMemorySink(0)
 	recorder := trace.New(sink, clock.Now)
-	recorder.Route(trace.RouteRecord{MutantID: "m-0002", Rule: "arith-swap", Path: "a.go", Line: 7, Reason: trace.ReasonUnreached})
+	recorder.Route(trace.RouteRecord{
+		MutantID: "m-0002", Rule: "arith-swap", Path: "a.go", Line: 7,
+		Reason: trace.ReasonUnreached, Granularity: trace.GranularityBlock,
+	})
 
 	events := sink.Events()
 	if len(events) != 2 || events[1].Route == nil {
@@ -353,10 +383,11 @@ func TestRouteRecordsUnreachedMutantsWithoutTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The routing fields are additive: a route that carries none of them must
-	// serialise none of them, or a recording made by a run that never decided
-	// a granularity would claim one the schema does not allow.
-	for _, field := range []string{"reaching_targets", "plan", "column", "granularity", "fallback", "file_candidates", "discharged", "probed"} {
+
+	if events[1].Route.Granularity != trace.GranularityBlock {
+		t.Errorf("granularity = %q, want %q", events[1].Route.Granularity, trace.GranularityBlock)
+	}
+	for _, field := range []string{"reaching_targets", "plan", "column", "fallback", "file_candidates", "discharged", "probed"} {
 		if strings.Contains(string(encoded), field) {
 			t.Errorf("unreached route carries %s: %s", field, encoded)
 		}
@@ -368,16 +399,14 @@ func TestProbeExecOmitsWhatItDidNotMeasure(t *testing.T) {
 	clock := newClock()
 	sink := trace.NewMemorySink(0)
 	recorder := trace.New(sink, clock.Now)
-	// A target whose tests failed against the probe tree measured nothing, so
-	// the record says which target ran and claims no mutant.
+
 	recorder.ProbeExec(trace.ProbeRecord{
 		Target:     "TestRun",
 		Outcome:    trace.ProbeOutcomeTestFailed,
 		ExitCode:   1,
 		DurationMS: 400,
 	})
-	// An execution that never returned an outcome carries the error that
-	// stopped it, which is the one case an outcome is absent.
+
 	recorder.ProbeExec(trace.ProbeRecord{
 		Target:   "TestOther",
 		ExitCode: -1,
@@ -395,8 +424,7 @@ func TestProbeExecOmitsWhatItDidNotMeasure(t *testing.T) {
 	if !strings.Contains(string(failed), `"outcome":"test-failed"`) {
 		t.Errorf("a failed probe execution does not record its outcome: %s", failed)
 	}
-	// Only a measured execution says anything about a mutant, so a failed one
-	// carries no infections, and the fields it was given none of are omitted.
+
 	for _, field := range []string{"infected", "package", "args", "timeout_ms", "error"} {
 		if strings.Contains(string(failed), field) {
 			t.Errorf("a probe execution that measured nothing carries %s: %s", field, failed)
@@ -447,7 +475,7 @@ func TestRunEndIsEmittedOnce(t *testing.T) {
 	recorder.Progress("late", "after the run ended")
 
 	events := sink.Events()
-	if len(events) != 2 {
+	if len(events) != twoEventTraceCount {
 		t.Fatalf("recorded %+v, want run-start and a single run-end", events)
 	}
 	if events[1].Run.Verdict != "assured" {
@@ -493,10 +521,7 @@ func TestAFullRingAccountsForTheEventTheRunEndDisplaces(t *testing.T) {
 			if last.Type != trace.TypeRunEnd || last.Run == nil {
 				t.Fatalf("ring of %d fed %d notes ended with %+v, want a run-end", capacity, notes, last)
 			}
-			// A recording is honest when its own accounting still describes
-			// the recording after the run-end was written: as many events
-			// beside it as it claims to have kept, and no drop it never
-			// counted, however little room the ring had.
+
 			if kept := int64(len(events)) - 1; kept != last.Run.EventsEmitted {
 				t.Errorf("ring of %d fed %d notes holds %d events beside its run-end but accounts for %d",
 					capacity, notes, kept, last.Run.EventsEmitted)
@@ -525,6 +550,7 @@ func TestNilRecorderIsAnInertNoOp(t *testing.T) {
 	recorder.MutantExec(trace.MutantRecord{ID: "m-0001"})
 	recorder.Route(trace.RouteRecord{MutantID: "m-0001", Reason: trace.ReasonUnreached})
 	recorder.ProbeExec(trace.ProbeRecord{Target: "TestRun"})
+	recorder.Prepare(trace.PreparePhaseDiscovery, trace.PrepareStateStarted, "", 0)
 	recorder.Progress("snapshot", "detail")
 	recorder.Artifact("report", "report.json")
 	recorder.RunEnd("assured", errors.New("ignored"))
@@ -544,7 +570,7 @@ func TestNewWithoutAClockUsesTheWallClock(t *testing.T) {
 	recorder.RunEnd("assured", nil)
 
 	events := sink.Events()
-	if len(events) != 2 {
+	if len(events) != twoEventTraceCount {
 		t.Fatalf("recorded %+v, want run-start and run-end", events)
 	}
 	for _, event := range events {
@@ -636,8 +662,6 @@ func TestIdenticalRecordingsProduceIdenticalBytes(t *testing.T) {
 	}
 }
 
-// jsonLines splits a JSONL file into its lines and fails the test when any
-// line is not a JSON object.
 func jsonLines(t *testing.T, data []byte) []string {
 	t.Helper()
 	if len(data) == 0 {
@@ -656,12 +680,6 @@ func jsonLines(t *testing.T, data []byte) []string {
 	return lines
 }
 
-// TestAReusedRouteIsPinnedApartFromTheScript pins the wire shape of a reuse
-// where the script cannot hold it: the script executes its one mutant, and a
-// route reused beside an execution of the same mutant would be the
-// contradiction docs/trace-v1.md tells a reader to reject. A reused route
-// plans the reuse and nothing else, and the recording holds no execution of
-// the mutant at all.
 func TestAReusedRouteIsPinnedApartFromTheScript(t *testing.T) {
 	t.Parallel()
 	sink := trace.NewMemorySink(0)

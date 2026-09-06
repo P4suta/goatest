@@ -43,9 +43,6 @@ func Inspect(root string) (Status, error) {
 	return status, err
 }
 
-// Collect removes expired entries first and then the oldest entries until the
-// configured capacity is met. It only removes direct, non-symlink children of
-// the cache's v1 directory.
 func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (GCResult, error) {
 	if maxBytes < 0 || ttl < 0 {
 		return GCResult{}, errors.New("goatest: cache policy must not be negative")
@@ -55,15 +52,10 @@ func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (GCR
 	return collectUnlocked(root, maxBytes, ttl, now)
 }
 
-// Flush removes every exact-input cache entry. It deliberately has the same
-// confined-directory rules as Collect: a malformed entry stops the operation
-// before anything is removed, and neither operation follows symbolic links.
 func Flush(root string) (GCResult, error) {
 	return flushWithHook(root, nil)
 }
 
-// flushWithHook gives a test one deterministic point after descriptor-rooted
-// validation and before removal. Production never supplies the hook.
 func flushWithHook(root string, beforeRemove func()) (GCResult, error) {
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()
@@ -197,8 +189,6 @@ func entryMetadata(root string) (int64, time.Time, error) {
 	return size, modified, err
 }
 
-// removeEntries validates the whole batch, then removes it relative to an open
-// descriptor for the inspected v1 directory.
 func removeEntries(cacheRoot string, entries []cacheEntry, beforeRemove func()) error {
 	if len(entries) == 0 {
 		return nil
@@ -208,10 +198,7 @@ func removeEntries(cacheRoot string, entries []cacheEntry, beforeRemove func()) 
 		return err
 	}
 	defer func() { _ = versionRoot.Close() }()
-	// Validate every final component before removing any of them. If an
-	// uncooperative process replaces one afterwards, Root.RemoveAll unlinks a
-	// final symlink without traversing it and confines every intermediate
-	// component to the open v1 descriptor.
+
 	for _, entry := range entries {
 		if !safeEntryName(entry.name) {
 			return fmt.Errorf("goatest: refusing unconfined cache removal %q", entry.name)
@@ -235,10 +222,6 @@ func removeEntries(cacheRoot string, entries []cacheEntry, beforeRemove func()) 
 	return nil
 }
 
-// openCacheVersionRoot binds removals to the same v1 directory inspection
-// observed. Opening first at cacheRoot prevents a replacement symlink from
-// escaping it; comparing identities prevents a replacement directory inside
-// cacheRoot from being mistaken for the inspected store.
 func openCacheVersionRoot(cacheRoot string, expected os.FileInfo) (*os.Root, error) {
 	confined, err := os.OpenRoot(cacheRoot)
 	if err != nil {
@@ -267,7 +250,6 @@ func openCacheVersionRoot(cacheRoot string, expected os.FileInfo) (*os.Root, err
 	return versionRoot, nil
 }
 
-// removeEntry recursively removes one direct cache child through versionRoot.
 func removeEntry(versionRoot *os.Root, name string) error {
 	if err := versionRoot.RemoveAll(name); err != nil {
 		return fmt.Errorf("goatest: remove cache entry: %w", err)

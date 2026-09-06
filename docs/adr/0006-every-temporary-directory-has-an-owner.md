@@ -14,7 +14,7 @@ run scratch and its lifecycle in `internal/assure` (`run_scratch.go`,
 A run writes far more outside the repository than inside it. go-mutants copies
 the whole module into a snapshot, builds a probe tree beside it, and keeps a
 scratch directory; goatest adds a build cache layer, a scratch per baseline
-round, a tree per validated candidate, and a fuzz cache for an original control.
+round, and a tree per validated candidate.
 On this project that is measured in gigabytes per run, and three agents sharing
 one 457 GB disk have twice filled it.
 
@@ -34,12 +34,16 @@ answered either.
 
 ## Decision
 
-1. **One scratch directory per run, and everything below it.** A run makes
+1. **One scratch directory per run, with one filesystem-required exception.** A run makes
    `goatest-run-*` under the configured temporary root before it writes
    anything, and everything it would otherwise have made beside it goes below
-   instead: `build/` for the build cache layer, `baseline-*` per round,
-   `candidate-*` per validated candidate, `control-fuzz-*` for a fuzzing
-   original control. One directory is one removal, one owner, and one path a
+   instead: the mutation engine's snapshot, probe tree, and scratch, `build/`
+   for the build cache layer, `baseline-*` per round, and `candidate-*` per
+   validated candidate. A native build-cache projection must be made beside its
+   persistent base so output objects can be hard links when the configured
+   temporary directory is another filesystem. It is therefore a second owned
+   top-level directory, `goatest-native-cache-*`, with the same marker and lock.
+   One directory is one removal, one owner, and one path a
    developer looks in. The names below it are short because the parent already
    says which tool made them.
 
@@ -48,18 +52,16 @@ answered either.
    scratch at the end covers whatever is left, including what a killed step
    never got to.
 
-2. **A run that cannot make or claim one still runs.** Every consumer takes the
-   parent *and* the prefix from the scratch, and a scratch that could not be
-   made answers with the temporary root and the `goatest-` names the sweep
-   knows. A scratch that was made but could not be claimed answers the same
-   way, and is removed again: an unowned directory is one a later sweep judges
-   by age alone, so using it would mean writing a run's work somewhere another
-   goatest is entitled to delete. The exception is a claim refused because
-   somebody else holds the lock, which makes the directory theirs and not ours
-   to remove. The
-   same rule covers a validation outside any run (`goatest fix`), which has no
-   run scratch at all. No path in this design can produce a directory nothing
-   recognizes.
+2. **A run that cannot make or claim one writes nothing temporary.** An
+   unowned directory is one a later sweep judges by age alone, so using it
+   would mean writing a run's work somewhere another goatest is entitled to
+   delete. Creation or claim failure therefore emits `temp-unavailable` and
+   stops before verification. A directory whose owner pair could not be
+   written is removed again. A claim refused because somebody else holds the
+   lock leaves the directory alone because it was never this run's to remove.
+   A validation outside an assurance run creates and claims its own
+   `goatest-run-*` root and applies the same lifecycle to every temporary it
+   creates.
 
 3. **The lock is the liveness signal, not the pid.** A claimed directory holds
    `owner.lock`, an exclusive advisory lock held open for the whole run. A lock
@@ -93,10 +95,11 @@ answered either.
    the leftovers of a killed run has the disk back before this one asks for
    hundreds of megabytes of it. `goatest cache gc` runs the same sweep, and
    `goatest cache status` runs the same classification without removing
-   anything. The prefix list is exported from the run layer and used by all
-   three: two lists that could disagree would be two conventions. go-mutants'
-   own directories are not in it — they carry owner files of their own and its
-   `Open` sweeps them, which goatest reports rather than duplicates.
+   anything. The same applies to native projections under the explicitly named
+   build-cache parent. Prefixes are exported by the layer that creates each
+   directory and used by all callers: `goatest-run-*` is the only top-level
+   goatest prefix. The engine's owned directories live below that root, so an
+   abandoned run has one collection boundary.
 
    A sweep runs only against a directory somebody named. An empty temporary
    root collects nothing, and `cmd/goatest` is the one layer that may name the
@@ -106,19 +109,20 @@ answered either.
    ahead, collect the working directory of a run that was using it.
 
 7. **A keep is recorded where it outlives the run.** `--keep-temp` marks the
-   directory kept, so no sweep takes it, and writes it to
-   `.goatest/kept-temp-v1.json`: path, run, moment, size. The trace already
-   carried an `artifact` event for each kept path, but a successful untraced run
-   writes no trace, and that is precisely the run that leaves gigabytes nobody
-   can account for. The ledger lives in the repository's own `.goatest`
-   directory rather than beside the directories it names, because it has to
+   run root kept, so no sweep takes it, and writes that root to
+   `.goatest/kept-temp-v1.json`: path, run, moment, size. The
+   filesystem-separated native projection is the only additional ledger entry.
+   The trace carries an `artifact` event for each useful child, but a successful
+   untraced run writes no trace, and that is precisely the run that leaves
+   gigabytes nobody can account for. The ledger lives in the repository's own
+   `.goatest` directory rather than beside the directories it names, because it has to
    survive the removal of every one of them and because the commands that read
    it are already run from a repository.
 
 8. **The ledger names a directory; the directory says whether it may be
    removed.** Before a collection removes anything it asks `tempowner.KeptBy`,
    which reads the marker in the directory: goatest's own naming the run the
-   entry names, or the mutation engine's, which names no run of ours. The
+   entry names. The
    ledger is a file in a repository — editable by hand, corruptible by a bad
    merge — and a recursive delete is not something a path alone may authorize.
    An entry nothing vouches for is kept and reported rather than acted on, and
@@ -132,15 +136,13 @@ answered either.
    request is time. A developer who wants one back sooner removes it by hand,
    and the next `gc` drops its entry.
 
-10. **None of this can fail a run.** A sweep that fails, a scratch that cannot
-    be made, claimed or removed, and a ledger that cannot be written are
-    progress notes — `temp-sweep`, `temp-unavailable`, `kept-temp-unrecorded` —
-    and the run reaches the same verdict it would have reached. This is
-    housekeeping done on the way to measuring mutants, and housekeeping that
-    could fail a verification would be worse than no housekeeping at all. For
-    the same reason none of it enters any cache identity: where a run put its
-    directories and what its sweep found are facts about the machine, exactly
-    as [0002](0002-trace-is-not-evidence.md) says of a trace.
+10. **Housekeeping cannot change an established verdict.** Sweep, removal, and
+    ledger failures are progress notes — `temp-sweep`, `temp-unavailable`,
+    `kept-temp-unrecorded` — and do not change a verdict already established.
+    Creation or ownership failure stops before verification because no command
+    may write to an unowned topology. None of this enters a cache identity:
+    where a run put its directories and what its sweep found are facts about the
+    machine, exactly as [0002](0002-trace-is-not-evidence.md) says of a trace.
 
 ## Consequences
 
@@ -154,8 +156,8 @@ answered either.
   the wrong trade.
 - `internal/tempowner` is deliberately the same convention as go-mutants'
   package of the same name, written separately because they are separate
-  modules. The two sweeps therefore leave each other's directories alone by
-  prefix and would agree about any directory they both looked at.
+  modules. The engine-owned children remain independently diagnosable while
+  the goatest run root is the single collection boundary.
 - A `--keep-temp` run now keeps the mutation engine's snapshot too, which is the
   one tree that answers what a mutant actually saw. It is also the largest, and
   the ledger is what makes that affordable: it is collectable rather than

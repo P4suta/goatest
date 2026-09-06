@@ -17,6 +17,8 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
+const signalHandlingDeadline = 5 * time.Second
+
 type mainServiceFunc func(context.Context, cli.Command, cli.Request, string) (report.Report, error)
 
 func (function mainServiceFunc) Execute(ctx context.Context, command cli.Command, request cli.Request, id string) (report.Report, error) {
@@ -28,17 +30,6 @@ type syntheticSignal string
 func (signal syntheticSignal) String() string { return string(signal) }
 func (syntheticSignal) Signal()               {}
 
-// TestTheCLIServiceNamesWhatBelongsToTheMachine pins the one layer allowed to
-// answer either question.
-//
-// The binary a go command re-executes as the build cache program and the
-// directory that cache lives in are both properties of a real machine running
-// the goatest CLI, so both are zero in every other process: a test binary
-// running the service in-process, an application that embedded it. Resolving
-// either one layer lower broke something quietly — the executable left the go
-// command waiting on a test binary, and the directory let an in-process test
-// collect the developer's own build cache. This test is what keeps them named
-// here and nowhere else.
 func TestTheCLIServiceNamesWhatBelongsToTheMachine(t *testing.T) {
 	if _, err := os.Executable(); err != nil {
 		t.Skipf("this process cannot name its own binary: %v", err)
@@ -50,10 +41,7 @@ func TestTheCLIServiceNamesWhatBelongsToTheMachine(t *testing.T) {
 	if service.UserCacheDir == nil {
 		t.Fatal("cliService named no user cache directory, want the machine's")
 	}
-	// Where the machine keeps its temporary files is the third such property,
-	// and it is the one that bites hardest when it is resolved lower down: a
-	// run makes its scratch under it and `cache gc` collects there, so a value
-	// nobody set must never become the machine's own temporary directory.
+
 	if service.TempDirectory == "" {
 		t.Fatal("cliService named no temporary directory, want the machine's")
 	}
@@ -121,7 +109,7 @@ func TestRunWithSignalsMapsTerminationAndNonSyscallInterrupt(t *testing.T) {
 			}()
 			select {
 			case <-started:
-			case <-time.After(5 * time.Second):
+			case <-time.After(signalHandlingDeadline):
 				t.Fatal("service did not start")
 			}
 			signals <- testCase.signal
@@ -130,7 +118,7 @@ func TestRunWithSignalsMapsTerminationAndNonSyscallInterrupt(t *testing.T) {
 				if got != testCase.want {
 					t.Fatalf("exit = %d, want %d", got, testCase.want)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(signalHandlingDeadline):
 				t.Fatal("signal did not stop service")
 			}
 		})
@@ -148,8 +136,7 @@ func TestEnvironmentTraceBecomesTheFlagTheCommandLayerParses(t *testing.T) {
 		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--trace"}},
-		// An empty argument list asks for the help text, and a variable in the
-		// environment must not turn it into a run.
+
 		{name: "true-bare", value: "true", arguments: nil, want: nil},
 		{name: "true", value: "true", arguments: []string{"verify"}, want: []string{"verify", "--trace"}},
 		{name: "directory", value: "/tmp/goatest-trace", arguments: []string{"verify"}, want: []string{"verify", "--trace=/tmp/goatest-trace"}},
@@ -193,11 +180,6 @@ func TestEnvironmentTraceReachesTheServiceWithoutDisturbingVersionOrHelp(t *test
 	}
 }
 
-// The cache program is dispatched ahead of everything the command layer knows
-// about. It speaks a binary protocol on the process streams, so it must reach
-// neither the service, nor the flag parsing, nor the environment-to-flag
-// rendering that a command a person typed passes through — and it must stay out
-// of the help text, because nobody types it.
 func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
 	t.Setenv("GOATEST_TRACE", "1")
 	t.Setenv("GOATEST_KEEP_TEMP", "1")
@@ -211,14 +193,12 @@ func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
 	if exit != 0 || stderr.Len() != 0 {
 		t.Fatalf("cacheprog exit = %d stderr = %q", exit, stderr.String())
 	}
-	// The opening response is the program announcing what it can do, which is
-	// the first thing a go command reads and the proof that this is the cache
-	// program rather than the command layer.
+
 	if !bytes.Contains(stdout.Bytes(), []byte(`"KnownCommands"`)) {
 		t.Fatalf("cacheprog stdout = %q, want the protocol", stdout.String())
 	}
 	stdout.Reset()
-	if exit := realMainStreams([]string{"cacheprog"}, strings.NewReader(""), &stdout, &stderr, service); exit != 2 {
+	if exit := realMainStreams([]string{"cacheprog"}, strings.NewReader(""), &stdout, &stderr, service); exit != cli.ExitInsufficient {
 		t.Fatalf("cacheprog without a scratch layer = %d, want a refusal", exit)
 	}
 	stdout.Reset()
@@ -227,9 +207,6 @@ func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
 	}
 }
 
-// A job that cannot change a command line can still ask a run to keep what it
-// would otherwise remove. The variable becomes the flag the command layer
-// parses, and nothing below this layer learns that an environment was involved.
 func TestEnvironmentKeepTempBecomesTheFlagTheCommandLayerParses(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
@@ -241,13 +218,10 @@ func TestEnvironmentKeepTempBecomesTheFlagTheCommandLayerParses(t *testing.T) {
 		{name: "disabled", value: "0", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "false", value: "false", arguments: []string{"verify"}, want: []string{"verify"}},
 		{name: "enabled", value: "1", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp"}},
-		// An empty argument list asks for the help text, and a variable in the
-		// environment must not turn it into a run.
+
 		{name: "true-bare", value: "true", arguments: nil, want: nil},
 		{name: "true", value: "true", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp"}},
-		// An unrecognized value becomes a flag the command layer refuses,
-		// because a setting nobody understood is a mistake to report rather
-		// than a default to fall back on.
+
 		{name: "unknown", value: "maybe", arguments: []string{"verify"}, want: []string{"verify", "--keep-temp=maybe"}},
 		{name: "explicit-flag-wins", value: "maybe", arguments: []string{"verify", "--keep-temp"}, want: []string{"verify", "--keep-temp"}},
 		{name: "before-test-arguments", value: "1", arguments: []string{"verify", "--", "-short"}, want: []string{"verify", "--keep-temp", "--", "-short"}},

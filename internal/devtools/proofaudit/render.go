@@ -11,35 +11,21 @@ import (
 )
 
 const (
-	// columnGap separates two columns of a table.
 	columnGap = "  "
-	// displayWidth is how wide a mutant is named: the first twenty characters
-	// of its content address, which is the display identity the engine gives
-	// it. A recording that carries none is cut to the same width so that one
-	// column stays one width whatever wrote the trace.
+
 	displayWidth = 20
-	// noValue marks a field the recording did not carry, printed rather than
-	// left blank so that a missing value reads as missing.
+
 	noValue = "-"
-	// whyBranchNotAudited is what the report says about the layer a run
-	// audited without a catalog was never held to. A missing row and a row of
-	// zeroes read the same to anyone skimming, so the report says which of the
-	// two this is.
+
 	whyBranchNotAudited = "branch: not audited (no -catalog given)"
-	// whyInfectionNotAudited is what the report says about the layer a run
-	// recorded without a probe pass was never held to. It reads the same way
-	// and for the same reason as the branch line: a row of zeroes for a layer
-	// nobody checked would read exactly like a layer that came out clean.
-	whyInfectionNotAudited = "infection: not audited (the recording holds no probe pass)"
-	// branchDischargeHeading opens what the branch layer would have bought, and
-	// infectionDischargeHeading what the infection layer would have.
+
+	whyInfectionNotAudited  = "infection: not audited (the recording holds no probe pass)"
+	whySuiteReachNotAudited = "suite-reach: not audited (the recording holds no package-suite coverage profile)"
+
 	branchDischargeHeading    = "branch discharge"
 	infectionDischargeHeading = "infection discharge"
 )
 
-// renderAudit renders the whole audit of one recording, ending in a newline.
-// It reads the audit alone: the same recording renders the same bytes on any
-// machine at any moment.
 func renderAudit(tracePath, profilesPath, modulePath string, result auditResult) string {
 	blocks := [][]string{
 		headerBlock(tracePath, profilesPath, modulePath),
@@ -63,8 +49,6 @@ func renderAudit(tracePath, profilesPath, modulePath string, result auditResult)
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// headerBlock names the two halves of the recording and the module their paths
-// are read against, which is what says the audit was given the run it claims.
 func headerBlock(tracePath, profilesPath, modulePath string) []string {
 	return []string{
 		"trace: " + tracePath,
@@ -73,22 +57,20 @@ func headerBlock(tracePath, profilesPath, modulePath string) []string {
 	}
 }
 
-// countBlock says how much of the recording was audited, and how much of it
-// was not. The kills no single target can be attributed are counted beside the
-// pairs so that the audited number is read as the share of the run it is, and
-// the routes whose verdict the run resolved from an earlier run's evidence are
-// counted beside the routes for the same reason: nothing ran for one, so it is
-// the part of the run this audit had nothing to measure.
 func countBlock(result auditResult) []string {
 	rows := [][]string{
 		{"routes", strconv.Itoa(result.routes)},
 		{"reused routes", strconv.Itoa(result.reusedRoutes)},
 		{"targets with profiles", strconv.Itoa(result.targets)},
+		{"package suites with coverage profiles", strconv.Itoa(result.suiteCoverageProfiles)},
 		{"probe executions", strconv.Itoa(result.probeExecutions)},
 		{"targets the probe measured", strconv.Itoa(result.probeMeasured)},
+		{"package-suite probe executions", strconv.Itoa(result.suiteProbeExecutions)},
+		{"package suites the probe measured", strconv.Itoa(result.suiteProbeMeasured)},
 		{"killed executions", strconv.Itoa(result.killedExecutions)},
-		{"kill pairs audited", strconv.Itoa(result.pairs)},
+		{"target kill pairs audited", strconv.Itoa(result.pairs)},
 		{"package-suite kills", strconv.Itoa(result.packageSuiteKills)},
+		{"package-suite kill pairs audited", strconv.Itoa(result.suitePairs)},
 		{"batch kills", strconv.Itoa(result.batchKills)},
 		{"unattributed kills", strconv.Itoa(result.unattributedKills)},
 		{"truncated trailing lines", strconv.Itoa(result.truncatedLines)},
@@ -97,9 +79,6 @@ func countBlock(result auditResult) []string {
 	return append([]string{"audit"}, renderTable(columns, rows)...)
 }
 
-// layerBlock renders what every audited layer concluded. A layer is sound for
-// this recording when it drops none of the killers the run proved, so the
-// violations column is the one this whole tool exists to print a zero in.
 func layerBlock(result auditResult) []string {
 	lines := []string{"layers"}
 	if len(result.layers) == 0 {
@@ -127,13 +106,12 @@ func layerBlock(result auditResult) []string {
 	if !result.infectionAudited {
 		lines = append(lines, whyInfectionNotAudited)
 	}
+	if result.suiteCoverageProfiles == 0 {
+		lines = append(lines, whySuiteReachNotAudited)
+	}
 	return lines
 }
 
-// branchBlock says what the branch layer would have bought on this recording.
-// Soundness is what makes the layer usable and this is what makes it worth
-// using, so the two are printed together: a layer that kept every killer and
-// removed nothing is a rule nobody needs.
 func branchBlock(result auditResult) []string {
 	if !result.branchAudited {
 		return nil
@@ -149,9 +127,6 @@ func branchBlock(result auditResult) []string {
 	return append([]string{branchDischargeHeading}, renderTable(columns, rows)...)
 }
 
-// infectionBlock says what the infection layer would have bought on this
-// recording. It is the same question the branch block answers of its own layer:
-// a rule that kept every killer and removed nothing is a rule nobody needs.
 func infectionBlock(result auditResult) []string {
 	if !result.infectionAudited {
 		return nil
@@ -167,10 +142,6 @@ func infectionBlock(result auditResult) []string {
 	return append([]string{infectionDischargeHeading}, renderTable(columns, rows)...)
 }
 
-// unverifiableBlock names the pairs a layer could not decide from the
-// recording. They are not violations — goatest keeps a target it has no block
-// evidence for — but they are the part of a run the audit did not prove
-// anything about, so they are named one by one.
 func unverifiableBlock(result auditResult) []string {
 	lines := []string{"unverifiable"}
 	if len(result.unverifiable) == 0 {
@@ -180,9 +151,6 @@ func unverifiableBlock(result auditResult) []string {
 	return append(lines, renderRows(result.unverifiable)...)
 }
 
-// violationBlock names the pairs a layer would drop. Every one of them is a
-// kill a recorded run proved and the layer would lose, which is the finding
-// this tool exists for.
 func violationBlock(result auditResult) []string {
 	lines := []string{"violations"}
 	if len(result.violations) == 0 {
@@ -192,8 +160,6 @@ func violationBlock(result auditResult) []string {
 	return append(lines, renderRows(result.violations)...)
 }
 
-// renderRows renders reported pairs as one table: which mutant, where it is,
-// which target killed it, and what the layer said about the pair.
 func renderRows(reported []auditRow) []string {
 	rows := make([][]string, 0, len(reported))
 	for _, row := range reported {
@@ -213,7 +179,6 @@ func renderRows(reported []auditRow) []string {
 	return renderTable(columns, rows)
 }
 
-// mutantName is the identity a mutant is reported by.
 func mutantName(pair killPair) string {
 	if pair.display != "" {
 		return pair.display
@@ -224,10 +189,6 @@ func mutantName(pair killPair) string {
 	return pair.mutant
 }
 
-// position renders where a mutant is, carrying exactly what the recording
-// carried: a route records a position or nothing, and a mutant the engine
-// could not place is one a reader wants to see as unplaced rather than as
-// sitting at line zero.
 func position(pair killPair) string {
 	if pair.line <= 0 {
 		return pair.path
@@ -238,7 +199,6 @@ func position(pair killPair) string {
 	return pair.path + ":" + strconv.Itoa(pair.line) + ":" + strconv.Itoa(pair.column)
 }
 
-// orNoValue renders a value the recording did not carry as a placeholder.
 func orNoValue(value string) string {
 	if value == "" {
 		return noValue
@@ -246,23 +206,11 @@ func orNoValue(value string) string {
 	return value
 }
 
-// The table rendering below is deliberately duplicated from
-// internal/devtools/reportdiff/render.go rather than shared, for the reason
-// recorded there: these are self-contained developer tools that happen to
-// print aligned columns, and a package existing only to hold twenty lines of
-// padding would couple them, so that when one tool's output has to change the
-// others would have to be re-reviewed with it.
-
-// column is one column of a rendered table: its heading, and whether its cells
-// are numbers that read better against the right edge.
 type column struct {
 	header string
 	right  bool
 }
 
-// renderTable renders a heading and its rows as aligned columns. Every line is
-// free of trailing spaces, so a table stays the same bytes however wide its
-// widest cell is.
 func renderTable(columns []column, rows [][]string) []string {
 	widths := make([]int, len(columns))
 	for index, definition := range columns {
@@ -289,7 +237,6 @@ func renderTable(columns []column, rows [][]string) []string {
 	return lines
 }
 
-// pad widens one cell to its column.
 func pad(cell string, width int, right bool) string {
 	padding := strings.Repeat(" ", max(width-utf8.RuneCountInString(cell), 0))
 	if right {

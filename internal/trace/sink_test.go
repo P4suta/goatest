@@ -22,10 +22,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// recordingSink is a scripted sink: it keeps what it was handed and answers
-// with the scripted error, so a test can drive the failure paths of the sinks
-// that compose it. It deliberately does not report drops, which is how a
-// recorder falls back to counting the errors it saw.
 type recordingSink struct {
 	mutex    sync.Mutex
 	events   []trace.Event
@@ -54,23 +50,36 @@ func (sink *recordingSink) recorded() []trace.Event {
 	return append([]trace.Event(nil), sink.events...)
 }
 
-// failingFile is a trace file whose writes always fail, the disk the trace
-// cannot be written to.
 type failingFile struct{ err error }
 
 func (file failingFile) Write([]byte) (int, error) { return 0, file.err }
 func (file failingFile) Sync() error               { return nil }
 func (file failingFile) Close() error              { return nil }
 
-// unclosableFile is a trace file that takes every write and fails on close,
-// which is how a filesystem reports the write it never actually completed.
 type unclosableFile struct{ err error }
 
 func (file unclosableFile) Write(data []byte) (int, error) { return len(data), nil }
 func (file unclosableFile) Sync() error                    { return nil }
 func (file unclosableFile) Close() error                   { return file.err }
 
-// sampleEvent is one minimal event, enough to drive a sink.
+type observedFile struct {
+	bytes.Buffer
+	syncs    int
+	closes   int
+	syncErr  error
+	closeErr error
+}
+
+func (file *observedFile) Sync() error {
+	file.syncs++
+	return file.syncErr
+}
+
+func (file *observedFile) Close() error {
+	file.closes++
+	return file.closeErr
+}
+
 func sampleEvent(seq int64) trace.Event {
 	return trace.Event{
 		Seq:       seq,
@@ -80,8 +89,6 @@ func sampleEvent(seq int64) trace.Event {
 	}
 }
 
-// execEvent is one exec event carrying captured output, enough to drive the
-// output a sink preserves beside its stream.
 func execEvent(seq int64, output []byte) trace.Event {
 	digest := sha256.Sum256(output)
 	return trace.Event{
@@ -109,7 +116,7 @@ func TestDirSinkCreatesItsDirectoryAndAppendsJSONL(t *testing.T) {
 	if want := filepath.Join(root, "20260102T030405Z-1234"); directory != want {
 		t.Fatalf("Directory = %s, want the run's own directory %s", directory, want)
 	}
-	for seq := int64(1); seq <= 3; seq++ {
+	for seq := int64(1); seq <= threeEventTraceCount; seq++ {
 		if err := sink.Emit(sampleEvent(seq)); err != nil {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
@@ -123,7 +130,7 @@ func TestDirSinkCreatesItsDirectoryAndAppendsJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := jsonLines(t, data)
-	if len(lines) != 3 {
+	if len(lines) != threeEventTraceCount {
 		t.Fatalf("trace file holds %d lines, want 3", len(lines))
 	}
 	for index, line := range lines {
@@ -143,8 +150,7 @@ func TestDirSinkCreatesItsDirectoryAndAppendsJSONL(t *testing.T) {
 func TestDirSinkGivesEachRunItsOwnDirectoryUnderOneRoot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	// The same root, twice, is the developer who passes --trace=DIR to every
-	// run: a second recording joins the first rather than writing over it.
+
 	first, err := trace.NewDirSink(root, "20260102T030405Z-1234", trace.Filesystem{})
 	if err != nil {
 		t.Fatalf("first NewDirSink = %v", err)
@@ -180,8 +186,7 @@ func TestDirSinkGivesEachRunItsOwnDirectoryUnderOneRoot(t *testing.T) {
 		if lines := jsonLines(t, data); len(lines) != 1 {
 			t.Fatalf("%s holds %d lines, want the single event of its own run", directory, len(lines))
 		}
-		// A second run restarts at sequence one, so a shared directory would
-		// have written over the output the first run's event digested.
+
 		preserved, err := os.ReadFile(filepath.Join(directory, trace.OutputDirectoryName, "1.txt"))
 		if err != nil {
 			t.Fatal(err)
@@ -222,7 +227,7 @@ func TestDirSinkRefusesADirectoryARecordingAlreadyOwns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := jsonLines(t, data); len(lines) != 2 {
+	if lines := jsonLines(t, data); len(lines) != twoEventTraceCount {
 		t.Fatalf("the open recording holds %d lines, want its own two", len(lines))
 	}
 }
@@ -243,7 +248,55 @@ func TestDirSinkMakesEachEventReadableBeforeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(jsonLines(t, data)) != 1 {
-		t.Fatal("an emitted event was not on disk before Close; a hung run must still leave its trace")
+		t.Fatal("an emitted event was not readable before Close; a hung run must still leave its trace")
+	}
+}
+
+func TestDirSinkSyncsOnceWhenClosed(t *testing.T) {
+	t.Parallel()
+	file := &observedFile{}
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		OpenAppend: func(string, fs.FileMode) (trace.File, error) { return file, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	for seq := int64(1); seq <= threeEventTraceCount; seq++ {
+		if err := sink.Emit(sampleEvent(seq)); err != nil {
+			t.Fatalf("Emit(%d) = %v", seq, err)
+		}
+	}
+	if file.syncs != 0 {
+		t.Fatalf("Sync calls before Close = %d, want 0", file.syncs)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
+	}
+	if file.syncs != 1 || file.closes != 1 {
+		t.Fatalf("Sync calls = %d, Close calls = %d, want one each", file.syncs, file.closes)
+	}
+}
+
+func TestDirSinkClosesAfterSyncFailureAndReportsBothFailures(t *testing.T) {
+	t.Parallel()
+	syncFailure := errors.New("sync failure")
+	closeFailure := errors.New("close failure")
+	file := &observedFile{syncErr: syncFailure, closeErr: closeFailure}
+	sink, err := trace.NewDirSink(t.TempDir(), "20260102T030405Z-1234", trace.Filesystem{
+		OpenAppend: func(string, fs.FileMode) (trace.File, error) { return file, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewDirSink = %v", err)
+	}
+	closeErr := sink.Close()
+	if !errors.Is(closeErr, syncFailure) || !errors.Is(closeErr, closeFailure) {
+		t.Fatalf("Close = %v, want both stream failures", closeErr)
+	}
+	if file.syncs != 1 || file.closes != 1 {
+		t.Fatalf("Sync calls = %d, Close calls = %d, want one each", file.syncs, file.closes)
 	}
 }
 
@@ -314,7 +367,7 @@ func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 		t.Fatalf("NewDirSink = %v", err)
 	}
 	directory := sink.Directory()
-	output := bytes.Repeat([]byte("x"), trace.OutputFileLimit+4096)
+	output := bytes.Repeat([]byte("x"), trace.OutputFileLimit+outputOverflowBytes)
 	digest := sha256.Sum256(output)
 	if err := sink.Emit(trace.Event{
 		Seq:       2,
@@ -351,9 +404,7 @@ func TestDirSinkTruncatesAPreservedOutputAtTheFileLimit(t *testing.T) {
 	if !bytes.HasSuffix(preserved, []byte(trace.TruncationMarker)) {
 		t.Fatal("a truncated file does not say so")
 	}
-	// The capped copy is a megabyte the sink lifts out of the event, and the
-	// marker it ends with is part of what it is making room for. A copy sized
-	// for the limit alone would be grown and moved again by the marker.
+
 	if want := trace.OutputFileLimit + len(trace.TruncationMarker); room != want {
 		t.Errorf("the truncated copy was made with room for %d bytes, want the limit and its marker %d", room, want)
 	}
@@ -366,9 +417,7 @@ func TestDirSinkPreservesAnOutputThatExactlyFillsTheFileLimit(t *testing.T) {
 		t.Fatalf("NewDirSink = %v", err)
 	}
 	directory := sink.Directory()
-	// The limit is what a file may hold, not what it must stay under: an
-	// output of exactly the limit is preserved whole and says nothing about
-	// truncation, because nothing was cut.
+
 	output := bytes.Repeat([]byte("x"), trace.OutputFileLimit)
 	if err := sink.Emit(execEvent(3, output)); err != nil {
 		t.Fatalf("Emit = %v", err)
@@ -449,8 +498,6 @@ func TestDirSinkKeepsTheEventWhenItsOutputDirectoryCannotBeCreated(t *testing.T)
 		t.Fatalf("Close = %v", err)
 	}
 
-	// An output directory that cannot be created costs the output its path,
-	// never the event: the record still digests what the command printed.
 	record := emittedExecRecord(t, directory)
 	if _, ok := record["output_path"]; ok {
 		t.Fatalf("output_path names a file no output directory could hold: %v", record)
@@ -458,7 +505,7 @@ func TestDirSinkKeepsTheEventWhenItsOutputDirectoryCannotBeCreated(t *testing.T)
 	if record["output_sha256"] == nil || record["output_bytes"] == nil {
 		t.Fatalf("the event lost its own accounting of the output: %v", record)
 	}
-	// Nothing is written into a directory the sink knows it never created.
+
 	if len(written) != 0 {
 		t.Fatalf("preserved output was written to %v without its directory", written)
 	}
@@ -480,7 +527,7 @@ func TestDirSinkCreatesItsOutputDirectoryOnceForTheWholeRecording(t *testing.T) 
 		t.Fatalf("NewDirSink = %v", err)
 	}
 	directory := sink.Directory()
-	for seq := int64(1); seq <= 3; seq++ {
+	for seq := int64(1); seq <= threeEventTraceCount; seq++ {
 		if err := sink.Emit(execEvent(seq, []byte("output of "+strconv.FormatInt(seq, 10)+"\n"))); err != nil {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
@@ -489,9 +536,6 @@ func TestDirSinkCreatesItsOutputDirectoryOnceForTheWholeRecording(t *testing.T) 
 		t.Fatalf("Close = %v", err)
 	}
 
-	// The output directory is made when the first output needs one, and the
-	// sink remembers it: preserving output is a write per event, not a
-	// directory per event.
 	output := filepath.Join(directory, trace.OutputDirectoryName)
 	var creations int
 	for _, name := range created {
@@ -528,7 +572,7 @@ func TestDirSinkCountsTheEventsItCouldNotWrite(t *testing.T) {
 			t.Fatalf("Emit(%d) hid a write failure", seq)
 		}
 	}
-	if sink.Dropped() != 3 {
+	if sink.Dropped() != threeEventTraceCount {
 		t.Fatalf("Dropped = %d, want 3", sink.Dropped())
 	}
 	if err := sink.Close(); err != nil {
@@ -556,9 +600,7 @@ func TestDirSinkFailsToOpenWhenItsStreamCannotBeOpened(t *testing.T) {
 			return nil, errors.New("too many open files")
 		},
 	})
-	// A sink whose stream never opened would write every event into a file it
-	// does not have. It reports the failure instead, so that the caller runs
-	// untraced rather than believing it is being recorded.
+
 	if err == nil {
 		t.Fatal("NewDirSink returned a sink for a stream it could not open")
 	}
@@ -583,8 +625,7 @@ func TestDirSinkReportsAStreamItCouldNotClose(t *testing.T) {
 	if err := sink.Emit(sampleEvent(1)); err != nil {
 		t.Fatalf("Emit = %v", err)
 	}
-	// Closing is the last moment a filesystem can report what it never wrote,
-	// and a recording that hid it would claim a stream nothing can read.
+
 	closeErr := sink.Close()
 	if closeErr == nil {
 		t.Fatal("Close hid the failure of the stream it was closing")
@@ -592,8 +633,7 @@ func TestDirSinkReportsAStreamItCouldNotClose(t *testing.T) {
 	if !strings.Contains(closeErr.Error(), "no space left on device") {
 		t.Errorf("Close = %v, want the failure it was answered with", closeErr)
 	}
-	// The recording is over either way: a stream that failed to close is not
-	// reopened, and a second close is not a second failure.
+
 	if err := sink.Close(); err != nil {
 		t.Fatalf("second Close = %v, want nil", err)
 	}
@@ -633,7 +673,7 @@ func TestDirSinkRejectsEmitAfterCloseAndClosesOnce(t *testing.T) {
 func TestMemorySinkDropsTheOldestEventsWhenItsRingIsFull(t *testing.T) {
 	t.Parallel()
 	sink := trace.NewMemorySink(3)
-	for seq := int64(1); seq <= 5; seq++ {
+	for seq := int64(1); seq <= memoryFixtureEventCount; seq++ {
 		if err := sink.Emit(sampleEvent(seq)); err != nil {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
@@ -642,21 +682,19 @@ func TestMemorySinkDropsTheOldestEventsWhenItsRingIsFull(t *testing.T) {
 	for _, event := range sink.Events() {
 		got = append(got, event.Seq)
 	}
-	// A ring of three holds two events of a run in progress: the last slot
-	// belongs to the run-end, so the event that closes the recording never
-	// costs the recording an event it already accounted for.
+
 	if !reflect.DeepEqual(got, []int64{4, 5}) {
 		t.Fatalf("Events = %v, want the last two beside the room held for the run-end", got)
 	}
-	if sink.Dropped() != 3 {
+	if sink.Dropped() != memoryFixtureDroppedCount {
 		t.Fatalf("Dropped = %d, want 3", sink.Dropped())
 	}
 }
 
 func TestMemorySinkKeepsItsLastSlotForTheRunEnd(t *testing.T) {
 	t.Parallel()
-	sink := trace.NewMemorySink(2)
-	for seq := int64(1); seq <= 3; seq++ {
+	sink := trace.NewMemorySink(memorySinkFixtureCapacity)
+	for seq := int64(1); seq <= threeEventTraceCount; seq++ {
 		if err := sink.Emit(sampleEvent(seq)); err != nil {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
@@ -703,7 +741,7 @@ func TestMemorySinkEventsAreASnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := sink.Events()
-	events[0].Seq = 99
+	events[0].Seq = snapshotMutationSequence
 	if sink.Events()[0].Seq != 1 {
 		t.Fatal("Events shares storage with the sink")
 	}
@@ -723,9 +761,11 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 		Path:            "internal/assure/run.go",
 		ReachingTargets: []string{"TestRun"},
 		Plan:            []string{"TestRun"},
-		Reason:          trace.ReasonCoverageReaching,
+		Reason:          trace.ReasonProbeReaching,
 		Granularity:     trace.GranularityBlock,
 		Discharged:      []trace.Discharge{{Target: "TestSkipped", Reason: trace.DischargeBranchNeverTaken}},
+		ProbeReaching:   []string{"TestRun"},
+		Probed:          true,
 	}
 	probe := &trace.ProbeRecord{
 		Target:   "TestRun",
@@ -742,15 +782,13 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 		}
 	}
 
-	// The caller amends the records it emitted. A sink whose state a caller
-	// can reach past its own mutex is a sink whose events are not what was
-	// recorded.
 	exec.Argv[0] = "rm"
 	exec.EnvNames[0] = "GOATEST_TOKEN=super-secret"
 	exec.Output[0] = 'X'
-	exec.ExitCode = 137
+	exec.ExitCode = snapshotMutationExitCode
 	route.Plan[0] = "TestSomethingElse"
 	route.Discharged[0].Target = "TestSomethingElse"
+	route.ProbeReaching[0] = "TestSomethingElse"
 	route.Reason = trace.ReasonUnreached
 	probe.Args[0] = "-test.run=^TestSomethingElse$"
 	probe.Infected[0] = "m-0002"
@@ -762,27 +800,54 @@ func TestMemorySinkKeepsAPayloadItsCallersCannotAmend(t *testing.T) {
 	if string(kept[0].Exec.Output) != "--- FAIL: TestBoundary\n" {
 		t.Fatalf("a caller amended the output the sink kept: %q", kept[0].Exec.Output)
 	}
-	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonCoverageReaching {
+	if kept[1].Route.Plan[0] != "TestRun" || kept[1].Route.Reason != trace.ReasonProbeReaching {
 		t.Fatalf("a caller amended the route record the sink kept: %+v", kept[1].Route)
 	}
 	if kept[1].Route.Discharged[0].Target != "TestSkipped" {
 		t.Fatalf("a caller amended the discharges the sink kept: %+v", kept[1].Route.Discharged)
 	}
+	if kept[1].Route.ProbeReaching[0] != "TestRun" {
+		t.Fatalf("a caller amended the probe-reaching targets the sink kept: %+v", kept[1].Route.ProbeReaching)
+	}
 	if kept[2].Probe.Args[0] != "-test.run=^TestRun$" || kept[2].Probe.Infected[0] != "m-0001" {
 		t.Fatalf("a caller amended the probe record the sink kept: %+v", kept[2].Probe)
 	}
 
-	// The snapshot is the caller's own, down to the payload it points at.
 	kept[0].Exec.Argv[0] = "rm"
 	kept[0].Exec.Output[0] = 'X'
 	kept[1].Route.ReachingTargets[0] = "TestSomethingElse"
+	kept[1].Route.ProbeReaching[0] = "TestSomethingElse"
 	kept[2].Probe.Infected[0] = "m-0002"
 	again := sink.Events()
-	if again[0].Exec.Argv[0] != "go" || again[0].Exec.Output[0] != '-' || again[1].Route.ReachingTargets[0] != "TestRun" {
+	if again[0].Exec.Argv[0] != "go" || again[0].Exec.Output[0] != '-' ||
+		again[1].Route.ReachingTargets[0] != "TestRun" || again[1].Route.ProbeReaching[0] != "TestRun" {
 		t.Fatalf("a returned snapshot shares its payload with the sink: %+v %+v", again[0].Exec, again[1].Route)
 	}
 	if again[2].Probe.Infected[0] != "m-0001" {
 		t.Fatalf("a returned snapshot shares its probe record with the sink: %+v", again[2].Probe)
+	}
+}
+
+func TestMemorySinkClonesPrepareDuration(t *testing.T) {
+	t.Parallel()
+	sink := trace.NewMemorySink(0)
+	durationMS := prepareFixtureDuration.Milliseconds()
+	record := &trace.PrepareRecord{
+		Phase: trace.PreparePhaseDiscovery, State: trace.PrepareStateFinished,
+		Result: trace.PrepareResultSucceeded, DurationMS: &durationMS,
+	}
+	if err := sink.Emit(trace.Event{Seq: 1, Type: trace.TypePrepare, Prepare: record}); err != nil {
+		t.Fatal(err)
+	}
+	durationMS = phaseFixtureDuration.Milliseconds()
+
+	events := sink.Events()
+	if got := *events[0].Prepare.DurationMS; got != prepareFixtureDuration.Milliseconds() {
+		t.Fatalf("stored preparation duration = %d", got)
+	}
+	*events[0].Prepare.DurationMS = phaseFixtureDuration.Milliseconds()
+	if got := *sink.Events()[0].Prepare.DurationMS; got != prepareFixtureDuration.Milliseconds() {
+		t.Fatalf("snapshot amended stored preparation duration to %d", got)
 	}
 }
 
@@ -829,18 +894,16 @@ func TestTeeSinkSumsTheDropsOfEverySink(t *testing.T) {
 	first := trace.NewMemorySink(1)
 	second := trace.NewMemorySink(2)
 	tee := trace.NewTeeSink(first, second)
-	for seq := int64(1); seq <= 4; seq++ {
+	for seq := int64(1); seq <= teeFixtureEventCount; seq++ {
 		if err := tee.Emit(sampleEvent(seq)); err != nil {
 			t.Fatalf("Emit(%d) = %v", seq, err)
 		}
 	}
-	// Neither ring has seen a run-end, so each is one slot smaller than its
-	// capacity: the ring of one keeps nothing, the ring of two keeps the last
-	// event.
-	if first.Dropped() != 4 || second.Dropped() != 3 {
+
+	if first.Dropped() != firstTeeDroppedCount || second.Dropped() != secondTeeDroppedCount {
 		t.Fatalf("sink drops = %d and %d, want 4 and 3", first.Dropped(), second.Dropped())
 	}
-	if tee.Dropped() != 7 {
+	if tee.Dropped() != totalTeeDroppedCount {
 		t.Fatalf("Dropped = %d, want the sum 7", tee.Dropped())
 	}
 }
@@ -849,8 +912,7 @@ func TestTeeSinkClosesEverySinkAndReportsTheFirstFailure(t *testing.T) {
 	t.Parallel()
 	first := &recordingSink{closeErr: errors.New("close failed")}
 	second := &recordingSink{}
-	// A second failure is not a better answer than the first: the failure that
-	// ended the first recording is the one a reader is told about.
+
 	third := &recordingSink{closeErr: errors.New("a later close failed")}
 	tee := trace.NewTeeSink(first, second, third)
 	err := tee.Close()
@@ -895,11 +957,11 @@ func TestARecorderCountsTheDropsOfASinkThatReportsThem(t *testing.T) {
 	recorder.RunEnd("assured", nil)
 
 	events := memory.Events()
-	if len(events) != 3 {
+	if len(events) != threeEventTraceCount {
 		t.Fatalf("recorded %+v, want run-start, progress and run-end", events)
 	}
 	run := events[2].Run
-	if run == nil || run.EventsEmitted != 0 || run.EventsDropped != 2 {
+	if run == nil || run.EventsEmitted != 0 || run.EventsDropped != recorderDroppedCount {
 		t.Fatalf("run-end accounting = %+v, want 0 emitted and 2 dropped", run)
 	}
 }
@@ -912,17 +974,15 @@ func TestARecorderCountsEmitErrorsOfASinkThatDoesNotReportDrops(t *testing.T) {
 	recorder.RunEnd("assured", nil)
 
 	events := sink.recorded()
-	if len(events) != 3 {
+	if len(events) != threeEventTraceCount {
 		t.Fatalf("recorded %+v, want run-start, progress and run-end", events)
 	}
 	run := events[2].Run
-	if run == nil || run.EventsEmitted != 0 || run.EventsDropped != 2 {
+	if run == nil || run.EventsEmitted != 0 || run.EventsDropped != recorderDroppedCount {
 		t.Fatalf("run-end accounting = %+v, want 0 emitted and 2 dropped", run)
 	}
 }
 
-// emittedExecRecord returns the exec payload of the single exec event written
-// to a trace directory.
 func emittedExecRecord(t *testing.T, directory string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(directory, trace.FileName))

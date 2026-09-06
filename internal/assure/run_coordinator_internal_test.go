@@ -15,6 +15,7 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/checkpoint"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/evidence"
@@ -23,6 +24,14 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/trace"
+)
+
+const (
+	coordinatorMutantLine       = 8
+	coordinatorMutantColumn     = 5
+	coordinatorProbeIndex       = 7
+	coordinatorProbeDuration    = 750 * time.Millisecond
+	acceptedMutationTargetCount = 3
 )
 
 type coordinatorCache struct {
@@ -98,9 +107,6 @@ type runCoordinatorHarness struct {
 	recorder     *trace.Recorder
 	scratch      string
 
-	// temporary is where the harness lets a run make its directories, whatever
-	// the run was told, so that a test driving a real creation and a real
-	// removal still leaves the machine as the framework found it.
 	temporary          string
 	runScratch         string
 	runScratchParent   string
@@ -141,17 +147,18 @@ type runCoordinatorHarness struct {
 	evidenceSaved    []evidence.MutationStore
 	evidenceSequence []string
 
-	workspaceOptions  mutationbridge.Options
-	preparedOptions   mutationbridge.PrepareOptions
-	probeOptions      ProbeOptions
-	probedTargets     []TargetEvidence
-	mutationTargets   []TargetEvidence
-	mutationOptions   MutationOptions
-	generationOptions GenerationOptions
-	racePackages      []string
-	raceModel         goanalysis.Model
-	raceOptions       RaceOptions
-	baselineOptions   BaselineOptions
+	workspaceOptions    mutationbridge.Options
+	workspaceOptionsSet bool
+	preparedOptions     mutationbridge.PrepareOptions
+	probeOptions        ProbeOptions
+	probedTargets       []TargetEvidence
+	mutationTargets     []TargetEvidence
+	mutationOptions     MutationOptions
+	generationOptions   GenerationOptions
+	racePackages        []string
+	raceModel           goanalysis.Model
+	raceOptions         RaceOptions
+	baselineOptions     BaselineOptions
 }
 
 func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
@@ -180,9 +187,11 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		race:       RaceResult{Evidence: []report.Evidence{{Kind: "race", ID: "race-a", Status: "passed"}}},
 		mutation:   MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed"}}},
 		generation: GenerationEvaluation{},
-		catalog:    gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-a", Accepted: true}}},
-		inputs:     evidence.Inputs{Contract: "digest-a"},
-		digest:     strings.Repeat("a", 64),
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{{
+			ID: "mutant-a", Accepted: true, Package: "fixture.example/module",
+		}}},
+		inputs: evidence.Inputs{Contract: "digest-a"},
+		digest: digestText("coordinator-harness"),
 	}
 	harness.dependencies = runDependencies{
 		repositoryRoot: func(root string) (string, error) {
@@ -205,29 +214,29 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 		},
 		openWorkspace: func(_ context.Context, root string, options mutationbridge.Options) (*mutationbridge.Workspace, error) {
 			harness.openCalls++
-			harness.workspaceOptions = options
-			if root != harness.root || options.ReportDirectory != ".goatest" {
+			if !harness.workspaceOptionsSet {
+				harness.workspaceOptions = options
+				harness.workspaceOptionsSet = true
+			}
+			if root != harness.root || options.ReportDirectory != internalOutputDirectory ||
+				!slices.Equal(options.SnapshotExclude, assuranceSnapshotExclusions()) {
 				t.Fatalf("open workspace = %q %+v", root, options)
 			}
-			return nil, nil
+			return &mutationbridge.Workspace{}, nil
 		},
 		closeWorkspace: func(*mutationbridge.Workspace) error {
 			harness.workspaceCloses++
 			return nil
 		},
-		inspectWorkspace: func(context.Context, CommandWorkspace) (roundMetadata, error) { return harness.metadata, nil },
+		inspectWorkspace: func(context.Context, CommandWorkspace, string, []string, []string, time.Duration) (roundMetadata, error) {
+			return harness.metadata, nil
+		},
 		assuranceInputs: func(root, contract string, _ Options, _ config.Config, metadata roundMetadata) (evidence.Inputs, string, error) {
 			harness.inputCalls++
 			if root != harness.root || contract == "" || !reflect.DeepEqual(metadata, harness.metadata) {
 				t.Fatalf("assurance input = %q %q %+v", root, contract, metadata)
 			}
 			return harness.inputs, harness.digest, nil
-		},
-		digestInputs: func(inputs evidence.Inputs) string {
-			if !reflect.DeepEqual(inputs, harness.inputs) {
-				t.Fatalf("digest inputs = %+v", inputs)
-			}
-			return harness.digest
 		},
 		discoverTargets: func(root string, packages []goanalysis.Package) ([]goanalysis.Target, error) {
 			harness.discoverCalls++
@@ -288,6 +297,19 @@ func newRunCoordinatorHarness(t *testing.T) *runCoordinatorHarness {
 			harness.baselineOptions = options
 			if !reflect.DeepEqual(model, harness.metadata.model) || len(targets) != len(harness.targets) {
 				t.Fatalf("baseline input = %+v %+v", model, targets)
+			}
+			if options.Progress != nil {
+				options.Progress(0, len(targets))
+			}
+			if options.StopAfterChecks {
+				state := checkpoint.Baseline{BuildVetComplete: true, Evidence: baselineCheckEvidence(harness.baseline.Evidence)}
+				if options.Checkpoint != nil {
+					options.Checkpoint(state)
+				}
+				return BaselineResult{Evidence: slices.Clone(state.Evidence)}, nil
+			}
+			if options.Progress != nil {
+				options.Progress(len(targets), len(targets))
 			}
 			return harness.baseline, nil
 		},
@@ -370,7 +392,6 @@ func (harness *runCoordinatorHarness) run(options Options) (report.Report, error
 	return runWithDependencies(harness.t.Context(), options, harness.dependencies)
 }
 
-// record traces the run of the harness and returns the sink that keeps it.
 func (harness *runCoordinatorHarness) record() *trace.MemorySink {
 	sink, recorder := newTraceRecording()
 	harness.recorder = recorder
@@ -385,40 +406,89 @@ func TestRunCoordinatorEstablishesAssuranceAndPassesExactRoundOptions(t *testing
 	harness.loaded.Project.Exclude = []string{"generated/**"}
 	result, err := harness.run(Options{
 		Now: func() time.Time { return now }, NoApply: true, GoBinary: "go-custom", TempDirectory: "scratch-parent",
-		Environment: []string{"A=1"}, MutationOperators: []string{"comparison"}, FuzzExecutions: 123, MutationJobs: 3,
+		Environment: []string{"A=1"}, MutationOperators: []string{"comparison"}, MutationJobs: 3,
 		CommandTimeout: 7 * time.Minute,
 		Changed:        true, ChangedRef: "origin/main", ReplayMutantID: "mutant-a",
 	})
 	if err != nil || result.Verdict != report.VerdictAssured || result.Schema != report.SchemaV1 || result.Contract != "standard-v1" || result.Snapshot != harness.digest ||
-		len(result.Evidence) != 4 || len(result.Findings) != 0 || len(harness.cache.puts) != 1 || harness.workspaceCloses != 1 || harness.manager.calls != 1 ||
-		harness.openCalls != 1 || harness.inputCalls != 2 || harness.discoverCalls != 1 || harness.resourceCalls != 1 || harness.baselineCalls != 1 || harness.raceCalls != 1 ||
+		len(result.Evidence) != 4 || len(result.Findings) != 0 || len(harness.cache.puts) != 1 || harness.workspaceCloses != completedRoundWorkspaceCount || harness.manager.calls != 1 ||
+		harness.openCalls != completedRoundWorkspaceCount || harness.inputCalls != 2 || harness.discoverCalls != 1 || harness.resourceCalls != 1 || harness.baselineCalls != 1 || harness.raceCalls != 1 ||
 		harness.prepareCalls != 1 || harness.mutationCalls != 1 || harness.generationCalls != 1 || harness.buildGraphCalls != 1 || harness.mergeGraphCalls != 1 || harness.saveGraphCalls != 1 {
 		t.Fatalf("result = (%+v, %v), harness=%+v", result, err, harness)
 	}
 	if harness.preparedOptions.Contract != "standard-v1" || !slices.Equal(harness.preparedOptions.Operators, []string{"comparison"}) ||
 		!slices.Equal(harness.preparedOptions.Exclude, []string{"generated/**"}) ||
 		harness.preparedOptions.Jobs != 3 || harness.preparedOptions.BuildTimeout != 7*time.Minute ||
-		harness.preparedOptions.MutantTimeout != 7*time.Minute || harness.preparedOptions.VerifyTimeout != 7*time.Minute ||
-		!slices.Equal(harness.preparedOptions.VerifyArgv, []string{"go", "test", "-run=^$", "./..."}) || !slices.Equal(harness.preparedOptions.VerifyEnv, []string{"DB=ready"}) {
+		harness.preparedOptions.MutantTimeout != 7*time.Minute || !harness.preparedOptions.SkipVerify ||
+		len(harness.preparedOptions.VerifyArgv) != 0 || len(harness.preparedOptions.VerifyEnv) != 0 || harness.preparedOptions.VerifyTimeout != 0 {
 		t.Fatalf("prepare options = %+v", harness.preparedOptions)
 	}
-	if harness.mutationOptions.Root != harness.root || harness.mutationOptions.Contract != "standard-v1" || !harness.mutationOptions.NoApply ||
-		harness.mutationOptions.FuzzExecutions != 123 || harness.mutationOptions.Timeout != 7*time.Minute || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
-		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil {
+	if harness.baselineOptions.Jobs != 3 || harness.baselineOptions.CommandTimeout != 7*time.Minute ||
+		harness.baselineOptions.Contract != "standard-v1" || !harness.baselineOptions.PackageSuites ||
+		harness.baselineOptions.Progress == nil || !slices.Equal(harness.baselineOptions.SuiteEnvironment, []string{"DB=ready"}) {
+		t.Fatalf("baseline options = %+v", harness.baselineOptions)
+	}
+	if harness.raceOptions.Timeout != 7*time.Minute {
+		t.Fatalf("race options = %+v, want the configured command ceiling", harness.raceOptions)
+	}
+	if harness.mutationOptions.Timeout != 7*time.Minute || harness.mutationOptions.Jobs != 3 || harness.mutationOptions.ReplayMutantID != "mutant-a" ||
+		!harness.mutationOptions.Accepted["accepted-a"] || harness.mutationOptions.Progress == nil ||
+		!slices.Equal(harness.mutationOptions.SuiteEnvironment, []string{"DB=ready"}) {
 		t.Fatalf("mutation options = %+v", harness.mutationOptions)
 	}
 	if harness.generationOptions.Snapshot != harness.digest || !harness.generationOptions.NoApply || harness.generationOptions.RepositoryValidator.Root != harness.root ||
 		harness.generationOptions.RepositoryValidator.Contract != "standard-v1" || harness.generationOptions.RepositoryValidator.GoBinary != "go-custom" {
 		t.Fatalf("generation options = %+v", harness.generationOptions)
 	}
-	wantKinds := []string{"snapshot", "impact-broad", "baseline-target", "race", "mutation-prepare", "mutation-jobs", "mutation-target"}
+	wantKinds := []string{"snapshot", "impact-broad", "mutation-jobs", "baseline-progress", "baseline-progress", "race", "mutation-target"}
 	gotKinds := make([]string, len(harness.events))
 	for index, event := range harness.events {
 		gotKinds[index] = event.Kind
 	}
-	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" || harness.events[3].Detail != "1 packages" ||
-		harness.events[5].Detail != "3" || harness.events[6].Detail != "1 mutant" {
+	if !slices.Equal(gotKinds, wantKinds) || harness.events[0].Detail != "repair round 1" ||
+		harness.events[2].Detail != "3" || harness.events[3].Detail != "0/1" || harness.events[4].Detail != "1/1" ||
+		harness.events[5].Detail != "1 packages" || harness.events[6].Detail != "1 mutant" {
 		t.Fatalf("events = %+v", harness.events)
+	}
+}
+
+func TestRunCoordinatorUsesTheNativeProjectionForMutationPreparation(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	base := filepath.Join(harness.temporary, "persistent-build-cache")
+	if err := (buildcache.Layer{Dir: base}).Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
+		buildCacheTestKey(1), buildCacheTestKey(2), strings.NewReader("compiled"), int64(len("compiled")), time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err := harness.run(Options{
+		Environment:       []string{"RESOURCE=base"},
+		BuildCacheProgram: "/opt/goatest",
+		BuildCacheDir:     base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCacheMode := func(name string, environment []string) {
+		t.Helper()
+		var cacheDirectory, program string
+		for _, entry := range environment {
+			switch {
+			case strings.HasPrefix(entry, "GOCACHE="):
+				cacheDirectory = strings.TrimPrefix(entry, "GOCACHE=")
+			case strings.HasPrefix(entry, "GOCACHEPROG="):
+				program = strings.TrimPrefix(entry, "GOCACHEPROG=")
+			}
+		}
+		if cacheDirectory == "" || program != "" || !strings.HasPrefix(filepath.Base(cacheDirectory), buildcache.NativeDirectoryPrefix) {
+			t.Fatalf("%s cache environment = %q, want the run-owned native projection", name, environment)
+		}
+	}
+	assertCacheMode("preparation", harness.workspaceOptions.Environment)
+	if !harness.preparedOptions.SkipVerify {
+		t.Fatal("mutation preparation ran a redundant verification")
 	}
 }
 
@@ -427,25 +497,42 @@ func TestRunCoordinatorHandsTheBaselineInstrumentationToMutationRouting(t *testi
 	harness.baseline.Instrumented = []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 		{StartLine: 5, StartColumn: 29, EndLine: 6, EndColumn: 16},
 	}}}
+	harness.baseline.Suites = map[string]PackageSuiteCoverage{
+		"fixture.example/module": {Duration: 2 * time.Second, WholeTree: true},
+	}
 	if _, err := harness.run(Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(harness.mutationOptions.Instrumented, harness.baseline.Instrumented) {
 		t.Fatalf("routed instrumentation = %+v, want %+v", harness.mutationOptions.Instrumented, harness.baseline.Instrumented)
 	}
+	if !reflect.DeepEqual(harness.mutationOptions.SuiteCoverage, harness.baseline.Suites) {
+		t.Fatalf("routed suite coverage = %+v, want %+v", harness.mutationOptions.SuiteCoverage, harness.baseline.Suites)
+	}
 }
 
-// TestRunCoordinatorHandsTheProbedTargetsToMutationRouting pins that the
-// mutation phase routes by the evidence the probe pass measured rather than by
-// the baseline evidence the pass was handed.
 func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants[0].Path = "value.go"
+	harness.catalog.Mutants[0].Line = coordinatorMutantLine
+	harness.catalog.Mutants[0].Column = coordinatorMutantColumn
+	harness.catalog.Mutants[0].Probed = true
+	harness.baseline.Instrumented = blockRoutingInstrumentation()
+	harness.baseline.Targets[0].Covered = []goanalysis.FileCoverage{{
+		Path: "value.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3}},
+	}}
 	harness.dependencies.probeTargets = func(_ context.Context, _ MutationSession, targets []TargetEvidence, options ProbeOptions) (ProbeEvaluation, error) {
 		harness.probeCalls++
 		harness.probeOptions = options
 		probed := slices.Clone(targets)
 		probed[0].Probed, probed[0].Infected = true, []uint32{7}
-		return ProbeEvaluation{Targets: probed, Measured: 1}, nil
+		return ProbeEvaluation{
+			Targets: probed, Measured: 1,
+			Suites: map[string]PackageProbeEvidence{
+				"fixture.example/module": {Measured: true, Infected: []uint32{7}, Duration: 2 * time.Second},
+			},
+			SuitesMeasured: 1,
+		}, nil
 	}
 	if _, err := harness.run(Options{MutationJobs: 3, CommandTimeout: 5 * time.Minute, TestArgs: []string{"-test.short=true"}}); err != nil {
 		t.Fatal(err)
@@ -458,8 +545,16 @@ func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 	}
 	if harness.probeOptions.Contract != "standard-v1" || harness.probeOptions.Jobs != 3 ||
 		harness.probeOptions.Timeout != 5*time.Minute || !slices.Equal(harness.probeOptions.TestArgs, []string{"-test.short=true"}) ||
-		harness.probeOptions.Progress == nil {
+		harness.probeOptions.Progress == nil || harness.probeOptions.PackageSuites ||
+		!slices.Equal(harness.probeOptions.SuitePackages, []string{"fixture.example/module"}) ||
+		!slices.Equal(harness.probeOptions.SuiteEnvironment, []string{"DB=ready"}) {
 		t.Fatalf("probe options = %+v", harness.probeOptions)
+	}
+	wantSuites := map[string]PackageProbeEvidence{
+		"fixture.example/module": {Measured: true, Infected: []uint32{7}, Duration: 2 * time.Second},
+	}
+	if !reflect.DeepEqual(harness.mutationOptions.SuiteProbes, wantSuites) {
+		t.Fatalf("mutation suite probes = %+v, want %+v", harness.mutationOptions.SuiteProbes, wantSuites)
 	}
 	kinds := make([]string, 0, len(harness.events))
 	details := make(map[string]string, len(harness.events))
@@ -472,14 +567,112 @@ func TestRunCoordinatorHandsTheProbedTargetsToMutationRouting(t *testing.T) {
 			t.Fatalf("events = %v, want a %s note", kinds, kind)
 		}
 	}
-	if details["probe-target"] != "1 target" || details["probe-summary"] != "1 measured, 0 without facts" {
+	if details["probe-target"] != "1 target, 1 package suite" ||
+		details["probe-summary"] != "1 target measured, 0 without facts; 1 package suite measured, 0 without facts" {
 		t.Fatalf("probe notes = %q and %q", details["probe-target"], details["probe-summary"])
 	}
 }
 
-// TestRunCoordinatorSkipsTheProbePassOnReplay pins that replaying one mutant
-// does not pay for a probe pass. Its routing is then the pre-probe one, which
-// only executes more.
+func TestRunCoordinatorUsesCombinedBaselineProbeWithoutSupplementalExecution(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants[0].Index = coordinatorProbeIndex
+	harness.catalog.Mutants[0].Path = "other.go"
+	harness.catalog.Mutants[0].Line = coordinatorMutantLine
+	harness.catalog.Mutants[0].Column = coordinatorMutantColumn
+	harness.catalog.Mutants[0].Probed = true
+	harness.baseline.Targets[0].Probed = true
+	harness.baseline.Targets[0].ProbeDuration = coordinatorProbeDuration
+	harness.baseline.ProbeSuites = map[string]PackageProbeEvidence{
+		"fixture.example/module": {
+			Measured: true, Infected: []uint32{coordinatorProbeIndex}, Duration: coordinatorProbeDuration,
+		},
+	}
+	session := &mutationUnitSession{catalog: harness.catalog, probe: func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		t.Fatalf("unexpected supplemental probe: %+v", request)
+		return gomutants.ProbeResult{}, nil
+	}}
+	harness.dependencies.prepareSession = func(context.Context, *mutationbridge.Workspace, mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		return session, nil
+	}
+	harness.dependencies.probeTargets = func(ctx context.Context, prepared MutationSession, targets []TargetEvidence, options ProbeOptions) (ProbeEvaluation, error) {
+		harness.probeCalls++
+		return ProbeTargets(ctx, prepared, targets, options)
+	}
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if harness.probeCalls != 1 || len(session.probeRequests()) != 0 {
+		t.Fatalf("probe coordinator calls = %d, executions = %+v", harness.probeCalls, session.probeRequests())
+	}
+	if !harness.mutationTargets[0].Probed || harness.mutationTargets[0].ProbeDuration != coordinatorProbeDuration {
+		t.Fatalf("mutation target = %+v", harness.mutationTargets[0])
+	}
+	if !reflect.DeepEqual(harness.mutationOptions.SuiteProbes, harness.baseline.ProbeSuites) {
+		t.Fatalf("suite probes = %+v, want %+v", harness.mutationOptions.SuiteProbes, harness.baseline.ProbeSuites)
+	}
+}
+
+func TestRunCoordinatorRestoresCompleteProbeWithoutExecutingItAgain(t *testing.T) {
+	harness := newRunCoordinatorHarness(t)
+	harness.catalog.Mutants[0].Index = coordinatorProbeIndex
+	harness.catalog.Mutants[0].Path = "value.go"
+	harness.catalog.Mutants[0].Line = coordinatorMutantLine
+	harness.catalog.Mutants[0].Probed = true
+	harness.baseline.Instrumented = blockRoutingInstrumentation()
+	harness.baseline.Targets[0].Covered = []goanalysis.FileCoverage{{
+		Path: "value.go", Blocks: []goanalysis.CoverageBlock{{StartLine: 7, StartColumn: 1, EndLine: 9, EndColumn: 1}},
+	}}
+	probed := slices.Clone(harness.baseline.Targets)
+	probed[0].Probed = true
+	probed[0].ProbeDuration = coordinatorProbeDuration
+	probed[0].Infected = []uint32{coordinatorProbeIndex}
+	probeEvaluation := ProbeEvaluation{Targets: probed, Measured: 1}
+	probePackages := neededProbeSuitePackages(
+		harness.catalog, harness.baseline.Targets, harness.baseline.Instrumented, harness.baseline.Suites,
+	)
+	if len(probePackages) != 0 {
+		probeEvaluation.Suites = make(map[string]PackageProbeEvidence, len(probePackages))
+		for _, pkg := range probePackages {
+			probeEvaluation.Suites[pkg] = PackageProbeEvidence{Measured: true, Duration: time.Second, Infected: []uint32{coordinatorProbeIndex}}
+			probeEvaluation.SuitesMeasured++
+		}
+	}
+	target := harness.targets[0]
+	harness.cache.checkpoint = checkpoint.State{
+		Schema: checkpoint.SchemaV1, InputDigest: harness.digest, Attempts: 1,
+		Baseline: checkpoint.Baseline{
+			BuildVetComplete: true, Complete: true,
+			Targets: []checkpoint.BaselineTarget{{
+				ID: target.ID, Executed: true,
+				Inventory: report.TargetDisposition{
+					ID: target.ID, Name: target.Name, Kind: string(target.Kind), Package: target.Package, Path: target.Path, Status: "passed",
+				},
+				Target: checkpointTargetEvidence(harness.baseline.Targets[0]),
+			}},
+			Routing: checkpointBaselineRouting(harness.baseline.Instrumented, harness.baseline.Suites),
+		},
+		Mutation: &checkpoint.Mutation{
+			CatalogFingerprint: MutationCatalogFingerprint(harness.catalog),
+			Probe:              checkpointMutationProbe(harness.catalog, probeEvaluation),
+		},
+	}
+	harness.cache.checkpointFound = true
+
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if harness.probeCalls != 0 || harness.mutationCalls != 1 {
+		t.Fatalf("probe calls = %d, mutation calls = %d", harness.probeCalls, harness.mutationCalls)
+	}
+	if !reflect.DeepEqual(harness.mutationTargets, probed) || !reflect.DeepEqual(harness.mutationOptions.SuiteProbes, probeEvaluation.Suites) {
+		t.Fatalf("restored routing = targets %+v suites %+v, want %+v %+v", harness.mutationTargets, harness.mutationOptions.SuiteProbes, probed, probeEvaluation.Suites)
+	}
+	if !slices.ContainsFunc(harness.events, func(event Event) bool { return event.Kind == "resume-probe" }) {
+		t.Fatalf("events = %+v, want resume-probe", harness.events)
+	}
+}
+
 func TestRunCoordinatorSkipsTheProbePassOnReplay(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
 	sink := harness.record()
@@ -497,9 +690,6 @@ func TestRunCoordinatorSkipsTheProbePassOnReplay(t *testing.T) {
 	}
 }
 
-// TestProbePassDoesNotEnterTheCacheIdentity pins that measuring infection
-// changes nothing a cached result is keyed on: the pass adds no option, and a
-// run that probed answers from the same entry as one that did not.
 func TestProbePassDoesNotEnterTheCacheIdentity(t *testing.T) {
 	probed := newRunCoordinatorHarness(t)
 	if _, err := probed.run(Options{}); err != nil {
@@ -538,7 +728,7 @@ func TestMutationTargetCountIncludesOnlyExecutableMutants(t *testing.T) {
 		{ID: "selected-b", Accepted: true},
 		{ID: "selected-c", Accepted: true},
 	}}
-	if got := mutationTargetCount(catalog, ""); got != 3 {
+	if got := mutationTargetCount(catalog, ""); got != acceptedMutationTargetCount {
 		t.Fatalf("mutationTargetCount = %d, want 3", got)
 	}
 	if got := mutationTargetCount(catalog, "selected-a"); got != 1 {
@@ -621,6 +811,18 @@ func TestRunCoordinatorCacheHitRequiresCurrentAcceptanceAndClosesSnapshot(t *tes
 			t.Fatalf("expired unused acceptance cache = (%+v, %v), discovers=%d", result, err, harness.discoverCalls)
 		}
 	})
+	t.Run("incomplete proof", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.cache.found = true
+		harness.cache.getReport = report.Report{
+			Verdict:     report.VerdictDefect,
+			Limitations: []report.Limitation{{Code: laterPhasesNotRunCode}},
+		}
+		result, err := harness.run(Options{})
+		if err != nil || result.Snapshot != harness.digest || harness.discoverCalls != 1 {
+			t.Fatalf("incomplete cache = (%+v, %v), discovers=%d", result, err, harness.discoverCalls)
+		}
+	})
 	t.Run("configured resources disable cache reuse", func(t *testing.T) {
 		harness := newRunCoordinatorHarness(t)
 		harness.loaded.Resources = map[string]config.Resource{"db": {Command: []string{"provider"}}}
@@ -695,22 +897,16 @@ func TestRunCoordinatorEmitsChangedImpactModeOnlyWhenRequested(t *testing.T) {
 	}
 }
 
-// coordinatorEvidenceRecord is one killed record an earlier run left behind.
 func coordinatorEvidenceRecord(id string) evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: id, Path: "value.go", Package: "fixture.example/module",
-		Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + strings.Repeat("b", 64),
-		KilledBy: &evidence.TargetKey{
-			Package: "fixture.example/module", Name: "TestValue", Kind: "test", Key: strings.Repeat("c", 64),
-		},
+		Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("coordinator-snapshot"),
+		KilledBy: []evidence.TargetKey{{
+			Package: "fixture.example/module", Name: "TestValue", Kind: "test", Key: digestText("coordinator-target"),
+		}},
 	}
 }
 
-// TestMutationEvidenceIsGuardedToTheFullRunItCanBeReusedIn pins every
-// dimension of the guard. A recorded verdict is a claim about the whole
-// project verified from an unmodified tree, so a run that narrows the scope,
-// carries runtime state, replays one finding, or is repairing what an earlier
-// round changed neither reads a record nor writes one.
 func TestMutationEvidenceIsGuardedToTheFullRunItCanBeReusedIn(t *testing.T) {
 	t.Parallel()
 	full := config.Config{}
@@ -745,15 +941,10 @@ func TestMutationEvidenceIsGuardedToTheFullRunItCanBeReusedIn(t *testing.T) {
 	}
 }
 
-// TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun pins the wiring
-// the guard decides: where the store lives, that it is read once before the
-// mutation phase and written once after it, that what is written keeps only
-// the mutants this run's catalogue still names, and that a run outside the
-// guard is handed no evidence at all.
 func TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun(t *testing.T) {
 	t.Run("a full run", func(t *testing.T) {
 		harness := newRunCoordinatorHarness(t)
-		kept, pruned := coordinatorEvidenceRecord(strings.Repeat("d", 64)), coordinatorEvidenceRecord(strings.Repeat("e", 64))
+		kept, pruned := coordinatorEvidenceRecord(digestText("kept-mutant")), coordinatorEvidenceRecord(digestText("pruned-mutant"))
 		harness.catalog = gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: kept.MutantID, Accepted: true}}}
 		harness.mutation = MutationEvaluation{Evidence: []report.Evidence{{
 			Kind: "mutation", ID: kept.MutantID, Status: "killed", Detail: "TestValue",
@@ -819,21 +1010,28 @@ func TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun(t *testing.T) {
 	}
 	t.Run("a repair round", func(t *testing.T) {
 		harness := newRunCoordinatorHarness(t)
+		finding := report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "gap"}
 		harness.dependencies.evaluateMutations = func(_ context.Context, _ MutationSession, _ []TargetEvidence, options MutationOptions) (MutationEvaluation, error) {
 			harness.mutationCalls++
 			harness.mutationOptions = options
 			if harness.mutationCalls == 1 {
-				return MutationEvaluation{Applied: true, Repairs: []report.Repair{{
-					ID: "corpus-a", Finding: "finding-a", Path: "testdata/fuzz/FuzzValue/seed", Status: "applied",
-				}}}, nil
+				return MutationEvaluation{Findings: []report.Finding{finding}}, nil
 			}
 			return MutationEvaluation{}, nil
+		}
+		harness.dependencies.attemptRepairs = func(context.Context, string, []report.Finding, GenerationOptions) (GenerationEvaluation, error) {
+			harness.generationCalls++
+			if harness.generationCalls == 1 {
+				return GenerationEvaluation{Findings: []report.Finding{finding}, Repairs: []report.Repair{{
+					ID: "generated-a", Finding: finding.ID, Path: "value_test.go", Status: "applied",
+				}}, Applied: true}, nil
+			}
+			return GenerationEvaluation{}, nil
 		}
 		if _, err := harness.run(Options{}); err != nil {
 			t.Fatal(err)
 		}
-		// The second round verifies a tree an earlier round changed, so only
-		// the first one reads and writes the store.
+
 		if harness.mutationCalls != 2 || len(harness.evidenceLoads) != 1 || len(harness.evidenceSaves) != 1 {
 			t.Fatalf("%d rounds read %v and wrote %v", harness.mutationCalls, harness.evidenceLoads, harness.evidenceSaves)
 		}
@@ -843,16 +1041,11 @@ func TestRunLoadsAndSavesMutationEvidenceOnlyForAGuardedFullRun(t *testing.T) {
 	})
 }
 
-// TestRunDiscardsARejectedMutationEvidenceStoreAndNotesIt pins the fail-closed
-// direction. A store that cannot be trusted is not an error the run dies of
-// and not a store the run believes: it is dropped, the reason is on the
-// progress stream, everything executes, and what this run establishes replaces
-// what could not be read.
 func TestRunDiscardsARejectedMutationEvidenceStoreAndNotesIt(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
 	harness.evidenceStore = evidence.MutationStore{
 		Schema: evidence.MutationSchemaV1, ModulePath: "fixture.example/module",
-		Records: []evidence.MutationRecord{coordinatorEvidenceRecord(strings.Repeat("d", 64))},
+		Records: []evidence.MutationRecord{coordinatorEvidenceRecord(digestText("rejected-mutant"))},
 	}
 	harness.evidenceLoadErr = errors.New("goatest: mutation evidence identity mismatch")
 	result, err := harness.run(Options{})
@@ -876,9 +1069,6 @@ func TestRunDiscardsARejectedMutationEvidenceStoreAndNotesIt(t *testing.T) {
 	}
 }
 
-// TestRunKeepsGoingWhenSavingMutationEvidenceFails pins that a store is a
-// cache and never a result: a run that cannot write one has established
-// everything it claims, and the next run simply starts cold.
 func TestRunKeepsGoingWhenSavingMutationEvidenceFails(t *testing.T) {
 	harness := newRunCoordinatorHarness(t)
 	harness.evidenceSaveErr = errors.New("disk is full")

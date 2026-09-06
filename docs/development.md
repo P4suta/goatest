@@ -151,11 +151,11 @@ a golden report yet; the helpers exist for the ones that will.
 `assure.Run` reports progress as `assure.Event` values. `HasEvent(events,
 kind)`, `CountEvent(events, kind)`, and `EventDetails(events, kind)` assert
 against a recorded stream — that a warm run reported a cache hit, that a phase
-ran once rather than twice, or which targets a phase named:
+ran once rather than twice, or which bounded milestones a phase reached:
 
 ```go
-if got := testkit.EventDetails(events, "baseline-target"); len(got) != 1 {
-	t.Fatalf("baseline targets = %v", got)
+if got := testkit.EventDetails(events, "baseline-progress"); !slices.Equal(got, []string{"0/2", "1/2", "2/2"}) {
+	t.Fatalf("baseline progress = %v", got)
 }
 ```
 
@@ -215,12 +215,15 @@ for it.
 performance breakdown of its run: phase durations, the command classes the run
 spent its time in, how coverage routed the mutants, what the probe pass
 measured, and what became of the ones it executed. The `probe` block counts the
-probe executions, tallies their outcomes, and reports the (target, mutant)
-infections they recorded together with the measured targets that infected
-nothing; a recording made without the pass reads `probe: not recorded` rather
-than a pass that infected nothing. The routing block counts the routes carrying
-a probe on its `probed:` line, which is absent from a recording that carries
-none. Every number comes from a recorded value, so summarizing a trace
+target and package-suite controls separately, tallies their outcomes, and
+reports the `(probe, mutant)` infections they recorded together with the
+measured executions that infected nothing; a recording made without a physical
+pass — including an attempt that restored its completed probe checkpoint —
+reads `probe: not recorded` rather than a pass that infected nothing. The
+routing block counts `probe-reaching` routes, whole-suite coverage decisions,
+and the routes carrying a probe on its `probed:` line, which is absent from a
+recording that carries none. Every
+number comes from a recorded value, so summarizing a trace
 twice prints the same bytes; a line the trace contract does not allow is an
 error naming the line, because a total that quietly skipped an event would be a
 confident wrong number. This is how the mutation phase was measured at 98% of a
@@ -251,10 +254,19 @@ actually killed, the narrowed rule must still route that mutant to that target.
 Why every speed-up is such a layer, and why a budget never is, is
 [ADR 0004](adr/0004-proof-layers-not-budgets.md).
 The `infection` layer reads the recording alone, so it is audited whenever the
-recording holds a probe pass and left out — with a line under the layer table
-saying so — whenever it holds none. Routing now discharges by the rule that layer
-audits, so a violation it reports is a killer a run actually skipped rather than
-one it would have skipped had the layer been switched on. Its
+recording holds a target probe pass and left out — with a line under the layer
+table saying so — whenever it holds none. A resumed attempt announces
+`resume-probe` but does not invent execution records; use its interrupted
+attempt or a clean recording to audit that layer. The `suite-reach` layer is separate:
+it reconstructs passing whole-package coverage controls from recorded command
+arguments, then independently applies exact block containment to attributable
+package-suite kills. It deduplicates identical recorded executions; a missing route,
+missing profile, or more than one profile identity for a package is
+unverifiable, never a pass. Infection suite probes are counted apart because
+they prove or calibrate a whole fallback and are not facts about one killer
+target. Routing now discharges by the rule each layer audits, so a violation it
+reports is a killer a run actually skipped rather than one it
+would have skipped had the layer been switched on. Its
 `infection discharge` block still measures what the layer would buy on top of
 the recording, which on a run that already applied it is nothing: the targets it
 discharged have left `reaching_targets`, and the trace's own `discharged`
@@ -438,28 +450,31 @@ The flag becomes `assure.Options.KeepTemp`, which the run passes on to
 | Directory | Made | Kept as |
 | --- | --- | --- |
 | the run scratch, `goatest-run-*` | once per run, under `TempDirectory` or the system temporary directory | `artifact` event `run-scratch` |
-| the scratch layer of the run's build cache, `build/` | once per run, below the run scratch | `artifact` event `build-cache-scratch` |
+| the scratch layer of the run's external build cache, `build/` (including its `go-cache/` backing) | once per run, below the run scratch | `artifact` event `build-cache-scratch` |
+| the projected native build cache, `goatest-native-cache-*` | once per run beside the persistent build cache, so output objects can be hard links | `artifact` event `native-build-cache-scratch` |
 | the scratch a round collects its baseline in, `baseline-*` | once per round, below the run scratch | `artifact` event `baseline-scratch` |
-| the tree a generated candidate is validated in, `candidate-*` | once per `OriginalStable`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
-| the snapshot, probe tree and scratch of the mutation engine, `go-mutants-*` | by go-mutants, once per opened workspace | `artifact` event `mutation-workspace` |
+| the tree a generated candidate is validated in, `candidate-*` | once per `OriginalPasses`, `Kills`, or `Suite` check of the repository validator | `artifact` event `candidate-tree` |
+| the snapshot, probe tree and scratch of the mutation engine, `go-mutants-*` | by go-mutants below the run scratch, once per opened workspace | `artifact` event `mutation-workspace` |
 
-Only the first and the last of those are the run's to remove at the end. The
-three in between are removed as the run finishes with them — a round releases
+The run scratch, native projection, and mutation workspace are released at the
+end. The other per-operation directories are removed as the run finishes with
+them — a round releases
 its baseline scratch, a validation releases its candidate tree, the build cache
-layer is dropped before the run scratch that holds it — because removing them
+scratch is dropped before the run scratch that holds it — because removing them
 early is what keeps the peak footprint of a run small. The removal of the run
-scratch at the end covers whatever is left, including the fuzz cache an
-original-control execution makes for a `-test.fuzz` argument (`control-fuzz-*`,
-also removed when that command returns) and anything a killed step never got to.
+scratch at the end covers anything a killed step never got to.
+The native projection is not below that scratch because hard links cannot cross
+filesystems. It carries its own owner pair, and a killed run's projection is
+reported and collected from the persistent build cache's parent.
 
-A run that could not make its scratch directory — or could not claim it, which
-is the same thing, because a directory with no owner pair is one the next sweep
-may take while this run is writing in it — makes all of them beside it instead,
-under the `goatest-` names the sweep knows, and says so with a
-`temp-unavailable` note. The unclaimed directory is removed again unless
-somebody else holds its lock, in which case it was never this run's to remove. Nothing in this area can fail a run: a scratch that cannot be made,
-claimed or removed, a sweep that fails, and a ledger that cannot be written are
-all progress notes, and the run reaches its verdict either way.
+A run writes no temporary child before it has made and claimed its run scratch.
+If creation or ownership fails, it emits `temp-unavailable` and stops before
+verification rather than create an unowned sibling. An unclaimed directory is
+removed again unless somebody else holds its lock, in which case it was never
+this run's to remove. A standalone repository validator creates the same owned
+run topology for each validation and places both its candidate and mutation
+workspace below it. Sweep, removal, and ledger failures remain diagnostic notes
+and do not change a verdict already established.
 
 ### Who owns a temporary directory
 
@@ -471,11 +486,9 @@ start time, the repository, and whether the directory was kept on purpose.
 
 The lock is the liveness signal and the only one. A lock that can be taken
 means the process that held it is gone, whatever its pid has been reused for
-since. `tempowner.Sweep` collects every direct child of the temporary root whose
-name begins with one of goatest's prefixes — `goatest-run-`, and the pre-scratch
-names `goatest-baseline-`, `goatest-candidate-`, `goatest-control-fuzz-`,
-`goatest-build-cache-` — whose lock is free and whose marker does not say kept,
-or which carries no marker at all and has been untouched for 24 hours. It never
+since. `tempowner.Sweep` collects every direct `goatest-run-*` child of the
+temporary root whose lock is free and whose marker does not say kept, or which
+carries no marker at all and has been untouched for 24 hours. It never
 follows a symbolic link, and one entry it cannot judge never stops the others.
 A run and a plan both sweep before they write anything — a plan makes the same
 directories, so it leaves the same leftovers — and `goatest cache gc` sweeps on
@@ -485,21 +498,22 @@ value nobody set must never become the machine's own temporary directory, and
 `cmd/goatest` is the one layer that names it. A run still makes its scratch
 where the operating system puts one — creating a directory there is harmless,
 collecting there is not — and maintenance reports the temporary directory as
-`skipped`. go-mutants' own directories
-are not in that list: they carry owner files of their own and its `Open` sweeps
-them, which is what the `mutation-temp-sweep` progress note reports. Why the
+`skipped`. go-mutants' directories are nested below the run root and carry
+their own owner files; its `Open` still reports its child sweep through the
+`mutation-temp-sweep` progress note. Why the
 lock and not a pid, why 24 hours, and why the ledger lives in `.goatest` are
 [ADR 0006](adr/0006-every-temporary-directory-has-an-owner.md).
 
 ### What a kept directory costs, and who collects it
 
-Keeping is the whole of the change to the run: the directory stays where it was
+Keeping is the whole of the change to the run: the run root stays where it was
 made, its marker records that it was kept on purpose so no later sweep takes it,
-and the run writes down where it left it. It writes it down twice. The
-`artifact` event is the account in the recording, which reaches a trace
-directory and, on a failure, `preserved-paths.txt` in the diagnostics bundle.
-`.goatest/kept-temp-v1.json` is the record that outlives the run: one entry per
-directory with its path, the run that kept it, when, and how big it was.
+and the run writes down where it left it. Each useful child is an `artifact`
+event in the recording, which reaches a trace directory and, on a failure,
+`preserved-paths.txt` in the diagnostics bundle. `.goatest/kept-temp-v1.json`
+is the record that outlives the run: one entry for the run root and one for the
+filesystem-separated native projection, each with its path, run, moment, and
+size.
 `goatest cache status` lists them, and `goatest cache gc` removes the ones older
 than `[cache] ttl` and drops the entries of directories that are already gone.
 `internal/keptledger` owns that file, and writes it under a lock of its own so
@@ -509,8 +523,8 @@ What the ledger never is, is authority. It is a file in the repository that a
 person can edit and a bad merge can mangle, and what a collection does with a
 path is remove the directory whole — so before it removes anything,
 `tempowner.KeptBy` asks the directory itself whether it was kept on purpose:
-goatest's marker naming the run the entry names, or the mutation engine's, which
-names no run of ours. An entry nothing vouches for keeps its place and reads as
+the directory's marker must name the run the entry names. An entry nothing
+vouches for keeps its place and reads as
 `unverified` in `cache status`; one whose path cannot even be stat'ed reads as
 `unreadable`, because a stat nobody could answer is not a directory that is
 gone.
@@ -746,14 +760,15 @@ Four Go benchmarks cover the critical self-application paths without an
 external repository harness:
 
 ```console
-go test -run '^$' -bench BenchmarkCheckpointIO ./internal/cache
+go test -run '^$' -bench 'BenchmarkCheckpoint(IO|JournalAppend)$' ./internal/cache
 go test -run '^$' -bench BenchmarkDigest ./internal/evidence
 go test -run '^$' -bench BenchmarkMutationAccounting ./internal/assure
 go test -run '^$' -bench BenchmarkReportGeneration ./internal/report
 ```
 
-They measure checkpoint write/read I/O, a 10,000-file input digest, accounting
-for a 10,000-mutant catalog, and JSON plus HTML rendering for a 5,000-mutant
-report. Record `benchstat` comparisons when changing one of those paths. The
-numbers are a local regression signal, not a compatibility or performance
-contract across unrelated repositories.
+They measure compacted checkpoint write/read I/O and one checksummed journal
+append, a 10,000-file input digest, accounting for a 10,000-mutant catalog, and
+JSON plus HTML rendering for a 5,000-mutant report. Record `benchstat`
+comparisons when changing one of those paths. The numbers are a local
+regression signal, not a compatibility or performance contract across
+unrelated repositories.

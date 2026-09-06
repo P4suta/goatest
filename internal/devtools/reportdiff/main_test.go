@@ -10,16 +10,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
-// writeReport writes one report into a temporary directory and returns its
-// path. The fixture is encoded by the report package itself, so the tool is
-// always handed the bytes a run would actually have written.
 func writeReport(t *testing.T, name string, input report.Report) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, report.JSON(input), 0o644); err != nil {
+	if err := os.WriteFile(path, report.JSON(input), filemode.ReadableFile); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	return path
@@ -32,8 +30,7 @@ func TestRunDiffsTheNamedReports(t *testing.T) {
 	afterPath := writeReport(t, "after.json", after)
 
 	var stdout, stderr bytes.Buffer
-	// A regression is something the comparison reports rather than something
-	// it fails on: the exit code says whether the two reports could be read.
+
 	if code := run([]string{beforePath, afterPath}, &stdout, &stderr); code != exitSuccess {
 		t.Fatalf("run exited %d, want %d; stderr: %s", code, exitSuccess, stderr.String())
 	}
@@ -118,7 +115,7 @@ func TestRunRejectsAReportWithTrailingData(t *testing.T) {
 	before, _ := sampleReports()
 	readable := writeReport(t, "before.json", before)
 	trailing := filepath.Join(t.TempDir(), "trailing.json")
-	if err := os.WriteFile(trailing, append(report.JSON(before), []byte("{}\n")...), 0o644); err != nil {
+	if err := os.WriteFile(trailing, append(report.JSON(before), []byte("{}\n")...), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,8 +128,6 @@ func TestRunRejectsAReportWithTrailingData(t *testing.T) {
 	}
 }
 
-// firstLine is the opening line of a comparison, which is what a failure about
-// the header should print rather than the whole report.
 func firstLine(text string) string {
 	line, _, _ := strings.Cut(text, "\n")
 	return line

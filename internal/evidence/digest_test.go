@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestDigestIsDeterministicAndEveryInputInvalidatesIt(t *testing.T) {
@@ -24,6 +25,7 @@ func TestDigestIsDeterministicAndEveryInputInvalidatesIt(t *testing.T) {
 		Corpus:           map[string]string{"FuzzX/seed": "ccc"},
 		Contract:         "standard-v1",
 		GoatestVersion:   "v0.1.0",
+		GoatestBuild:     "build-one",
 		GoMutantsVersion: "v0.1.0",
 	}
 	want := evidence.Digest(base)
@@ -42,6 +44,7 @@ func TestDigestIsDeterministicAndEveryInputInvalidatesIt(t *testing.T) {
 		func(v *evidence.Inputs) { v.Corpus = map[string]string{"FuzzX/seed": "changed"} },
 		func(v *evidence.Inputs) { v.Contract = "deep-v1" },
 		func(v *evidence.Inputs) { v.GoatestVersion = "v0.2.0" },
+		func(v *evidence.Inputs) { v.GoatestBuild = "build-two" },
 		func(v *evidence.Inputs) { v.GoMutantsVersion = "v0.2.0" },
 	}
 	for i, mutate := range mutations {
@@ -92,10 +95,10 @@ func TestScanHashesContentModeAndCorpusSeparately(t *testing.T) {
 		"dist/release/ignored":            "binary",
 	} {
 		path := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(contents), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 	}

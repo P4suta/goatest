@@ -11,7 +11,6 @@ import (
 type Target struct {
 	ID           string   `json:"id"`
 	Package      string   `json:"package"`
-	Kind         string   `json:"kind,omitempty"`
 	Dependencies []string `json:"dependencies"`
 	CoveredFiles []string `json:"covered_files"`
 }
@@ -74,7 +73,6 @@ func (graph Graph) JSON() ([]byte, error) {
 	return graph.jsonWithHooks(graphHooks{})
 }
 
-// jsonWithHooks is Graph.JSON against an encoder the caller supplies.
 func (graph Graph) jsonWithHooks(hooks graphHooks) ([]byte, error) {
 	data, err := hooks.resolved().marshalGraph(graph.canonical(), "", "  ")
 	if err != nil {

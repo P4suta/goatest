@@ -18,6 +18,12 @@ import (
 	"time"
 )
 
+const (
+	internalAcquireDeadline = 500 * time.Millisecond
+	stopFixtureTimeout      = 20 * time.Millisecond
+	stopWaitFixtureDeadline = 250 * time.Millisecond
+)
+
 func TestManagerSharedLifecycleIsReferenceCountedAndDeterministic(t *testing.T) {
 	originalStart, originalStop := startResource, stopResource
 	t.Cleanup(func() { startResource, stopResource = originalStart, originalStop })
@@ -185,6 +191,86 @@ func TestManagerReleaseAndClosePropagateStopsAndWakeWaiters(t *testing.T) {
 	}
 }
 
+func TestExclusiveAcquireWaitsUntilStopCompletes(t *testing.T) {
+	originalStart, originalStop := startResource, stopResource
+	t.Cleanup(func() { startResource, stopResource = originalStart, originalStop })
+	startResource = func(_ context.Context, capability, requestID string, _ Spec) (*instance, error) {
+		return &instance{capability: capability, requestID: requestID}, nil
+	}
+	stopEntered := make(chan struct{})
+	finishStop := make(chan struct{})
+	firstStop := true
+	stopResource = func(*instance) error {
+		if firstStop {
+			firstStop = false
+			close(stopEntered)
+			<-finishStop
+		}
+		return nil
+	}
+	manager := New(map[string]Spec{"db": {Exclusive: true}})
+	waitEntered := make(chan struct{}, 1)
+	manager.beforeWait = func() {
+		select {
+		case waitEntered <- struct{}{}:
+		default:
+		}
+	}
+	first, err := acquireInternal(manager, "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type acquired struct {
+		lease *Lease
+		err   error
+	}
+	second := make(chan acquired, 1)
+	go func() {
+		lease, acquireErr := acquireInternal(manager, "db")
+		second <- acquired{lease: lease, err: acquireErr}
+	}()
+	select {
+	case <-waitEntered:
+	case <-time.After(internalAcquireDeadline):
+		t.Fatal("second acquire did not enter the exclusive wait")
+	}
+	firstReleased := make(chan error, 1)
+	go func() { firstReleased <- first.Release() }()
+	select {
+	case <-stopEntered:
+	case <-time.After(internalAcquireDeadline):
+		t.Fatal("first release did not start the provider stop")
+	}
+	select {
+	case result := <-second:
+		if result.lease != nil {
+			_ = result.lease.Release()
+		}
+		t.Fatalf("second acquire completed before stop: %v", result.err)
+	default:
+	}
+	close(finishStop)
+	select {
+	case err := <-firstReleased:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(internalAcquireDeadline):
+		t.Fatal("first release did not finish")
+	}
+	select {
+	case result := <-second:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if err := result.lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(internalAcquireDeadline):
+		t.Fatal("second acquire was not awakened")
+	}
+}
+
 func TestManagerInternalBookkeepingHandlesInactiveAndDifferentSharedInstance(t *testing.T) {
 	originalStop := stopResource
 	t.Cleanup(func() { stopResource = originalStop })
@@ -330,7 +416,7 @@ func TestResourceLimitedBufferBoundariesAndDiagnostics(t *testing.T) {
 
 func TestDecodeAcceptsExactLimitAndRejectsProtocolFailures(t *testing.T) {
 	t.Parallel()
-	valid := Response{Version: 1, Status: "ready", Instance: "db-1"}
+	valid := Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1"}
 	validJSON, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatal(err)
@@ -346,7 +432,7 @@ func TestDecodeAcceptsExactLimitAndRejectsProtocolFailures(t *testing.T) {
 		{name: "no newline", input: validJSON, want: "EOF"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			provider := &instance{stdout: bufio.NewReaderSize(bytes.NewReader(test.input), protocolOutputLimit+1)}
+			provider := &instance{stdout: bufio.NewReaderSize(bytes.NewReader(test.input), ProtocolOutputLimit+1)}
 			_, err := provider.decode(context.Background())
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("decode error = %v, want %q", err, test.want)
@@ -354,29 +440,29 @@ func TestDecodeAcceptsExactLimitAndRejectsProtocolFailures(t *testing.T) {
 		})
 	}
 
-	base := Response{Version: 1, Status: "ready", Instance: "db-1", Error: "x"}
+	base := Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1", Error: "x"}
 	baseJSON, err := json.Marshal(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fillerLength := protocolOutputLimit - 1 - (len(baseJSON) - 1)
+	fillerLength := ProtocolOutputLimit - 1 - (len(baseJSON) - 1)
 	base.Error = strings.Repeat("x", fillerLength)
 	exactJSON, err := json.Marshal(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	exactLine := append(exactJSON, '\n')
-	if len(exactLine) != protocolOutputLimit {
+	if len(exactLine) != ProtocolOutputLimit {
 		t.Fatalf("exact line length = %d", len(exactLine))
 	}
-	provider := &instance{stdout: bufio.NewReaderSize(bytes.NewReader(exactLine), protocolOutputLimit+1)}
+	provider := &instance{stdout: bufio.NewReaderSize(bytes.NewReader(exactLine), ProtocolOutputLimit+1)}
 	response, err := provider.decode(context.Background())
 	if err != nil || response.Error != base.Error {
 		t.Fatalf("exact-limit decode = (%d byte error, %v)", len(response.Error), err)
 	}
 
 	overLimit := append(slices.Clone(exactJSON), 'x', '\n')
-	provider = &instance{stdout: bufio.NewReaderSize(bytes.NewReader(overLimit), protocolOutputLimit+1)}
+	provider = &instance{stdout: bufio.NewReaderSize(bytes.NewReader(overLimit), ProtocolOutputLimit+1)}
 	if _, err := provider.decode(context.Background()); err == nil || err.Error() != "goatest: resource response exceeded output limit" {
 		t.Fatalf("over-limit decode error = %v", err)
 	}
@@ -395,7 +481,7 @@ func TestDecodeHonoursContextCancellation(t *testing.T) {
 }
 
 func acquireInternal(manager *Manager, capability string) (*Lease, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), internalAcquireDeadline)
 	defer cancel()
 	return manager.Acquire(ctx, capability)
 }
@@ -411,14 +497,14 @@ func TestStartValidatesCommandAndDefaultTimeout(t *testing.T) {
 	for _, timeout := range []time.Duration{0, -time.Second, 7 * time.Second} {
 		t.Run(timeout.String(), func(t *testing.T) {
 			preserveResourceProcessSeams(t)
-			stdin, _, _ := installFakeResourceStart(t, readyLine(t, Response{Version: 1, Status: "ready", Instance: "db-1"}))
+			stdin, _, _ := installFakeResourceStart(t, readyLine(t, Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1"}))
 			provider, err := start(context.Background(), "db", "request-1", Spec{Command: []string{"provider"}, Timeout: timeout})
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantTimeout := timeout
 			if wantTimeout <= 0 {
-				wantTimeout = 30 * time.Second
+				wantTimeout = defaultProviderTimeout
 			}
 			if provider.timeout != wantTimeout {
 				t.Fatalf("timeout = %s, want %s", provider.timeout, wantTimeout)
@@ -427,7 +513,7 @@ func TestStartValidatesCommandAndDefaultTimeout(t *testing.T) {
 			if err := json.NewDecoder(bytes.NewReader(stdin.Bytes())).Decode(&request); err != nil {
 				t.Fatal(err)
 			}
-			if request != (Request{Version: 1, Action: "start", Capability: "db", RequestID: "request-1"}) {
+			if request != (Request{Version: ProtocolVersion, Action: "start", Capability: "db", RequestID: "request-1"}) {
 				t.Fatalf("start request = %+v", request)
 			}
 		})
@@ -485,10 +571,10 @@ func TestStartRejectsEachInvalidReadyResponseAndMalformedProtocol(t *testing.T) 
 		response []byte
 		want     string
 	}{
-		{name: "wrong version", response: readyLine(t, Response{Version: 2, Status: "ready", Instance: "db-1"}), want: "returned invalid ready response"},
-		{name: "wrong status", response: readyLine(t, Response{Version: 1, Status: "waiting", Instance: "db-1"}), want: "returned invalid ready response"},
-		{name: "missing instance", response: readyLine(t, Response{Version: 1, Status: "ready"}), want: "returned invalid ready response"},
-		{name: "provider error", response: readyLine(t, Response{Version: 1, Status: "ready", Instance: "db-1", Error: "unavailable"}), want: "returned invalid ready response"},
+		{name: "wrong version", response: readyLine(t, Response{Version: ProtocolVersion + 1, Status: "ready", Instance: "db-1"}), want: "returned invalid ready response"},
+		{name: "wrong status", response: readyLine(t, Response{Version: ProtocolVersion, Status: "waiting", Instance: "db-1"}), want: "returned invalid ready response"},
+		{name: "missing instance", response: readyLine(t, Response{Version: ProtocolVersion, Status: "ready"}), want: "returned invalid ready response"},
+		{name: "provider error", response: readyLine(t, Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1", Error: "unavailable"}), want: "returned invalid ready response"},
 		{name: "malformed", response: []byte("{\n"), want: "readiness: unexpected EOF"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -504,18 +590,18 @@ func TestStartRejectsEachInvalidReadyResponseAndMalformedProtocol(t *testing.T) 
 
 func TestStartAcceptsReadyResponseAtExactProtocolLimit(t *testing.T) {
 	preserveResourceProcessSeams(t)
-	response := Response{Version: 1, Status: "ready", Instance: "db-1", Environment: map[string]string{"PAD": "x"}}
+	response := Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1", Environment: map[string]string{"PAD": "x"}}
 	probe, err := json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Environment["PAD"] = strings.Repeat("x", protocolOutputLimit-1-(len(probe)-1))
+	response.Environment["PAD"] = strings.Repeat("x", ProtocolOutputLimit-1-(len(probe)-1))
 	line := readyLine(t, response)
-	if len(line) != protocolOutputLimit {
+	if len(line) != ProtocolOutputLimit {
 		t.Fatalf("line length = %d", len(line))
 	}
 	_, _, _ = installFakeResourceStart(t, line)
-	// The line is 1 MiB and decoding it under -race on a loaded runner has taken over a second; the readiness timeout is not what this test measures.
+
 	provider, err := start(context.Background(), "db", "request-1", Spec{Command: []string{"provider"}, Timeout: time.Minute})
 	if err != nil {
 		t.Fatalf("start error = %v", err)
@@ -559,7 +645,7 @@ func TestAbortJoinsDiagnosticsWaitAndCloseFailures(t *testing.T) {
 func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		preserveResourceProcessSeams(t)
-		provider, stdin, tree := fakeStoppingResource(t, Response{Version: 1, Status: "stopped", Instance: "db-1"})
+		provider, stdin, tree := fakeStoppingResource(t, Response{Version: ProtocolVersion, Status: "stopped", Instance: "db-1"})
 		if err := provider.stop(); err != nil {
 			t.Fatal(err)
 		}
@@ -570,7 +656,7 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 		if err := json.NewDecoder(bytes.NewReader(stdin.Bytes())).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if request != (Request{Version: 1, Action: "stop", Capability: "db", RequestID: "request-1", Instance: "db-1"}) {
+		if request != (Request{Version: ProtocolVersion, Action: "stop", Capability: "db", RequestID: "request-1", Instance: "db-1"}) {
 			t.Fatalf("stop request = %+v", request)
 		}
 	})
@@ -578,9 +664,9 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 		name     string
 		response Response
 	}{
-		{name: "wrong version", response: Response{Version: 2, Status: "stopped", Instance: "db-1"}},
-		{name: "wrong status", response: Response{Version: 1, Status: "ready", Instance: "db-1"}},
-		{name: "wrong instance", response: Response{Version: 1, Status: "stopped", Instance: "other"}},
+		{name: "wrong version", response: Response{Version: ProtocolVersion + 1, Status: "stopped", Instance: "db-1"}},
+		{name: "wrong status", response: Response{Version: ProtocolVersion, Status: "ready", Instance: "db-1"}},
+		{name: "wrong instance", response: Response{Version: ProtocolVersion, Status: "stopped", Instance: "other"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			preserveResourceProcessSeams(t)
@@ -614,7 +700,7 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 	})
 	t.Run("wait failure", func(t *testing.T) {
 		preserveResourceProcessSeams(t)
-		provider, _, tree := fakeStoppingResource(t, Response{Version: 1, Status: "stopped", Instance: "db-1"})
+		provider, _, tree := fakeStoppingResource(t, Response{Version: ProtocolVersion, Status: "stopped", Instance: "db-1"})
 		sentinel := errors.New("wait failed")
 		waitResourceProcess = func(*exec.Cmd) error { return sentinel }
 		err := provider.stop()
@@ -624,7 +710,7 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 	})
 	t.Run("close failure", func(t *testing.T) {
 		preserveResourceProcessSeams(t)
-		provider, _, tree := fakeStoppingResource(t, Response{Version: 1, Status: "stopped", Instance: "db-1"})
+		provider, _, tree := fakeStoppingResource(t, Response{Version: ProtocolVersion, Status: "stopped", Instance: "db-1"})
 		sentinel := errors.New("close failed")
 		tree.closeErr = sentinel
 		err := provider.stop()
@@ -634,8 +720,8 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 	})
 	t.Run("exit timeout", func(t *testing.T) {
 		preserveResourceProcessSeams(t)
-		provider, _, tree := fakeStoppingResource(t, Response{Version: 1, Status: "stopped", Instance: "db-1"})
-		provider.timeout = 20 * time.Millisecond
+		provider, _, tree := fakeStoppingResource(t, Response{Version: ProtocolVersion, Status: "stopped", Instance: "db-1"})
+		provider.timeout = stopFixtureTimeout
 		unblock := make(chan struct{})
 		waitDone := make(chan struct{})
 		waitResourceProcess = func(*exec.Cmd) error {
@@ -643,7 +729,7 @@ func TestStopCoversSuccessInvalidResponsesExitAndTimeout(t *testing.T) {
 			select {
 			case <-unblock:
 				return nil
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(stopWaitFixtureDeadline):
 				return errors.New("wait fixture deadline")
 			}
 		}

@@ -10,18 +10,19 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/tempowner"
 )
 
-// abandonedDirectory makes what a run that was killed leaves behind: claimed in
-// somebody's name, its lock freed by the operating system, and never kept.
+const abandonedPayloadBytes = 512
+
 func abandonedDirectory(t *testing.T, parent string) string {
 	t.Helper()
 	directory := filepath.Join(parent, "goatest-run-dead")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := os.MkdirAll(directory, filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "payload"), make([]byte, 512), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "payload"), make([]byte, abandonedPayloadBytes), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: "goatest-run-dead"}, time.Now())
@@ -34,17 +35,11 @@ func abandonedDirectory(t *testing.T, parent string) string {
 	return directory
 }
 
-// A plan makes the same temporary directories a verify does, so an interrupted
-// plan leaves the same leftovers. It has to collect them too: otherwise a
-// developer who only ever plans accumulates them until somebody runs a verify
-// or types `cache gc`.
 func TestAPlanCollectsWhatRunsThatWereKilledLeftBehind(t *testing.T) {
 	t.Parallel()
 	temporary := t.TempDir()
 	dead := abandonedDirectory(t, temporary)
-	// The plan itself cannot get past locating a toolchain that is not there,
-	// which is exactly the point: the sweep happens before the plan does any
-	// work, so that the disk is back before this process asks for any of it.
+
 	if _, err := assure.Plan(t.Context(), assure.Options{
 		Root: t.TempDir(), Contract: "standard-v1", GoBinary: "definitely-missing-goatest-go",
 		TempDirectory: temporary,
@@ -56,9 +51,6 @@ func TestAPlanCollectsWhatRunsThatWereKilledLeftBehind(t *testing.T) {
 	}
 }
 
-// And a plan sweeps only the directory it was given, for the reason every other
-// sweep does: a value nobody set must never become the machine's own temporary
-// directory.
 func TestAPlanNeverSweepsATemporaryDirectoryNobodyNamed(t *testing.T) {
 	t.Parallel()
 	elsewhere := t.TempDir()

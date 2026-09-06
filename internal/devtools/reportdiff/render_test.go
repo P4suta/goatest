@@ -11,14 +11,6 @@ import (
 	"github.com/P4suta/goatest/internal/testkit"
 )
 
-// sampleReports are the two reports the golden comparison is rendered from.
-// They are built from the report types rather than written as JSON, so a
-// change to the report contract reaches this fixture through the compiler.
-//
-// The pair is the shape of the change this tool exists to audit: the same
-// verdict, a batch of surviving mutants that became unreached ones, an
-// inventory the two runs do not fully share, and the one mutant that stopped
-// being killed — which is the regression a routing change must never cause.
 func sampleReports() (report.Report, report.Report) {
 	before := report.Report{
 		Schema:  report.SchemaV1,
@@ -79,8 +71,6 @@ func sampleReports() (report.Report, report.Report) {
 	return before, after
 }
 
-// renderSample renders the sample comparison under fixed paths, so the golden
-// records the comparison rather than the temporary directory it was read from.
 func renderSample() string {
 	before, after := sampleReports()
 	return renderComparison("testdata/before.json", "testdata/after.json", compare(before, after))
@@ -101,11 +91,7 @@ func TestRenderComparisonDependsOnTheReportsAlone(t *testing.T) {
 
 func TestFormatDurationRendersMillisecondsNoDurationHoldsLosslessly(t *testing.T) {
 	t.Parallel()
-	// A duration counts nanoseconds, so the milliseconds of a report only
-	// convert while a thousand of them still fit: past the boundary the
-	// multiplication wraps and prints a duration of the opposite sign. The
-	// count a report carried is printed instead, which is lossless whatever
-	// wrote it.
+
 	cases := []struct {
 		name         string
 		milliseconds int64

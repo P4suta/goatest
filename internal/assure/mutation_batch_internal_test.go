@@ -4,7 +4,9 @@
 package assure
 
 import (
+	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,161 +15,217 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
 
-func TestMutationSeedBatchesRemainingRelevantTargetsByPackageAndEnvironment(t *testing.T) {
-	const individualLimit = 8
-	mutant := internalMutation("mutant-a")
-	targets := make([]TargetEvidence, 0, individualLimit+4)
-	for index := range individualLimit + 4 {
+const (
+	aggregatePrimaryTargets   = 3
+	aggregateSecondaryTargets = 2
+	expectedAggregateGroups   = 2
+
+	aggregateRequestsWithRemeasuredRetry = expectedAggregateGroups + 1
+	aggregateUnboundedTargetCount        = 65
+	aggregateLongTargetNameBytes         = 9_000
+	aggregateFastDuration                = 10 * time.Second
+	aggregateSlowDuration                = 30 * time.Second
+	aggregateSlowProbeDuration           = 41 * time.Second
+	aggregateSuiteSampleDuration         = 11 * time.Second
+	aggregateSingleSuiteDuration         = 20 * time.Second
+	aggregateControlBaselineA            = 2 * time.Millisecond
+	aggregateControlBaselineB            = 3 * time.Millisecond
+	aggregateControlProbeA               = 5 * time.Millisecond
+	aggregateControlProbeB               = 7 * time.Millisecond
+	aggregateExactControlDuration        = 11 * time.Millisecond
+	aggregatePriorDeadline               = aggregateControlBaselineA + aggregateControlBaselineB + aggregateControlProbeA + aggregateControlProbeB
+	aggregateMutantDeadline              = aggregatePriorDeadline + aggregateExactControlDuration
+	expectedTargetTimeout                = 82 * time.Second
+	expectedCombinedTimeout              = 104 * time.Second
+	expectedSingleCombinedTimeout        = 41 * time.Second
+)
+
+func aggregateTargets() []TargetEvidence {
+	targets := make([]TargetEvidence, 0, aggregatePrimaryTargets+aggregateSecondaryTargets)
+	for index := range cap(targets) {
 		target := internalTarget(fmt.Sprintf("Test%02d", index), goanalysis.KindTest, time.Duration(index+1)*time.Millisecond)
-		if index >= individualLimit+2 {
+		if index >= aggregatePrimaryTargets {
 			target.Target.Package = "fixture.example/other"
 			target.Environment = []string{"DB=other"}
 		}
 		targets = append(targets, target)
 	}
+	return targets
+}
 
+func TestMutationSeedExecutesEachExactEnvironmentGroupOnce(t *testing.T) {
+	mutant := internalMutation("mutant-a")
+	targets := aggregateTargets()
 	session := &mutationUnitSession{exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		outcome := gomutants.OutcomeSurvived
-		if request.Package == "fixture.example/other" && strings.Contains(request.Args[0], "|") {
+		if request.Package == "fixture.example/other" {
 			outcome = gomutants.OutcomeKilled
 		}
 		return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
 	}}
-	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, MutationOptions{Contract: "standard-v1"})
 
-	if !seed.resolved || seed.err != nil || len(seed.evaluation.Evidence) != 1 {
-		t.Fatalf("seed = %+v", seed)
+	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
+	if seed.err != nil || !seed.resolved || len(session.requests) != expectedAggregateGroups {
+		t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
 	}
-	if got, want := len(session.requests), individualLimit+2; got != want {
-		t.Fatalf("request count = %d, want %d: %+v", got, want, session.requests)
+	if got := session.requests[0]; got.Package != "fixture.example/module" || !slices.Equal(got.Args, []string{"-test.run=^(Test00|Test01|Test02)$"}) || len(got.Env) != 0 {
+		t.Fatalf("primary group = %+v", got)
 	}
-	for index := range individualLimit {
-		want := fmt.Sprintf("-test.run=^Test%02d$", index)
-		if got := session.requests[index].Args; len(got) != 1 || got[0] != want {
-			t.Fatalf("individual request %d = %+v, want %q", index, got, want)
-		}
-	}
-	firstBatch := session.requests[individualLimit]
-	if firstBatch.Package != "fixture.example/module" || len(firstBatch.Args) != 1 || firstBatch.Args[0] != "-test.run=^(Test08|Test09)$" || len(firstBatch.Env) != 0 {
-		t.Fatalf("first batch = %+v", firstBatch)
-	}
-	secondBatch := session.requests[individualLimit+1]
-	if secondBatch.Package != "fixture.example/other" || len(secondBatch.Args) != 1 || secondBatch.Args[0] != "-test.run=^(Test10|Test11)$" || !strings.EqualFold(strings.Join(secondBatch.Env, "\x00"), "DB=other") {
-		t.Fatalf("second batch = %+v", secondBatch)
+	if got := session.requests[1]; got.Package != "fixture.example/other" || !slices.Equal(got.Args, []string{"-test.run=^(Test03|Test04)$"}) || !slices.Equal(got.Env, []string{"DB=other"}) {
+		t.Fatalf("secondary group = %+v", got)
 	}
 	if got := seed.evaluation.Evidence[0].Detail; got != "fixture.example/other (2 related targets)" {
 		t.Fatalf("kill detail = %q", got)
 	}
 }
 
-func TestMutationTargetBatchesBoundTheNumberOfNamesInOneCommand(t *testing.T) {
-	const batchLimit = 64
-	targets := make([]TargetEvidence, 0, batchLimit*2+2)
-	for index := range batchLimit*2 + 2 {
-		targets = append(targets, internalTarget(fmt.Sprintf("TestBatch%03d", index), goanalysis.KindTest, time.Millisecond))
-	}
-
-	batches := mutationTargetBatches(targets)
-	if got, want := len(batches), 3; got != want {
-		t.Fatalf("batch count = %d, want %d", got, want)
-	}
-	wantSizes := []int{batchLimit, batchLimit, 2}
-	for index, batch := range batches {
-		if got := len(batch); got != wantSizes[index] {
-			t.Fatalf("batch %d size = %d, want %d", index, got, wantSizes[index])
+func TestLaterGroupKillDominatesEarlierUnknown(t *testing.T) {
+	mutant := internalMutation("late-kill")
+	targets := aggregateTargets()
+	session := &mutationUnitSession{exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		outcome := gomutants.OutcomeTimedOut
+		if request.Package == "fixture.example/other" {
+			outcome = gomutants.OutcomeKilled
 		}
+		return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
+	}}
+	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
+	if seed.err != nil || !seed.resolved || len(session.requests) != aggregateRequestsWithRemeasuredRetry || len(seed.evaluation.Findings) != 0 || seed.evaluation.Evidence[0].Status != "killed" {
+		t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
 	}
 }
 
-func TestMutationTargetBatchesBoundTheRunArgumentBytes(t *testing.T) {
-	targets := make([]TargetEvidence, 0, 3)
-	for index := range 3 {
-		name := "Test" + strings.Repeat(string(rune('A'+index)), 3_000)
-		targets = append(targets, internalTarget(name, goanalysis.KindTest, time.Millisecond))
-	}
-
-	batches := mutationTargetBatches(targets)
-	if got, want := len(batches), 2; got != want {
-		t.Fatalf("batch count = %d, want %d", got, want)
-	}
-	if len(batches[0]) != 2 || len(batches[1]) != 1 {
-		t.Fatalf("batch sizes = %d, %d, want 2, 1", len(batches[0]), len(batches[1]))
-	}
-}
-
-func TestMutationTargetBatchesKeepAnArgumentExactlyAtTheByteLimit(t *testing.T) {
-	const fixedBytes = len("-test.run=^(") + len("|") + len(")$")
-	firstNameBytes := (maximumMutationRunArgumentBytes - fixedBytes) / 2
-	secondNameBytes := maximumMutationRunArgumentBytes - fixedBytes - firstNameBytes
-	targets := []TargetEvidence{
-		internalTarget(strings.Repeat("A", firstNameBytes), goanalysis.KindTest, time.Millisecond),
-		internalTarget(strings.Repeat("B", secondNameBytes), goanalysis.KindTest, time.Millisecond),
-	}
-	if got := len(batchRunArgument(targets)); got != maximumMutationRunArgumentBytes {
-		t.Fatalf("run argument bytes = %d, want %d", got, maximumMutationRunArgumentBytes)
-	}
-	if batches := mutationTargetBatches(targets); len(batches) != 1 || len(batches[0]) != 2 {
-		t.Fatalf("exact-limit batches = %+v, want one two-target batch", batches)
-	}
-}
-
-func TestMutationTargetBatchesKeepSlowTargetsOutOfFastBatches(t *testing.T) {
-	targets := []TargetEvidence{
-		internalTarget("TestFastA", goanalysis.KindTest, 500*time.Millisecond),
-		internalTarget("TestFastB", goanalysis.KindTest, 500*time.Millisecond),
-		internalTarget("TestOverBoundary", goanalysis.KindTest, 500*time.Millisecond),
-		internalTarget("TestSlowE2E", goanalysis.KindTest, 2*time.Second),
-	}
-
-	batches := mutationTargetBatches(targets)
-	wantSizes := []int{2, 1, 1}
-	if len(batches) != len(wantSizes) {
-		t.Fatalf("batch count = %d, want %d", len(batches), len(wantSizes))
-	}
-	for index, want := range wantSizes {
-		if got := len(batches[index]); got != want {
-			t.Fatalf("batch %d size = %d, want %d", index, got, want)
+func TestUnknownGroupsAreAggregatedAfterEveryGroupRuns(t *testing.T) {
+	mutant := internalMutation("unknown-groups")
+	targets := aggregateTargets()
+	session := &mutationUnitSession{exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		outcome := gomutants.OutcomeTimedOut
+		if request.Package == "fixture.example/other" {
+			outcome = gomutants.OutcomeInconclusive
 		}
+		return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
+	}}
+	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
+	if seed.err != nil || !seed.resolved || len(session.requests) != aggregateRequestsWithRemeasuredRetry || len(seed.evaluation.Findings) != 1 {
+		t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
+	}
+	finding := seed.evaluation.Findings[0]
+	if finding.Kind != "mutation-inconclusive" || !strings.Contains(finding.Summary, "2 of 2 compatible execution groups") || !strings.Contains(finding.Summary, "fixture.example/other") {
+		t.Fatalf("finding = %+v", finding)
 	}
 }
 
-func TestMutationSeedExecutionsHandleARemainderLargerThanTheIndividualPrefix(t *testing.T) {
-	mutant := internalMutation("mutant-a")
-	targets := make([]TargetEvidence, 0, individualMutationTargetLimit*2+1)
-	for index := range individualMutationTargetLimit*2 + 1 {
-		targets = append(targets, internalTarget(fmt.Sprintf("Test%02d", index), goanalysis.KindTest, time.Millisecond))
-	}
-
-	executions := mutationSeedExecutions(mutant, targets, MutationOptions{Contract: "standard-v1"})
-	if got, want := len(executions), individualMutationTargetLimit+1; got != want {
-		t.Fatalf("execution count = %d, want %d", got, want)
-	}
-	if got := executions[len(executions)-1].detail; got != "fixture.example/module (9 related targets)" {
-		t.Fatalf("batch detail = %q", got)
+func TestAggregateKillAndInconclusiveAreTerminal(t *testing.T) {
+	mutant := internalMutation("terminal")
+	targets := aggregateTargets()[:aggregatePrimaryTargets]
+	for _, outcome := range []gomutants.Outcome{gomutants.OutcomeKilled, gomutants.OutcomeInconclusive} {
+		t.Run(string(outcome), func(t *testing.T) {
+			session := &mutationUnitSession{exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
+				return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
+			}}
+			seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
+			if seed.err != nil || !seed.resolved || len(session.requests) != 1 {
+				t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
+			}
+			if outcome == gomutants.OutcomeInconclusive && seed.evaluation.Findings[0].Kind != "mutation-inconclusive" {
+				t.Fatalf("findings = %+v", seed.evaluation.Findings)
+			}
+		})
 	}
 }
 
-func TestBatchMutationDurationSumsPositiveValuesIgnoresNegativeAndSaturates(t *testing.T) {
+func TestMutationTargetGroupsHaveNoHeuristicSizeOrArgumentBoundary(t *testing.T) {
+	targets := make([]TargetEvidence, 0, aggregateUnboundedTargetCount)
+	for index := range cap(targets) {
+		name := fmt.Sprintf("Test%03d%s", index, strings.Repeat("X", aggregateLongTargetNameBytes))
+		targets = append(targets, internalTarget(name, goanalysis.KindTest, time.Hour))
+	}
+	groups := mutationTargetGroups(targets)
+	if len(groups) != 1 || len(groups[0]) != len(targets) {
+		t.Fatalf("group sizes = %d/%d", len(groups), len(groups[0]))
+	}
+	if argument := batchRunArgument(groups[0]); !strings.Contains(argument, targets[0].Target.Name) || !strings.Contains(argument, targets[len(targets)-1].Target.Name) {
+		t.Fatal("aggregate run argument omitted a boundary target")
+	}
+}
+
+func TestMutationTargetGroupsCanonicalizeSelectorsAndScheduleShortestGroupFirst(t *testing.T) {
+	first := internalTarget("TestZulu", goanalysis.KindTest, time.Hour)
+	second := internalTarget("TestAlpha", goanalysis.KindTest, time.Hour)
+	fast := internalTarget("TestBeta", goanalysis.KindTest, time.Millisecond)
+	fast.Environment = []string{"RESOURCE=fast"}
+	groups := mutationTargetGroups([]TargetEvidence{first, fast, second})
+	if len(groups) != expectedAggregateGroups {
+		t.Fatalf("groups = %+v", groups)
+	}
+	if groups[0][0].Target.Name != fast.Target.Name {
+		t.Fatalf("first group = %+v, want shortest", groups[0])
+	}
+	if got := batchRunArgument(groups[1]); got != "-test.run=^(TestAlpha|TestZulu)$" {
+		t.Fatalf("canonical selector = %q", got)
+	}
+}
+
+func TestMutationTargetGroupsUseEffectiveEnvironmentIdentity(t *testing.T) {
+	first := internalTarget("TestAlpha", goanalysis.KindTest, time.Second)
+	first.Environment = []string{"SECOND=value", "FIRST=value", "SECOND=final"}
+	second := internalTarget("TestBeta", goanalysis.KindTest, time.Second)
+	second.Environment = []string{"FIRST=value", "SECOND=final"}
+	targets := []TargetEvidence{first, second}
+	groups := mutationTargetGroups(targets)
+	if len(groups) != 1 || len(groups[0]) != len(targets) {
+		t.Fatalf("groups = %+v", groups)
+	}
+}
+
+func TestAggregateMutationTimeoutUsesEveryMeasuredControl(t *testing.T) {
 	targets := []TargetEvidence{
-		internalTarget("TestFirst", goanalysis.KindTest, time.Second),
-		internalTarget("TestUnknown", goanalysis.KindTest, -time.Hour),
-		internalTarget("TestSecond", goanalysis.KindTest, 2*time.Second),
+		internalTarget("TestFast", goanalysis.KindTest, aggregateFastDuration),
+		internalTarget("TestSlow", goanalysis.KindTest, aggregateSlowDuration),
 	}
-	if got, want := batchMutationDuration(targets), 3*time.Second; got != want {
-		t.Fatalf("batch duration = %s, want %s", got, want)
+	targets[0].ProbeDuration = time.Second
+	targets[1].ProbeDuration = aggregateSlowProbeDuration
+	withoutSuite := aggregateMutationTimeout(targets, MutationOptions{})
+	withSuite := aggregateMutationTimeout(targets, MutationOptions{
+		SuiteCoverage: map[string]PackageSuiteCoverage{"fixture.example/module": {Duration: aggregateSuiteSampleDuration}},
+		SuiteProbes:   map[string]PackageProbeEvidence{"fixture.example/module": {Measured: true, Duration: aggregateSuiteSampleDuration}},
+	})
+	if withoutSuite != expectedTargetTimeout || withSuite != expectedCombinedTimeout {
+		t.Fatalf("aggregate deadlines = (%s, %s)", withoutSuite, withSuite)
 	}
-	overflowing := []TargetEvidence{
-		internalTarget("TestLong", goanalysis.KindTest, deepMutationTimeoutLimit-1),
-		internalTarget("TestOverflow", goanalysis.KindTest, time.Duration(1<<63-1)),
-	}
-	if got := batchMutationDuration(overflowing); got != deepMutationTimeoutLimit {
-		t.Fatalf("saturated duration = %s, want %s", got, deepMutationTimeoutLimit)
+	single := aggregateMutationTimeout(targets[:1], MutationOptions{
+		SuiteCoverage: map[string]PackageSuiteCoverage{"fixture.example/module": {Duration: aggregateSingleSuiteDuration}},
+		SuiteProbes:   map[string]PackageProbeEvidence{"fixture.example/module": {Measured: true, Duration: aggregateFastDuration}},
+	})
+	if single != expectedSingleCombinedTimeout {
+		t.Fatalf("single deadline = %s", single)
 	}
 }
 
-func TestBatchMutationDetailKeepsASingleTargetName(t *testing.T) {
-	target := internalTarget("TestOnly", goanalysis.KindTest, time.Second)
-	if got := batchMutationDetail([]TargetEvidence{target}); got != target.Target.Name {
-		t.Fatalf("single-target detail = %q, want %q", got, target.Target.Name)
+func TestExactOriginalRunsUnderTheContainmentCeiling(t *testing.T) {
+	mutant := internalMutation("derived-control")
+	targets := []TargetEvidence{
+		internalTarget("TestAlpha", goanalysis.KindTest, aggregateControlBaselineA),
+		internalTarget("TestBeta", goanalysis.KindTest, aggregateControlBaselineB),
+	}
+	targets[0].ProbeDuration = aggregateControlProbeA
+	targets[1].ProbeDuration = aggregateControlProbeB
+	var controlDeadline time.Duration
+	options := mutationOptionsForTest(MutationOptions{
+		Timeout: time.Hour,
+		OriginalControl: func(_ context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+			controlDeadline = request.Timeout
+			return gomutants.CommandResult{Duration: aggregateExactControlDuration}, nil
+		},
+	})
+	session := &mutationUnitSession{exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		if request.Timeout != aggregateMutantDeadline {
+			t.Fatalf("mutant deadline = %s, want %s", request.Timeout, aggregateMutantDeadline)
+		}
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	}}
+	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, options)
+	if seed.err != nil || controlDeadline != time.Hour {
+		t.Fatalf("seed = %+v, control deadline = %s, want the containment ceiling %s", seed, controlDeadline, time.Hour)
 	}
 }

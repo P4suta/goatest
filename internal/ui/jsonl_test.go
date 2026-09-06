@@ -13,8 +13,6 @@ import (
 	"github.com/P4suta/goatest/internal/ui"
 )
 
-// steppingClock returns a clock that starts at a fixed instant and advances by
-// step on every reading after the first.
 func steppingClock(step time.Duration) func() time.Time {
 	current := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	first := true
@@ -41,19 +39,18 @@ func TestJSONLStreamsOneEventPerNote(t *testing.T) {
 	}
 }
 
-// TestJSONLStreamsWhatTheProbePassReported pins that the notes of the probe
-// pass reach a streamed run under the same kinds a plain run prints, so a note
-// reads the same wherever it is watched.
-func TestJSONLStreamsWhatTheProbePassReported(t *testing.T) {
+func TestJSONLStreamsBoundedPhaseProgress(t *testing.T) {
 	var buffer bytes.Buffer
 	notes := ui.NewJSONL(&buffer, steppingClock(1000*time.Millisecond))
+	notes.Note("baseline-progress", "17/42")
 	notes.Note("probe-target", "42 targets")
 	notes.Note("probe-progress", "21/42")
 	notes.Note("probe-summary", "40 measured, 2 without facts")
 	notes.Close()
-	want := `{"type":"progress","kind":"probe-target","detail":"42 targets","elapsed_ms":1000}` + "\n" +
-		`{"type":"progress","kind":"probe-progress","detail":"21/42","elapsed_ms":2000}` + "\n" +
-		`{"type":"progress","kind":"probe-summary","detail":"40 measured, 2 without facts","elapsed_ms":3000}` + "\n"
+	want := `{"type":"progress","kind":"baseline-progress","detail":"17/42","elapsed_ms":1000}` + "\n" +
+		`{"type":"progress","kind":"probe-target","detail":"42 targets","elapsed_ms":2000}` + "\n" +
+		`{"type":"progress","kind":"probe-progress","detail":"21/42","elapsed_ms":3000}` + "\n" +
+		`{"type":"progress","kind":"probe-summary","detail":"40 measured, 2 without facts","elapsed_ms":4000}` + "\n"
 	if got := buffer.String(); got != want {
 		t.Fatalf("stream = %q, want %q", got, want)
 	}

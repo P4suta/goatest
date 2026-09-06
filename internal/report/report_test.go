@@ -5,16 +5,31 @@ package report_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+const (
+	impossibleReusedTargets     = 4
+	unknownAccountingExecutions = 12
+	unaccountedReusedMutants    = 2
+	reportFixtureMutationJobs   = 8
+	reportFixtureCommandTimeout = 10 * time.Minute
+)
+
+func reportTestDigest(character string) string {
+	return strings.Repeat(character, hex.EncodedLen(sha256.Size))
+}
 
 func fixture() report.Report {
 	return report.Report{
@@ -50,7 +65,12 @@ func persistedFixture() report.Report {
 		Module: "example.test/fixture",
 		Git:    report.Git{Available: true, Commit: "commit", MergeBase: "commit"},
 	}
-	result.Configuration = report.Configuration{Digest: strings.Repeat("a", 64)}
+	result.Configuration = report.Configuration{Digest: reportTestDigest("a")}
+	result.Execution = report.Execution{
+		TestArgs: []string{"-test.short=true"}, BuildTags: []string{"integration"}, MutationOperators: []string{"comparison"},
+		MutationJobs:     reportFixtureMutationJobs,
+		CommandTimeoutNS: int64(reportFixtureCommandTimeout), TargetTimeoutNS: int64(time.Minute),
+	}
 	result.Toolchain = report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "linux", Arch: "amd64"}
 	result.Timing = report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000}
 	result.Acceptances = []report.Acceptance{{ID: "accepted-fixture", Reason: "reviewed", Expires: "2026-12-01T00:00:00Z"}}
@@ -80,8 +100,9 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 	}
 }
 
-func TestCanonicalReportDefaultsSchemaPreservesExplicitSchemaAndOrdersEveryCollection(t *testing.T) {
+func TestCanonicalReportPreservesSchemaAndOrdersEveryCollection(t *testing.T) {
 	input := report.Report{
+		Schema: report.SchemaV1,
 		Evidence: []report.Evidence{
 			{Kind: "z-kind", ID: "a-id"},
 			{Kind: "a-kind", ID: "z-id"},
@@ -94,8 +115,8 @@ func TestCanonicalReportDefaultsSchemaPreservesExplicitSchemaAndOrdersEveryColle
 	if err := json.Unmarshal(report.JSON(input), &canonical); err != nil {
 		t.Fatal(err)
 	}
-	if canonical.Schema != report.SchemaV1 {
-		t.Fatalf("default schema = %q", canonical.Schema)
+	if canonical.Schema != input.Schema {
+		t.Fatalf("schema = %q", canonical.Schema)
 	}
 	wantEvidence := []report.Evidence{
 		{Kind: "a-kind", ID: "a-id"},
@@ -172,6 +193,58 @@ func TestHTMLIsSelfContainedAndOffline(t *testing.T) {
 	}
 }
 
+func TestProjectionsPreserveExecutionIdentity(t *testing.T) {
+	input := persistedFixture()
+	want := input.Execution
+
+	var sarif struct {
+		Runs []struct {
+			Properties struct {
+				Execution report.Execution `json:"execution"`
+			} `json:"properties"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(report.SARIF(input), &sarif); err != nil {
+		t.Fatal(err)
+	}
+	if len(sarif.Runs) != 1 || !reflect.DeepEqual(sarif.Runs[0].Properties.Execution, want) {
+		t.Fatalf("SARIF execution = %+v, want %+v", sarif.Runs, want)
+	}
+
+	var junit struct {
+		Properties []struct {
+			Name  string `xml:"name,attr"`
+			Value string `xml:"value,attr"`
+		} `xml:"properties>property"`
+	}
+	if err := xml.Unmarshal(report.JUnit(input), &junit); err != nil {
+		t.Fatal(err)
+	}
+	var junitExecution report.Execution
+	for _, property := range junit.Properties {
+		if property.Name == "execution" {
+			if err := json.Unmarshal([]byte(property.Value), &junitExecution); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !reflect.DeepEqual(junitExecution, want) {
+		t.Fatalf("JUnit execution = %+v, want %+v", junitExecution, want)
+	}
+
+	html := string(report.HTML(input))
+	for _, field := range []string{
+		"-test.short=true", "integration", "comparison",
+		"mutation jobs: " + fmt.Sprint(want.MutationJobs),
+		"command timeout: " + fmt.Sprint(want.CommandTimeoutNS) + " ns",
+		"target timeout: " + fmt.Sprint(want.TargetTimeoutNS) + " ns",
+	} {
+		if !strings.Contains(html, field) {
+			t.Errorf("HTML omitted execution field %q", field)
+		}
+	}
+}
+
 func TestTargetInventoryRanksSlowestFirstAndResumeIsOptionalAuditMetadata(t *testing.T) {
 	input := persistedFixture()
 	input.Accounting.Targets = report.CountAccounting{Discovered: 3, Selected: 3, Executed: 3}
@@ -193,7 +266,7 @@ func TestTargetInventoryRanksSlowestFirstAndResumeIsOptionalAuditMetadata(t *tes
 	if err := report.Validate(input); err != nil {
 		t.Fatalf("target/resume report rejected: %v", err)
 	}
-	input.Resume.ReusedTargets = 4
+	input.Resume.ReusedTargets = impossibleReusedTargets
 	if err := report.Validate(input); err == nil || !strings.Contains(err.Error(), "resume") {
 		t.Fatalf("impossible resume metadata error = %v", err)
 	}
@@ -252,8 +325,8 @@ func TestAuditValidationRejectsScopeMisrepresentationAndMissingMutants(t *testin
 	missing := valid
 	missing.Verdict = report.VerdictError
 	missing.Accounting.Mutants.Unknown = 1
-	missing.Accounting.Mutants.Executed = 12
-	missing.Accounting.Mutants.Killed = 12
+	missing.Accounting.Mutants.Executed = unknownAccountingExecutions
+	missing.Accounting.Mutants.Killed = unknownAccountingExecutions
 	missing.Mutants[0].Status = report.MutantUnknown
 	if err := report.Validate(missing); err != nil {
 		t.Fatalf("auditable ERROR report rejected: %v", err)
@@ -274,6 +347,7 @@ func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
 		change func(*report.Report)
 		want   string
 	}{
+		{name: "schema", change: func(value *report.Report) { value.Schema = "" }, want: "schema"},
 		{name: "verdict", change: func(value *report.Report) { value.Verdict = "" }, want: "verdict"},
 		{name: "run-kind", change: func(value *report.Report) { value.RunKind = "future" }, want: "run_kind"},
 		{name: "contract", change: func(value *report.Report) { value.Contract = "" }, want: "contract"},
@@ -281,6 +355,7 @@ func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
 		{name: "project", change: func(value *report.Report) { value.Scope.Resolved.Project = "" }, want: "project boundary"},
 		{name: "module", change: func(value *report.Report) { value.Repository.Module = "" }, want: "module"},
 		{name: "configuration", change: func(value *report.Report) { value.Configuration.Digest = "not-a-digest" }, want: "SHA-256"},
+		{name: "execution", change: func(value *report.Report) { value.Execution.MutationJobs = -1 }, want: "negative"},
 		{name: "toolchain", change: func(value *report.Report) { value.Toolchain.Go = "" }, want: "toolchain"},
 		{name: "git-commit", change: func(value *report.Report) { value.Repository.Git.Commit = "" }, want: "Git identity"},
 		{name: "cache-source", change: func(value *report.Report) { value.Cache.SourceRunID = "unexpected" }, want: "non-cache"},
@@ -314,6 +389,7 @@ func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
 
 func TestAcceptanceMetadataMustExplainEveryAcceptedMutation(t *testing.T) {
 	input := report.Report{
+		Schema:     report.SchemaV1,
 		Accounting: report.Accounting{Mutants: report.MutantAccounting{Discovered: 1, Selected: 1, Accepted: 1}},
 		Mutants:    []report.MutantDisposition{{ID: "mutant-a", Status: report.MutantAccepted, Detail: "finding-a"}},
 		Evidence:   []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "accepted", Detail: "finding-a"}},
@@ -337,19 +413,29 @@ func TestAcceptanceMetadataMustExplainEveryAcceptedMutation(t *testing.T) {
 }
 
 func TestSARIFJUnitAndSchemaAreDeterministicAndWellFormed(t *testing.T) {
-	firstSARIF := report.SARIF(fixture())
-	secondSARIF := report.SARIF(fixture())
+	input := fixture()
+	input.Toolchain.Goatest = "v9.8.7-rc.1+audited"
+	firstSARIF := report.SARIF(input)
+	secondSARIF := report.SARIF(input)
 	if !bytes.Equal(firstSARIF, secondSARIF) {
 		t.Fatal("SARIF bytes are not deterministic")
 	}
 	var sarif struct {
 		Version string `json:"version"`
 		Runs    []struct {
+			Tool struct {
+				Driver struct {
+					SemanticVersion string `json:"semanticVersion"`
+				} `json:"driver"`
+			} `json:"tool"`
 			Results []json.RawMessage `json:"results"`
 		} `json:"runs"`
 	}
 	if err := json.Unmarshal(firstSARIF, &sarif); err != nil || sarif.Version != "2.1.0" || len(sarif.Runs) != 1 || len(sarif.Runs[0].Results) != 2 {
 		t.Fatalf("SARIF = %+v, %v\n%s", sarif, err, firstSARIF)
+	}
+	if sarif.Runs[0].Tool.Driver.SemanticVersion != "9.8.7-rc.1+audited" {
+		t.Fatalf("SARIF goatest semantic version = %q", sarif.Runs[0].Tool.Driver.SemanticVersion)
 	}
 
 	junit := report.JUnit(fixture())
@@ -485,6 +571,25 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	if err := compiled.Validate(invalid); err == nil {
 		t.Fatal("unknown report field passed assurance schema")
 	}
+	emptyExecutionSequences := persistedFixture()
+	emptyExecutionSequences.Execution.TestArgs = nil
+	emptyExecutionSequences.Execution.BuildTags = nil
+	emptyExecutionSequences.Execution.MutationOperators = nil
+	var emptyExecutionDocument any
+	if err := json.Unmarshal(report.JSON(emptyExecutionSequences), &emptyExecutionDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiled.Validate(emptyExecutionDocument); err != nil {
+		t.Fatalf("canonical empty execution sequences failed schema: %v", err)
+	}
+	var nestedExecution map[string]any
+	if err := json.Unmarshal(valid, &nestedExecution); err != nil {
+		t.Fatal(err)
+	}
+	nestedExecution["execution"].(map[string]any)["unknown"] = true
+	if err := compiled.Validate(nestedExecution); err == nil {
+		t.Fatal("unknown execution field passed assurance schema")
+	}
 	for _, field := range []string{"acceptances", "evidence", "findings", "repairs", "limitations"} {
 		var nested map[string]any
 		if err := json.Unmarshal(valid, &nested); err != nil {
@@ -498,8 +603,6 @@ func TestJSONSchemaCompilesValidatesReportAndRejectsUnknownFields(t *testing.T) 
 	}
 }
 
-// reusedFixture is a report of three mutants, one of them killed by evidence
-// an earlier run established rather than by an execution of this one.
 func reusedFixture() report.Report {
 	result := report.Report{
 		Schema: report.SchemaV1, RunKind: report.RunFull, Verdict: report.VerdictAssured,
@@ -513,7 +616,7 @@ func reusedFixture() report.Report {
 		Mutants: []report.MutantDisposition{
 			{
 				ID: "mutant-01", Status: report.MutantKilled, Detail: "TestValue",
-				Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+				Reused: true, Provenance: "snapshot=" + reportTestDigest("b"),
 			},
 			{ID: "mutant-02", Status: report.MutantKilled, Detail: "TestValue"},
 			{ID: "mutant-03", Status: report.MutantKilled, Detail: "TestOther"},
@@ -522,9 +625,6 @@ func reusedFixture() report.Report {
 	return result
 }
 
-// TestValidateReconcilesReusedCountsWithTheMutantInventory pins the audit that
-// makes the reuse counters worth reading: they are a summary of the inventory,
-// and a summary that disagrees with what it summarises is refused.
 func TestValidateReconcilesReusedCountsWithTheMutantInventory(t *testing.T) {
 	t.Parallel()
 	valid := reusedFixture()
@@ -537,10 +637,10 @@ func TestValidateReconcilesReusedCountsWithTheMutantInventory(t *testing.T) {
 	}{
 		{name: "a reuse the counter does not know about", change: func(input *report.Report) {
 			input.Mutants[1].Reused = true
-			input.Mutants[1].Provenance = "snapshot=" + strings.Repeat("c", 64)
+			input.Mutants[1].Provenance = "snapshot=" + reportTestDigest("c")
 		}},
 		{name: "a counter no disposition accounts for", change: func(input *report.Report) {
-			input.Accounting.Mutants.ReusedKilled = 2
+			input.Accounting.Mutants.ReusedKilled = unaccountedReusedMutants
 		}},
 		{name: "a survived counter no disposition accounts for", change: func(input *report.Report) {
 			input.Accounting.Mutants.ReusedSurvived = 1
@@ -560,9 +660,6 @@ func TestValidateReconcilesReusedCountsWithTheMutantInventory(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsAReusedMutantWithoutProvenance pins the audit trail. A
-// disposition that says it was not established by this run has to name the run
-// that did establish it, or the claim cannot be traced to anything.
 func TestValidateRejectsAReusedMutantWithoutProvenance(t *testing.T) {
 	t.Parallel()
 	invalid := reusedFixture()
@@ -572,9 +669,6 @@ func TestValidateRejectsAReusedMutantWithoutProvenance(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsProvenanceWithoutTheReusedFlag pins the other direction:
-// provenance is what a reuse is audited by, so a disposition carrying one
-// while claiming this run established it contradicts itself.
 func TestValidateRejectsProvenanceWithoutTheReusedFlag(t *testing.T) {
 	t.Parallel()
 	invalid := reusedFixture()
@@ -585,9 +679,6 @@ func TestValidateRejectsProvenanceWithoutTheReusedFlag(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition pins what a
-// reuse may be about: a mutant that reached a terminal execution disposition.
-// Nothing else was ever executed, so nothing else can be reused.
 func TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition(t *testing.T) {
 	t.Parallel()
 	invalid := reusedFixture()
@@ -600,12 +691,6 @@ func TestValidateRejectsAReusedMutantWithoutAnExecutionDisposition(t *testing.T)
 	}
 }
 
-// TestValidateAcceptsAReusedMutantThisRunAccepted pins the one disposition a
-// reuse reaches without an execution of its own. A reused verdict raises its
-// finding again here, so this run's acceptances decide it, and an acceptance
-// that still holds silences the finding: the mutant was reused and reports as
-// accepted. It is outside the executed counts, which is why the reuse counters
-// stay empty while the flag and its provenance stay.
 func TestValidateAcceptsAReusedMutantThisRunAccepted(t *testing.T) {
 	t.Parallel()
 	accepted := reusedFixture()
@@ -622,13 +707,6 @@ func TestValidateAcceptsAReusedMutantThisRunAccepted(t *testing.T) {
 	}
 }
 
-// TestValidateAcceptsAReusedInconclusiveMutantInsideTheExecutedCounts pins
-// where a reused timeout lands. Reusing one keeps a finding rather than
-// resolving anything, but it is still a mutant with a terminal execution
-// disposition, so it counts in `executed` and in `inconclusive` like any
-// other: the identity holds however a disposition was reached. The reuse
-// counters are parts of `killed` and `survived` and of nothing else, so
-// claiming it in either contradicts the inventory.
 func TestValidateAcceptsAReusedInconclusiveMutantInsideTheExecutedCounts(t *testing.T) {
 	t.Parallel()
 	inconclusive := reusedFixture()
@@ -646,9 +724,6 @@ func TestValidateAcceptsAReusedInconclusiveMutantInsideTheExecutedCounts(t *test
 	}
 }
 
-// TestValidateRejectsReusedCountsExceedingExecuted pins the inequality that
-// holds however the counters were produced: a run cannot have reused more
-// verdicts than it has mutants with a verdict.
 func TestValidateRejectsReusedCountsExceedingExecuted(t *testing.T) {
 	t.Parallel()
 	invalid := report.Report{
@@ -658,7 +733,7 @@ func TestValidateRejectsReusedCountsExceedingExecuted(t *testing.T) {
 		}},
 		Mutants: []report.MutantDisposition{{
 			ID: "mutant-01", Status: report.MutantKilled,
-			Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+			Reused: true, Provenance: "snapshot=" + reportTestDigest("b"),
 		}},
 	}
 	if err := report.Validate(invalid); err == nil || !strings.Contains(err.Error(), "reused") {
@@ -666,10 +741,7 @@ func TestValidateRejectsReusedCountsExceedingExecuted(t *testing.T) {
 	}
 }
 
-// TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem pins that the two
-// additions are optional. Every report written before they existed still
-// validates, which is what keeps the reports already on disk readable.
-func TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem(t *testing.T) {
+func TestJSONSchemaRequiresExplicitReuseFields(t *testing.T) {
 	t.Parallel()
 	schemaBytes := report.JSONSchema()
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
@@ -692,14 +764,14 @@ func TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem(t *testing.T) {
 	carrying.Mutants = []report.MutantDisposition{{
 		ID: "mutant-01", Status: report.MutantKilled, Path: "value.go", Line: 8,
 		Package: "example.test/fixture", Rule: "arithmetic", Detail: "TestValue",
-		Reused: true, Provenance: "snapshot=" + strings.Repeat("b", 64),
+		Reused: true, Provenance: "snapshot=" + reportTestDigest("b"),
 	}}
 	for _, test := range []struct {
 		name  string
 		input report.Report
 	}{
-		{name: "a report carrying the fields", input: carrying},
-		{name: "a report written before they existed", input: persistedFixture()},
+		{name: "a report carrying reuse", input: carrying},
+		{name: "a report carrying explicit zero reuse", input: persistedFixture()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -725,9 +797,29 @@ func TestJSONSchemaAcceptsReusedFieldsAndAReportWithoutThem(t *testing.T) {
 			}
 		})
 	}
-	// A report written before the fields existed carries neither of them: an
-	// absent reuse is not a recorded false.
-	if strings.Contains(string(report.JSON(persistedFixture())), "reused") {
-		t.Fatal("a report that reused nothing wrote a reuse field")
+
+	encoded := report.JSON(persistedFixture())
+	if !strings.Contains(string(encoded), `"reused_killed": 0`) || !strings.Contains(string(encoded), `"reused_survived": 0`) {
+		t.Fatal("a report that reused nothing omitted explicit reuse accounting")
+	}
+	var missing map[string]any
+	if err := json.Unmarshal(encoded, &missing); err != nil {
+		t.Fatal(err)
+	}
+	delete(missing["accounting"].(map[string]any)["mutants"].(map[string]any), "reused_killed")
+	withoutRequired, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(withoutRequired))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compiled.Validate(instance); err == nil {
+		t.Fatal("schema accepted missing reused_killed")
+	}
+	var decoded report.Report
+	if err := json.Unmarshal(withoutRequired, &decoded); err == nil || !strings.Contains(err.Error(), "reused_killed") {
+		t.Fatalf("decoder accepted missing reused_killed: %v", err)
 	}
 }

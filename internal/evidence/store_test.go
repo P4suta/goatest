@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestGraphStoreRoundTripsCanonicalRecord(t *testing.T) {
@@ -61,6 +62,7 @@ func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
 		{name: "read", directory: true},
 		{name: "malformed", data: "{", want: "decode evidence graph"},
 		{name: "unknown", data: `{"schema":"evidence-graph-v1","module_path":"example/module","graph":{},"extra":true}`, want: "decode evidence graph"},
+		{name: "removed target kind", data: `{"schema":"evidence-graph-v1","module_path":"example/module","graph":{"file_packages":{},"targets":[{"id":"target","package":"example/module","kind":"test","dependencies":[],"covered_files":[]}]}}`, want: "decode evidence graph"},
 		{name: "trailing", data: `{"schema":"evidence-graph-v1","module_path":"example/module","graph":{}} {}`, want: "trailing data"},
 		{name: "schema", data: `{"schema":"future-schema","module_path":"example/module","graph":{}}`, want: "identity mismatch"},
 		{name: "module", data: `{"schema":"evidence-graph-v1","module_path":"","graph":{}}`, want: "identity mismatch"},
@@ -69,10 +71,10 @@ func TestLoadGraphMissingReadStrictnessAndIdentity(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "graph.json")
 			if testCase.directory {
-				if err := os.Mkdir(path, 0o755); err != nil {
+				if err := os.Mkdir(path, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.WriteFile(path, []byte(testCase.data), 0o644); err != nil {
+			} else if err := os.WriteFile(path, []byte(testCase.data), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			got, ok, err := evidence.LoadGraph(path)
@@ -101,7 +103,7 @@ func TestSaveGraphReportsDirectoryFailure(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	blocking := filepath.Join(root, "parent")
-	if err := os.WriteFile(blocking, []byte("file"), 0o644); err != nil {
+	if err := os.WriteFile(blocking, []byte("file"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	err := evidence.SaveGraph(filepath.Join(blocking, "graph.json"), evidence.GraphRecord{ModulePath: "example/module"})

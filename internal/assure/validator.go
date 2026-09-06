@@ -19,48 +19,42 @@ import (
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
+	"github.com/P4suta/goatest/internal/tempowner"
 	"github.com/P4suta/goatest/internal/trace"
+)
+
+const (
+	defaultValidationTimeout       = 10 * time.Minute
+	defaultMutantValidationTimeout = 30 * time.Second
 )
 
 type RepositoryValidatorOptions struct {
 	Root     string
 	Contract string
 	GoBinary string
-	// TempDirectory is the parent of the isolated tree each candidate is
-	// validated in: the scratch directory of the run that asked for the
-	// validation, or the configured temporary root for a validation outside
-	// any run.
+
 	TempDirectory string
-	// TempPrefix names those trees. An empty prefix is a validation outside a
-	// run, whose trees stand among everybody else's temporary directories and
-	// therefore carry the tool's name, which is how the next run's sweep
-	// recognizes one that was left behind.
-	TempPrefix        string
+
 	Environment       []string
 	MutationOperators []string
 	Packages          []string
 	BuildTags         []string
 	TestArgs          []string
 	Timeout           time.Duration
-	// Trace records the commands that validate a candidate. A nil recorder
-	// validates untraced.
+
 	Trace *trace.Recorder
-	// KeepTemp keeps the isolated tree a candidate was validated in instead of
-	// removing it, and records the tree as an artifact of the recording. It is
-	// a debugging aid: what a validation decided is decided the same way
-	// whether the tree survives it or not.
+
 	KeepTemp bool
-	// BuildCacheEnvironment is the cache program every command validating a
-	// candidate carries. Its writes land in the run's scratch layer and never
-	// in the layer the machine keeps: a candidate is a tree that may never be
-	// applied, so nothing it compiles has earned a place there. A validation
-	// outside a run — `goatest fix` — has no run scratch and so carries
-	// nothing, which is the toolchain's own cache.
+
 	BuildCacheEnvironment []string
+	Now                   func() time.Time
+
+	scratch *runScratch
 }
 
 type repositoryValidator struct{ options RepositoryValidatorOptions }
@@ -122,13 +116,13 @@ func NewRepositoryValidator(options RepositoryValidatorOptions) *repositoryValid
 	return &repositoryValidator{options: options}
 }
 
-func (validator *repositoryValidator) OriginalStable(ctx context.Context, candidate provider.Candidate) error {
-	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root string) error {
-		workspace, err := validator.open(ctx, root)
+func (validator *repositoryValidator) OriginalPasses(ctx context.Context, candidate provider.Candidate) error {
+	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root, temporary string) error {
+		workspace, err := validator.open(ctx, root, temporary)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = workspace.Close() }()
+		defer validator.close(workspace)
 		return runPassing(ctx, workspace, validator.testArgv(false), "generated candidate on original code", validator.timeout())
 	})
 }
@@ -137,15 +131,13 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 	if finding.MutantID == "" {
 		return errors.New("goatest: generated candidate finding has no mutant identity")
 	}
-	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root string) error {
-		workspace, err := validator.open(ctx, root)
+	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root, temporary string) error {
+		workspace, err := validator.open(ctx, root, temporary)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = workspace.Close() }()
-		// No probe tree: this session re-executes one named mutant against a
-		// candidate repair, so the second instrumentation a probe costs would
-		// buy a measurement nothing here reads.
+		defer validator.close(workspace)
+
 		session, err := prepareValidationSession(ctx, workspace, mutationbridge.PrepareOptions{
 			Contract: validator.options.Contract, Operators: slices.Clone(validator.options.MutationOperators),
 			Packages: slices.Clone(validator.options.Packages), VerifyArgv: validator.testArgv(true),
@@ -179,12 +171,12 @@ func (validator *repositoryValidator) Kills(ctx context.Context, finding report.
 }
 
 func (validator *repositoryValidator) Suite(ctx context.Context, candidate provider.Candidate) error {
-	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root string) error {
-		workspace, err := validator.open(ctx, root)
+	return validator.withCandidate(ctx, candidate, func(ctx context.Context, root, temporary string) error {
+		workspace, err := validator.open(ctx, root, temporary)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = workspace.Close() }()
+		defer validator.close(workspace)
 		if err := runPassing(ctx, workspace, validator.testArgv(false), "related suite", validator.timeout()); err != nil {
 			return err
 		}
@@ -220,17 +212,26 @@ func (validator *repositoryValidator) Suite(ctx context.Context, candidate provi
 	})
 }
 
-func (validator *repositoryValidator) open(ctx context.Context, root string) (validationWorkspace, error) {
+func (validator *repositoryValidator) open(ctx context.Context, root, temporary string) (validationWorkspace, error) {
 	environment := slices.Clone(validator.options.Environment)
 	if len(validator.options.BuildTags) != 0 {
 		environment = mutationEnvironment(environment, validator.options.BuildTags)
 	}
-	environment = append(environment, validator.options.BuildCacheEnvironment...)
+	environment = overlayEnvironment(environment, validator.options.BuildCacheEnvironment)
 	return openValidationWorkspace(ctx, root, mutationbridge.Options{
-		GoBinary: validator.options.GoBinary, TempDirectory: validator.options.TempDirectory,
-		ReportDirectory: ".goatest", Environment: environment, Trace: validator.options.Trace,
+		GoBinary: validator.options.GoBinary, TempDirectory: temporary,
+		ReportDirectory: internalOutputDirectory, SnapshotExclude: assuranceSnapshotExclusions(),
+		Environment: environment, Trace: validator.options.Trace,
 		KeepTemp: validator.options.KeepTemp,
 	})
+}
+
+func (validator *repositoryValidator) close(workspace validationWorkspace) {
+	_ = workspace.Close()
+	preserved, ok := workspace.(interface{ Preserved() []string })
+	if ok {
+		recordTemporaryArtifacts(validator.scratchOptions(), artifactMutationWorkspace, preserved.Preserved())
+	}
 }
 
 func (validator *repositoryValidator) packages() []string {
@@ -244,14 +245,14 @@ func (validator *repositoryValidator) timeout() time.Duration {
 	if validator.options.Timeout > 0 {
 		return validator.options.Timeout
 	}
-	return 10 * time.Minute
+	return defaultValidationTimeout
 }
 
 func (validator *repositoryValidator) mutantTimeout() time.Duration {
 	if validator.options.Timeout > 0 {
 		return validator.options.Timeout
 	}
-	return 30 * time.Second
+	return defaultMutantValidationTimeout
 }
 
 func (validator *repositoryValidator) testArgv(compileOnly bool) []string {
@@ -283,8 +284,22 @@ func runPassing(ctx context.Context, workspace CommandWorkspace, argv []string, 
 	return nil
 }
 
-func (validator *repositoryValidator) withCandidate(ctx context.Context, candidate provider.Candidate, action func(context.Context, string) error) error {
-	root, err := makeCandidateTemp(validator.options.TempDirectory, validator.candidatePrefix())
+func (validator *repositoryValidator) withCandidate(ctx context.Context, candidate provider.Candidate, action func(context.Context, string, string) error) error {
+	moment := validator.now()
+	scratch, standalone, err := validator.candidateScratch(moment)
+	if err != nil {
+		return err
+	}
+	if standalone {
+		defer func() {
+			releaseRunScratch(validator.scratchOptions(), os.RemoveAll, scratch, validator.now())
+		}()
+	}
+	parent, prefix, err := scratch.subdirectory(candidateTreeName)
+	if err != nil {
+		return err
+	}
+	root, err := makeCandidateTemp(parent, prefix)
 	if err != nil {
 		return err
 	}
@@ -295,17 +310,35 @@ func (validator *repositoryValidator) withCandidate(ctx context.Context, candida
 	if err := writeCandidateRepositoryFile(root, candidate); err != nil {
 		return err
 	}
-	return action(ctx, root)
+	return action(ctx, root, scratch.dir)
 }
 
-// candidatePrefix names the trees this validator makes. A validation that was
-// given no prefix is one outside any run, and its trees are made where nothing
-// else names them, so they carry the name the sweep of the next run knows.
-func (validator *repositoryValidator) candidatePrefix() string {
-	if validator.options.TempPrefix == "" {
-		return legacyPrefix + candidateTreeName
+func (validator *repositoryValidator) candidateScratch(now time.Time) (runScratch, bool, error) {
+	if validator.options.scratch != nil {
+		return *validator.options.scratch, false, nil
 	}
-	return validator.options.TempPrefix
+	options := validator.scratchOptions()
+	sweepRunTemporaries(options, tempowner.Sweep, now)
+	scratch, err := openRunScratch(os.MkdirTemp, os.RemoveAll, validator.options.TempDirectory, validator.options.Root, now)
+	if err != nil {
+		emit(options, "temp-unavailable", err.Error())
+		return runScratch{}, false, err
+	}
+	return scratch, true, nil
+}
+
+func (validator *repositoryValidator) scratchOptions() Options {
+	return Options{
+		Root: validator.options.Root, TempDirectory: validator.options.TempDirectory,
+		Trace: validator.options.Trace, KeepTemp: validator.options.KeepTemp,
+	}
+}
+
+func (validator *repositoryValidator) now() time.Time {
+	if validator.options.Now != nil {
+		return validator.options.Now()
+	}
+	return time.Now()
 }
 
 func copyRepository(source, destination string) error {
@@ -342,7 +375,7 @@ func copyRepository(source, destination string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("goatest: candidate validation refuses irregular file %s", relativeSlash)
 		}
-		if err := makeCandidateDirectory(filepath.Dir(target), 0o755); err != nil {
+		if err := makeCandidateDirectory(filepath.Dir(target), filemode.ReadableDirectory); err != nil {
 			return err
 		}
 		input, err := openCandidateInput(path)
@@ -410,8 +443,8 @@ func writeCandidate(root string, candidate provider.Candidate) error {
 			return errors.New("goatest: candidate preimage does not match validation copy")
 		}
 	}
-	if err := makeCandidateDirectory(filepath.Dir(target), 0o755); err != nil {
+	if err := makeCandidateDirectory(filepath.Dir(target), filemode.ReadableDirectory); err != nil {
 		return err
 	}
-	return writeCandidateFile(target, candidate.Content, 0o644)
+	return writeCandidateFile(target, candidate.Content, filemode.ReadableFile)
 }

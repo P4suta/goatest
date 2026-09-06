@@ -19,22 +19,16 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// verifiedRun is one recorded verify of a real repository: the report it
-// printed and the events it recorded.
 type verifiedRun struct {
 	report report.Report
 	events []trace.Event
 }
 
-// verifyRecording runs verify against a real toolchain and reads back both the
-// report and the recording, which together are the whole claim a run makes.
 func verifyRecording(t *testing.T, service app.Service) verifiedRun {
 	t.Helper()
 	return verifyRecordingWithExit(t, service, cli.ExitAssured)
 }
 
-// verifyRecordingWithExit is verifyRecording against a fixture whose verdict is
-// not ASSURED, which is what a fixture with a surviving mutant has.
 func verifyRecordingWithExit(t *testing.T, service app.Service, want int) verifiedRun {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "trace")
@@ -50,8 +44,6 @@ func verifyRecordingWithExit(t *testing.T, service app.Service, want int) verifi
 	return verifiedRun{report: result, events: readTrace(t, traceRun(t, directory))}
 }
 
-// reusedMutants is the set of mutants a run resolved from recorded evidence,
-// read off the report.
 func reusedMutants(result report.Report) []string {
 	var reused []string
 	for _, mutant := range result.Mutants {
@@ -63,8 +55,6 @@ func reusedMutants(result report.Report) []string {
 	return reused
 }
 
-// reusedRoutes is the same set read off the recording, which is where an
-// auditor reads it.
 func reusedRoutes(events []trace.Event) []string {
 	var reused []string
 	for _, event := range traceOfType(events, trace.TypeRoute) {
@@ -76,8 +66,6 @@ func reusedRoutes(events []trace.Event) []string {
 	return reused
 }
 
-// mutantStatuses is what the two runs must agree on, whatever either of them
-// executed.
 func mutantStatuses(result report.Report) map[string]report.MutantStatus {
 	statuses := make(map[string]report.MutantStatus, len(result.Mutants))
 	for _, mutant := range result.Mutants {
@@ -86,7 +74,6 @@ func mutantStatuses(result report.Report) map[string]report.MutantStatus {
 	return statuses
 }
 
-// executedMutants names every mutant a recording shows an execution of.
 func executedMutants(events []trace.Event) map[string]bool {
 	executed := make(map[string]bool)
 	for _, event := range traceOfType(events, trace.TypeMutantExec) {
@@ -95,14 +82,9 @@ func executedMutants(events []trace.Event) map[string]bool {
 	return executed
 }
 
-// TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges is the
-// whole of P4.2 against a real toolchain: a run records the kills it confirms,
-// the next run over an unchanged test binary resolves them without executing
-// anything and reaches the same verdict, and a run whose killing test changed
-// executes them again, because the test that killed them is no longer the test
-// the record is about.
 func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().File("docs/notes.md", "first\n").Git()
 	service := app.Service{
 		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
@@ -121,8 +103,6 @@ func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *test
 		t.Fatalf("mutation evidence store %s = (%v, %v)", store, info, err)
 	}
 
-	// Only a documentation file changes: the snapshot the run is keyed on is
-	// new, and no input of any test binary is.
 	repository.File("docs/notes.md", "second\n")
 	second := verifyRecording(t, service)
 	reused := reusedMutants(second.report)
@@ -152,9 +132,6 @@ func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *test
 		}
 	}
 
-	// The test that killed them changes. Every mutant keeps its identity,
-	// because the file it mutates is untouched, and every record about it is
-	// about a test binary that no longer exists.
 	repository.File("boundary_test.go", changedBoundaryTestSource)
 	third := verifyRecording(t, service)
 	if third.report.Verdict != report.VerdictAssured {
@@ -174,13 +151,9 @@ func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *test
 	}
 }
 
-// TestRepositoryReadObservationWidensOnlyTheMutantsEstablishedByTheReader
-// pins the runtime refinement against a real toolchain. One package has both
-// ordinary tests and a test that reads its repository directory. A change
-// outside every narrow closure preserves evidence established by the ordinary
-// targets and invalidates evidence established by the actual reader.
 func TestRepositoryReadObservationWidensOnlyTheMutantsEstablishedByTheReader(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("reader/reader.go", repositoryReaderSource).
 		File("reader/repository_access.go", actualRepositoryReaderSource).
@@ -215,9 +188,6 @@ func TestRepositoryReadObservationWidensOnlyTheMutantsEstablishedByTheReader(t *
 		t.Fatalf("reader fixture mutants = narrow %v, whole-tree %v", narrowMutants, wholeTreeMutants)
 	}
 
-	// Only a documentation file changes. Nothing the boundary package's test
-	// binary reads has changed. Within the mixed reader package, only the
-	// target that actually listed the repository needs the whole-tree key.
 	repository.File("docs/notes.md", "second\n")
 	second := verifyRecording(t, service)
 	reused := reusedMutants(second.report)
@@ -244,7 +214,6 @@ func TestRepositoryReadObservationWidensOnlyTheMutantsEstablishedByTheReader(t *
 	}
 }
 
-// mutantsOfPackage names the mutants one package of the fixture contributed.
 func mutantsOfPackage(result report.Report, path string) []string {
 	var mutants []string
 	for _, mutant := range result.Mutants {
@@ -256,12 +225,8 @@ func mutantsOfPackage(result report.Report, path string) []string {
 	return mutants
 }
 
-// repositoryReaderSource is a second guarded behaviour, in a package of its
-// own, so that the module has mutants on both sides of the reading rule.
 const repositoryReaderSource = `package reader
 
-// Threshold clamps value to the largest accepted input, the single guarded
-// behaviour this package's tests and mutants argue about.
 func Threshold(value int) int {
 	if value < 4 {
 		return value
@@ -270,9 +235,6 @@ func Threshold(value int) int {
 }
 `
 
-// actualRepositoryReaderSource contributes a distinct mutant whose killing
-// target really does consult the repository. Keeping it in its own file makes
-// the two evidence modes directly observable in the report.
 const actualRepositoryReaderSource = `package reader
 
 import "os"
@@ -284,9 +246,6 @@ func DirectoryEntryCount() int {
 }
 `
 
-// repositoryReaderTestSource kills every mutant of that behaviour and lists a
-// directory it computes rather than a file it names, which is what makes the
-// whole tree an input of this test binary.
 const repositoryReaderTestSource = `package reader
 
 import (
@@ -319,8 +278,6 @@ func TestTheDirectoryIsReadable(t *testing.T) {
 }
 `
 
-// changedBoundaryTestSource is the fixture's test with one more case, so that
-// the test binary is a different one while still killing what it killed.
 const changedBoundaryTestSource = `package assured
 
 import "testing"
@@ -337,9 +294,6 @@ func TestBoundary(t *testing.T) {
 	}
 }
 
-// TestBoundaryAtZero exercises the guarded return at the value a return-zero
-// mutation puts there, so the probe pass measures one target that makes no
-// mutated site differ and routing has a target to discharge.
 func TestBoundaryAtZero(t *testing.T) {
 	if got := Boundary(0); got != 0 {
 		t.Fatalf("Boundary(0) = %d, want 0", got)
@@ -347,13 +301,9 @@ func TestBoundaryAtZero(t *testing.T) {
 }
 `
 
-// TestASecondVerifyReusesEveryMutantAndRunsNoMutantExecution is the whole of
-// P4.3 against a real toolchain. A run records what it established about every
-// mutant it could name a claim for; the next run over a tree in which nothing
-// any test binary reads has changed resolves all of them from those records,
-// executes no mutant at all, and reaches byte for byte the same verdict.
 func TestASecondVerifyReusesEveryMutantAndRunsNoMutantExecution(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().File("docs/notes.md", "first\n").Git()
 	service := app.Service{
 		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
@@ -390,12 +340,9 @@ func TestASecondVerifyReusesEveryMutantAndRunsNoMutantExecution(t *testing.T) {
 	}
 }
 
-// TestChangingASourceFileForcesItsMutantsToRunAgain pins the granularity of a
-// record. A mutant is named by the content of the file it edits, so changing
-// that file leaves every record about it about mutants that no longer exist,
-// while a package the change does not reach keeps every verdict it had.
 func TestChangingASourceFileForcesItsMutantsToRunAgain(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("other/other.go", otherSource).
 		File("other/other_test.go", otherTestSource).
@@ -430,13 +377,9 @@ func TestChangingASourceFileForcesItsMutantsToRunAgain(t *testing.T) {
 	}
 }
 
-// TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain pins the
-// universal claim from the side that can cost assurance. A survived verdict is
-// a claim about the tests that ran; a test binary that changed is not one of
-// them, so every survivor it reaches runs again, while the kills recorded in a
-// package the change does not reach stand.
 func TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("unsure/unsure.go", survivingSource).
 		File("unsure/unsure_test.go", survivingTestSource).
@@ -452,8 +395,6 @@ func TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain(t *testing
 		t.Fatalf("the fixture left no survivor: %+v", first.report.Accounting.Mutants)
 	}
 
-	// Nothing any test binary reads changes, so the survivors are resolved from
-	// the records the first run left.
 	repository.File("docs/notes.md", "second\n")
 	second := verifyRecordingWithExit(t, service, cli.ExitInsufficient)
 	if second.report.Accounting.Mutants.ReusedSurvived == 0 {
@@ -464,9 +405,6 @@ func TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain(t *testing
 		t.Fatalf("no survivor of %s was reused: %+v", unsurePackage, second.report.Mutants)
 	}
 
-	// The test that exhausted them changes. What it does now is not what the
-	// record is a claim about, so every survivor it reaches runs again; the
-	// kills of the package it is not in stand.
 	repository.File("unsure/unsure_test.go", changedSurvivingTestSource)
 	third := verifyRecordingWithExit(t, service, cli.ExitInsufficient)
 	executed := executedMutants(third.events)
@@ -486,8 +424,6 @@ func TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain(t *testing
 	}
 }
 
-// survivorsOfPackage names the mutants of one package this run reused a
-// survived verdict for.
 func survivorsOfPackage(result report.Report, path string) []string {
 	var mutants []string
 	for _, mutant := range result.Mutants {
@@ -499,27 +435,19 @@ func survivorsOfPackage(result report.Report, path string) []string {
 	return mutants
 }
 
-// changedBoundarySource is the fixture's guarded behaviour with a comment
-// added: every mutant of the file is named by the file's content, so all of
-// them are new mutants while the behaviour and the verdict are unchanged.
 const changedBoundarySource = `package assured
 
-// Boundary clamps value to the largest accepted input, the single guarded
-// behaviour this fixture's test and mutants argue about. This sentence is here
-// to change the file without changing what it does.
 func Boundary(value int) int {
 	if value < 10 {
 		return value
 	}
 	return 9
 }
+
 `
 
-// otherSource is a second guarded behaviour in a package of its own, so that a
-// change to one package can be shown not to reach another.
 const otherSource = `package other
 
-// Ceiling clamps value to the largest accepted input of this package.
 func Ceiling(value int) int {
 	if value < 4 {
 		return value
@@ -551,13 +479,8 @@ func TestCeilingAtZero(t *testing.T) {
 }
 `
 
-// survivingSource computes a value its test does observe and then asks a
-// question the mutated value cannot change the answer to for the inputs the
-// test gives it. The mutant is therefore infected and reached, and still
-// survives, which is the survivor a record can be about.
 const survivingSource = `package unsure
 
-// Doubled reports whether twice the value is above zero.
 func Doubled(value int) bool {
 	return value*2 > 0
 }
@@ -577,8 +500,6 @@ func TestDoubled(t *testing.T) {
 }
 `
 
-// changedSurvivingTestSource is that test with one more case, so that the test
-// binary the survivors were exhausted by is not the one running now.
 const changedSurvivingTestSource = `package unsure
 
 import "testing"

@@ -6,6 +6,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,34 +19,12 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// readBufferSize is the read buffer one line is assembled in. A line is not
-// bounded by it: a route event naming every target that reaches a mutant can
-// be far larger than any fixed buffer, so lines are read whole rather than
-// through a scanner that would refuse the long ones.
-// routePlanReused is the whole plan of a route the run resolved from an
-// earlier run's evidence: the reuse itself, and nothing that ran.
 const routePlanReused = "reused"
 
 const readBufferSize = 1 << 16
 
-// firstSequence is the number a recording gives its first event.
 const firstSequence = 1
 
-// readEvents reads a whole trace stream, refusing anything the contract does
-// not allow rather than summarizing what it understood of it.
-//
-// The line checks are goatest-trace-v1 itself: the required fields, the
-// pairing of an event type with the single payload it carries, the ranges, and
-// the schema identity the run-start alone declares. The stream checks are the
-// order the contract states around them — a recording opens with one run-start,
-// sequence numbers only advance, and nothing follows the run-end.
-//
-// Two things a strict reader could refuse are deliberately accepted, because
-// refusing them would refuse the traces most worth reading. A gap in the
-// sequence numbers is what a dropped event leaves behind, and the run-end that
-// reports the drop is on the other side of it. A stream that ends without a
-// run-end at all is what a killed or crashed run leaves; the summary reports
-// the absence instead.
 func readEvents(reader io.Reader) ([]trace.Event, error) {
 	buffered := bufio.NewReaderSize(reader, readBufferSize)
 	var events []trace.Event
@@ -79,7 +59,6 @@ func readEvents(reader io.Reader) ([]trace.Event, error) {
 	return events, nil
 }
 
-// checkOrder holds one event to the order of the stream around it.
 func checkOrder(event trace.Event, kept int, previousSeq int64, ended bool) error {
 	if kept == 0 {
 		if event.Type != trace.TypeRunStart {
@@ -102,13 +81,6 @@ func checkOrder(event trace.Event, kept int, previousSeq int64, ended bool) erro
 	return nil
 }
 
-// decodeEvent decodes and validates one line of the stream.
-//
-// The line is read twice on purpose: once into the event, which rejects an
-// unknown field and a field of the wrong type anywhere in the line, and once
-// into its raw fields, which is the only way to tell an absent number from a
-// zero one and therefore the only way to enforce a required field the contract
-// names.
 func decodeEvent(line []byte) (trace.Event, error) {
 	if len(bytes.TrimSpace(line)) == 0 {
 		return trace.Event{}, errors.New("blank line; every line of a trace is one event")
@@ -132,7 +104,6 @@ func decodeEvent(line []byte) (trace.Event, error) {
 	return event, nil
 }
 
-// objectFields returns the raw fields of a JSON object.
 func objectFields(data []byte) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
@@ -141,9 +112,6 @@ func objectFields(data []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
-// validateEvent holds one event to the contract every event shares: the
-// required fields, the ranges, the event type, the payload pairing, and the
-// schema identity.
 func validateEvent(event trace.Event, fields map[string]json.RawMessage) error {
 	for _, name := range []string{"seq", "type", "timestamp", "elapsed_ms"} {
 		if _, present := fields[name]; !present {
@@ -175,22 +143,18 @@ func validateEvent(event trace.Event, fields map[string]json.RawMessage) error {
 	return checkPayload(event, fields)
 }
 
-// payloadNames are the payload fields of the contract, in the order the event
-// declares them, so a deviation is always reported against the same field
-// first.
 func payloadNames() []string {
-	return []string{"phase", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
+	return []string{"phase", "prepare", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
 }
 
-// payloadOf names the single payload an event type carries, empty for the
-// run-start event that carries none, and reports whether the type is one the
-// contract knows at all.
 func payloadOf(eventType string) (string, bool) {
 	switch eventType {
 	case trace.TypeRunStart:
 		return "", true
 	case trace.TypePhaseStart, trace.TypePhaseEnd:
 		return "phase", true
+	case trace.TypePrepare:
+		return "prepare", true
 	case trace.TypeExec:
 		return "exec", true
 	case trace.TypeMutantExec:
@@ -210,13 +174,12 @@ func payloadOf(eventType string) (string, bool) {
 	}
 }
 
-// payloadPresent reports whether the payload an event's type names was
-// actually decoded. A JSON null leaves the field present in the raw object but
-// the pointer nil, which pairing alone cannot tell from a real payload.
 func payloadPresent(event trace.Event) bool {
 	switch event.Type {
 	case trace.TypePhaseStart, trace.TypePhaseEnd:
 		return event.Phase != nil
+	case trace.TypePrepare:
+		return event.Prepare != nil
 	case trace.TypeExec:
 		return event.Exec != nil
 	case trace.TypeMutantExec:
@@ -236,8 +199,6 @@ func payloadPresent(event trace.Event) bool {
 	}
 }
 
-// checkPairing holds an event to the payload its type names: that payload and
-// no other one.
 func checkPairing(eventType, payload string, fields map[string]json.RawMessage) error {
 	for _, name := range payloadNames() {
 		_, present := fields[name]
@@ -251,7 +212,6 @@ func checkPairing(eventType, payload string, fields map[string]json.RawMessage) 
 	return nil
 }
 
-// checkSchema holds the format identity to the one event that declares it.
 func checkSchema(event trace.Event, fields map[string]json.RawMessage) error {
 	_, present := fields["schema"]
 	if event.Type != trace.TypeRunStart {
@@ -270,12 +230,12 @@ func checkSchema(event trace.Event, fields map[string]json.RawMessage) error {
 	return nil
 }
 
-// checkPayload holds the payload an event carries to its own part of the
-// contract.
 func checkPayload(event trace.Event, fields map[string]json.RawMessage) error {
 	switch {
 	case event.Phase != nil:
 		return checkPhase(*event.Phase, fields)
+	case event.Prepare != nil:
+		return checkPrepare(*event.Prepare, fields)
 	case event.Exec != nil:
 		return checkExec(*event.Exec, fields)
 	case event.Mutant != nil:
@@ -305,6 +265,58 @@ func checkPhase(record trace.PhaseRecord, fields map[string]json.RawMessage) err
 	return checkNotNegative("phase.duration_ms", record.DurationMS)
 }
 
+func checkPrepare(record trace.PrepareRecord, fields map[string]json.RawMessage) error {
+	prepare, err := requiredFields(fields, "prepare", "phase", "state")
+	if err != nil {
+		return err
+	}
+	if !knownPreparePhase(record.Phase) {
+		return fmt.Errorf("unknown prepare phase %q", record.Phase)
+	}
+	switch record.State {
+	case trace.PrepareStateStarted:
+		if _, present := prepare["result"]; present {
+			return errors.New("started prepare carries a result")
+		}
+		if _, present := prepare["duration_ms"]; present {
+			return errors.New("started prepare carries a duration_ms")
+		}
+		return nil
+	case trace.PrepareStateFinished:
+		if _, err := requiredFields(fields, "prepare", "result", "duration_ms"); err != nil {
+			return err
+		}
+		switch record.Result {
+		case trace.PrepareResultSucceeded, trace.PrepareResultFailed, trace.PrepareResultSkipped:
+		default:
+			return fmt.Errorf("unknown prepare result %q", record.Result)
+		}
+		if record.DurationMS == nil {
+			return errors.New("prepare.duration_ms is null")
+		}
+		return checkNotNegative("prepare.duration_ms", *record.DurationMS)
+	default:
+		return fmt.Errorf("unknown prepare state %q", record.State)
+	}
+}
+
+func knownPreparePhase(phase string) bool {
+	switch phase {
+	case trace.PreparePhaseDiscovery,
+		trace.PreparePhaseProbeSnapshot,
+		trace.PreparePhaseMainValidation,
+		trace.PreparePhaseMainRestoration,
+		trace.PreparePhaseVerification,
+		trace.PreparePhaseBinaryBuild,
+		trace.PreparePhaseProbeValidation,
+		trace.PreparePhaseProbeCoverageBuild,
+		trace.PreparePhaseProbeRestoration:
+		return true
+	default:
+		return false
+	}
+}
+
 func checkExec(record trace.ExecRecord, fields map[string]json.RawMessage) error {
 	if _, err := requiredFields(fields, "exec", "argv", "exit_code"); err != nil {
 		return err
@@ -324,8 +336,6 @@ func checkExec(record trace.ExecRecord, fields map[string]json.RawMessage) error
 	return checkEnvironmentNames(record.EnvNames)
 }
 
-// checkEnvironmentNames holds an environment description to the half a trace
-// is allowed to keep: names alone, each of them once.
 func checkEnvironmentNames(names []string) error {
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
@@ -354,20 +364,17 @@ func checkMutant(record trace.MutantRecord, fields map[string]json.RawMessage) e
 }
 
 func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) error {
-	inner, err := requiredFields(fields, "route", "path", "reason")
+	inner, err := requiredFields(fields, "route", "path", "reason", "granularity")
 	if err != nil {
 		return err
 	}
-	if record.Reason != trace.ReasonCoverageReaching && record.Reason != trace.ReasonUnreached {
-		return fmt.Errorf("unknown route reason %q, want %q or %q",
-			record.Reason, trace.ReasonCoverageReaching, trace.ReasonUnreached)
+	if record.Reason != trace.ReasonCoverageReaching &&
+		record.Reason != trace.ReasonProbeReaching && record.Reason != trace.ReasonUnreached {
+		return fmt.Errorf("unknown route reason %q, want %q, %q, or %q",
+			record.Reason, trace.ReasonCoverageReaching, trace.ReasonProbeReaching, trace.ReasonUnreached)
 	}
-	// The routing labels are additive, so an empty one is a recording made
-	// before the field existed rather than a deviation. A value outside the
-	// contract is a deviation, because a summary that counted it would be
-	// counting a label nothing produces.
-	if record.Granularity != "" &&
-		record.Granularity != trace.GranularityBlock && record.Granularity != trace.GranularityFile {
+
+	if record.Granularity != trace.GranularityBlock && record.Granularity != trace.GranularityFile {
 		return fmt.Errorf("unknown route granularity %q, want %q or %q",
 			record.Granularity, trace.GranularityBlock, trace.GranularityFile)
 	}
@@ -376,13 +383,15 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 		return fmt.Errorf("unknown route fallback %q, want %q or %q",
 			record.Fallback, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
 	}
-	// A fallback names why a decision by block dropped back to the file, so a
-	// route recording one that was decided otherwise contradicts itself.
+
 	if record.Fallback != "" && record.Granularity != trace.GranularityFile {
 		return fmt.Errorf("route fallback %q on granularity %q, want granularity %q: a fallback is what dropped the route to the file",
 			record.Fallback, record.Granularity, trace.GranularityFile)
 	}
 	if err := checkDischarges(record); err != nil {
+		return err
+	}
+	if err := checkProbeRouting(record, inner); err != nil {
 		return err
 	}
 	if err := checkReuse(record); err != nil {
@@ -397,26 +406,62 @@ func checkRoute(record trace.RouteRecord, fields map[string]json.RawMessage) err
 	if err := checkNotNegative("route.file_candidates", int64(record.FileCandidates)); err != nil {
 		return err
 	}
-	// The granularity is what marks a route as carrying its routing metadata,
-	// so a column or a candidate count without one is a route the summary
-	// would read as metadata-free while it carries some. Presence is what
-	// matters, not the value: a recorded zero is metadata too.
-	if record.Granularity == "" {
-		for _, field := range []string{"column", "file_candidates", "discharged", "probed"} {
-			if _, present := inner[field]; present {
-				return fmt.Errorf("route %s recorded without a granularity: the granularity is what marks a route as carrying its routing metadata", field)
+	return nil
+}
+
+func checkProbeRouting(record trace.RouteRecord, fields map[string]json.RawMessage) error {
+	_, recovered := fields["probe_reaching"]
+	if recovered {
+		if len(record.ProbeReaching) == 0 {
+			return errors.New("route probe_reaching is empty: a positive probe route names at least one recovered target")
+		}
+		if record.Reason != trace.ReasonProbeReaching || !record.Probed {
+			return fmt.Errorf("route records probe-reaching targets with reason %q and probed=%t, want reason %q and probed=true",
+				record.Reason, record.Probed, trace.ReasonProbeReaching)
+		}
+		reaching := make(map[string]bool, len(record.ReachingTargets))
+		for _, target := range record.ReachingTargets {
+			reaching[target] = true
+		}
+		seen := make(map[string]bool, len(record.ProbeReaching))
+		for _, target := range record.ProbeReaching {
+			if target == "" || seen[target] || !reaching[target] {
+				return fmt.Errorf("route probe_reaching target %q is empty, repeated, or absent from reaching_targets", target)
 			}
+			seen[target] = true
+		}
+	} else if record.Reason == trace.ReasonProbeReaching {
+		return errors.New("route has reason probe-reaching without naming probe_reaching targets")
+	}
+	_, suiteCoverage := fields["suite_coverage"]
+	if suiteCoverage {
+		if !strings.HasPrefix(record.SuiteCoverage, trace.PackageSuiteCoveragePrefix) ||
+			len(record.SuiteCoverage) == len(trace.PackageSuiteCoveragePrefix) || record.Granularity != trace.GranularityBlock {
+			return fmt.Errorf("route suite_coverage %q on granularity %q, want a package-suite-coverage identity on block granularity",
+				record.SuiteCoverage, record.Granularity)
+		}
+	}
+	if _, reached := fields["suite_reached"]; reached && (!suiteCoverage || !record.SuiteReached) {
+		return fmt.Errorf("route suite_reached=%t without a suite_coverage control", record.SuiteReached)
+	}
+	if _, recorded := fields["suite_probe"]; recorded {
+		if !strings.HasPrefix(record.SuiteProbe, trace.PackageSuiteProbePrefix) ||
+			len(record.SuiteProbe) == len(trace.PackageSuiteProbePrefix) || !record.Probed {
+			return fmt.Errorf("route suite_probe %q with probed=%t, want a package-suite identity and probed=true",
+				record.SuiteProbe, record.Probed)
+		}
+	}
+	if suiteCoverage && record.SuiteProbe != "" {
+		coveragePackage := strings.TrimPrefix(record.SuiteCoverage, trace.PackageSuiteCoveragePrefix)
+		probePackage := strings.TrimPrefix(record.SuiteProbe, trace.PackageSuiteProbePrefix)
+		if coveragePackage != probePackage {
+			return fmt.Errorf("route suite controls name different packages: coverage %q, probe %q",
+				coveragePackage, probePackage)
 		}
 	}
 	return nil
 }
 
-// checkReuse holds a reused route to the biconditional the contract states.
-// Nothing ran for a mutant the run resolved from an earlier run's evidence, so
-// the plan of a reused route is the reuse and nothing else, and a plan that is
-// the reuse belongs to a route that says it was reused. A reader told by one
-// field and not the other is reading a recording that contradicts itself, and
-// would count an execution that never happened or miss one that did.
 func checkReuse(record trace.RouteRecord) error {
 	planned := slices.Equal(record.Plan, []string{routePlanReused})
 	if record.Reused == planned {
@@ -430,19 +475,6 @@ func checkReuse(record trace.RouteRecord) error {
 		routePlanReused)
 }
 
-// checkDischarges holds the proofs that removed a target from a reaching set to
-// the vocabulary the contract names, and to the accounting behind it: a
-// discharge names one target and the proof that removed it, a discharged
-// target is one the route no longer reaches, so a route naming the same target
-// on both sides contradicts itself, and a target is removed by one proof, so a
-// route naming the same target twice would be counted twice. One route may
-// carry both proofs, because the reason is read per entry.
-//
-// It holds them to their prerequisites as well. The reaching set a proof
-// removes a target from is the one the blocks decided, so a route recording any
-// discharge was decided by block; and the infection proof is the probe pass's
-// measurement of this mutant, so a route recording that one was probed. Either
-// contradiction is a route the summary would otherwise count as a proof.
 func checkDischarges(record trace.RouteRecord) error {
 	if len(record.Discharged) == 0 {
 		return nil
@@ -481,12 +513,6 @@ func checkDischarges(record trace.RouteRecord) error {
 	return nil
 }
 
-// checkProbe holds one probe execution to its part of the contract: it names
-// the target that ran and the status it returned with, its timings are
-// durations, its outcome is one the contract names, and it ended in exactly
-// one way — with that outcome, or with the error that stopped it before one.
-// A record saying neither describes no execution, and one saying both would
-// be counted as an error by one reader and as a measurement by another.
 func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) error {
 	probe, err := requiredFields(fields, "probe", "target", "exit_code")
 	if err != nil {
@@ -494,6 +520,33 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 	}
 	if err := checkNotEmpty("probe.target", record.Target); err != nil {
 		return err
+	}
+	_, suiteRecorded := probe["suite"]
+	_, infectionsRecorded := probe["infected"]
+	if record.Control {
+		target := trace.MutationControlProbePrefix + record.Package
+		if record.Package == "" {
+			target = trace.MutationControlProbePrefix + "all"
+		}
+		if record.Target != target {
+			return fmt.Errorf("exact original preflight target %q in package %q, want %q for that exact package",
+				record.Target, record.Package, target)
+		}
+		if suiteRecorded || infectionsRecorded {
+			return errors.New("exact original preflight carries suite or infected: a control is neither a routing suite nor a source of infection facts")
+		}
+	} else if strings.HasPrefix(record.Target, trace.MutationControlProbePrefix) {
+		return fmt.Errorf("probe target %q has a mutation-control identity without control=true", record.Target)
+	}
+	if record.Suite {
+		if !strings.HasPrefix(record.Target, trace.PackageSuiteProbePrefix) ||
+			len(record.Target) == len(trace.PackageSuiteProbePrefix) || record.Package == "" ||
+			record.Target != trace.PackageSuiteProbePrefix+record.Package {
+			return fmt.Errorf("suite probe target %q in package %q, want the package-suite identity of that exact package",
+				record.Target, record.Package)
+		}
+	} else if strings.HasPrefix(record.Target, trace.PackageSuiteProbePrefix) {
+		return fmt.Errorf("probe target %q has a package-suite identity without suite=true", record.Target)
 	}
 	if err := checkNotNegative("probe.timeout_ms", record.TimeoutMS); err != nil {
 		return err
@@ -509,9 +562,7 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 			trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
 			trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable)
 	}
-	// Presence is read from the line rather than from the decoded record, as
-	// the schema reads it: an empty error and an empty infection list are
-	// fields the record carries, not fields it left out.
+
 	_, outcome := probe["outcome"]
 	_, failure := probe["error"]
 	switch {
@@ -524,18 +575,9 @@ func checkProbe(record trace.ProbeRecord, fields map[string]json.RawMessage) err
 			return err
 		}
 	}
-	_, infected := probe["infected"]
-	return checkInfections(record, infected)
+	return checkInfections(record, infectionsRecorded)
 }
 
-// checkInfections holds the mutants a probe execution infected to the
-// accounting behind them: a mutant is named by an identity, an execution
-// infects a mutant once, so a record naming the same one twice would be
-// counted twice, and only a measured execution observed anything at all, so
-// infections beside any other outcome — an empty list included, which is the
-// claim that the execution measured and found nothing — are facts an
-// execution that measured none claims. recorded says whether the line carries
-// the field at all, which the decoded record cannot tell from an empty list.
 func checkInfections(record trace.ProbeRecord, recorded bool) error {
 	if !recorded {
 		return nil
@@ -584,8 +626,6 @@ func checkRun(record trace.RunRecord, fields map[string]json.RawMessage) error {
 	return checkNotNegative("run.events_dropped", record.EventsDropped)
 }
 
-// requiredFields returns the raw fields of a payload once every field the
-// contract requires of it is present.
 func requiredFields(fields map[string]json.RawMessage, payload string, required ...string) (map[string]json.RawMessage, error) {
 	inner, err := objectFields(fields[payload])
 	if err != nil {
@@ -599,13 +639,10 @@ func requiredFields(fields map[string]json.RawMessage, payload string, required 
 	return inner, nil
 }
 
-// missingField reports a field the contract requires and the line does not
-// carry.
 func missingField(name string) error {
 	return fmt.Errorf("missing required field %q", name)
 }
 
-// checkNotEmpty reports a field the contract requires a value in.
 func checkNotEmpty(name, value string) error {
 	if value == "" {
 		return fmt.Errorf("%s is empty", name)
@@ -613,8 +650,6 @@ func checkNotEmpty(name, value string) error {
 	return nil
 }
 
-// checkNotNegative reports a count or a duration below the range the contract
-// gives it. A negative duration would silently shorten a total.
 func checkNotNegative(name string, value int64) error {
 	if value < 0 {
 		return fmt.Errorf("%s is %d, which is below zero", name, value)
@@ -622,9 +657,6 @@ func checkNotNegative(name string, value int64) error {
 	return nil
 }
 
-// checkTimestamp holds the moment an event was recorded to RFC 3339. The
-// summary never reads the clock, so the check is about the stream being the
-// stream it claims rather than about the value being needed.
 func checkTimestamp(value string) error {
 	if err := checkNotEmpty("timestamp", value); err != nil {
 		return err
@@ -635,10 +667,8 @@ func checkTimestamp(value string) error {
 	return nil
 }
 
-// isDigest reports whether a value is a SHA-256 digest as the contract writes
-// one: 64 lowercase hexadecimal characters.
 func isDigest(value string) bool {
-	if len(value) != 64 {
+	if len(value) != hex.EncodedLen(sha256.Size) {
 		return false
 	}
 	for _, character := range value {

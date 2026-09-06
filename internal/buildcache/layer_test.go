@@ -5,6 +5,8 @@ package buildcache_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,19 +16,21 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// reference is a fixed moment every timed assertion is written against, so a
-// test states the age of an entry rather than racing the wall clock.
 var reference = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
-// identifier renders a cache key or an output identifier of the length the go
-// command uses, distinguished by its first byte.
+const (
+	sharedObjectActionCount     = 2
+	collectionFixtureEntryCount = 3
+	staleLayerEntryAge          = 48 * time.Hour
+)
+
 func identifier(value byte) []byte {
-	return append([]byte{value}, bytes.Repeat([]byte{0xab}, 31)...)
+	return append([]byte{value}, bytes.Repeat([]byte{0xab}, sha256.Size-1)...)
 }
 
-// prepared is a layer ready to store entries.
 func prepared(t *testing.T) buildcache.Layer {
 	t.Helper()
 	layer := buildcache.Layer{Dir: filepath.Join(t.TempDir(), "layer")}
@@ -36,11 +40,6 @@ func prepared(t *testing.T) buildcache.Layer {
 	return layer
 }
 
-// store puts one output and fails the test if it could not.
-//
-// It writes through Layers rather than through the layer, because Layers is the
-// only way production reaches a layer at all: a test that stored an entry by
-// some other route would be holding a path no run takes.
 func store(t *testing.T, layer buildcache.Layer, action, output byte, content string, at time.Time) buildcache.Entry {
 	t.Helper()
 	entry, err := buildcache.Layers{Scratch: layer}.Put(
@@ -51,16 +50,12 @@ func store(t *testing.T, layer buildcache.Layer, action, output byte, content st
 	return entry
 }
 
-// lookup resolves one cache key against a single layer, reported as the hit or
-// miss the layer-level assertions below are written in terms of.
 func lookup(t *testing.T, layer buildcache.Layer, actionID []byte, now time.Time) (buildcache.Entry, bool, error) {
 	t.Helper()
 	entry, source, err := buildcache.Layers{Scratch: layer}.Get(actionID, now)
 	return entry, source != buildcache.SourceNone, err
 }
 
-// files lists the paths below one half of a layer, relative and slash
-// separated, so an assertion names what is on the disk.
 func files(t *testing.T, layer buildcache.Layer, half string) []string {
 	t.Helper()
 	root := filepath.Join(layer.Dir, half)
@@ -86,9 +81,6 @@ func files(t *testing.T, layer buildcache.Layer, half string) []string {
 	return found
 }
 
-// collect bounds a layer through the entry point production uses, which takes
-// the layer's collection lock and records that it ran. There is no unlocked
-// collection to test against: every caller goes through this one.
 func collect(t *testing.T, layer buildcache.Layer, policy buildcache.Policy, now time.Time) buildcache.Collected {
 	t.Helper()
 	collected, ran, err := layer.CollectLocked(policy, 0, now)
@@ -101,8 +93,6 @@ func collect(t *testing.T, layer buildcache.Layer, policy buildcache.Policy, now
 	return collected
 }
 
-// age sets an entry's file time to a moment before the reference, which is how
-// a test says how long ago something was read.
 func age(t *testing.T, path string, before time.Duration) {
 	t.Helper()
 	moment := reference.Add(-before)
@@ -111,27 +101,18 @@ func age(t *testing.T, path string, before time.Duration) {
 	}
 }
 
-// actionPath is where a layer stores one cache key, as this test knows the
-// layout rather than as the package computes it: the layout is the contract a
-// concurrent run and a later goatest read the layer through.
 func actionPath(layer buildcache.Layer, action byte) string {
 	name := hexadecimalName(identifier(action))
 	return filepath.Join(layer.Dir, "actions", name[:2], name)
 }
 
-// objectPath is where a layer stores one output.
 func objectPath(layer buildcache.Layer, output byte) string {
 	name := hexadecimalName(identifier(output))
 	return filepath.Join(layer.Dir, "objects", name[:2], name)
 }
 
 func hexadecimalName(identifier []byte) string {
-	const digits = "0123456789abcdef"
-	name := make([]byte, 0, len(identifier)*2)
-	for _, value := range identifier {
-		name = append(name, digits[value>>4], digits[value&0x0f])
-	}
-	return string(name)
+	return hex.EncodeToString(identifier)
 }
 
 func TestLayerStoresAndReturnsOutputsByteExact(t *testing.T) {
@@ -169,7 +150,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 			name: "malformed action line",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
 				store(t, layer, 1, 2, "content", reference)
-				if err := os.WriteFile(actionPath(layer, 1), []byte("{not json"), 0o644); err != nil {
+				if err := os.WriteFile(actionPath(layer, 1), []byte("{not json"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -178,7 +159,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 			name: "action names no output",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
 				store(t, layer, 1, 2, "content", reference)
-				if err := os.WriteFile(actionPath(layer, 1), []byte(`{"output":"","size":7}`), 0o644); err != nil {
+				if err := os.WriteFile(actionPath(layer, 1), []byte(`{"output":"","size":7}`), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -196,7 +177,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 			name: "truncated object",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
 				store(t, layer, 1, 2, "content", reference)
-				if err := os.WriteFile(objectPath(layer, 2), []byte("cut"), 0o644); err != nil {
+				if err := os.WriteFile(objectPath(layer, 2), []byte("cut"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -225,7 +206,7 @@ func TestLayerSharesOneObjectBetweenEveryKeyThatProducedIt(t *testing.T) {
 	if stored := files(t, layer, "objects"); len(stored) != 1 {
 		t.Fatalf("objects on disk = %v, want exactly one", stored)
 	}
-	if keys := files(t, layer, "actions"); len(keys) != 2 {
+	if keys := files(t, layer, "actions"); len(keys) != sharedObjectActionCount {
 		t.Fatalf("actions on disk = %v, want two", keys)
 	}
 }
@@ -337,7 +318,7 @@ func TestLayerCollectRemovesWhatThePolicyNames(t *testing.T) {
 			if !slices.Equal(survived, testCase.want) {
 				t.Fatalf("survivors = %v, want %v", survived, testCase.want)
 			}
-			wantRemoved := 3 - len(testCase.want)
+			wantRemoved := collectionFixtureEntryCount - len(testCase.want)
 			if collected.RemovedActions != wantRemoved || collected.RemovedObjects != wantRemoved {
 				t.Fatalf("Collect = %+v, want %d actions and objects removed", collected, wantRemoved)
 			}
@@ -356,8 +337,8 @@ func TestLayerCollectBreaksTiesByName(t *testing.T) {
 	layer := prepared(t)
 	for _, key := range []byte{1, 2, 3} {
 		store(t, layer, key, key+0x10, "0123456789", reference)
-		age(t, actionPath(layer, key), 48*time.Hour)
-		age(t, objectPath(layer, key+0x10), 48*time.Hour)
+		age(t, actionPath(layer, key), staleLayerEntryAge)
+		age(t, objectPath(layer, key+0x10), staleLayerEntryAge)
 	}
 	collect(t, layer, buildcache.Policy{MaxBytes: 20, MinIdle: time.Hour}, reference)
 	var survived []byte
@@ -378,7 +359,7 @@ func TestLayerCollectRemovesObjectsNoKeyNames(t *testing.T) {
 	if err := os.Remove(actionPath(layer, 1)); err != nil {
 		t.Fatal(err)
 	}
-	age(t, objectPath(layer, 2), 48*time.Hour)
+	age(t, objectPath(layer, 2), staleLayerEntryAge)
 	collected := collect(t, layer, buildcache.Policy{MinIdle: time.Hour}, reference)
 	if collected.RemovedObjects != 1 || collected.RemovedBytes != 10 || collected.After.Bytes != 0 {
 		t.Fatalf("Collect = %+v, want the orphaned object removed", collected)
@@ -409,8 +390,7 @@ func TestLayerInspectAndCollectAnswerForALayerThatHoldsNothing(t *testing.T) {
 	if err != nil || status != (buildcache.Status{}) {
 		t.Fatalf("Inspect = (%+v, %v), want the zero status", status, err)
 	}
-	// A layer no machine has built yet is nothing to collect rather than a
-	// failure, which is what a first ever run and a first ever cache gc meet.
+
 	collected, ran, err := empty.CollectLocked(buildcache.Policy{MaxBytes: 1, TTL: time.Hour, MinIdle: time.Hour}, 0, reference)
 	if err != nil || ran || collected != (buildcache.Collected{}) {
 		t.Fatalf("Collect = (%+v, %t, %v), want nothing collected", collected, ran, err)
@@ -425,7 +405,7 @@ func TestLayerInspectReportsWhatTheLayerHolds(t *testing.T) {
 	layer := prepared(t)
 	store(t, layer, 1, 2, "0123456789", reference)
 	store(t, layer, 3, 4, "01234", reference)
-	age(t, actionPath(layer, 1), 48*time.Hour)
+	age(t, actionPath(layer, 1), staleLayerEntryAge)
 	age(t, actionPath(layer, 3), time.Minute)
 	status, err := layer.Inspect()
 	if err != nil {
@@ -434,7 +414,7 @@ func TestLayerInspectReportsWhatTheLayerHolds(t *testing.T) {
 	if status.Entries != 2 || status.Bytes != 15 {
 		t.Fatalf("Inspect = %+v, want two entries of 15 bytes", status)
 	}
-	if want := reference.Add(-48 * time.Hour); !status.Oldest.Equal(want) {
+	if want := reference.Add(-staleLayerEntryAge); !status.Oldest.Equal(want) {
 		t.Fatalf("Inspect oldest = %s, want %s", status.Oldest, want)
 	}
 }
@@ -446,10 +426,7 @@ func TestLayerPrepareLeavesItsMarkerAndRefusesAnUnusableDirectory(t *testing.T) 
 	if err != nil || !strings.Contains(string(marker), "goatest") {
 		t.Fatalf("marker = %q (%v), want a note naming goatest", marker, err)
 	}
-	// The marker carries goatest's own name rather than being a README. A
-	// README is a file a project may already keep in a directory somebody
-	// pointed build_dir at, and the marker's whole job is to be a name nothing
-	// else writes.
+
 	if strings.EqualFold(buildcache.MarkerName, "README") || strings.EqualFold(buildcache.MarkerName, "README.md") {
 		t.Fatalf("marker name = %q, want a name only goatest writes", buildcache.MarkerName)
 	}
@@ -461,7 +438,7 @@ func TestLayerPrepareLeavesItsMarkerAndRefusesAnUnusableDirectory(t *testing.T) 
 		t.Fatal("a layer with no directory prepared successfully")
 	}
 	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
+	if err := os.WriteFile(file, nil, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := (buildcache.Layer{Dir: filepath.Join(file, "layer")}).Prepare(); err == nil {
@@ -472,13 +449,6 @@ func TestLayerPrepareLeavesItsMarkerAndRefusesAnUnusableDirectory(t *testing.T) 
 	}
 }
 
-// TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache is what stops a
-// mistyped build_dir from ever being collected.
-//
-// goatest collects and removes files below a layer, so it must never adopt a
-// directory somebody else owns. A directory that holds files and carries no
-// marker is refused; an empty one, an absent one, and one goatest prepared
-// before are accepted, because those are the three a run legally meets.
 func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -493,7 +463,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "an empty directory",
 			prepare: func(t *testing.T, dir string) {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
+				if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -509,10 +479,10 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "somebody's home directory",
 			prepare: func(t *testing.T, dir string) {
-				if err := os.MkdirAll(filepath.Join(dir, "Documents"), 0o755); err != nil {
+				if err := os.MkdirAll(filepath.Join(dir, "Documents"), filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(dir, ".profile"), []byte("export PATH\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, ".profile"), []byte("export PATH\n"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -521,10 +491,10 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "a directory holding one unrelated file",
 			prepare: func(t *testing.T, dir string) {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
+				if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(dir, "README"), []byte("my project\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "README"), []byte("my project\n"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -543,8 +513,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 				if !strings.Contains(err.Error(), "not a goatest build cache") {
 					t.Fatalf("Prepare error = %v, want it to say the directory is not a goatest build cache", err)
 				}
-				// Refusing must leave the directory as it was: the point is not
-				// to touch what somebody else owns.
+
 				if _, statErr := os.Stat(filepath.Join(dir, buildcache.MarkerName)); statErr == nil {
 					t.Fatal("Prepare wrote its marker into a directory it refused")
 				}

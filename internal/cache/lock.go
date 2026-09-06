@@ -12,30 +12,47 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/advisorylock"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-const lockFileName = ".lock"
+const (
+	lockFileName          = ".lock"
+	lockContentionBackoff = 100 * time.Millisecond
+)
 
-// Lease is an OS advisory exclusive lock on one cache root.
 type Lease struct {
 	file *os.File
 	once sync.Once
 	err  error
 }
 
-// Acquire waits interruptibly for exclusive ownership of root. onWait is
-// called once after the first contention, before waiting for the owner.
 func Acquire(ctx context.Context, root string, onWait func()) (*Lease, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	return acquire(ctx, root, onWait, lockOperations{
+		mkdirAll: os.MkdirAll,
+		openFile: os.OpenFile,
+		try:      advisorylock.Try,
+		wait:     waitForCacheLock,
+	})
+}
+
+type lockOperations struct {
+	mkdirAll func(string, os.FileMode) error
+	openFile func(string, int, os.FileMode) (*os.File, error)
+	try      func(*os.File) (bool, error)
+	wait     func(context.Context) error
+}
+
+func acquire(ctx context.Context, root string, onWait func(), operations lockOperations) (*Lease, error) {
+	if err := operations.mkdirAll(root, filemode.ReadableDirectory); err != nil {
 		return nil, fmt.Errorf("goatest: create cache lock directory: %w", err)
 	}
-	file, err := os.OpenFile(filepath.Join(root, lockFileName), os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := operations.openFile(filepath.Join(root, lockFileName), os.O_CREATE|os.O_RDWR, filemode.ReadableFile)
 	if err != nil {
 		return nil, fmt.Errorf("goatest: open cache lock: %w", err)
 	}
 	waiting := false
 	for {
-		locked, lockErr := advisorylock.Try(file)
+		locked, lockErr := operations.try(file)
 		if lockErr != nil {
 			_ = file.Close()
 			return nil, fmt.Errorf("goatest: acquire cache lock: %w", lockErr)
@@ -49,20 +66,24 @@ func Acquire(ctx context.Context, root string, onWait func()) (*Lease, error) {
 				onWait()
 			}
 		}
-		timer := time.NewTimer(100 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+		if err := operations.wait(ctx); err != nil {
 			_ = file.Close()
-			return nil, context.Cause(ctx)
-		case <-timer.C:
+			return nil, err
 		}
 	}
 }
 
-// Release unlocks and closes the lease. It is safe to call more than once.
+func waitForCacheLock(ctx context.Context) error {
+	timer := time.NewTimer(lockContentionBackoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (lease *Lease) Release() error {
 	if lease == nil {
 		return nil

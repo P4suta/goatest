@@ -11,8 +11,6 @@ import (
 	"github.com/P4suta/goatest/internal/ui"
 )
 
-// The plain line is a deterministic contract: one byte of drift here breaks
-// every consumer that parses progress lines.
 func TestPlainRendersTheDeterministicNoteLine(t *testing.T) {
 	var buffer bytes.Buffer
 	notes := ui.NewPlain(&buffer)
@@ -38,18 +36,17 @@ func TestPlainEscapesTerminalControlCharactersOntoOneLine(t *testing.T) {
 	}
 }
 
-// TestPlainShowsWhatTheProbePassReported pins that the notes of the probe pass
-// reach a plain run. What a phase measured is only worth measuring if the
-// person watching the run is told.
-func TestPlainShowsWhatTheProbePassReported(t *testing.T) {
+func TestPlainShowsBoundedPhaseProgress(t *testing.T) {
 	var buffer bytes.Buffer
 	notes := ui.NewPlain(&buffer)
+	notes.Note("baseline-progress", "17/42")
 	notes.Note("probe-target", "42 targets")
 	notes.Note("probe-progress", "21/42")
 	notes.Note("probe-summary", "40 measured, 2 without facts")
 	notes.Close()
 	got := buffer.String()
 	for _, want := range []string{
+		"goatest: baseline-progress  17/42\n",
 		"goatest: probe-target       42 targets\n",
 		"goatest: probe-progress     21/42\n",
 		"goatest: probe-summary      40 measured, 2 without facts\n",

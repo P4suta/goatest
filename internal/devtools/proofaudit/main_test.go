@@ -9,21 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// writeTrace writes one recording into a temporary directory and returns its
-// path.
 func writeTrace(t *testing.T, stream string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "trace.jsonl")
-	if err := os.WriteFile(path, []byte(stream), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(stream), filemode.ReadableFile); err != nil {
 		t.Fatalf("write the trace: %v", err)
 	}
 	return path
 }
 
-// soundRecording is a recording of a run whose one killer ran the block its
-// mutant sits in: the shape every routing layer must keep passing.
 func soundRecording(t *testing.T) (string, string) {
 	t.Helper()
 	stream := recordedRun(t, []string{killerTarget},
@@ -128,13 +126,10 @@ func TestRunReportsARecordingItCannotParse(t *testing.T) {
 }
 
 func TestRunReadsTheModuleFromGoModAndLetsTheFlagOverrideIt(t *testing.T) {
-	// The default module path comes from ./go.mod, which is the working
-	// directory of the process, so this test cannot run in parallel with one
-	// that depends on the working directory.
 	tracePath, profiles := soundRecording(t)
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "go.mod"),
-		[]byte("module "+fixtureModule+"\n\ngo 1.26.0\n"), 0o644); err != nil {
+		[]byte("module "+fixtureModule+"\n\ngo 1.26.0\n"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(directory)
@@ -147,8 +142,6 @@ func TestRunReadsTheModuleFromGoModAndLetsTheFlagOverrideIt(t *testing.T) {
 		t.Errorf("the audit does not name the module it read from go.mod:\n%s", stdout.String())
 	}
 
-	// The flag decides instead when it is given, which the profiles of
-	// another module prove by being refused.
 	const other = "example.com/other"
 	stdout.Reset()
 	stderr.Reset()
@@ -161,8 +154,6 @@ func TestRunReadsTheModuleFromGoModAndLetsTheFlagOverrideIt(t *testing.T) {
 }
 
 func TestRunReportsAGoModItCannotRead(t *testing.T) {
-	// See TestRunReadsTheModuleFromGoModAndLetsTheFlagOverrideIt: the working
-	// directory is the process's, so this test runs on its own too.
 	tracePath, profiles := soundRecording(t)
 	t.Chdir(t.TempDir())
 
@@ -180,8 +171,7 @@ func TestRunReportsAGoModItCannotRead(t *testing.T) {
 
 func TestRunExitsOneOnAViolation(t *testing.T) {
 	t.Parallel()
-	// A violation is the finding this tool exists for, so it is reported on
-	// stdout and refused with an exit code a gate can read.
+
 	stream := recordedRun(t, []string{killerTarget},
 		blockRoute(2, firstMutant, 21, 4, killerTarget),
 		killedBy(3, firstMutant, firstDisplay, killerTarget),
@@ -205,10 +195,6 @@ func TestRunExitsOneOnAViolation(t *testing.T) {
 	}
 }
 
-// soundCatalog writes a catalog for the sound recording: its one mutant, with
-// a proof over a body no profile of the run instrumented. The layer refuses to
-// discharge anything from a body the toolchain never measured, so the sound
-// recording stays sound with the layer in the audit.
 func soundCatalog(t *testing.T) string {
 	t.Helper()
 	return writeCatalog(t, `{"document_type": "go-mutants/catalog", "schema_version": 1, "mutants": [
@@ -239,9 +225,7 @@ func TestRunAuditsTheBranchLayerWhenACatalogIsGiven(t *testing.T) {
 
 func TestRunSaysTheBranchLayerWasNotAuditedWithoutACatalog(t *testing.T) {
 	t.Parallel()
-	// A missing row and a row of zeroes read the same to anyone skimming, so
-	// the report says which of the two it is and the exit code stays what the
-	// audited layers decided.
+
 	tracePath, profiles := soundRecording(t)
 
 	var stdout, stderr bytes.Buffer
@@ -257,10 +241,6 @@ func TestRunSaysTheBranchLayerWasNotAuditedWithoutACatalog(t *testing.T) {
 	}
 }
 
-// probedRecording is a recording of a run whose probe pass measured its one
-// killer, naming the mutants that killer saw infect. It is the shape the
-// infection layer is audited over, and the shape the layer is left out of when
-// the probe pass is missing.
 func probedRecording(t *testing.T, infected ...string) (string, string) {
 	t.Helper()
 	stream := recordedRun(t, []string{killerTarget},
@@ -275,8 +255,7 @@ func probedRecording(t *testing.T, infected ...string) (string, string) {
 
 func TestRunAuditsTheInfectionLayerWhenTheRecordingHoldsAProbePass(t *testing.T) {
 	t.Parallel()
-	// The layer decides by facts the recording itself carries, so it is audited
-	// with no third input: a probe pass in the trace is the whole condition.
+
 	tracePath, profiles := probedRecording(t, firstMutant)
 
 	var stdout, stderr bytes.Buffer
@@ -299,9 +278,7 @@ func TestRunAuditsTheInfectionLayerWhenTheRecordingHoldsAProbePass(t *testing.T)
 
 func TestRunExitsOneOnAnInfectionViolation(t *testing.T) {
 	t.Parallel()
-	// The probe pass measured the killer and never saw the mutant infect, and
-	// the run killed it there anyway. That is the finding this tool exists for,
-	// so it reaches stdout and the exit code a gate reads.
+
 	tracePath, profiles := probedRecording(t)
 
 	var stdout, stderr bytes.Buffer
@@ -338,9 +315,7 @@ func TestRunReportsACatalogItCannotRead(t *testing.T) {
 
 func TestRunRefusesACatalogItCannotBeSureOf(t *testing.T) {
 	t.Parallel()
-	// A document of another kind or another schema may name the same fields
-	// and mean something else by them, and an audit that read one anyway would
-	// print a soundness result it has no evidence for.
+
 	tracePath, profiles := soundRecording(t)
 	catalog := writeCatalog(t, `{"document_type": "go-mutants/inventory", "schema_version": 7, "mutants": []}`)
 
@@ -376,7 +351,7 @@ func TestModuleFromGoModReadsTheDirectiveAlone(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), goModFile)
-			if err := os.WriteFile(path, []byte(testCase.content), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(testCase.content), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			got, err := moduleFromGoMod(path)
@@ -394,7 +369,7 @@ func TestModuleFromGoModReportsAFileThatNamesNoModule(t *testing.T) {
 	t.Parallel()
 	for _, content := range []string{"go 1.26.0\n", "// module example.com/commented\n", "module\n"} {
 		path := filepath.Join(t.TempDir(), goModFile)
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		_, err := moduleFromGoMod(path)
@@ -408,8 +383,6 @@ func TestModuleFromGoModReportsAFileThatNamesNoModule(t *testing.T) {
 	}
 }
 
-// firstLine is the opening line of an audit, which is what a failure about the
-// header should print rather than the whole report.
 func firstLine(text string) string {
 	line, _, _ := strings.Cut(text, "\n")
 	return line

@@ -11,20 +11,14 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
-// mutantAt is one entry of a fixture inventory. Every fixture mutant carries a
-// location and a rule, because a regression is reported by where it is rather
-// than by the content address that identifies it.
 func mutantAt(id string, status report.MutantStatus, path string, line int) report.MutantDisposition {
 	return report.MutantDisposition{ID: id, Status: status, Path: path, Line: line, Rule: "conditional"}
 }
 
-// findingOf is one finding of a fixture report, attributed to a mutant.
 func findingOf(kind, mutantID string) report.Finding {
 	return report.Finding{ID: kind + ":" + mutantID, Kind: kind, MutantID: mutantID, Summary: kind}
 }
 
-// transitionLines renders a status transition matrix so a test can pin both
-// the counts and the order in one comparison.
 func transitionLines(transitions []statusTransition) []string {
 	lines := make([]string, 0, len(transitions))
 	for _, transition := range transitions {
@@ -33,7 +27,6 @@ func transitionLines(transitions []statusTransition) []string {
 	return lines
 }
 
-// kindLines renders a finding-kind transition matrix the same way.
 func kindLines(transitions []kindTransition) []string {
 	lines := make([]string, 0, len(transitions))
 	for _, transition := range transitions {
@@ -147,14 +140,7 @@ func TestCompareCountsStatusTransitionsOverCommonMutantsOnly(t *testing.T) {
 		mutantAt("m-j", report.MutantSurvived, "j.go", 10),
 	}}
 	result := compare(before, after)
-	// Most common transition first, then the pair itself, so two runs of the
-	// same comparison print the same matrix. The counts descend against the
-	// name order of the pairs, and the tie at one row is broken by a before
-	// name whose order contradicts the after names, so nothing but the count
-	// comparison followed by each tie-break in turn produces this order: a
-	// comparator that read the count last, or that fell from the before name
-	// through to the after one, sorts this fixture some other way whatever
-	// order the map hands the rows over in.
+
 	want := []string{
 		"survived -> killed 3",
 		"killed -> killed 2",
@@ -165,9 +151,7 @@ func TestCompareCountsStatusTransitionsOverCommonMutantsOnly(t *testing.T) {
 	if got := transitionLines(result.statuses); !slices.Equal(got, want) {
 		t.Fatalf("transitions = %q, want %q", got, want)
 	}
-	// m-i and m-j are in one report alone: a mutant the other report never
-	// discovered has no transition to count, so the matrix totals the eight
-	// common mutants and nothing besides.
+
 	counted := 0
 	for _, transition := range result.statuses {
 		counted += transition.mutants
@@ -275,12 +259,7 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 		},
 	}
 	result := compare(before, after)
-	// A mutant with several findings is one row named by the whole set it
-	// carried, and a mutant no finding names is the absence rather than a
-	// blank cell. The counts descend against the name order and the tie at one
-	// row is broken by a before name whose order contradicts the after names,
-	// so this order comes from the count comparison and each tie-break in
-	// turn rather than from the order the map handed the rows over in.
+
 	want := []string{
 		"unreached-mutant -> unreached-mutant 3",
 		"surviving-mutant -> unreached-mutant 2",
@@ -291,8 +270,7 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 	if got := kindLines(result.kinds); !slices.Equal(got, want) {
 		t.Fatalf("kind transitions = %q, want %q", got, want)
 	}
-	// The kind totals count every finding of each report, including the ones
-	// no mutant is attributed to.
+
 	var totals []string
 	for _, total := range result.kindTotals {
 		totals = append(totals, fmt.Sprintf("%s %d %d", total.name, total.before, total.after))
@@ -305,6 +283,11 @@ func TestCompareGroupsFindingKindsPerMutant(t *testing.T) {
 
 func TestCompareReportsAccountingDeltasInAFixedOrder(t *testing.T) {
 	t.Parallel()
+	const (
+		changedKilledMutants       = 71
+		changedSurvivingMutants    = 9
+		changedReusedKilledMutants = 60
+	)
 	before := report.Report{Accounting: report.Accounting{
 		Targets: report.CountAccounting{Discovered: 10, Selected: 9, Executed: 8, Skipped: 1, Excluded: 1},
 		Mutants: report.MutantAccounting{
@@ -314,9 +297,9 @@ func TestCompareReportsAccountingDeltasInAFixedOrder(t *testing.T) {
 		Race: report.CountAccounting{Discovered: 5, Selected: 5, Executed: 5},
 	}}
 	after := before
-	after.Accounting.Mutants.Killed = 71
-	after.Accounting.Mutants.Survived = 9
-	after.Accounting.Mutants.ReusedKilled = 60
+	after.Accounting.Mutants.Killed = changedKilledMutants
+	after.Accounting.Mutants.Survived = changedSurvivingMutants
+	after.Accounting.Mutants.ReusedKilled = changedReusedKilledMutants
 
 	result := compare(before, after)
 	want := []string{
@@ -340,9 +323,7 @@ func TestCompareReportsAccountingDeltasInAFixedOrder(t *testing.T) {
 				t.Errorf("%s = %d -> %d, want 70 -> 71", delta.name, delta.before, delta.after)
 			}
 		case "mutants.reused_killed":
-			// How much of a run was answered without running anything is the
-			// number a comparison of two runs is read against, so it is a
-			// delta of its own rather than something hidden inside killed.
+
 			if delta.before != 40 || delta.after != 60 {
 				t.Errorf("%s = %d -> %d, want 40 -> 60", delta.name, delta.before, delta.after)
 			}

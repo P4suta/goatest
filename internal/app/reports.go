@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -37,9 +38,6 @@ var operatingSystemAtomicWrites = atomicWriteOperations{
 	rename: os.Rename,
 }
 
-// WriteReports atomically projects one completed run to its immutable history
-// directory and then advances the scope-aware indexes. A changeset, package,
-// or replay run can never replace latest-full.
 func WriteReports(root string, input report.Report) error {
 	if err := report.ValidateForPersistence(input); err != nil {
 		return err
@@ -59,7 +57,7 @@ func WriteReports(root string, input report.Report) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("goatest: inspect report run %s: %w", input.RunID, err)
 	}
-	if err := os.MkdirAll(runsDirectory, 0o755); err != nil {
+	if err := os.MkdirAll(runsDirectory, filemode.ReadableDirectory); err != nil {
 		return fmt.Errorf("goatest: create report history: %w", err)
 	}
 	stagingDirectory, err := os.MkdirTemp(runsDirectory, ".goatest-run-*")
@@ -123,7 +121,7 @@ func atomicWrite(path string, data []byte) error {
 }
 
 func atomicWriteWith(path string, data []byte, operations atomicWriteOperations) error {
-	if err := operations.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := operations.mkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
 	temporary, err := operations.createTemp(filepath.Dir(path), ".goatest-report-*.tmp")
@@ -140,7 +138,7 @@ func atomicWriteWith(path string, data []byte, operations atomicWriteOperations)
 		_ = temporary.Close()
 		return err
 	}
-	if err := temporary.Chmod(0o644); err != nil {
+	if err := temporary.Chmod(filemode.ReadableFile); err != nil {
 		_ = temporary.Close()
 		return err
 	}

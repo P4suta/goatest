@@ -40,6 +40,8 @@ A durable report must include:
 - repository module/package inventory and explicit Git availability, commit,
   dirty state, merge base, and changed files;
 - an effective configuration SHA-256;
+- the effective test arguments, build tags, mutation operators, mutation
+  parallelism, command timeout, and target timeout;
 - Go, goatest, go-mutants, OS, and architecture identity;
 - RFC3339 start/finish times and duration;
 - cache-derived state and source run ID when applicable;
@@ -59,6 +61,10 @@ The JSON Schema rejects unknown fields and constrains every nested object. Go
 validation additionally enforces arithmetic, scope/verdict, acceptance, cache,
 and unavailable-metadata invariants that JSON Schema alone cannot express.
 
+`goatest replay` restores the selected report's requested package scope,
+contract, and complete `execution` object. A report without that identity is
+not replayable; replay never silently substitutes the current configuration.
+
 `targets` is canonically ordered by descending duration, then ascending target
 ID for equal durations. A completed run may also carry `resume` with the total
 attempt count and the numbers of baseline targets, race packages, and mutants
@@ -72,19 +78,16 @@ conditions in [the assurance contract](assurance-contract.md), and executed
 nothing for it. The two fields are one fact stated twice and are validated
 against each other in both directions. The accounting carries the totals as
 `reused_killed` and `reused_survived`; each is part of `killed` and `survived`
-respectively, so their sum never exceeds `executed`. All four are optional and
-omitted when zero, so a report written before evidence was ever reused still
-validates.
+respectively, so their sum never exceeds `executed`. Both accounting fields are
+required and remain explicit when zero.
 
-A reused mutant that reports as `inconclusive` is a timeout an earlier run
-recorded; reusing one keeps a finding rather than resolving anything. It is
-counted in `executed` and in `inconclusive` like every other inconclusive
-mutant, because `executed = killed + survived + inconclusive` holds however a
-disposition was reached, but no reuse counter includes it: `reused_killed` and
-`reused_survived` are parts of `killed` and `survived` and of nothing else. A
-reused mutant that reports as `accepted` is one whose regenerated finding this
-run's acceptances silenced; it is outside `executed` altogether, so it moves no
-counter but `accepted`, while the flag and the provenance stay.
+An inconclusive mutant is never evidence-reused. Timeout and other inconclusive
+findings are not reusable claims. It is counted in `executed` and in
+`inconclusive`, because `executed = killed + survived + inconclusive` holds
+however a disposition was reached. A reused mutant that reports as `accepted`
+is one whose regenerated finding this run's acceptances silenced; it is outside
+`executed` altogether, so it moves no counter but `accepted`, while the flag
+and the provenance stay.
 
 `reused_killed + reused_survived` is therefore a lower bound on how many
 dispositions carry `reused: true`, not a count of them: a reader wanting every

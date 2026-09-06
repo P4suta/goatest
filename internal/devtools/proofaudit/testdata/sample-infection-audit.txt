@@ -3,24 +3,29 @@ profiles: testdata/sample-profiles
 module: example.com/audited
 
 audit
-counter                     count
-routes                          6
-reused routes                   0
-targets with profiles           3
-probe executions                4
-targets the probe measured      2
-killed executions               7
-kill pairs audited              4
-package-suite kills             1
-batch kills                     1
-unattributed kills              1
-truncated trailing lines        1
+counter                                count
+routes                                     6
+reused routes                              0
+targets with profiles                      3
+package suites with coverage profiles      0
+probe executions                           4
+targets the probe measured                 2
+package-suite probe executions             0
+package suites the probe measured          0
+killed executions                          7
+target kill pairs audited                  4
+package-suite kills                        1
+package-suite kill pairs audited           0
+batch kills                                1
+unattributed kills                         1
+truncated trailing lines                   1
 
 layers
 layer      audited  kept  inapplicable  unverifiable  violations
 reach            4     4             0             0           0
 infection        4     1             1             1           1
 branch: not audited (no -catalog given)
+suite-reach: not audited (the recording holds no package-suite coverage profile)
 
 infection discharge
 counter                                   count

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/cache"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestCollectExpiresThenBoundsCacheAndStatusIsAuditable(t *testing.T) {
@@ -43,10 +44,10 @@ func TestCollectRejectsNegativePolicyAndConfinedIrregularEntries(t *testing.T) {
 		t.Fatal("negative capacity accepted")
 	}
 	path := filepath.Join(root, "v1", "not-a-directory")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("unexpected"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("unexpected"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cache.Inspect(root); err == nil {
@@ -86,7 +87,7 @@ func TestFlushRefusesMalformedEntriesBeforeRemovingAnything(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	writeCacheEntry(t, root, "valid", 20, now)
 	malformed := filepath.Join(root, "v1", "not-a-directory")
-	if err := os.WriteFile(malformed, []byte("unexpected"), 0o600); err != nil {
+	if err := os.WriteFile(malformed, []byte("unexpected"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,10 +114,10 @@ func TestInspectRefusesASymbolicLinkForTheVersionRoot(t *testing.T) {
 func writeCacheEntry(t *testing.T, root, id string, size int, modified time.Time) {
 	t.Helper()
 	path := filepath.Join(root, "v1", id, "report.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+	if err := os.WriteFile(path, make([]byte, size), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(path, modified, modified); err != nil {

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package retention bounds directories of diagnostic exhaust by age and size.
 package retention
 
 import (
@@ -36,11 +35,6 @@ type entry struct {
 	expired    bool
 }
 
-// childKind is the shape of the direct children one retained store holds. A
-// store holds one or the other and never a mixture: a recording is a directory
-// of streams, a stored repair candidate is a single JSON file, and a root that
-// turned out to hold the other shape is a root this package has misidentified
-// rather than one it should collect.
 type childKind int
 
 const (
@@ -55,9 +49,6 @@ func (kind childKind) String() string {
 	return "directory"
 }
 
-// accepts reports whether a direct child is the shape this store holds. A
-// symbolic link is neither, whatever it points at, because everything below
-// walks and removes what it finds.
 func (kind childKind) accepts(child fs.DirEntry) bool {
 	if child.Type()&os.ModeSymlink != 0 {
 		return false
@@ -68,8 +59,6 @@ func (kind childKind) accepts(child fs.DirEntry) bool {
 	return child.IsDir()
 }
 
-// measure is the size and age of one child: a walk of the tree for a directory,
-// and the file's own metadata for a file.
 func (kind childKind) measure(path string, child fs.DirEntry) (int64, time.Time, error) {
 	if kind != childFile {
 		return metadata(path)
@@ -78,9 +67,7 @@ func (kind childKind) measure(path string, child fs.DirEntry) (int64, time.Time,
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("goatest: inspect retained artifact %s: %w", path, err)
 	}
-	// The type bits of a listing can be empty where the filesystem reports no
-	// type, and an empty mode reads as a regular file. The file's own metadata
-	// is what decides, because what is measured here is what remove is handed.
+
 	if !info.Mode().IsRegular() {
 		return 0, time.Time{}, fmt.Errorf("goatest: retained artifact %q is not a confined file", child.Name())
 	}
@@ -92,22 +79,15 @@ func Inspect(root string) (Status, error) {
 	return status, err
 }
 
-// InspectFiles reports on a root whose children are regular files rather than
-// directories, which is what a store of repair candidates or patch artifacts is.
 func InspectFiles(root string) (Status, error) {
 	status, _, err := inspect(root, childFile, 0, time.Time{})
 	return status, err
 }
 
-// Collect removes expired recording directories first, then oldest
-// directories until maxBytes is met. It never follows a symbolic link.
 func Collect(root string, maxBytes int64, ttl time.Duration, now time.Time) (Result, error) {
 	return collect(root, childDirectory, maxBytes, ttl, now)
 }
 
-// CollectFiles applies the same expiry and byte budget to a root of regular
-// files. Eviction removes a whole file, so a reader of the root never meets a
-// half-written one.
 func CollectFiles(root string, maxBytes int64, ttl time.Duration, now time.Time) (Result, error) {
 	return collect(root, childFile, maxBytes, ttl, now)
 }
@@ -138,20 +118,6 @@ func collect(root string, kind childKind, maxBytes int64, ttl time.Duration, now
 	return result, err
 }
 
-// Keep bounds a root by how many entries it holds rather than by how many bytes
-// they occupy, removing the oldest until at most keep remain and never removing
-// one protected names.
-//
-// A count is the bound for a store of product evidence: what somebody asks of a
-// run history is "the last few runs", and a byte budget would answer a question
-// nobody asked by collecting a large run and sparing a small older one. Expiry
-// does not apply for the same reason — a report does not go stale — so now is
-// carried only to date the listing, and keep <= 0 is no bound at all, exactly as
-// maxBytes <= 0 is for Collect.
-//
-// Protection adds to the bound instead of consuming it: the newest keep entries
-// survive, and a protected entry older than every one of them survives beside
-// them, because the reason to protect a run is that something still reads it.
 func Keep(root string, keep int, protected func(name string) bool, now time.Time) (Result, error) {
 	before, entries, err := inspect(root, childDirectory, 0, now)
 	if err != nil {
@@ -180,9 +146,6 @@ func Keep(root string, keep int, protected func(name string) bool, now time.Time
 	return result, err
 }
 
-// order sorts entries into the sequence a collection removes them in: expired
-// first, then oldest, then by name so that two entries of the same age still
-// have a total order.
 func order(entries []entry) {
 	slices.SortFunc(entries, func(a, b entry) int {
 		if a.expired != b.expired {

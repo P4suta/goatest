@@ -15,6 +15,11 @@ import (
 	gotest "github.com/P4suta/goatest/internal/golang"
 )
 
+const (
+	canonicalPackageCount  = 2
+	testImportPackageCount = 3
+)
+
 func TestDecodePackageStreamComputesRelativeDirectories(t *testing.T) {
 	stream := strings.NewReader(`{"ImportPath":"example.com/sample","Dir":"C:/snap","Module":{"Path":"example.com/sample","Dir":"C:/snap"},"Deps":["fmt"]}
 {"ImportPath":"example.com/sample/sub","Dir":"C:/snap/sub","Module":{"Path":"example.com/sample","Dir":"C:/snap"},"Deps":["example.com/sample","fmt"]}
@@ -66,7 +71,7 @@ func TestDecodePackagesCanonicalizesPackages(t *testing.T) {
 	if model.ModuleDir != moduleDir {
 		t.Fatalf("ModuleDir = %q, want %q", model.ModuleDir, moduleDir)
 	}
-	if len(model.Packages) != 2 {
+	if len(model.Packages) != canonicalPackageCount {
 		t.Fatalf("Packages = %+v", model.Packages)
 	}
 	if model.Packages[0].ImportPath != "example.com/sample" || model.Packages[0].RelativeDir != "." {
@@ -120,12 +125,10 @@ func TestDecodePackagesIncludesTestOnlyImportsInTheDependencyClosure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(model.Packages) != 3 {
+	if len(model.Packages) != testImportPackageCount {
 		t.Fatalf("Packages = %+v", model.Packages)
 	}
-	// The in-module test import is expanded through its own Deps, the external
-	// one is recorded alone, the package itself is never its own dependency,
-	// and a package whose tests import nothing keeps exactly its Deps.
+
 	for index, want := range [][]string{
 		{"example.com/m/internal/shared", "example.com/m/testutil", "fmt", "github.com/x/assert", "strings"},
 		{"strings"},
@@ -173,10 +176,6 @@ func TestDecodePackagesLeavesAPackageWithoutTestImportsAsItsDeps(t *testing.T) {
 	}
 }
 
-// testImportListing is one module whose app package reaches
-// example.com/m/testutil from its test files alone, and whose testutil package
-// reaches example.com/m/internal/shared. The external test import and the
-// self-import an external test package always carries are listed too.
 func testImportListing(moduleDir string) []map[string]any {
 	app := listedPackage("example.com/m/app", filepath.Join(moduleDir, "app"), "example.com/m", moduleDir, "fmt")
 	app["TestImports"] = []string{"example.com/m/testutil"}
@@ -208,11 +207,6 @@ func packageStream(t *testing.T, packages ...map[string]any) *bytes.Reader {
 	return bytes.NewReader(stream.Bytes())
 }
 
-// TestDecodePackagesRecordsEmbeddedFilesRelativeToTheModule pins the one input
-// of a test binary that lives outside both the import graph and the package's
-// own directory listing: `go list` reports embedded files relative to the
-// package, and a consumer comparing them against a repository scan needs them
-// relative to the module, once each and in a stable order.
 func TestDecodePackagesRecordsEmbeddedFilesRelativeToTheModule(t *testing.T) {
 	t.Parallel()
 	moduleDir := filepath.Join(t.TempDir(), "module")

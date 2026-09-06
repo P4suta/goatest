@@ -14,37 +14,40 @@ import (
 	"path/filepath"
 )
 
-// Summary is the bounded, read-only view of one trace stream.
+const (
+	traceInitialReadBuffer = 64 << 10
+	traceMaximumLineBytes  = 16 << 20
+)
+
 type Summary struct {
-	Path             string
-	Missing          bool
-	Events           int
-	FirstSequence    int64
-	LastSequence     int64
-	MissingSequences int64
-	HasRunEnd        bool
-	EventsDropped    int64
-	Verdict          string
-	Error            string
-	Counts           map[string]int
-	PhaseDurationMS  map[string]int64
+	Path              string
+	Missing           bool
+	Events            int
+	FirstSequence     int64
+	LastSequence      int64
+	MissingSequences  int64
+	HasRunEnd         bool
+	EventsDropped     int64
+	Verdict           string
+	Error             string
+	Counts            map[string]int
+	PhaseDurationMS   map[string]int64
+	PrepareDurationMS map[string]int64
 }
 
-// SummaryDiff compares two summaries without replaying either run.
 type SummaryDiff struct {
-	EventsDelta           int
-	MissingSequencesDelta int64
-	EventsDroppedDelta    int64
-	BeforeVerdict         string
-	AfterVerdict          string
-	BeforeRunEnd          bool
-	AfterRunEnd           bool
-	CountDelta            map[string]int
-	PhaseDurationDeltaMS  map[string]int64
+	EventsDelta            int
+	MissingSequencesDelta  int64
+	EventsDroppedDelta     int64
+	BeforeVerdict          string
+	AfterVerdict           string
+	BeforeRunEnd           bool
+	AfterRunEnd            bool
+	CountDelta             map[string]int
+	PhaseDurationDeltaMS   map[string]int64
+	PrepareDurationDeltaMS map[string]int64
 }
 
-// ReadSummary strictly reads trace.jsonl at path. path may name the stream or
-// its containing directory. An absent stream is an explicit summary state.
 func ReadSummary(path string) (Summary, error) {
 	stream := path
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
@@ -52,16 +55,16 @@ func ReadSummary(path string) (Summary, error) {
 	}
 	file, err := os.Open(stream)
 	if errors.Is(err, os.ErrNotExist) {
-		return Summary{Path: stream, Missing: true, Counts: map[string]int{}, PhaseDurationMS: map[string]int64{}}, nil
+		return Summary{Path: stream, Missing: true, Counts: map[string]int{}, PhaseDurationMS: map[string]int64{}, PrepareDurationMS: map[string]int64{}}, nil
 	}
 	if err != nil {
 		return Summary{}, fmt.Errorf("goatest: open trace %s: %w", stream, err)
 	}
 	defer func() { _ = file.Close() }()
 
-	result := Summary{Path: stream, Counts: make(map[string]int), PhaseDurationMS: make(map[string]int64)}
+	result := Summary{Path: stream, Counts: make(map[string]int), PhaseDurationMS: make(map[string]int64), PrepareDurationMS: make(map[string]int64)}
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	scanner.Buffer(make([]byte, traceInitialReadBuffer), traceMaximumLineBytes)
 	var previous int64
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -98,6 +101,9 @@ func ReadSummary(path string) (Summary, error) {
 		if event.Type == TypePhaseEnd && event.Phase != nil {
 			result.PhaseDurationMS[event.Phase.Name] += event.Phase.DurationMS
 		}
+		if event.Type == TypePrepare && event.Prepare != nil && event.Prepare.State == PrepareStateFinished {
+			result.PrepareDurationMS[event.Prepare.Phase] += *event.Prepare.DurationMS
+		}
 		if event.Type == TypeRunEnd {
 			if result.HasRunEnd {
 				return Summary{}, errors.New("goatest: trace contains more than one run-end event")
@@ -119,7 +125,7 @@ func validateReadEvent(event Event) error {
 		return fmt.Errorf("goatest: trace event %d has an invalid envelope", event.Seq)
 	}
 	payloads := 0
-	for _, present := range []bool{event.Phase != nil, event.Exec != nil, event.Mutant != nil, event.Route != nil, event.Probe != nil, event.Progress != nil, event.Artifact != nil, event.Run != nil} {
+	for _, present := range []bool{event.Phase != nil, event.Prepare != nil, event.Exec != nil, event.Mutant != nil, event.Route != nil, event.Probe != nil, event.Progress != nil, event.Artifact != nil, event.Run != nil} {
 		if present {
 			payloads++
 		}
@@ -135,6 +141,10 @@ func validateReadEvent(event Event) error {
 		if event.Phase == nil {
 			return fmt.Errorf("goatest: trace event %d is missing phase payload", event.Seq)
 		}
+	case TypePrepare:
+		if err := validatePrepareRecord(event.Seq, event.Prepare); err != nil {
+			return err
+		}
 	case TypeExec:
 		if event.Exec == nil {
 			return fmt.Errorf("goatest: trace event %d is missing exec payload", event.Seq)
@@ -146,6 +156,9 @@ func validateReadEvent(event Event) error {
 	case TypeRoute:
 		if event.Route == nil {
 			return fmt.Errorf("goatest: trace event %d is missing route payload", event.Seq)
+		}
+		if event.Route.Granularity != GranularityBlock && event.Route.Granularity != GranularityFile {
+			return fmt.Errorf("goatest: trace event %d has invalid route granularity %q", event.Seq, event.Route.Granularity)
 		}
 	case TypeProbeExec:
 		if event.Probe == nil {
@@ -172,8 +185,47 @@ func validateReadEvent(event Event) error {
 	return nil
 }
 
-// Diff compares two Summary values and returns signed deltas across the union
-// of both summaries' count and phase key sets.
+func validatePrepareRecord(sequence int64, record *PrepareRecord) error {
+	if record == nil || !knownPreparePhase(record.Phase) {
+		return fmt.Errorf("goatest: trace event %d is missing valid prepare payload", sequence)
+	}
+	switch record.State {
+	case PrepareStateStarted:
+		if record.Result != "" || record.DurationMS != nil {
+			return fmt.Errorf("goatest: trace event %d has an invalid started prepare payload", sequence)
+		}
+	case PrepareStateFinished:
+		if record.DurationMS == nil || *record.DurationMS < 0 {
+			return fmt.Errorf("goatest: trace event %d has an invalid finished prepare duration", sequence)
+		}
+		switch record.Result {
+		case PrepareResultSucceeded, PrepareResultFailed, PrepareResultSkipped:
+		default:
+			return fmt.Errorf("goatest: trace event %d has an invalid finished prepare result %q", sequence, record.Result)
+		}
+	default:
+		return fmt.Errorf("goatest: trace event %d has an invalid prepare state %q", sequence, record.State)
+	}
+	return nil
+}
+
+func knownPreparePhase(phase string) bool {
+	switch phase {
+	case PreparePhaseDiscovery,
+		PreparePhaseProbeSnapshot,
+		PreparePhaseMainValidation,
+		PreparePhaseMainRestoration,
+		PreparePhaseVerification,
+		PreparePhaseBinaryBuild,
+		PreparePhaseProbeValidation,
+		PreparePhaseProbeCoverageBuild,
+		PreparePhaseProbeRestoration:
+		return true
+	default:
+		return false
+	}
+}
+
 func Diff(before, after Summary) SummaryDiff {
 	result := SummaryDiff{
 		EventsDelta:           after.Events - before.Events,
@@ -181,7 +233,7 @@ func Diff(before, after Summary) SummaryDiff {
 		EventsDroppedDelta:    after.EventsDropped - before.EventsDropped,
 		BeforeVerdict:         before.Verdict, AfterVerdict: after.Verdict,
 		BeforeRunEnd: before.HasRunEnd, AfterRunEnd: after.HasRunEnd,
-		CountDelta: make(map[string]int), PhaseDurationDeltaMS: make(map[string]int64),
+		CountDelta: make(map[string]int), PhaseDurationDeltaMS: make(map[string]int64), PrepareDurationDeltaMS: make(map[string]int64),
 	}
 	for kind, count := range before.Counts {
 		result.CountDelta[kind] -= count
@@ -194,6 +246,12 @@ func Diff(before, after Summary) SummaryDiff {
 	}
 	for phase, duration := range after.PhaseDurationMS {
 		result.PhaseDurationDeltaMS[phase] += duration
+	}
+	for phase, duration := range before.PrepareDurationMS {
+		result.PrepareDurationDeltaMS[phase] -= duration
+	}
+	for phase, duration := range after.PrepareDurationMS {
+		result.PrepareDurationDeltaMS[phase] += duration
 	}
 	return result
 }

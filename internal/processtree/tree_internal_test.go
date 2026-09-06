@@ -143,6 +143,27 @@ func TestTreeKillIsFailClosedAndNormalizesFinishedProcess(t *testing.T) {
 	}
 }
 
+func TestTreeWaitDelegatesToItsStartedCommand(t *testing.T) {
+	if err := (*Tree)(nil).Wait(); err != nil {
+		t.Fatalf("nil Tree.Wait = %v", err)
+	}
+	if err := (&Tree{}).Wait(); err != nil {
+		t.Fatalf("empty Tree.Wait = %v", err)
+	}
+	preserveTreeHooks(t)
+	sentinel := errors.New("wait failed")
+	command := &exec.Cmd{}
+	waitStartedCommand = func(got *exec.Cmd) error {
+		if got != command {
+			t.Fatalf("waited command = %p, want %p", got, command)
+		}
+		return sentinel
+	}
+	if err := (&Tree{command: command}).Wait(); !errors.Is(err, sentinel) {
+		t.Fatalf("Tree.Wait = %v, want %v", err, sentinel)
+	}
+}
+
 func TestTreeCloseReleasesExactlyOnceAndRetainsResult(t *testing.T) {
 	if err := (*Tree)(nil).Close(); err != nil {
 		t.Fatalf("nil Tree.Close = %v", err)

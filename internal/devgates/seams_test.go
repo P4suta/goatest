@@ -19,31 +19,23 @@ import (
 )
 
 const (
-	// modulePath identifies the repository the gates apply to.
 	modulePath = "github.com/P4suta/goatest"
-	// testkitPath is the test harness no production file may import.
+
 	testkitPath = modulePath + "/internal/testkit"
-	// allowlistPath locates the seam ledger, relative to the repository root.
+
 	allowlistPath = "internal/devgates/seam_allowlist.txt"
 )
 
-// seam is one package-level variable a test can replace to change what
-// production code does. It is the unit the ratchet counts.
 type seam struct {
-	// pkg is the repository-relative package directory, slash separated, or
-	// "." for the package at the repository root.
 	pkg string
-	// name is the declared variable name.
+
 	name string
 }
 
-// String renders a seam in the one-per-line ledger format.
 func (declaration seam) String() string {
 	return declaration.pkg + " " + declaration.name
 }
 
-// compareSeams orders seams by package, then by name, so a scan and a ledger
-// can be compared and printed deterministically.
 func compareSeams(first, second seam) int {
 	if order := strings.Compare(first.pkg, second.pkg); order != 0 {
 		return order
@@ -51,10 +43,6 @@ func compareSeams(first, second seam) int {
 	return strings.Compare(first.name, second.name)
 }
 
-// TestPackageLevelSeamsMatchAllowlist is the ratchet. The scan of the working
-// tree and the recorded ledger must agree exactly: a seam the ledger does not
-// name is a new global the repository no longer accepts, and a ledger entry
-// the scan cannot find is a removal that was not recorded.
 func TestPackageLevelSeamsMatchAllowlist(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -84,8 +72,6 @@ func TestPackageLevelSeamsMatchAllowlist(t *testing.T) {
 	}
 }
 
-// TestSeamAllowlistIsSortedAndFreeOfDuplicates keeps the ledger itself
-// deterministic, so a diff of it reads as the change it records.
 func TestSeamAllowlistIsSortedAndFreeOfDuplicates(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -103,10 +89,6 @@ func TestSeamAllowlistIsSortedAndFreeOfDuplicates(t *testing.T) {
 	}
 }
 
-// TestProductionCodeDoesNotImportTestkit keeps the test harness out of the
-// shipped binary: internal/testkit exists to build fixtures for tests, and a
-// production file that reaches for one has put test scaffolding on the path a
-// user runs.
 func TestProductionCodeDoesNotImportTestkit(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -134,13 +116,10 @@ func TestProductionCodeDoesNotImportTestkit(t *testing.T) {
 	}
 }
 
-// formatSeams renders seams one per line, in the ledger format, so the failure
-// message can be pasted into the ledger when a line is genuinely earned.
 func formatSeams(seams []seam) string {
 	return strings.Join(formatSeamLines(seams), "\n")
 }
 
-// formatSeamLines renders seams one per line, in the ledger format.
 func formatSeamLines(seams []seam) []string {
 	lines := make([]string, 0, len(seams))
 	for _, declaration := range seams {
@@ -149,8 +128,6 @@ func formatSeamLines(seams []seam) []string {
 	return lines
 }
 
-// missingFrom reports the members of first that second does not contain,
-// keeping the order of first.
 func missingFrom(first, second []seam) []seam {
 	present := make(map[seam]struct{}, len(second))
 	for _, declaration := range second {
@@ -165,11 +142,8 @@ func missingFrom(first, second []seam) []seam {
 	return difference
 }
 
-// readAllowlist parses the seam ledger. Blank lines and lines opening with "#"
-// carry documentation and are ignored; every other line names one seam as
-// "package-path name". A ledger that does not exist yet is empty, which makes
-// every seam in the tree unrecorded rather than hiding the gate.
 func readAllowlist(path string) ([]seam, error) {
+	const seamFieldCount = 2
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -184,7 +158,7 @@ func readAllowlist(path string) ([]seam, error) {
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) != 2 {
+		if len(fields) != seamFieldCount {
 			return nil, fmt.Errorf("%s:%d: want \"package-path name\", got %q", path, number+1, trimmed)
 		}
 		allowed = append(allowed, seam{pkg: fields[0], name: fields[1]})
@@ -192,8 +166,6 @@ func readAllowlist(path string) ([]seam, error) {
 	return allowed, nil
 }
 
-// repositoryRoot walks up from the working directory to the module this gate
-// belongs to, so the scan covers the whole tree however the test was started.
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	directory, err := os.Getwd()
@@ -213,22 +185,14 @@ func repositoryRoot(t *testing.T) string {
 	}
 }
 
-// parsedFile is one production source file and the package directory it
-// belongs to.
 type parsedFile struct {
-	// pkg is the repository-relative package directory, slash separated.
 	pkg string
-	// path is the repository-relative file path, slash separated.
+
 	path string
-	// file is the parsed syntax tree, comments included.
+
 	file *ast.File
 }
 
-// skipDirectory reports whether a directory is outside the production tree.
-// The Go toolchain already ignores "testdata", "vendor", and names opening
-// with "." or "_"; "dist" and "reports" at the repository root are the
-// generated output directories .gitignore also names, and a build left in one
-// must not change what the gate sees.
 func skipDirectory(relative, name string) bool {
 	switch relative {
 	case "dist", "reports":
@@ -240,9 +204,6 @@ func skipDirectory(relative, name string) bool {
 	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
-// parseProduction parses every production Go file under root, in a stable
-// order. Test files are not production and are never scanned; build
-// constraints are not applied, so the gate reads the same on every platform.
 func parseProduction(root string) ([]parsedFile, error) {
 	fileSet := token.NewFileSet()
 	var parsed []parsedFile
@@ -285,24 +246,6 @@ func parseProduction(root string) ([]parsedFile, error) {
 	return parsed, nil
 }
 
-// scanSeams reports every package-level seam declared in the production Go
-// files under root, sorted by package and then by name.
-//
-// A package-level var is a seam when it declares behaviour a test can replace:
-//
-//   - its declared type is a function type, named or literal
-//     ("var hook func(string) error"); or
-//   - it has no declared type and its value is a function literal, an
-//     identifier naming a function of the same package, a selector qualified
-//     by an import ("os.Remove"), or a composite literal of a package-local
-//     struct whose every field is a function.
-//
-// Everything else is data, not a seam: a var carrying a "//go:embed"
-// directive, a sentinel built by a call (errors.New, fmt.Errorf,
-// template.Must, flag.Bool), a basic literal, a slice or map literal, and a
-// zero-valued sync.Mutex, sync.Once, or atomic counter, none of which a test
-// replaces. The blank identifier is skipped: an interface assertion declares
-// nothing a test can reach.
 func scanSeams(root string) ([]seam, error) {
 	files, err := parseProduction(root)
 	if err != nil {
@@ -330,20 +273,14 @@ func scanSeams(root string) ([]seam, error) {
 	return found, nil
 }
 
-// packageFacts is what one package declares about itself, gathered across the
-// files of its directory so a build-constrained file is read like any other.
 type packageFacts struct {
-	// functions holds the names of the package-level functions, methods
-	// excluded: an identifier naming one is a function value.
 	functions map[string]struct{}
-	// types maps a package-level type name to the expression it names.
+
 	types map[string]ast.Expr
-	// declared holds every package-level name, so a selector qualified by a
-	// local declaration is not mistaken for one qualified by an import.
+
 	declared map[string]struct{}
 }
 
-// collectPackageFacts indexes the declarations of every scanned package.
 func collectPackageFacts(files []parsedFile) map[string]packageFacts {
 	packages := make(map[string]packageFacts)
 	for _, parsed := range files {
@@ -382,14 +319,10 @@ func collectPackageFacts(files []parsedFile) map[string]packageFacts {
 	return packages
 }
 
-// isFunctionType reports whether an expression names a function type, chasing
-// the package-local type names it is written through.
 func (facts packageFacts) isFunctionType(expression ast.Expr) bool {
 	return facts.functionType(expression, make(map[string]struct{}))
 }
 
-// functionType carries the visited type names, so a cyclic declaration ends
-// the walk instead of the process.
 func (facts packageFacts) functionType(expression ast.Expr, seen map[string]struct{}) bool {
 	switch typed := expression.(type) {
 	case *ast.FuncType:
@@ -410,8 +343,6 @@ func (facts packageFacts) functionType(expression ast.Expr, seen map[string]stru
 	return false
 }
 
-// isHookStruct reports whether a package-local type is a struct of functions
-// alone: the shape a package uses to group replaceable operations.
 func (facts packageFacts) isHookStruct(name string) bool {
 	underlying, ok := facts.types[name]
 	if !ok {
@@ -429,14 +360,6 @@ func (facts packageFacts) isHookStruct(name string) bool {
 	return true
 }
 
-// isSeamValue reports whether a value expression installs behaviour a test can
-// replace.
-//
-// A package-level initialiser is written in package scope, where a bare
-// identifier is either a name the package declares or one an import binds. So
-// a selector qualified by a name the package does not declare is qualified by
-// an import, whatever the import was named and however its path was spelled,
-// and the value it reads is behaviour that arrived from another package.
 func (facts packageFacts) isSeamValue(expression ast.Expr) bool {
 	switch typed := expression.(type) {
 	case *ast.FuncLit:
@@ -462,7 +385,6 @@ func (facts packageFacts) isSeamValue(expression ast.Expr) bool {
 	return false
 }
 
-// declaredSeams reports the seam names one var declaration introduces.
 func declaredSeams(facts packageFacts, declaration *ast.GenDecl) []string {
 	var names []string
 	for _, spec := range declaration.Specs {
@@ -489,8 +411,6 @@ func declaredSeams(facts packageFacts, declaration *ast.GenDecl) []string {
 	return names
 }
 
-// hasEmbedDirective reports whether a doc comment embeds a file. An embedded
-// asset is compiled-in data, never a seam.
 func hasEmbedDirective(doc *ast.CommentGroup) bool {
 	if doc == nil {
 		return false

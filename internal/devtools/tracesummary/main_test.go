@@ -76,8 +76,6 @@ func TestRunReportsTheLineATraceDeviatesOn(t *testing.T) {
 	}
 }
 
-// firstLine is the opening line of a summary, which is what a failure about
-// the header should print rather than the whole report.
 func firstLine(text string) string {
 	line, _, _ := strings.Cut(text, "\n")
 	return line

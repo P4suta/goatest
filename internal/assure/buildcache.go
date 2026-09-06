@@ -11,46 +11,67 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/filemode"
+	"github.com/P4suta/goatest/internal/tempowner"
 )
 
-// cacheProgramVariable is the environment variable the go command reads the
-// cache program from. It is named here and nowhere else.
-const cacheProgramVariable = "GOCACHEPROG"
+const (
+	cacheProgramVariable = "GOCACHEPROG"
+	goCacheVariable      = "GOCACHE"
+	minimumGoCommandArgs = 2
+	goSubcommandStart    = 1
+	goDirectoryFlagArgs  = 2
+)
 
-// runBuildCache is the build cache one run serves every go command it starts
-// from: a scratch layer that dies with the run, and the base layer this machine
-// keeps between runs.
-//
-// Its zero value serves nothing, which is a run that uses the toolchain's own
-// cache exactly as it did before this layer existed. That is what a caller who
-// named no program gets, and what a run gets when the cache could not be
-// opened: a build cache is an optimization, and an optimization that cannot
-// start is never a reason to fail a run.
 type runBuildCache struct {
-	// scratch is the layer this run removes when it ends.
 	scratch string
-	// base is the layer this machine keeps.
-	base string
-	// plain is the GOCACHEPROG value whose writes land in scratch.
+
+	base   string
+	source string
+
+	fallback string
+
+	native string
+
+	nativeOwner *tempowner.Owner
+	nativeSweep tempowner.Result
+
+	projection *nativeCacheProjection
+
 	plain string
-	// persisting is the GOCACHEPROG value whose writes land in base.
+
 	persisting string
+	maxBytes   int64
 }
 
-// openRunBuildCache prepares both layers and renders the two cache programs one
-// run needs. An empty program or base directory opens the zero cache, which
-// serves nothing.
-//
-// Preparing the layers here rather than in the served process is deliberate: a
-// layer that cannot be created or written is discovered by the run, which can
-// carry on without a cache, instead of by a go command, which would fail the
-// build it was in the middle of.
-func openRunBuildCache(program, base string, runScratch runScratch, maxBytes int64) (runBuildCache, error) {
+type nativeCacheProjection struct {
+	once        sync.Once
+	admission   sync.Mutex
+	executions  sync.WaitGroup
+	mutex       sync.Mutex
+	attempted   bool
+	seed        buildcache.NativeSeed
+	err         error
+	disabled    bool
+	beforeDrain func()
+	collected   buildcache.NativeCollected
+	persisted   buildcache.NativePersisted
+	collectErr  error
+	refreshErr  error
+	persistErr  error
+	lastCollect time.Time
+
+	generation       uint64
+	seededGeneration uint64
+}
+
+func openRunBuildCache(program, base, source string, runScratch runScratch, maxBytes int64) (runBuildCache, error) {
 	if program == "" || base == "" {
 		return runBuildCache{}, nil
 	}
@@ -61,41 +82,68 @@ func openRunBuildCache(program, base string, runScratch runScratch, maxBytes int
 	if err != nil {
 		return runBuildCache{}, fmt.Errorf("goatest: create build cache scratch: %w", err)
 	}
-	// Everything from here on may fail, and the directory above already exists,
-	// so every exit removes it. A run that ends without a cache must also end
-	// without the empty layer it made on the way to not having one.
+
 	discard := func(err error) (runBuildCache, error) {
 		return runBuildCache{}, errors.Join(err, removeBuildCacheScratch(scratch))
 	}
 	if err := (buildcache.Layer{Dir: scratch, Touch: buildcache.ScratchTouchInterval}).Prepare(); err != nil {
 		return discard(err)
 	}
-	cache := runBuildCache{scratch: scratch, base: base}
-	if cache.plain, err = buildcache.Program(program, base, scratch, false, maxBytes); err != nil {
+	fallback := filepath.Join(scratch, goCacheScratchName)
+	if err := os.Mkdir(fallback, filemode.PrivateDirectory); err != nil {
+		return discard(fmt.Errorf("goatest: create external build cache backing directory: %w", err))
+	}
+	cache := runBuildCache{
+		scratch: scratch, base: base, source: source, fallback: fallback,
+		projection: &nativeCacheProjection{beforeDrain: releaseUntrackedNativeExecution}, maxBytes: maxBytes,
+	}
+	if cache.plain, err = buildcache.Program(buildcache.ProgramOptions{
+		Executable: program, Base: base, Scratch: scratch, NativeSource: source, MaxBytes: maxBytes,
+	}); err != nil {
 		return discard(err)
 	}
-	if cache.persisting, err = buildcache.Program(program, base, scratch, true, maxBytes); err != nil {
+	if cache.persisting, err = buildcache.Program(buildcache.ProgramOptions{
+		Executable: program, Base: base, Scratch: scratch, NativeSource: source, Persist: true, MaxBytes: maxBytes,
+	}); err != nil {
 		return discard(err)
+	}
+	cache.native, cache.nativeOwner, cache.nativeSweep, err = openNativeBuildCache(base, runScratch, time.Now())
+	if err != nil {
+		cache.projection.once.Do(func() {
+			cache.projection.attempted = true
+			cache.projection.err = err
+		})
 	}
 	return cache, nil
 }
 
-// removeBuildCacheScratch removes a scratch layer, naming what it could not.
+func openNativeBuildCache(base string, scratch runScratch, now time.Time) (string, *tempowner.Owner, tempowner.Result, error) {
+	parent := filepath.Dir(base)
+	swept, sweepErr := tempowner.Sweep(parent, []string{buildcache.NativeDirectoryPrefix}, now)
+	directory, err := os.MkdirTemp(parent, buildcache.NativeDirectoryPrefix)
+	if err != nil {
+		return "", nil, swept, errors.Join(sweepErr, fmt.Errorf("goatest: create native build cache scratch: %w", err))
+	}
+	owner, err := tempowner.Claim(directory, tempowner.Marker{RunID: scratch.id, Root: scratch.root}, now)
+	if err != nil {
+		return "", nil, swept, errors.Join(sweepErr, fmt.Errorf("goatest: claim native build cache scratch: %w", err), removeBuildCacheScratch(directory))
+	}
+	if sweepErr != nil {
+		swept.Errors = append(swept.Errors, sweepErr)
+	}
+	return directory, owner, swept, nil
+}
+
 func removeBuildCacheScratch(scratch string) error {
+	if scratch == "" {
+		return nil
+	}
 	if err := os.RemoveAll(scratch); err != nil {
 		return fmt.Errorf("goatest: remove build cache scratch: %w", err)
 	}
 	return nil
 }
 
-// collectBase bounds the layer this machine keeps, and reports whether it ran.
-//
-// A run collects it once, when the run ends. A bound that only a command a
-// developer remembers to type applies is not a bound, and this is the moment
-// the run knows it has stopped compiling. It yields to another process already
-// collecting — the layer is shared by every repository on the machine — and
-// what makes that safe for the builds of those other repositories is MinIdle:
-// anything read within the last touch interval is spared by construction.
 func (cache runBuildCache) collectBase(policy buildcache.Policy, now time.Time) (buildcache.Collected, bool, error) {
 	if !cache.serves() {
 		return buildcache.Collected{}, false, nil
@@ -103,13 +151,6 @@ func (cache runBuildCache) collectBase(policy buildcache.Policy, now time.Time) 
 	return buildcache.Layer{Dir: cache.base}.CollectLocked(policy, 0, now)
 }
 
-// collectRunBuildCache bounds the layer this machine keeps and reports what it
-// did, at the end of one run. It is the only enforcement of build_max_bytes a
-// developer never has to remember, which is what makes the setting a bound
-// rather than a suggestion.
-//
-// Nothing here can fail a run: the run has finished, and a layer that could not
-// be collected costs the disk and never the verdict.
 func collectRunBuildCache(options Options, loaded config.Config, cache runBuildCache, now time.Time) {
 	base := buildcache.Layer{Dir: cache.base}
 	collected, ran, err := cache.collectBase(buildcache.Policy{
@@ -125,8 +166,6 @@ func collectRunBuildCache(options Options, loaded config.Config, cache runBuildC
 	}
 }
 
-// planMoment is the clock a plan collects against. A plan has no round to
-// timestamp, so it reads the one the caller supplied or the wall clock.
 func planMoment(options Options) time.Time {
 	if options.Now != nil {
 		return options.Now()
@@ -134,33 +173,213 @@ func planMoment(options Options) time.Time {
 	return time.Now()
 }
 
-// serves reports whether this cache answers anything at all.
 func (cache runBuildCache) serves() bool { return cache.plain != "" }
 
-// environment is the overlay every go command a run starts carries. Its writes
-// land in the scratch layer, so whatever a run compiles that the machine has no
-// use for afterwards — mutants, candidate trees, and every fixture module a
-// test suite compiles in a directory of its own — dies with the run.
+func (cache runBuildCache) needsPersistentCompile() bool {
+	return cache.serves() && !cache.seedNative()
+}
+
 func (cache runBuildCache) environment() []string {
 	if !cache.serves() {
 		return nil
 	}
-	return []string{cacheProgramVariable + "=" + cache.plain}
+	var result []string
+	if cache.fallback != "" {
+		result = append(result, goCacheVariable+"="+cache.fallback)
+	}
+	return append(result, cacheProgramVariable+"="+cache.plain)
 }
 
-// persistingEnvironment is the overlay a command that compiles or lists carries
-// instead. Its writes land in the base layer, which is what makes the standard
-// library and the project's dependencies survive into the next run.
+func (cache runBuildCache) nativeEnvironment() []string {
+	if !cache.serves() {
+		return nil
+	}
+	if cache.native == "" {
+		return []string{cacheProgramVariable + "=" + cache.plain}
+	}
+	return []string{goCacheVariable + "=" + cache.native, cacheProgramVariable + "="}
+}
+
+func (cache runBuildCache) preparationEnvironment() []string {
+	if cache.seedNative() {
+		if cache.projection == nil {
+			return cache.nativeEnvironment()
+		}
+		cache.projection.mutex.Lock()
+		hasActions := cache.projection.seed.Actions > 0
+		cache.projection.mutex.Unlock()
+		if hasActions {
+			return cache.nativeEnvironment()
+		}
+		cache.markNativeDirty()
+	}
+	return cache.persistingEnvironment()
+}
+
+func (cache runBuildCache) seedNative() bool {
+	if !cache.serves() || cache.native == "" {
+		return false
+	}
+
+	if cache.projection == nil {
+		return true
+	}
+	cache.projection.once.Do(func() {
+		cache.projection.mutex.Lock()
+		generation := cache.projection.generation
+		cache.projection.mutex.Unlock()
+		seed, err := buildcache.SeedNative(cache.base, cache.native, time.Now())
+		now := time.Now()
+		cache.projection.mutex.Lock()
+		defer cache.projection.mutex.Unlock()
+		cache.projection.attempted = true
+		cache.projection.seed = seed
+		cache.projection.err = err
+		if err == nil {
+			cache.projection.seededGeneration = generation
+			cache.projection.lastCollect = now
+			cache.projection.collected.BeforeBytes = seed.Bytes
+			cache.projection.collected.AfterBytes = seed.Bytes
+		}
+	})
+	cache.projection.mutex.Lock()
+	err := cache.projection.err
+	disabled := cache.projection.disabled
+	cache.projection.mutex.Unlock()
+	return err == nil && !disabled
+}
+
+type nativeExecutionRelease func()
+
+func releaseUntrackedNativeExecution() {}
+
+func (cache runBuildCache) beginNative() (nativeExecutionRelease, bool) {
+	if !cache.seedNative() {
+		return nil, false
+	}
+	if cache.projection == nil {
+		return releaseUntrackedNativeExecution, true
+	}
+	projection := cache.projection
+	projection.admission.Lock()
+	defer projection.admission.Unlock()
+	projection.mutex.Lock()
+	if projection.disabled {
+		projection.mutex.Unlock()
+		return nil, false
+	}
+	now := time.Now()
+	refresh := projection.seededGeneration != projection.generation
+	collect := cache.maxBytes > 0 && (projection.lastCollect.IsZero() ||
+		now.Sub(projection.lastCollect) >= buildcache.NativeCollectInterval)
+	if refresh || collect {
+		projection.mutex.Unlock()
+		projection.beforeDrain()
+		projection.executions.Wait()
+		projection.mutex.Lock()
+		if projection.seededGeneration != projection.generation {
+			seed, err := buildcache.RefreshNative(cache.base, cache.native, time.Now())
+			now = time.Now()
+			projection.seed = seed
+			projection.refreshErr = err
+			if err != nil {
+				projection.disabled = true
+			} else {
+				projection.seededGeneration = projection.generation
+				projection.lastCollect = now
+				projection.collected.BeforeBytes = max(projection.collected.BeforeBytes, seed.Bytes)
+				projection.collected.AfterBytes = max(projection.collected.AfterBytes, seed.Bytes)
+			}
+		}
+		cache.collectNativeLocked(false, time.Now())
+	}
+	if projection.disabled {
+		projection.mutex.Unlock()
+		return nil, false
+	}
+	projection.executions.Add(1)
+	projection.mutex.Unlock()
+	return projection.executions.Done, true
+}
+
+func (cache runBuildCache) markNativeDirty() {
+	if cache.projection == nil || cache.native == "" {
+		return
+	}
+	cache.projection.mutex.Lock()
+	cache.projection.generation++
+	cache.projection.mutex.Unlock()
+}
+
+func (cache runBuildCache) persistPreparation() {
+	if cache.projection == nil {
+		return
+	}
+	if !cache.seedNative() {
+		return
+	}
+	cache.projection.mutex.Lock()
+	seed := cache.projection.seed
+	cache.projection.mutex.Unlock()
+	persisted, err := buildcache.PersistNative(cache.base, cache.native, seed, time.Now())
+	recordNativePersistence(cache.projection, seed, persisted, err)
+}
+
+func recordNativePersistence(projection *nativeCacheProjection, seed buildcache.NativeSeed, persisted buildcache.NativePersisted, err error) {
+	projection.mutex.Lock()
+	defer projection.mutex.Unlock()
+	projection.persisted.Actions += persisted.Actions
+	projection.persisted.Objects += persisted.Objects
+	projection.persisted.Bytes += persisted.Bytes
+	projection.persisted.Skipped += persisted.Skipped
+	projection.persisted.Deferred = projection.persisted.Deferred || persisted.Deferred
+	projection.persistErr = err
+	if err == nil {
+		bytes := seed.Bytes + persisted.Bytes
+		projection.seed.Actions += persisted.Actions
+		projection.seed.Objects += persisted.Objects
+		projection.seed.Bytes = bytes
+		projection.seed.Skipped += persisted.Skipped
+		projection.collected.BeforeBytes = max(projection.collected.BeforeBytes, bytes)
+		projection.collected.AfterBytes = max(projection.collected.AfterBytes, bytes)
+	}
+}
+
+func (cache runBuildCache) collectNativeLocked(force bool, now time.Time) {
+	if cache.maxBytes <= 0 || cache.projection.err != nil || cache.projection.disabled {
+		return
+	}
+	if !force && !cache.projection.lastCollect.IsZero() && now.Sub(cache.projection.lastCollect) < buildcache.NativeCollectInterval {
+		return
+	}
+	cache.projection.lastCollect = now
+	collected, err := buildcache.CollectNative(cache.native, cache.maxBytes)
+	if err != nil {
+		cache.projection.collectErr = err
+
+		cache.projection.disabled = true
+		return
+	}
+	cache.projection.collectErr = nil
+	cache.projection.collected.BeforeBytes = max(cache.projection.collected.BeforeBytes, collected.BeforeBytes)
+	cache.projection.collected.AfterBytes = collected.AfterBytes
+	cache.projection.collected.RemovedObjects += collected.RemovedObjects
+	cache.projection.collected.RemovedActions += collected.RemovedActions
+	cache.projection.collected.RemovedBytes += collected.RemovedBytes
+}
+
 func (cache runBuildCache) persistingEnvironment() []string {
 	if !cache.serves() {
 		return nil
 	}
-	return []string{cacheProgramVariable + "=" + cache.persisting}
+	var result []string
+	if cache.fallback != "" {
+		result = append(result, goCacheVariable+"="+cache.fallback)
+	}
+
+	return append(result, cacheProgramVariable+"="+cache.persisting)
 }
 
-// summarize reports what the go commands of this run asked the cache for. An
-// unreadable record summarizes to nothing: the record is a progress note, and
-// no note is worth failing a finished run over.
 func (cache runBuildCache) summarize() string {
 	if !cache.serves() {
 		return ""
@@ -169,91 +388,161 @@ func (cache runBuildCache) summarize() string {
 	if err != nil {
 		return ""
 	}
-	return stats.Detail()
+	detail := stats.Detail()
+	if len(cache.nativeSweep.Removed) != 0 || len(cache.nativeSweep.Errors) != 0 {
+		detail += " native-sweep-" + cache.nativeSweep.Detail("removed")
+	}
+	if cache.projection == nil {
+		return detail
+	}
+	cache.projection.mutex.Lock()
+	attempted := cache.projection.attempted
+	projectionErr := cache.projection.err
+	seed := cache.projection.seed
+	collected := cache.projection.collected
+	persisted := cache.projection.persisted
+	collectErr := cache.projection.collectErr
+	refreshErr := cache.projection.refreshErr
+	persistErr := cache.projection.persistErr
+	cache.projection.mutex.Unlock()
+	if !attempted {
+		return detail
+	}
+	if projectionErr != nil {
+		return detail + " native-seed=fallback"
+	}
+	status := "ready"
+	if refreshErr != nil {
+		status = "refresh-failed"
+	} else if collectErr != nil {
+		status = "collection-failed"
+	} else if persistErr != nil {
+		status = "persistence-failed"
+	}
+	return fmt.Sprintf("%s native-seed=%s native-actions=%d native-objects=%d native-bytes=%d native-skipped=%d native-persisted-actions=%d native-persisted-objects=%d native-persisted-bytes=%d native-persisted-skipped=%d native-persist-deferred=%t native-pruned-bytes=%d native-after-bytes=%d",
+		detail, status, seed.Actions, seed.Objects, seed.Bytes, seed.Skipped, persisted.Actions, persisted.Objects, persisted.Bytes,
+		persisted.Skipped, persisted.Deferred, collected.RemovedBytes, collected.AfterBytes)
 }
 
-// close removes the scratch layer. A run asked to keep its temporary
-// directories keeps this one too, and names it, because a directory left
-// behind and never named is litter rather than something a developer can find.
+type nativeMutationSession struct {
+	MutationSession
+	cache runBuildCache
+}
+
+func withNativeBuildCache(session MutationSession, cache runBuildCache) MutationSession {
+	if session == nil || !cache.serves() {
+		return session
+	}
+	return nativeMutationSession{MutationSession: session, cache: cache}
+}
+
+func (session nativeMutationSession) Exec(ctx context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+	release, native := session.cache.beginNative()
+	if !native {
+		request.Env = overlayEnvironment(request.Env, session.cache.environment())
+		return session.MutationSession.Exec(ctx, request)
+	}
+	defer release()
+	request.Env = overlayEnvironment(request.Env, session.cache.nativeEnvironment())
+	return session.MutationSession.Exec(ctx, request)
+}
+
+func (session nativeMutationSession) Probe(ctx context.Context, request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+	release, native := session.cache.beginNative()
+	if !native {
+		request.Env = overlayEnvironment(request.Env, session.cache.environment())
+		return session.MutationSession.Probe(ctx, request)
+	}
+	defer release()
+	request.Env = overlayEnvironment(request.Env, session.cache.nativeEnvironment())
+	return session.MutationSession.Probe(ctx, request)
+}
+
 func (cache runBuildCache) close(keep bool) error {
-	if !cache.serves() || keep {
+	if !cache.serves() {
 		return nil
 	}
-	return removeBuildCacheScratch(cache.scratch)
+	if keep {
+		if cache.projection != nil {
+			cache.projection.mutex.Lock()
+			cache.collectNativeLocked(true, time.Now())
+			cache.projection.mutex.Unlock()
+		}
+		if cache.nativeOwner != nil {
+			return cache.nativeOwner.Keep()
+		}
+		return nil
+	}
+	var releaseErr error
+	if cache.nativeOwner != nil {
+		releaseErr = cache.nativeOwner.Release()
+	}
+	return errors.Join(releaseErr, removeBuildCacheScratch(cache.scratch), removeBuildCacheScratch(cache.native))
 }
 
-// buildCacheWorkspace attaches the build cache to every command a run issues.
-//
-// The rule it applies is the whole of the policy, and it lives in one place so
-// that no call site can get it wrong:
-//
-//   - A command that compiles or lists writes into the base layer this machine
-//     keeps, so that the standard library, the dependencies, and the project's
-//     own packages are compiled once rather than once per run.
-//   - Every other command writes into the run's scratch layer, which is
-//     removed when the run ends.
-//
-// The second half is not a detail. A baseline target is the project's own test
-// binary, and a test suite spawns go commands of its own: goatest's does, and
-// so does every suite with a fixture module, a golden build, or a `go list`
-// under test. Those children inherit the cache program of the process that
-// started them. Were a target run to carry the persisting program, every
-// throwaway package those fixtures compile would be written into the base
-// layer and would evict the standard library the layer exists to hold — the
-// cache would grow without bound and get slower the more it was used.
-//
-// Only the workspace of a run is wrapped. The validator opens a workspace of
-// its own for each candidate tree, and it is never wrapped: a candidate is a
-// tree that does not exist yet and may never be applied, so nothing it
-// compiles has earned a place in what the machine keeps.
 type buildCacheWorkspace struct {
-	workspace  CommandWorkspace
-	persisting []string
+	workspace     CommandWorkspace
+	nonPersisting []string
+	native        []string
+	persisting    []string
+	cache         runBuildCache
 }
 
-// withBuildCache wraps a workspace so that its commands that compile or list
-// reach the base layer. A cache that serves nothing wraps nothing, so a run
-// without a cache runs exactly the commands it ran before.
 func withBuildCache(workspace CommandWorkspace, cache runBuildCache) CommandWorkspace {
 	if workspace == nil || !cache.serves() {
 		return workspace
 	}
-	return buildCacheWorkspace{workspace: workspace, persisting: cache.persistingEnvironment()}
-}
-
-// Exec runs one command, having decided which layer its cache writes land in.
-func (wrapper buildCacheWorkspace) Exec(ctx context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
-	if persistingCommand(command.Argv) {
-		command.Env = overlayEnvironment(command.Env, wrapper.persisting)
+	return buildCacheWorkspace{
+		workspace: workspace, nonPersisting: cache.environment(), native: cache.nativeEnvironment(),
+		persisting: cache.persistingEnvironment(), cache: cache,
 	}
-	return wrapper.workspace.Exec(ctx, command)
 }
 
-// persistingCommand reports whether a command may write into the base layer.
-//
-// Only a go command that compiles or lists may: vet, build, list, version, and
-// a test that is compiled and not run. Nothing that runs the project's tests
-// ever may, and the check reads the subcommand rather than the executable
-// because the command that runs a baseline target begins with the go binary
-// too: it is `go tool test2json` wrapped around the compiled test binary. That
-// command is precisely the one whose children fill a cache with garbage, so
-// treating every argv that starts with "go" as a compile would defeat the rule
-// exactly where it matters most.
-func persistingCommand(argv []string) bool {
-	if len(argv) < 2 || !goExecutable(argv[0]) {
+func (wrapper buildCacheWorkspace) Exec(ctx context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
+	persisting := persistingCommand(command.Argv)
+	if persisting {
+		command.Env = overlayEnvironment(command.Env, wrapper.persisting)
+	} else if nativeExecutionCommand(command.Argv) {
+		release, native := wrapper.cache.beginNative()
+		if native {
+			defer release()
+			command.Env = overlayEnvironment(command.Env, wrapper.native)
+		} else {
+			command.Env = overlayEnvironment(command.Env, wrapper.nonPersisting)
+		}
+	} else {
+		command.Env = overlayEnvironment(command.Env, wrapper.nonPersisting)
+	}
+	result, err := wrapper.workspace.Exec(ctx, command)
+	if persisting {
+		wrapper.cache.markNativeDirty()
+	}
+	return result, err
+}
+
+func nativeExecutionCommand(argv []string) bool {
+	if len(argv) < minimumGoCommandArgs {
 		return false
 	}
-	// -C changes the directory before the subcommand is read, and the go
-	// command accepts it only as its first flag. A rule that read argv[1]
-	// blindly would see "-C" and classify every such command as neither a
-	// compile nor a test run, which fails silently: nothing would persist.
-	first := 1
-	switch {
-	case argv[first] == "-C":
-		first += 2
-	case strings.HasPrefix(argv[first], "-C="):
-		first++
+	if !goExecutable(argv[0]) {
+		return slices.ContainsFunc(argv[1:], func(argument string) bool {
+			return strings.HasPrefix(argument, "-test.coverprofile=")
+		})
 	}
+	first := goSubcommandIndex(argv)
+	if first >= len(argv) {
+		return false
+	}
+	command := argv[first:]
+	return command[0] == "test" && !slices.Contains(command[1:argumentSeparator(command)], "-c")
+}
+
+func persistingCommand(argv []string) bool {
+	if len(argv) < minimumGoCommandArgs || !goExecutable(argv[0]) {
+		return false
+	}
+
+	first := goSubcommandIndex(argv)
 	if first >= len(argv) {
 		return false
 	}
@@ -262,21 +551,27 @@ func persistingCommand(argv []string) bool {
 	case "vet", "build", "list", "version":
 		return true
 	case "test":
-		// -c compiles the test binary and does not run it. Every other form of
-		// go test runs the project's tests, including `go test -run=^$`, which
-		// still starts the binary and every TestMain in it.
-		//
-		// Everything after -args belongs to the test binary, so a -c there is
-		// an argument of the suite and not an instruction to the go command.
+
 		return slices.Contains(argv[1:argumentSeparator(argv)], "-c")
 	default:
 		return false
 	}
 }
 
-// argumentSeparator is the index of -args, the point after which a go test
-// command line stops being the go command's and becomes the test binary's. A
-// command line without one ends without ever reaching it.
+func goSubcommandIndex(argv []string) int {
+	if len(argv) < minimumGoCommandArgs {
+		return len(argv)
+	}
+	first := goSubcommandStart
+	switch {
+	case argv[first] == "-C":
+		first += goDirectoryFlagArgs
+	case strings.HasPrefix(argv[first], "-C="):
+		first++
+	}
+	return first
+}
+
 func argumentSeparator(argv []string) int {
 	if index := slices.Index(argv, "-args"); index >= 0 {
 		return index
@@ -284,20 +579,21 @@ func argumentSeparator(argv []string) int {
 	return len(argv)
 }
 
-// goExecutable reports whether a path names the go command. A run may have been
-// given an absolute go binary, and Windows spells it with an extension.
 func goExecutable(path string) bool {
 	name := filepath.Base(path)
 	return name == "go" || name == "go.exe"
 }
 
-// overlayEnvironment replaces the cache program of one command's environment
-// overlay. An overlay the caller already filled in is kept: it carries the
-// resources a target needs, and only the cache program is this layer's to say.
 func overlayEnvironment(existing, overlay []string) []string {
+	replaced := make(map[string]bool, len(overlay))
+	for _, entry := range overlay {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			replaced[strings.ToUpper(key)] = true
+		}
+	}
 	result := make([]string, 0, len(existing)+len(overlay))
 	for _, entry := range existing {
-		if key, _, ok := strings.Cut(entry, "="); ok && strings.ToUpper(key) == cacheProgramVariable {
+		if key, _, ok := strings.Cut(entry, "="); ok && replaced[strings.ToUpper(key)] {
 			continue
 		}
 		result = append(result, entry)

@@ -19,13 +19,19 @@ import (
 	"github.com/P4suta/goatest/internal/app"
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cli"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// readTrace decodes the recorded stream of a trace directory, oldest event
-// first, failing the test if the stream is absent or holds a line no reader of
-// the contract could decode.
+const (
+	traceScannerInitialBufferBytes = 64 << 10
+	traceScannerMaximumTokenBytes  = 8 << 20
+	minimumCompleteTraceEvents     = 3
+	minimumTraceLifecycleEvents    = 2
+	traceFixtureRuns               = 2
+)
+
 func readTrace(t *testing.T, directory string) []trace.Event {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(directory, trace.FileName))
@@ -34,7 +40,7 @@ func readTrace(t *testing.T, directory string) []trace.Event {
 	}
 	var events []trace.Event
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64*1024), 8<<20)
+	scanner.Buffer(make([]byte, 0, traceScannerInitialBufferBytes), traceScannerMaximumTokenBytes)
 	for scanner.Scan() {
 		var event trace.Event
 		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
@@ -50,9 +56,6 @@ func readTrace(t *testing.T, directory string) []trace.Event {
 	return events
 }
 
-// traceRun returns the run directory a traced run wrote under a trace root.
-// A root collects the recordings of the runs written into it, one directory
-// each, so a test that asked for one trace finds exactly one.
 func traceRun(t *testing.T, root string) string {
 	t.Helper()
 	entries, err := os.ReadDir(root)
@@ -71,7 +74,6 @@ func traceRun(t *testing.T, root string) string {
 	return runs[0]
 }
 
-// traceOfType returns the events of one type, in the order they were recorded.
 func traceOfType(events []trace.Event, kind string) []trace.Event {
 	var selected []trace.Event
 	for _, event := range events {
@@ -90,8 +92,7 @@ func TestTraceRequestRecordsTheRunAndClosesItWithItsVerdict(t *testing.T) {
 		Root: t.TempDir(),
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			recorded = options.Trace
-			// A run forwards its own notes to the recorder it was handed,
-			// beside the callback it answers.
+
 			options.Progress(assure.Event{Kind: "snapshot", Detail: "captured"})
 			options.Trace.Progress("snapshot", "captured")
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1", Snapshot: "snapshot-a"}, nil
@@ -106,7 +107,7 @@ func TestTraceRequestRecordsTheRunAndClosesItWithItsVerdict(t *testing.T) {
 	}
 
 	events := readTrace(t, traceRun(t, directory))
-	if len(events) < 3 {
+	if len(events) < minimumCompleteTraceEvents {
 		t.Fatalf("recorded events = %+v", events)
 	}
 	first, last := events[0], events[len(events)-1]
@@ -171,8 +172,6 @@ func TestARunThatReachedNoVerdictIsTracedWithHowItEnded(t *testing.T) {
 			service := app.Service{
 				Root: t.TempDir(),
 				Run: func(context.Context, assure.Options) (report.Report, error) {
-					// A runner that stops early answers with the report it had,
-					// which on the interrupted path is no report at all.
 					return report.Report{}, testCase.runErr
 				},
 			}
@@ -186,9 +185,7 @@ func TestARunThatReachedNoVerdictIsTracedWithHowItEnded(t *testing.T) {
 			if last.Type != trace.TypeRunEnd || last.Run == nil {
 				t.Fatalf("last event = %+v, want a run-end", last)
 			}
-			// A recording says how the run it recorded ended. An empty verdict
-			// says nothing, and an interrupted run leaves no report to say it
-			// elsewhere.
+
 			if last.Run.Verdict != testCase.verdict {
 				t.Fatalf("run-end verdict = %q, want %q", last.Run.Verdict, testCase.verdict)
 			}
@@ -214,9 +211,7 @@ func TestAnUnrequestedTraceIsRecordedInMemoryAndWritesNothing(t *testing.T) {
 	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err != nil {
 		t.Fatal(err)
 	}
-	// Every run records, because a failure nobody expected is the one nobody
-	// asked for a trace of. What a flag buys is where the recording is kept,
-	// not whether the run keeps one.
+
 	if !traced {
 		t.Fatal("a run nobody asked to trace was handed no recorder")
 	}
@@ -231,7 +226,7 @@ func TestDefaultTraceDirectoryIsNamedForTheMomentAndTheProcess(t *testing.T) {
 	service := app.Service{
 		Root:      root,
 		Now:       func() time.Time { return time.Date(2026, 9, 1, 10, 11, 12, 0, time.UTC) },
-		ProcessID: func() int { return 4242 },
+		ProcessID: func() int { return appFixtureProcessID },
 		Run: func(context.Context, assure.Options) (report.Report, error) {
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
@@ -240,7 +235,7 @@ func TestDefaultTraceDirectoryIsNamedForTheMomentAndTheProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := filepath.Join(root, ".goatest", "trace", "20260901T101112Z-4242")
-	if events := readTrace(t, directory); len(events) < 2 || events[0].Type != trace.TypeRunStart {
+	if events := readTrace(t, directory); len(events) < minimumTraceLifecycleEvents || events[0].Type != trace.TypeRunStart {
 		t.Fatalf("default trace directory %s recorded %+v", directory, events)
 	}
 }
@@ -248,7 +243,7 @@ func TestDefaultTraceDirectoryIsNamedForTheMomentAndTheProcess(t *testing.T) {
 func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 	t.Parallel()
 	blocked := filepath.Join(t.TempDir(), "occupied")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+	if err := os.WriteFile(blocked, []byte("not a directory"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	for _, testCase := range []struct {
@@ -277,9 +272,7 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 			if err != nil || result.Verdict != report.VerdictAssured {
 				t.Fatalf("verify = %+v, %v", result, err)
 			}
-			// A directory that cannot be written costs the recording its file
-			// and nothing else: the run goes on recording where every untraced
-			// run records, in memory.
+
 			if !traced {
 				t.Fatal("a trace directory that cannot be written left the run with no recording at all")
 			}
@@ -294,8 +287,6 @@ func TestATraceThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 	}
 }
 
-// unclosableStream is a trace stream that takes every write and fails when it
-// is closed, which is how a filesystem reports a write it never completed.
 type unclosableStream struct{ err error }
 
 func (stream unclosableStream) Write(data []byte) (int, error) { return len(data), nil }
@@ -320,9 +311,7 @@ func TestARecordingThatCannotBeClosedWarnsAndLeavesTheRunAlone(t *testing.T) {
 		},
 	}
 	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, "")
-	// Closing is the last moment a recording can discover that what it wrote
-	// was never kept. A trace is diagnostic exhaust, so that discovery is a
-	// note to the developer and never the verdict of the run.
+
 	if err != nil || result.Verdict != report.VerdictAssured {
 		t.Fatalf("verify = %+v, %v", result, err)
 	}
@@ -341,8 +330,6 @@ func TestARecordingThatCannotBeClosedWarnsAndLeavesTheRunAlone(t *testing.T) {
 	}
 }
 
-// symlinkTo links name at target, skipping the test where the filesystem or
-// the platform will not have one.
 func symlinkTo(t *testing.T, target, name string) string {
 	t.Helper()
 	if err := os.Symlink(target, name); err != nil {
@@ -369,11 +356,10 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 			name: "symlink-to-a-directory-of-the-repository",
 			directory: func(t *testing.T, root string) string {
 				inside := filepath.Join(root, "internal")
-				if err := os.MkdirAll(inside, 0o755); err != nil {
+				if err := os.MkdirAll(inside, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-				// The trace directory itself does not exist yet, so only the
-				// path above it can be resolved.
+
 				return filepath.Join(symlinkTo(t, inside, filepath.Join(t.TempDir(), "alias")), "traces", "run")
 			},
 			refused: true,
@@ -407,7 +393,7 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 				if !traced {
 					t.Fatalf("a directory outside the repository was refused: %q", progress.String())
 				}
-				if events := readTrace(t, traceRun(t, directory)); len(events) < 2 {
+				if events := readTrace(t, traceRun(t, directory)); len(events) < minimumTraceLifecycleEvents {
 					t.Fatalf("recorded events = %+v", events)
 				}
 				if progress.Len() != 0 {
@@ -415,10 +401,7 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 				}
 				return
 			}
-			// A trace stream growing where the source snapshot reads costs the
-			// run its evidence, and a symbolic link is not a way around that.
-			// What the refusal takes away is the directory, not the recording:
-			// the run records in memory as an untraced run does.
+
 			if !traced {
 				t.Fatal("a refused trace directory left the run with no recording at all")
 			}
@@ -448,9 +431,7 @@ func TestATraceDirectoryBesideTheRepositoryIsRecordedInto(t *testing.T) {
 		name      string
 		directory func(parent string) string
 	}{
-		// The directory the repository sits in is not inside it, and neither is
-		// anything beside it. A run traced there leaves the snapshot alone, so
-		// refusing it would cost a developer the recording for nothing.
+
 		{name: "the-directory-holding-the-repository", directory: func(parent string) string { return parent }},
 		{name: "a-sibling-of-the-repository", directory: func(parent string) string { return filepath.Join(parent, "traces") }},
 	} {
@@ -458,7 +439,7 @@ func TestATraceDirectoryBesideTheRepositoryIsRecordedInto(t *testing.T) {
 			t.Parallel()
 			parent := t.TempDir()
 			root := filepath.Join(parent, "repository")
-			if err := os.MkdirAll(root, 0o755); err != nil {
+			if err := os.MkdirAll(root, filemode.ReadableDirectory); err != nil {
 				t.Fatal(err)
 			}
 			directory := testCase.directory(parent)
@@ -467,7 +448,7 @@ func TestATraceDirectoryBesideTheRepositoryIsRecordedInto(t *testing.T) {
 			service := app.Service{
 				Root: root, Progress: &progress,
 				Now:       func() time.Time { return time.Date(2026, 9, 1, 10, 11, 12, 0, time.UTC) },
-				ProcessID: func() int { return 4242 },
+				ProcessID: func() int { return appFixtureProcessID },
 				Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 					traced = options.Trace != nil
 					return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
@@ -480,7 +461,7 @@ func TestATraceDirectoryBesideTheRepositoryIsRecordedInto(t *testing.T) {
 			if !traced {
 				t.Fatalf("a trace directory outside the repository was refused: %q", progress.String())
 			}
-			if events := readTrace(t, filepath.Join(directory, "20260901T101112Z-4242")); len(events) < 2 {
+			if events := readTrace(t, filepath.Join(directory, "20260901T101112Z-4242")); len(events) < minimumTraceLifecycleEvents {
 				t.Fatalf("recorded events = %+v", events)
 			}
 			if progress.Len() != 0 {
@@ -505,7 +486,7 @@ func TestATraceMayBeWrittenUnderTheRepositoryReportDirectory(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if events := readTrace(t, traceRun(t, filepath.Join(root, ".goatest", "chosen"))); len(events) < 2 {
+	if events := readTrace(t, traceRun(t, filepath.Join(root, ".goatest", "chosen"))); len(events) < minimumTraceLifecycleEvents {
 		t.Fatalf("recorded events = %+v", events)
 	}
 	if progress.Len() != 0 {
@@ -521,17 +502,14 @@ func TestASecondRunTracedToOneDirectoryKeepsTheRecordingOfTheFirst(t *testing.T)
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress,
 		Now:       func() time.Time { return moment },
-		ProcessID: func() int { return 4242 },
+		ProcessID: func() int { return appFixtureProcessID },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			options.Trace.Progress("snapshot", moment.Format(time.RFC3339))
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
 	}
-	// The same directory every time is what a developer does with --trace=DIR,
-	// and each run of it is a recording of its own: the second must not append
-	// to the stream of the first, whose events number from one and whose
-	// preserved output is named after those numbers.
-	for range 2 {
+
+	for range traceFixtureRuns {
 		if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{Trace: true, TraceDirectory: directory}, ""); err != nil {
 			t.Fatal(err)
 		}
@@ -542,12 +520,12 @@ func TestASecondRunTracedToOneDirectoryKeepsTheRecordingOfTheFirst(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
+	if len(entries) != traceFixtureRuns {
 		t.Fatalf("%s holds %d recordings, want one for each run", directory, len(entries))
 	}
 	for _, entry := range entries {
 		events := readTrace(t, filepath.Join(directory, entry.Name()))
-		if len(events) < 3 || events[0].Type != trace.TypeRunStart || events[0].Seq != 1 {
+		if len(events) < minimumCompleteTraceEvents || events[0].Type != trace.TypeRunStart || events[0].Seq != 1 {
 			t.Fatalf("recording %s = %+v", entry.Name(), events)
 		}
 		last := events[len(events)-1]

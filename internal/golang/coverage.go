@@ -8,16 +8,18 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 )
 
-// CoverageBlock is one basic block of a Go coverage profile: the source span
-// cmd/cover instruments and counts as a unit. The span is half-open, so the
-// start position belongs to the block and the end position belongs to whatever
-// follows it. Lines and columns are 1-based, and a column counts bytes, which
-// is the unit both cmd/cover and go-mutants report positions in.
+const (
+	coverageLineFieldCount = 3
+	coverageLocationField  = 0
+	coverageCountField     = 2
+)
+
 type CoverageBlock struct {
 	StartLine   int
 	StartColumn int
@@ -25,9 +27,6 @@ type CoverageBlock struct {
 	EndColumn   int
 }
 
-// Contains reports whether a 1-based line and byte column lies inside the
-// block. A position on the start line before the start column, or on the end
-// line at or after the end column, belongs to a neighbouring block instead.
 func (block CoverageBlock) Contains(line, column int) bool {
 	if line < block.StartLine || line > block.EndLine {
 		return false
@@ -41,16 +40,11 @@ func (block CoverageBlock) Contains(line, column int) bool {
 	return true
 }
 
-// FileCoverage is every block a coverage profile recorded for one
-// module-relative file, in a stable order and without duplicates.
 type FileCoverage struct {
 	Path   string
 	Blocks []CoverageBlock
 }
 
-// Contains reports whether any block of the file contains the position. A file
-// with no blocks contains nothing, so the zero value answers every position
-// with false.
 func (file FileCoverage) Contains(line, column int) bool {
 	for _, block := range file.Blocks {
 		if block.Contains(line, column) {
@@ -60,13 +54,6 @@ func (file FileCoverage) Contains(line, column int) bool {
 	return false
 }
 
-// CoverageSpan is a closed region of one file: unlike a coverage block, both
-// the start and the end position belong to it. It is the form a source
-// construct has to be described in to be compared against coverage, because
-// cmd/cover does not cut a construct into blocks the same way in every release
-// — a body block begins at its opening brace in Go 1.26 and at the body's
-// first statement in Go 1.27 — while the braces bound the construct under
-// both.
 type CoverageSpan struct {
 	StartLine   int
 	StartColumn int
@@ -74,12 +61,6 @@ type CoverageSpan struct {
 	EndColumn   int
 }
 
-// StartsWithin reports whether any block of the file begins inside the span.
-// Where a block begins is the whole question: a block that begins before the
-// span and reaches into it belongs to the code around the span rather than to
-// the span, and would answer for execution the span never saw. A file with no
-// blocks begins none, and a span whose end precedes its start holds none, so
-// both answer every question with false.
 func (file FileCoverage) StartsWithin(span CoverageSpan) bool {
 	for _, block := range file.Blocks {
 		if comparePositions(span.StartLine, span.StartColumn, block.StartLine, block.StartColumn) <= 0 &&
@@ -90,20 +71,32 @@ func (file FileCoverage) StartsWithin(span CoverageSpan) bool {
 	return false
 }
 
-// Coverage is one parsed coverage profile: the blocks the profiled execution
-// actually ran, and every block the profile instrumented whether it ran or
-// not. Both are sorted by path and free of duplicates, and both are non-nil
-// even when the profile carries nothing, so that an absent measurement stays
-// distinguishable from a measurement that found nothing.
 type Coverage struct {
 	Covered      []FileCoverage
 	Instrumented []FileCoverage
 }
 
-// ParseCoverage reads a Go coverage profile and separates the blocks that ran
-// from the blocks that were instrumented. Every path is reported relative to
-// the module and with forward slashes; a path outside the module is rejected,
-// as is any line the profile format does not allow.
+func RestrictCoverageToPackages(coverage Coverage, packages []Package) Coverage {
+	return Coverage{
+		Covered:      RestrictFileCoverageToPackages(coverage.Covered, packages),
+		Instrumented: RestrictFileCoverageToPackages(coverage.Instrumented, packages),
+	}
+}
+
+func RestrictFileCoverageToPackages(files []FileCoverage, packages []Package) []FileCoverage {
+	directories := make(map[string]bool, len(packages))
+	for _, pkg := range packages {
+		directories[path.Clean(pkg.RelativeDir)] = true
+	}
+	result := make([]FileCoverage, 0, len(files))
+	for _, file := range files {
+		if directories[path.Dir(file.Path)] {
+			result = append(result, file)
+		}
+	}
+	return result
+}
+
 func ParseCoverage(profile []byte, modulePath string) (Coverage, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(profile))
 	if !scanner.Scan() || !strings.HasPrefix(scanner.Text(), "mode: ") {
@@ -115,18 +108,18 @@ func ParseCoverage(profile []byte, modulePath string) (Coverage, error) {
 	for scanner.Scan() {
 		lines++
 		fields := strings.Fields(scanner.Text())
-		if len(fields) != 3 {
+		if len(fields) != coverageLineFieldCount {
 			return Coverage{}, fmt.Errorf("goatest: malformed coverage line %d", lines+1)
 		}
-		count, err := strconv.ParseUint(fields[2], 10, 64)
+		count, err := strconv.ParseUint(fields[coverageCountField], 10, 64)
 		if err != nil {
 			return Coverage{}, fmt.Errorf("goatest: malformed coverage count on line %d", lines+1)
 		}
-		colon := strings.LastIndex(fields[0], ":")
+		colon := strings.LastIndex(fields[coverageLocationField], ":")
 		if colon < 1 {
 			return Coverage{}, fmt.Errorf("goatest: malformed coverage location on line %d", lines+1)
 		}
-		block, ok := parseCoverageSpan(fields[0][colon+1:])
+		block, ok := parseCoverageSpan(fields[coverageLocationField][colon+1:])
 		if !ok {
 			return Coverage{}, fmt.Errorf("goatest: malformed coverage span on line %d", lines+1)
 		}
@@ -147,8 +140,6 @@ func ParseCoverage(profile []byte, modulePath string) (Coverage, error) {
 	return Coverage{Covered: sortedFileCoverage(covered), Instrumented: sortedFileCoverage(instrumented)}, nil
 }
 
-// CoverageFiles returns the module-relative files some part of which the
-// profiled execution ran.
 func CoverageFiles(profile []byte, modulePath string) ([]string, error) {
 	coverage, err := ParseCoverage(profile, modulePath)
 	if err != nil {
@@ -157,7 +148,6 @@ func CoverageFiles(profile []byte, modulePath string) ([]string, error) {
 	return CoveredPaths(coverage.Covered), nil
 }
 
-// CoveredPaths returns the paths of a file coverage set, keeping its order.
 func CoveredPaths(files []FileCoverage) []string {
 	paths := make([]string, 0, len(files))
 	for _, file := range files {
@@ -166,10 +156,6 @@ func CoveredPaths(files []FileCoverage) []string {
 	return paths
 }
 
-// MergeFileCoverage returns the union of two file coverage sets, sorted by
-// path with the blocks of each file sorted and deduplicated. The result is
-// independent of the order the two sets are given in and shares no memory with
-// either of them.
 func MergeFileCoverage(first, second []FileCoverage) []FileCoverage {
 	blocks := make(map[string]map[CoverageBlock]struct{})
 	for _, files := range [][]FileCoverage{first, second} {
@@ -182,9 +168,6 @@ func MergeFileCoverage(first, second []FileCoverage) []FileCoverage {
 	return sortedFileCoverage(blocks)
 }
 
-// FindFileCoverage returns the coverage recorded for one path. The files must
-// be sorted by path, which is how ParseCoverage and MergeFileCoverage return
-// them.
 func FindFileCoverage(files []FileCoverage, path string) (FileCoverage, bool) {
 	index, found := slices.BinarySearchFunc(files, path, func(file FileCoverage, wanted string) int {
 		return strings.Compare(file.Path, wanted)
@@ -195,11 +178,6 @@ func FindFileCoverage(files []FileCoverage, path string) (FileCoverage, bool) {
 	return files[index], true
 }
 
-// parseCoverageSpan reads the "startLine.startColumn,endLine.endColumn" span
-// of a coverage profile line. A span is only accepted when it names a block
-// the rest of the package can rely on: 1-based coordinates, and an end that
-// does not precede the start. An end equal to the start is the empty block
-// cmd/cover emits for a clause with no statements; it contains no position.
 func parseCoverageSpan(span string) (CoverageBlock, bool) {
 	start, end, ok := strings.Cut(span, ",")
 	if !ok {
@@ -218,8 +196,6 @@ func parseCoverageSpan(span string) (CoverageBlock, bool) {
 	return block, true
 }
 
-// parseCoveragePosition reads one "line.column" half of a coverage span, and
-// accepts only the positive line and column a source position has.
 func parseCoveragePosition(position string) (int, int, bool) {
 	line, column, ok := strings.Cut(position, ".")
 	if !ok {
@@ -245,9 +221,6 @@ func rememberCoverageBlock(blocks map[string]map[CoverageBlock]struct{}, path st
 	file[block] = struct{}{}
 }
 
-// sortedFileCoverage turns remembered blocks into the canonical form every
-// caller reads: files sorted by path, blocks sorted by position, no
-// duplicates, and never nil.
 func sortedFileCoverage(blocks map[string]map[CoverageBlock]struct{}) []FileCoverage {
 	files := make([]FileCoverage, 0, len(blocks))
 	for path, unique := range blocks {
@@ -271,8 +244,6 @@ func compareCoverageBlocks(first, second CoverageBlock) int {
 	return comparePositions(first.EndLine, first.EndColumn, second.EndLine, second.EndColumn)
 }
 
-// comparePositions orders two source positions the way a reader reads them:
-// by line, and within a line by column.
 func comparePositions(firstLine, firstColumn, secondLine, secondColumn int) int {
 	if compared := cmp.Compare(firstLine, secondLine); compared != 0 {
 		return compared

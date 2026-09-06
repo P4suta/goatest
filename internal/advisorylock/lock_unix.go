@@ -12,10 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Try takes an exclusive lock on one open file without waiting. A lock somebody
-// else holds is reported as not taken rather than as a failure: the caller is
-// deciding whether to go ahead, and somebody else holding the lock is an
-// answer.
 func Try(file *os.File) (bool, error) {
 	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if err == nil {
@@ -27,6 +23,4 @@ func Try(file *os.File) (bool, error) {
 	return false, err
 }
 
-// Release drops the lock without closing the file, for the callers that keep
-// the file open afterwards.
 func Release(file *os.File) error { return unix.Flock(int(file.Fd()), unix.LOCK_UN) }

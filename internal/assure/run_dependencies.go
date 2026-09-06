@@ -55,7 +55,6 @@ func productionRunDependencies() runDependencies {
 		},
 		inspectWorkspace: inspectWorkspace,
 		assuranceInputs:  assuranceInputs,
-		digestInputs:     evidence.Digest,
 		discoverTargets:  goanalysis.DiscoverTargets,
 		selectImpact:     selectImpact,
 		acquireResources: func(ctx context.Context, loaded config.Config, targets []goanalysis.Target, baseEnvironment []string) (runRoundCloser, []BaselineTarget, []report.Evidence, []string, error) {
@@ -71,7 +70,7 @@ func productionRunDependencies() runDependencies {
 		concurrencyPackages:    goanalysis.ConcurrencyPackages,
 		relevantRacePackages:   RelevantRacePackages,
 		collectRaceWithOptions: CollectRaceWithOptions,
-		prepareSession:         prepareTracedSession,
+		prepareSession:         prepareMutationSession,
 		probeTargets:           ProbeTargets,
 		evaluateMutations:      EvaluateMutations,
 		attemptRepairs:         AttemptGeneratedRepairs,

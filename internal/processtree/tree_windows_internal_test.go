@@ -20,6 +20,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const (
+	failedWindowsHandle     = windows.Handle(101)
+	windowsChildPIDDeadline = 15 * time.Second
+)
+
 func TestAttachWindowsConfiguresKillOnCloseAndOwnsHandles(t *testing.T) {
 	preserveWindowsHooks(t)
 	job := windows.Handle(101)
@@ -185,12 +190,12 @@ func TestCloseTreeWindowsHandlesZeroAndPropagatesClose(t *testing.T) {
 	sentinel := errors.New("close failed")
 	closeWindowsHandle = func(handle windows.Handle) error {
 		calls++
-		if handle != 101 {
+		if handle != failedWindowsHandle {
 			t.Fatalf("closed handle = %v", handle)
 		}
 		return sentinel
 	}
-	if err := closeTree(nil, platformHandle(101)); !errors.Is(err, sentinel) || calls != 1 {
+	if err := closeTree(nil, platformHandle(failedWindowsHandle)); !errors.Is(err, sentinel) || calls != 1 {
 		t.Fatalf("closeTree = %v, calls=%d", err, calls)
 	}
 }
@@ -251,7 +256,7 @@ func TestCloseTreeTerminatesDescendantAfterParentExits(t *testing.T) {
 	case childPID = <-pidResult:
 	case err := <-readError:
 		t.Fatal(err)
-	case <-time.After(15 * time.Second):
+	case <-time.After(windowsChildPIDDeadline):
 		t.Fatal("timed out waiting for helper child pid")
 	}
 	childHandle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE, false, uint32(childPID))

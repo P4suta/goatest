@@ -15,58 +15,42 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// Layout of a trace directory.
 const (
-	// FileName is the JSON Lines stream, one event per line, in sequence order.
 	FileName = "trace.jsonl"
-	// OutputDirectoryName holds the command output preserved beside the stream.
+
 	OutputDirectoryName = "output"
-	// OutputFileLimit caps one preserved output file. A capture larger than the
-	// limit is truncated to it; the event still digests the whole capture.
+
 	OutputFileLimit = 1 << 20
-	// TruncationMarker ends a preserved output file that did not fit.
+
 	TruncationMarker = "..."
 )
 
-// Permissions of what a trace writes. A trace is diagnostic exhaust a developer
-// reads, not a secret store.
 const (
-	directoryPermissions fs.FileMode = 0o755
-	filePermissions      fs.FileMode = 0o644
+	directoryPermissions fs.FileMode = filemode.ReadableDirectory
+	filePermissions      fs.FileMode = filemode.ReadableFile
 )
 
-// errSinkClosed is the answer of a sink that has already been closed.
 var errSinkClosed = errors.New("goatest: trace sink is closed")
 
-// Sink keeps the events of a recording. A sink that cannot keep an event
-// answers with an error and counts the loss; it never fails the run.
 type Sink interface {
 	Emit(event Event) error
 	Close() error
 }
 
-// Dropper is the optional half of a sink that counts what it lost. A sink that
-// implements it is the authority on its own drops, which is how a recording
-// reports loss a sink absorbed without an error, such as a full ring buffer.
 type Dropper interface {
 	Dropped() int64
 }
 
-// File is the part of a file a trace stream needs. It exists so a test can
-// stand in for the disk without a global seam.
 type File interface {
 	Write(data []byte) (int, error)
 	Sync() error
 	Close() error
 }
 
-// Filesystem is the filesystem a DirSink writes through. Its zero value is the
-// os package; a test fills in only the operation it wants to drive.
-//
-// Mkdir creates one directory and fails when it exists, which is how a
-// recording claims a directory no other recording is writing.
 type Filesystem struct {
 	MkdirAll   func(path string, perm fs.FileMode) error
 	Mkdir      func(path string, perm fs.FileMode) error
@@ -74,8 +58,6 @@ type Filesystem struct {
 	WriteFile  func(path string, data []byte, perm fs.FileMode) error
 }
 
-// resolved returns the hooks with every unset operation filled in from the os
-// package.
 func (hooks Filesystem) resolved() Filesystem {
 	if hooks.MkdirAll == nil {
 		hooks.MkdirAll = os.MkdirAll
@@ -94,18 +76,6 @@ func (hooks Filesystem) resolved() Filesystem {
 	return hooks
 }
 
-// DirSink writes a recording to a trace directory: the JSON Lines stream in
-// FileName, and the output of the commands that produced any in
-// OutputDirectoryName.
-//
-// The directory belongs to one recording. A run owns its own, named under the
-// trace root the caller collects recordings in, because everything in a
-// recording is numbered from the first event: a second run sharing a directory
-// would append to the first run's stream and write its output over the files
-// the first run's events digested.
-//
-// Each event is flushed as it arrives, so a run that hangs or is killed still
-// leaves everything it recorded readable on disk.
 type DirSink struct {
 	directory string
 	hooks     Filesystem
@@ -118,13 +88,6 @@ type DirSink struct {
 	dropped atomic.Int64
 }
 
-// NewDirSink creates the directory of one recording under the trace root and
-// opens its stream. The root collects recordings and may already hold them;
-// the run's own directory is created exclusively, so a name another recording
-// owns is refused rather than joined.
-//
-// It reports the error that stopped it rather than returning a sink that cannot
-// write; a caller that cannot trace runs untraced.
 func NewDirSink(root, run string, hooks Filesystem) (*DirSink, error) {
 	hooks = hooks.resolved()
 	if err := hooks.MkdirAll(root, directoryPermissions); err != nil {
@@ -142,12 +105,8 @@ func NewDirSink(root, run string, hooks Filesystem) (*DirSink, error) {
 	return &DirSink{directory: directory, hooks: hooks, file: file}, nil
 }
 
-// Directory is where the recording is being written: the run's own directory
-// under the trace root it was opened in.
 func (sink *DirSink) Directory() string { return sink.directory }
 
-// Emit appends one event to the stream, preserving any captured output beside
-// it first, and flushes the line before returning.
 func (sink *DirSink) Emit(event Event) error {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
@@ -165,14 +124,9 @@ func (sink *DirSink) Emit(event Event) error {
 		sink.dropped.Add(1)
 		return fmt.Errorf("goatest: write trace event %d: %w", event.Seq, err)
 	}
-	// The line is in the file's hands and readable; whether it reached the disk
-	// is not something a diagnostic stream fails over.
-	_ = sink.file.Sync()
 	return nil
 }
 
-// Close closes the stream. Closing twice is not an error, so a deferred close
-// and an explicit one may both run.
 func (sink *DirSink) Close() error {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
@@ -180,21 +134,18 @@ func (sink *DirSink) Close() error {
 		return nil
 	}
 	sink.closed = true
-	if err := sink.file.Close(); err != nil {
-		return fmt.Errorf("goatest: close trace stream: %w", err)
+	var failures []error
+	if err := sink.file.Sync(); err != nil {
+		failures = append(failures, fmt.Errorf("goatest: sync trace stream: %w", err))
 	}
-	return nil
+	if err := sink.file.Close(); err != nil {
+		failures = append(failures, fmt.Errorf("goatest: close trace stream: %w", err))
+	}
+	return errors.Join(failures...)
 }
 
-// Dropped reports how many events the sink could not write.
 func (sink *DirSink) Dropped() int64 { return sink.dropped.Load() }
 
-// preserveOutput writes the captured output of an exec event to the output
-// directory and returns the event pointing at the file it wrote.
-//
-// It copies the record instead of amending the caller's, so a sink that shares
-// an event with other sinks never sees this sink's paths. Preserving output is
-// best effort: an output that cannot be written costs its path, not the event.
 func (sink *DirSink) preserveOutput(event Event) Event {
 	if event.Exec == nil || len(event.Exec.Output) == 0 {
 		return event
@@ -211,8 +162,6 @@ func (sink *DirSink) preserveOutput(event Event) Event {
 	return event
 }
 
-// writeOutput writes one preserved output file, creating the output directory
-// the first time one is needed.
 func (sink *DirSink) writeOutput(name string, data []byte) error {
 	directory := filepath.Join(sink.directory, OutputDirectoryName)
 	if !sink.outputExists {
@@ -224,7 +173,6 @@ func (sink *DirSink) writeOutput(name string, data []byte) error {
 	return sink.hooks.WriteFile(filepath.Join(directory, name), data, filePermissions)
 }
 
-// limitOutput caps a captured output at OutputFileLimit, marking what it cut.
 func limitOutput(output []byte) ([]byte, bool) {
 	if len(output) <= OutputFileLimit {
 		return output, false
@@ -234,9 +182,6 @@ func limitOutput(output []byte) ([]byte, bool) {
 	return append(limited, TruncationMarker...), true
 }
 
-// MemorySink keeps the most recent events of a recording in a ring buffer. It
-// is the sink of a test and of an in-process reader; a full ring drops its
-// oldest event and counts it.
 type MemorySink struct {
 	capacity int
 
@@ -247,18 +192,8 @@ type MemorySink struct {
 	dropped atomic.Int64
 }
 
-// NewMemorySink returns a sink holding at most capacity events. A capacity of
-// zero or less is unbounded.
-//
-// The last slot of a bounded ring belongs to the run-end event, so a run in
-// progress fills capacity-1 slots. That reservation is what keeps the
-// accounting honest: a recorder counts the loss before it writes the run-end,
-// and a ring with no room left for that write would drop an event nothing
-// could report. A ring of one therefore keeps the run-end alone.
 func NewMemorySink(capacity int) *MemorySink { return &MemorySink{capacity: capacity} }
 
-// Emit keeps one event, dropping the oldest ones the ring no longer has room
-// for.
 func (sink *MemorySink) Emit(event Event) error {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
@@ -272,7 +207,6 @@ func (sink *MemorySink) Emit(event Event) error {
 	}
 	room := sink.capacity
 	if event.Type != TypeRunEnd {
-		// The run-end has not arrived yet, and its slot is not on offer.
 		room--
 	}
 	if overflow := len(sink.events) - room; overflow > 0 {
@@ -282,7 +216,6 @@ func (sink *MemorySink) Emit(event Event) error {
 	return nil
 }
 
-// Close stops the sink from accepting events. Closing twice is not an error.
 func (sink *MemorySink) Close() error {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
@@ -290,12 +223,8 @@ func (sink *MemorySink) Close() error {
 	return nil
 }
 
-// Dropped reports how many events fell out of the ring.
 func (sink *MemorySink) Dropped() int64 { return sink.dropped.Load() }
 
-// Events returns a snapshot of the kept events, oldest first. The snapshot is
-// the caller's own down to the payloads it points at, so reading a recording
-// and recording into it are independent whatever either side does next.
 func (sink *MemorySink) Events() []Event {
 	sink.mutex.Lock()
 	defer sink.mutex.Unlock()
@@ -306,14 +235,18 @@ func (sink *MemorySink) Events() []Event {
 	return snapshot
 }
 
-// cloneEvent detaches an event from the payload records and slices its holder
-// may still amend. An Event is an envelope of pointers, so copying one copies
-// nothing a caller could not reach afterwards; a sink that keeps events keeps
-// clones, both when it takes one and when it hands one back.
 func cloneEvent(event Event) Event {
 	if event.Phase != nil {
 		record := *event.Phase
 		event.Phase = &record
+	}
+	if event.Prepare != nil {
+		record := *event.Prepare
+		if record.DurationMS != nil {
+			durationMS := *record.DurationMS
+			record.DurationMS = &durationMS
+		}
+		event.Prepare = &record
 	}
 	if event.Exec != nil {
 		record := *event.Exec
@@ -332,6 +265,7 @@ func cloneEvent(event Event) Event {
 		record.ReachingTargets = slices.Clone(record.ReachingTargets)
 		record.Plan = slices.Clone(record.Plan)
 		record.Discharged = slices.Clone(record.Discharged)
+		record.ProbeReaching = slices.Clone(record.ProbeReaching)
 		event.Route = &record
 	}
 	if event.Probe != nil {
@@ -355,17 +289,12 @@ func cloneEvent(event Event) Event {
 	return event
 }
 
-// TeeSink delivers every event to several sinks, which is how one recording
-// reaches both a trace directory and an in-process reader.
 type TeeSink struct {
 	sinks []Sink
 
-	// dropped counts the failures of sinks that do not count their own.
 	dropped atomic.Int64
 }
 
-// NewTeeSink returns a sink that fans out to the given sinks. Nil sinks are
-// ignored, and no sinks at all is a sink that keeps nothing and loses nothing.
 func NewTeeSink(sinks ...Sink) *TeeSink {
 	kept := make([]Sink, 0, len(sinks))
 	for _, sink := range sinks {
@@ -376,8 +305,6 @@ func NewTeeSink(sinks ...Sink) *TeeSink {
 	return &TeeSink{sinks: kept}
 }
 
-// Emit delivers the event to every sink and reports the first failure. One sink
-// failing never costs another sink the event.
 func (tee *TeeSink) Emit(event Event) error {
 	var first error
 	for _, sink := range tee.sinks {
@@ -395,7 +322,6 @@ func (tee *TeeSink) Emit(event Event) error {
 	return first
 }
 
-// Close closes every sink and reports the first failure.
 func (tee *TeeSink) Close() error {
 	var first error
 	for _, sink := range tee.sinks {
@@ -406,8 +332,6 @@ func (tee *TeeSink) Close() error {
 	return first
 }
 
-// Dropped reports the drops of every sink: their own counts where they keep
-// one, and the failures observed here where they do not.
 func (tee *TeeSink) Dropped() int64 {
 	total := tee.dropped.Load()
 	for _, sink := range tee.sinks {

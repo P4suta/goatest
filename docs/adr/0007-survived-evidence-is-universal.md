@@ -19,8 +19,9 @@ evidence, and re-observing it is work that establishes nothing new — provided
 the claim the earlier run made is still a claim about this run.
 
 [ADR 0002](0002-trace-is-not-evidence.md) and the assurance contract fixed the
-first half of that: a kill is reused when the recorded killer still reaches the
-mutant, still has the same behaviour key, and passed this run's own baseline.
+first half of that: a kill is reused when every target in the recorded witness
+set still reaches the mutant in one compatible group, still has the same
+behaviour key, and passed this run's own baseline.
 That covers the existential half of a mutation phase. It does not cover the
 expensive half. On this repository, survivors are most of the mutation phase:
 every reaching test of a surviving mutant runs to completion, because nothing
@@ -28,10 +29,11 @@ short of running all of them establishes that none kills it, and the result is
 re-derived from scratch on every run although nothing that could change it
 changed.
 
-The difficulty is that a survival is a different kind of claim. "This target
-killed the mutant" is existential: one witness makes it true, and checking that
-the witness is unchanged is enough. "No test that reaches this mutant kills it"
-is universal: it is a claim about a set, and a set that gained a member is a
+The difficulty is that a survival is a different kind of claim. "This exact
+target set killed the mutant" is existential: one witness set makes it true,
+and checking that the complete witness is unchanged is enough. "No test that
+reaches this mutant kills it" is universal: it is a claim about a set, and a
+set that gained a member is a
 different set. A condition modelled on the kill rule — say, "some recorded
 target still reaches it unchanged" — would be unsound in exactly the case that
 matters, a newly written test that kills a mutant an earlier run watched
@@ -55,65 +57,48 @@ survive.
    at all. The asymmetry is the whole rule: reuse is refused by growth, never
    by shrinkage.
 
-3. **Fuzz targets and resumed targets never qualify, in either direction.** A
-   fuzz target explores past the corpus its coverage was measured on, so "this
-   budget found no input" is not "no input exists"; the next budget is a
-   different experiment. A target restored from a checkpoint carries no
-   coverage blocks, so routing keeps it for the whole file: the set it belongs
-   to is wider than the set any run measured, and a claim about a measured set
-   is not a claim about a widened one. Both disqualify a record from being
-   written as well as from being read, so the store never holds a record that
-   could not be used.
+3. **Fuzz seed targets qualify only under their corpus-bound key.** Verification
+   executes the registered seed corpus deterministically. Its digest is part of
+   the target key, so any corpus change invalidates a recorded kill or survival.
+   A target without exact coverage blocks belongs to a wider set than any run
+   measured and does not qualify.
 
-4. **A mutant no target reaches is a claim about the package suite.** The suite
-   runs every target of the package, fuzz targets included, as one command, so
-   its behaviour is the conjunction of its targets' behaviours and of what the
-   package-level run itself reads. The suite key is built from exactly those
-   two, in a hash domain of its own so that it can never be confused with the
-   behaviour key of one target. A package this run could not measure whole
-   names no suite key, and neither records nor reuses anything.
+4. **A mutant no target reaches is a claim about the package suite.** The claim
+   is established by exact negative suite coverage, by a semantics-preserving
+   whole-suite probe proving activation cannot change the execution, or by
+   executing that suite with the mutant active after a passing original
+   preflight. The suite runs every target of the package, fuzz targets included,
+   as one command, so its behaviour is the conjunction of its targets'
+   behaviours and of what the package-level run itself reads. The suite key is
+   built from exactly those two, in a hash domain of its own so that it can
+   never be confused with the behaviour key of one target. A package this run
+   could not measure whole names no suite key, and neither records nor reuses
+   anything.
 
-5. **A timeout is reused fail-closed, under an existential condition.** A
-   timeout establishes nothing about the mutant: it says the run ran out of
-   time under one target. That is one observation about one target, not a claim
-   about a set, so the condition has the shape a kill's has and not the shape a
-   survival's has — the target time ran out under still reaches the mutant, has
-   the same behaviour key, passed this run's baseline, and is neither a fuzz
-   target nor one restored from a checkpoint. The targets that ran before it
-   neither caused the timeout nor say anything about whether it recurs, and a
-   target that has since joined the reaching set says nothing about it either.
-   Applying the survival's universal condition here would be wrong twice over:
-   it would refuse the reuse whenever anything joined the reaching set or the
-   timeout was not under the last target in order, spending the whole timeout
-   budget again on the same non-answer, and it would accept the reuse when the
-   target time ran out under had left the reaching set, keeping a finding about
-   a test no longer run. Reusing a timeout keeps its finding and can never
-   remove one, so the worst the rule can cost is work a run did not need to do.
-   `goatest replay <finding-id>` bypasses evidence entirely, which is the
-   documented way to run a timeout again.
-
-   The record names that target as the last of its executed targets. A
-   timed-out record is therefore stored in execution order, while a survived
-   record's targets are stored sorted: there the set is the claim and sorting is
-   what makes two runs produce the same bytes, here the order is the evidence
-   and sorting would leave the record naming an arbitrary target as the one
-   that did not finish. No separate field names it, because the list already
-   contains it and a second place to say so would be a second place to keep
-   consistent; the store's schema stays additive.
+5. **A timeout is not evidence.** A timeout establishes nothing about the
+   mutant or the reaching set. It is reported as an inconclusive finding for
+   the current run and is never written to the reusable store. A later run must
+   obtain completed executions to establish a kill, survival, or unreached
+   verdict; otherwise it remains inconclusive again.
 
 6. **An execution that reads the repository keys the whole tree, rather than
-   excluding its package.** A named list of directory APIs statically selects
-   candidates. Go's test action log then observes the baseline and every mutant
-   execution that establishes a record. Access to a repository directory, a
+   excluding its package.** Go's test action log observes every selected
+   baseline, package suite, and mutant execution that establishes a record,
+   except those whose package static inspection has already placed outside the
+   observable interval or behind an API the log cannot see; such a package is
+   widened without an observation. Access to a repository directory, a
    missing repository path, or a file outside the ordinary closure widens that
    target or suite to the whole snapshot; accesses to temporary directories
-   and already-keyed files do not. The observations of both paired kill runs
-   are joined, and a batch applies its observation to every selected target.
-   An absent, malformed, or unobservable log always widens. Thus a reused
-   narrow record exists only when both the original and mutated executions
-   were observed inside its stated input set; a mutant-only reader branch
-   cannot escape the key. Known pre-`M.Run` and generic-FS cases remain
-   statically whole-tree. ADR 0004 still forbids exclusions: the rule changes
+   and already-keyed files do not. A killing mutant execution contributes its
+   observation directly, and a batch applies its observation to every selected
+   target. An absent, malformed, or ambiguous completed log always widens; a
+   failure to produce the log is an infrastructure error and is not retried
+   without observation. Thus a
+   reused narrow record exists only when the baseline and killing mutant
+   execution were observed inside its stated input set; a mutant-only reader
+   branch cannot escape the key. Known pre-`M.Run` cases, generic-FS uses, raw
+   syscalls, cgo, subprocesses, and loaded plugins remain statically
+   whole-tree. ADR 0004 still forbids exclusions: the rule changes
    what a verdict may be reused across, never which mutants are tested.
 
 7. **Contradiction removes a record; nothing else does.** Every mutant a run
@@ -136,18 +121,19 @@ survive.
 
 ## Consequences
 
-The expensive half of the mutation phase becomes reusable, and the store now
-holds four outcomes rather than one. The conditions are strictly narrower than
+The expensive half of the mutation phase becomes reusable, and the store holds
+three outcome shapes. The conditions are strictly narrower than
 those for a kill, so a repository whose tests change often will reuse fewer
 survivors than kills — which is the correct behaviour, not a shortfall: a
 changed test binary is a test binary nothing was ever run against.
 
-Repository-reading packages now pay the whole-tree cost only for targets that
-actually cross the key boundary. Tests that use the same APIs exclusively on
+Every observed execution pays for one transient action log, while the
+whole-tree key cost remains limited to targets that actually cross the key
+boundary or are statically unobservable. Whole-tree target and suite keys are
+generated lazily and cached. Tests that use repository APIs exclusively on
 temporary directories retain narrow evidence, while repository-wide gates and
 every uncertain observation retain the conservative behaviour. The refinement
-adds transient action logs but no user configuration, stored paths, or weaker
-fallback.
+adds no user configuration, stored paths, or weaker fallback.
 
 `proofaudit` gains a class rather than a rule. A reused route is not a measured
 kill it can hold to a layer, and counting it as one would be auditing evidence
@@ -169,14 +155,5 @@ and compare verdicts.
 - **Expiring records by age or run count.** Age is not evidence. A record is
   either still a claim about this run, in which case time has not changed it,
   or it is not, in which case a condition already refuses it.
-- **Reusing a timeout as a resolution.** A timeout resolves nothing, so a
-  reuse that removed the finding would be inventing an answer. Keeping the
-  finding is the only direction that cannot cost assurance.
-- **Reusing a timeout under the survival's universal condition.** A timeout is
-  not a claim about the reaching set, and treating it as one both refuses
-  almost every reuse it should allow and allows the one it should refuse. See
-  decision 5.
-- **A separate `timed_out_under` field on the record.** The executed list
-  already ends with that target, and two statements of one fact are two
-  statements to keep consistent. The ordering is stated in the assurance
-  contract and preserved by the store.
+- **Persisting a timeout.** A timeout resolves nothing. Storing it would make a
+  non-answer durable without providing a premise for a later proof.

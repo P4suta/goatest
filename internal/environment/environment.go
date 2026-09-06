@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package environment builds deterministic, explicit subprocess environments.
 package environment
 
 import (
@@ -15,15 +14,11 @@ var providerLaunchNames = []string{
 	"TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
 }
 
-// Provider returns only the minimal process-launch environment plus explicitly
-// allowed names. A nil input reads the current process environment; an empty
-// non-nil input remains empty.
 func Provider(input, allowed []string) []string {
 	names := append(slices.Clone(providerLaunchNames), allowed...)
 	return Select(input, names)
 }
 
-// Select returns case-insensitively selected KEY=value entries in stable order.
 func Select(input, allowed []string) []string {
 	if input == nil {
 		input = os.Environ()

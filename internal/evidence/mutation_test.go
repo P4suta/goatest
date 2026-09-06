@@ -5,6 +5,8 @@ package evidence_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,22 +15,16 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// mutationModulePath is the module every fixture in this file belongs to. A
-// store is only ever trusted for the module it was written for, so the tests
-// that exercise identity ask for a different one on purpose.
 const mutationModulePath = "example/module"
 
-// mutationDigest builds a sha256-shaped digest out of one hex character, so a
-// fixture can name distinct digests without carrying 64-character literals.
 func mutationDigest(character string) string {
-	return strings.Repeat(character, 64)
+	return strings.Repeat(character, hex.EncodedLen(sha256.Size))
 }
 
-// mutationProvenance is the recording run's input digest, in the form a record
-// must carry.
 func mutationProvenance() string {
 	return "snapshot=" + mutationDigest("f")
 }
@@ -37,14 +33,12 @@ func killedMutationRecord() evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: mutationDigest("a"), Path: "value.go", Package: mutationModulePath + "/pkg",
 		Outcome: evidence.MutationOutcomeKilled, Provenance: mutationProvenance(),
-		KilledBy: &evidence.TargetKey{
+		KilledBy: []evidence.TargetKey{{
 			Package: mutationModulePath + "/pkg", Name: "TestKills", Kind: "test", Key: mutationDigest("1"),
-		},
+		}},
 	}
 }
 
-// survivedMutationRecord carries its exhausted targets out of canonical order,
-// so a round trip has something to sort.
 func survivedMutationRecord() evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: mutationDigest("b"), Path: "value.go", Package: mutationModulePath + "/pkg",
@@ -57,49 +51,12 @@ func survivedMutationRecord() evidence.MutationRecord {
 	}
 }
 
-// canonicalSurvivedMutationRecord is survivedMutationRecord with its exhausted
-// targets in the order a stored record carries them.
 func canonicalSurvivedMutationRecord() evidence.MutationRecord {
 	record := survivedMutationRecord()
 	record.Exhausted = []evidence.TargetKey{
 		{Package: mutationModulePath + "/pkg", Name: "TestA", Kind: "test", Key: mutationDigest("3")},
 		{Package: mutationModulePath + "/pkg", Name: "TestZ", Kind: "test", Key: mutationDigest("2")},
 	}
-	return record
-}
-
-func timedOutMutationRecord() evidence.MutationRecord {
-	return evidence.MutationRecord{
-		MutantID: mutationDigest("c"), Path: "value.go", Package: mutationModulePath + "/pkg",
-		Outcome: evidence.MutationOutcomeTimedOut, Provenance: mutationProvenance(),
-		Exhausted: []evidence.TargetKey{
-			{Package: mutationModulePath + "/pkg", Name: "TestSlow", Kind: "test", Key: mutationDigest("4")},
-		},
-		Finding: &evidence.FindingSeed{Kind: "timed-out-mutant", Summary: "the mutant did not terminate"},
-	}
-}
-
-// orderedTimedOutMutationRecord is a timeout under the second of two targets:
-// the recording run executed TestZ, then TestSlow, and time ran out under
-// TestSlow. The two are deliberately in an order sorting by identity would
-// undo, because for a timeout the order is the evidence: the last entry is the
-// target time ran out under, and it is the only one a later run checks.
-func orderedTimedOutMutationRecord() evidence.MutationRecord {
-	record := timedOutMutationRecord()
-	record.Exhausted = []evidence.TargetKey{
-		{Package: mutationModulePath + "/pkg", Name: "TestZ", Kind: "test", Key: mutationDigest("2")},
-		{Package: mutationModulePath + "/pkg", Name: "TestSlow", Kind: "test", Key: mutationDigest("4")},
-	}
-	return record
-}
-
-// suiteTimedOutMutationRecord is the other shape a timeout takes: the package
-// suite of a mutant no target reached ran out of time, so there is a suite to
-// name and no set of executed targets.
-func suiteTimedOutMutationRecord() evidence.MutationRecord {
-	record := timedOutMutationRecord()
-	record.Exhausted = nil
-	record.Suite = &evidence.SuiteKey{Package: mutationModulePath + "/pkg", Key: mutationDigest("6")}
 	return record
 }
 
@@ -112,14 +69,11 @@ func unreachedMutationRecord() evidence.MutationRecord {
 	}
 }
 
-// mutationStoreFixture carries one record of every outcome, so a document built
-// from it exercises every shape the schema and the loader accept.
 func mutationStoreFixture() evidence.MutationStore {
 	return evidence.MutationStore{
 		Schema: evidence.MutationSchemaV1, ModulePath: mutationModulePath,
 		Records: []evidence.MutationRecord{
-			killedMutationRecord(), survivedMutationRecord(),
-			timedOutMutationRecord(), unreachedMutationRecord(),
+			killedMutationRecord(), survivedMutationRecord(), unreachedMutationRecord(),
 		},
 	}
 }
@@ -163,11 +117,11 @@ func TestMutationEvidenceStoreRoundTripsCanonicalRecord(t *testing.T) {
 	}
 }
 
-func TestMutationEvidenceWholeTreeMarkersRoundTripAndRemainOptional(t *testing.T) {
+func TestMutationEvidenceWholeTreeMarkersRoundTripExplicitly(t *testing.T) {
 	t.Parallel()
 	store := mutationStoreFixture()
-	store.Records[0].KilledBy.WholeTree = true
-	store.Records[3].Suite.WholeTree = true
+	store.Records[0].KilledBy[0].WholeTree = true
+	store.Records[2].Suite.WholeTree = true
 	path := filepath.Join(t.TempDir(), "mutation.json")
 	if err := evidence.SaveMutation(path, store); err != nil {
 		t.Fatal(err)
@@ -176,22 +130,21 @@ func TestMutationEvidenceWholeTreeMarkersRoundTripAndRemainOptional(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("LoadMutation = (%+v, %t, %v)", loaded, found, err)
 	}
-	if !loaded.Records[0].KilledBy.WholeTree || !loaded.Records[3].Suite.WholeTree {
+	if !loaded.Records[0].KilledBy[0].WholeTree || !loaded.Records[2].Suite.WholeTree {
 		t.Fatalf("whole-tree markers were lost: %+v", loaded.Records)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Count(data, []byte(`"whole_tree": true`)) != 2 || bytes.Contains(data, []byte(`"whole_tree": false`)) {
-		t.Fatalf("optional marker encoding = %s", data)
+	if bytes.Count(data, []byte(`"whole_tree": true`)) != 2 || bytes.Count(data, []byte(`"whole_tree": false`)) != 2 {
+		t.Fatalf("explicit marker encoding = %s", data)
 	}
 	if err := validateMutationInstance(t, compileMutationSchema(t), data); err != nil {
 		t.Fatalf("marked document failed its schema: %v", err)
 	}
 }
 
-// mutationRecords reaches the record objects of a decoded document.
 func mutationRecords(t *testing.T, document map[string]any) []map[string]any {
 	t.Helper()
 	raw, ok := document["records"].([]any)
@@ -209,8 +162,6 @@ func mutationRecords(t *testing.T, document map[string]any) []map[string]any {
 	return records
 }
 
-// mutationDocument encodes the fixture store as a decoded document the caller
-// can damage before it is written, so a test names only the damage it makes.
 func mutationDocument(t *testing.T, mutate func(document map[string]any)) []byte {
 	t.Helper()
 	data, err := json.Marshal(mutationStoreFixture())
@@ -260,13 +211,28 @@ func TestLoadMutationEvidenceMissingReadStrictnessAndIdentity(t *testing.T) {
 		{
 			name: "unknown-target-key-field",
 			mutate: func(document map[string]any) {
-				killer, ok := mutationRecords(t, document)[0]["killed_by"].(map[string]any)
+				killers, ok := mutationRecords(t, document)[0]["killed_by"].([]any)
 				if !ok {
 					t.Fatal("the killed fixture carries no killer")
 				}
+				killer := killers[0].(map[string]any)
 				killer["unknown"] = true
 			},
 			want: "decode mutation evidence",
+		},
+		{
+			name: "missing-target-key-whole-tree",
+			mutate: func(document map[string]any) {
+				delete(mutationRecords(t, document)[0]["killed_by"].([]any)[0].(map[string]any), "whole_tree")
+			},
+			want: "requires whole_tree",
+		},
+		{
+			name: "missing-suite-key-whole-tree",
+			mutate: func(document map[string]any) {
+				delete(mutationRecords(t, document)[2]["suite"].(map[string]any), "whole_tree")
+			},
+			want: "requires whole_tree",
 		},
 		{name: "trailing", trailing: true, want: "trailing data"},
 		{
@@ -285,7 +251,7 @@ func TestLoadMutationEvidenceMissingReadStrictnessAndIdentity(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "mutation.json")
 			switch {
 			case testCase.directory:
-				if err := os.Mkdir(path, 0o755); err != nil {
+				if err := os.Mkdir(path, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
 			default:
@@ -296,7 +262,7 @@ func TestLoadMutationEvidenceMissingReadStrictnessAndIdentity(t *testing.T) {
 				if testCase.trailing {
 					data = append(data, []byte(" {}")...)
 				}
-				if err := os.WriteFile(path, data, 0o644); err != nil {
+				if err := os.WriteFile(path, data, filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -309,17 +275,12 @@ func TestLoadMutationEvidenceMissingReadStrictnessAndIdentity(t *testing.T) {
 	}
 }
 
-// mutateMutationStore applies one damage to the fixture store.
 func mutateMutationStore(mutate func(store *evidence.MutationStore)) evidence.MutationStore {
 	store := mutationStoreFixture()
 	mutate(&store)
 	return store
 }
 
-// TestLoadMutationEvidenceRejectsSelfInconsistentRecords walks every
-// self-consistency rule. Each row is checked twice: a store that reached disk
-// some other way must not load, and the same store must not be written, so an
-// inconsistent record can neither enter nor leave the store.
 func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -379,7 +340,7 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 		{
 			name: "target-key-not-a-digest",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[0].KilledBy.Key = "abc"
+				store.Records[0].KilledBy[0].Key = "abc"
 			}),
 			want: "is not a sha256 digest",
 		},
@@ -393,14 +354,14 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 		{
 			name: "suite-key-not-a-digest",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[3].Suite.Key = "abc"
+				store.Records[2].Suite.Key = "abc"
 			}),
 			want: "is not a sha256 digest",
 		},
 		{
 			name: "suite-without-a-package",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[3].Suite.Package = ""
+				store.Records[2].Suite.Package = ""
 			}),
 			want: "requires a package",
 		},
@@ -408,6 +369,13 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 			name: "duplicate-exhausted-target",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
 				store.Records[1].Exhausted[0] = store.Records[1].Exhausted[1]
+			}),
+			want: "twice",
+		},
+		{
+			name: "duplicate-killer-target",
+			store: mutateMutationStore(func(store *evidence.MutationStore) {
+				store.Records[0].KilledBy = append(store.Records[0].KilledBy, store.Records[0].KilledBy[0])
 			}),
 			want: "twice",
 		},
@@ -449,37 +417,9 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 		{
 			name: "unreached-without-a-suite",
 			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[3].Suite = nil
+				store.Records[2].Suite = nil
 			}),
 			want: "requires a suite and a finding",
-		},
-		{
-			name: "timed-out-naming-neither-targets-nor-a-suite",
-			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[2].Exhausted = nil
-			}),
-			want: "requires either exhausted targets or a suite",
-		},
-		{
-			name: "timed-out-naming-both-targets-and-a-suite",
-			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[2].Suite = unreachedMutationRecord().Suite
-			}),
-			want: "requires either exhausted targets or a suite",
-		},
-		{
-			name: "timed-out-with-a-killer",
-			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[2].KilledBy = killedMutationRecord().KilledBy
-			}),
-			want: "requires either exhausted targets or a suite",
-		},
-		{
-			name: "timed-out-without-a-finding",
-			store: mutateMutationStore(func(store *evidence.MutationStore) {
-				store.Records[2].Finding = nil
-			}),
-			want: "requires either exhausted targets or a suite",
 		},
 		{
 			name: "finding-without-a-kind",
@@ -503,7 +443,7 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 				t.Fatal(err)
 			}
 			stored := filepath.Join(t.TempDir(), "mutation.json")
-			if err := os.WriteFile(stored, data, 0o644); err != nil {
+			if err := os.WriteFile(stored, data, filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			got, ok, loadErr := evidence.LoadMutation(stored, mutationModulePath)
@@ -523,9 +463,6 @@ func TestLoadMutationEvidenceRejectsSelfInconsistentRecords(t *testing.T) {
 	}
 }
 
-// TestSaveMutationRejectsEmptyModuleBeforeCreatingOutput keeps a store that
-// belongs to no module off disk: LoadMutation would refuse it as an identity
-// mismatch, so writing one only leaves a file the next run has to reject.
 func TestSaveMutationRejectsEmptyModuleBeforeCreatingOutput(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "mutation.json")
@@ -540,8 +477,6 @@ func TestSaveMutationRejectsEmptyModuleBeforeCreatingOutput(t *testing.T) {
 	}
 }
 
-// compileMutationSchema compiles the published schema the way a consumer of the
-// artifact would, so the test fails when the schema itself stops compiling.
 func compileMutationSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
 	const url = "https://goatest.invalid/mutation-evidence-v1.schema.json"
@@ -561,8 +496,6 @@ func compileMutationSchema(t *testing.T) *jsonschema.Schema {
 	return compiled
 }
 
-// savedMutationDocument writes a store and returns the canonical bytes, which
-// is what a consumer validates against the schema.
 func savedMutationDocument(t *testing.T, store evidence.MutationStore) []byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mutation.json")
@@ -576,8 +509,6 @@ func savedMutationDocument(t *testing.T, store evidence.MutationStore) []byte {
 	return data
 }
 
-// validateMutationInstance decodes a document into the shape the validator
-// walks and reports what the schema says about it.
 func validateMutationInstance(t *testing.T, compiled *jsonschema.Schema, data []byte) error {
 	t.Helper()
 	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
@@ -603,7 +534,7 @@ func TestMutationEvidenceSchemaRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 		{
 			name: "killed_by",
 			damage: func(document map[string]any) {
-				mutationRecords(t, document)[0]["killed_by"].(map[string]any)["unknown"] = true
+				mutationRecords(t, document)[0]["killed_by"].([]any)[0].(map[string]any)["unknown"] = true
 			},
 		},
 		{
@@ -615,7 +546,31 @@ func TestMutationEvidenceSchemaRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 		{
 			name: "suite",
 			damage: func(document map[string]any) {
-				mutationRecords(t, document)[3]["suite"].(map[string]any)["unknown"] = true
+				mutationRecords(t, document)[2]["suite"].(map[string]any)["unknown"] = true
+			},
+		},
+		{
+			name: "killed_by whole_tree",
+			damage: func(document map[string]any) {
+				delete(mutationRecords(t, document)[0]["killed_by"].([]any)[0].(map[string]any), "whole_tree")
+			},
+		},
+		{
+			name: "empty killed_by",
+			damage: func(document map[string]any) {
+				mutationRecords(t, document)[0]["killed_by"] = []any{}
+			},
+		},
+		{
+			name: "exhausted whole_tree",
+			damage: func(document map[string]any) {
+				delete(mutationRecords(t, document)[1]["exhausted"].([]any)[0].(map[string]any), "whole_tree")
+			},
+		},
+		{
+			name: "suite whole_tree",
+			damage: func(document map[string]any) {
+				delete(mutationRecords(t, document)[2]["suite"].(map[string]any), "whole_tree")
 			},
 		},
 		{
@@ -636,6 +591,12 @@ func TestMutationEvidenceSchemaRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 			name:   "provenance",
 			damage: func(document map[string]any) { mutationRecords(t, document)[0]["provenance"] = "snapshot=short" },
 		},
+		{
+			name: "removed-timeout-field",
+			damage: func(document map[string]any) {
+				mutationRecords(t, document)[0]["timeout_ns"] = 1
+			},
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -655,40 +616,6 @@ func TestMutationEvidenceSchemaRejectsUnknownFieldsAtEveryLevel(t *testing.T) {
 	}
 }
 
-// TestMutationEvidenceKeepsATimedOutRecordsExecutionOrder pins the one place
-// where the order of a record's exhausted targets is evidence rather than a
-// rendering of a set. A survived record says that these targets all ran and
-// none killed the mutant, which is true in any order, so it is written sorted
-// and two runs that observed it produce the same bytes. A timed-out record
-// says that these targets ran and time ran out under the last of them, so
-// sorting it would destroy the only part of it a later run reads.
-func TestMutationEvidenceKeepsATimedOutRecordsExecutionOrder(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "mutation.json")
-	if err := evidence.SaveMutation(path, evidence.MutationStore{
-		ModulePath: mutationModulePath,
-		Records:    []evidence.MutationRecord{orderedTimedOutMutationRecord(), survivedMutationRecord()},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, ok, err := evidence.LoadMutation(path, mutationModulePath)
-	if err != nil || !ok {
-		t.Fatalf("LoadMutation = ok %v, err %v", ok, err)
-	}
-	for _, record := range got.Records {
-		switch record.Outcome {
-		case evidence.MutationOutcomeTimedOut:
-			if !reflect.DeepEqual(record.Exhausted, orderedTimedOutMutationRecord().Exhausted) {
-				t.Errorf("timed-out exhausted = %+v, want the order it was executed in", record.Exhausted)
-			}
-		case evidence.MutationOutcomeSurvived:
-			if !reflect.DeepEqual(record.Exhausted, canonicalSurvivedMutationRecord().Exhausted) {
-				t.Errorf("survived exhausted = %+v, want the canonical order", record.Exhausted)
-			}
-		}
-	}
-}
-
 func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 	t.Parallel()
 	compiled := compileMutationSchema(t)
@@ -699,9 +626,6 @@ func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 		{name: evidence.MutationOutcomeKilled, record: killedMutationRecord()},
 		{name: evidence.MutationOutcomeSurvived, record: canonicalSurvivedMutationRecord()},
 		{name: evidence.MutationOutcomeUnreached, record: unreachedMutationRecord()},
-		{name: evidence.MutationOutcomeTimedOut, record: timedOutMutationRecord()},
-		{name: evidence.MutationOutcomeTimedOut + "-by-the-package-suite", record: suiteTimedOutMutationRecord()},
-		{name: evidence.MutationOutcomeTimedOut + "-under-the-last-of-several-targets", record: orderedTimedOutMutationRecord()},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -723,6 +647,87 @@ func TestMutationEvidenceSchemaAcceptsEveryOutcomeShape(t *testing.T) {
 			got, ok, err := evidence.LoadMutation(path, mutationModulePath)
 			if err != nil || !ok || len(got.Records) != 1 || !reflect.DeepEqual(got.Records[0], testCase.record) {
 				t.Fatalf("LoadMutation = %+v, ok %v, err %v", got, ok, err)
+			}
+		})
+	}
+}
+
+func TestMutationEvidenceSchemaAndDecoderAcceptTheSameDocuments(t *testing.T) {
+	t.Parallel()
+	compiled := compileMutationSchema(t)
+	data := savedMutationDocument(t, mutationStoreFixture())
+	for _, testCase := range []struct {
+		name   string
+		accept bool
+		change func(document map[string]any)
+	}{
+		{name: "canonical", accept: true, change: func(map[string]any) {}},
+		{name: "no records", change: func(document map[string]any) { delete(document, "records") }},
+		{name: "null records", change: func(document map[string]any) { document["records"] = nil }},
+		{
+			name: "empty records", accept: true,
+			change: func(document map[string]any) { document["records"] = []any{} },
+		},
+		{
+			name:   "survived with empty exhausted",
+			change: func(document map[string]any) { mutationRecords(t, document)[1]["exhausted"] = []any{} },
+		},
+		{
+			name:   "killed with empty exhausted",
+			change: func(document map[string]any) { mutationRecords(t, document)[0]["exhausted"] = []any{} },
+		},
+		{
+			name: "killed with a suite",
+			change: func(document map[string]any) {
+				records := mutationRecords(t, document)
+				records[0]["suite"] = records[2]["suite"]
+			},
+		},
+		{
+			name: "unreached with exhausted",
+			change: func(document map[string]any) {
+				records := mutationRecords(t, document)
+				records[2]["exhausted"] = records[1]["exhausted"]
+			},
+		},
+		{
+			name:   "survived without a finding",
+			change: func(document map[string]any) { delete(mutationRecords(t, document)[1], "finding") },
+		},
+		{
+			name:   "null killed_by",
+			change: func(document map[string]any) { mutationRecords(t, document)[0]["killed_by"] = nil },
+		},
+		{
+			name:   "null suite",
+			change: func(document map[string]any) { mutationRecords(t, document)[2]["suite"] = nil },
+		},
+		{
+			name:   "null finding",
+			change: func(document map[string]any) { mutationRecords(t, document)[1]["finding"] = nil },
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			testCase.change(document)
+			changed, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), evidence.MutationFileName)
+			if err := os.WriteFile(path, changed, filemode.ReadableFile); err != nil {
+				t.Fatal(err)
+			}
+			schemaErr := validateMutationInstance(t, compiled, changed)
+			_, ok, loadErr := evidence.LoadMutation(path, mutationModulePath)
+			accepted := ok && loadErr == nil
+			if (schemaErr == nil) != testCase.accept || accepted != testCase.accept {
+				t.Fatalf("schema accepted %v (%v), LoadMutation accepted %v (%v); want %v",
+					schemaErr == nil, schemaErr, accepted, loadErr, testCase.accept)
 			}
 		})
 	}

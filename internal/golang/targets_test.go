@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	gotest "github.com/P4suta/goatest/internal/golang"
 )
 
@@ -28,7 +29,7 @@ func FuzzExisting(f *testing.F) { f.Add([]byte{}); f.Fuzz(func(t *testing.T, b [
 func TestWrapped(t *testing.T) { gt.Run(t, gt.Integration(" postgres ", "redis", "postgres"), func(t *gt.T) {}) }
 func helper(t *testing.T) {}
 `
-	if err := os.WriteFile(filepath.Join(root, "sample_test.go"), []byte(source), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "sample_test.go"), []byte(source), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	packages := []gotest.Package{{ImportPath: "example.com/sample", RelativeDir: ".", Dependencies: []string{"testing"}}}
@@ -47,8 +48,7 @@ func helper(t *testing.T) {}
 		t.Fatalf("targets = %v", names)
 	}
 	for _, target := range targets {
-		if target.Name == "TestWrapped" && (target.Kind != gotest.KindTest || target.Capability != "postgres" ||
-			!slices.Equal(target.Capabilities, []string{"postgres", "redis"})) {
+		if target.Name == "TestWrapped" && (target.Kind != gotest.KindTest || !slices.Equal(target.Capabilities, []string{"postgres", "redis"})) {
 			t.Errorf("wrapped integration = %+v", target)
 		}
 		if target.Name == "FuzzExisting" && (target.Kind != gotest.KindFuzz || !slices.Equal(target.Capabilities, []string{"redis"})) {
@@ -91,7 +91,7 @@ func TestWrong(t std.T) {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 {
+	if len(targets) != len(packages) {
 		t.Fatalf("targets = %+v", targets)
 	}
 	for index, wantPackage := range []string{"example.com/sample/a", "example.com/sample/b"} {

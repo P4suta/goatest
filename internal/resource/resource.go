@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package resource manages versioned external integration-resource providers.
 package resource
 
 import (
@@ -22,9 +21,12 @@ import (
 	"github.com/P4suta/goatest/internal/processtree"
 )
 
-const protocolVersion = 1
+const ProtocolVersion = 1
 
-const protocolOutputLimit = 1 << 20
+const (
+	ProtocolOutputLimit    = 1 << 20
+	defaultProviderTimeout = 30 * time.Second
+)
 
 type Request struct {
 	Version    int    `json:"version"`
@@ -51,13 +53,14 @@ type Spec struct {
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	specs   map[string]Spec
-	shared  map[string]*instance
-	active  map[*instance]bool
-	nextID  uint64
-	closed  bool
-	changed chan struct{}
+	mu         sync.Mutex
+	specs      map[string]Spec
+	shared     map[string]*instance
+	active     map[*instance]bool
+	nextID     uint64
+	closed     bool
+	changed    chan struct{}
+	beforeWait func()
 }
 
 type Lease struct {
@@ -109,7 +112,10 @@ func New(specs map[string]Spec) *Manager {
 		spec.Environment = slices.Clone(spec.Environment)
 		cloned[name] = spec
 	}
-	return &Manager{specs: cloned, shared: make(map[string]*instance), active: make(map[*instance]bool), changed: make(chan struct{})}
+	return &Manager{
+		specs: cloned, shared: make(map[string]*instance), active: make(map[*instance]bool),
+		changed: make(chan struct{}), beforeWait: func() {},
+	}
 }
 
 func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease, error) {
@@ -141,6 +147,7 @@ func (manager *Manager) Acquire(ctx context.Context, capability string) (*Lease,
 		}
 		changed := manager.changed
 		manager.mu.Unlock()
+		manager.beforeWait()
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("goatest: wait for exclusive resource %q: %w", capability, ctx.Err())
@@ -258,7 +265,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 	}
 	timeout := spec.Timeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = defaultProviderTimeout
 	}
 	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
 	if spec.Environment == nil {
@@ -275,7 +282,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		_ = stdin.Close()
 		return nil, err
 	}
-	stderr := &limitedBuffer{remaining: protocolOutputLimit}
+	stderr := &limitedBuffer{remaining: ProtocolOutputLimit}
 	cmd.Stderr = stderr
 	provider := &instance{
 		capability: capability,
@@ -284,7 +291,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 		cmd:        cmd,
 		stdin:      stdin,
 		encoder:    json.NewEncoder(stdin),
-		stdout:     bufio.NewReaderSize(stdout, protocolOutputLimit+1),
+		stdout:     bufio.NewReaderSize(stdout, ProtocolOutputLimit+1),
 		stderr:     stderr,
 	}
 	tree, err := startResourceProcess(cmd)
@@ -294,7 +301,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 	}
 	provider.tree = tree
 	if err := encodeResourceRequest(provider.encoder, Request{
-		Version: protocolVersion, Action: "start", Capability: capability, RequestID: requestID,
+		Version: ProtocolVersion, Action: "start", Capability: capability, RequestID: requestID,
 	}); err != nil {
 		return nil, provider.abort(fmt.Errorf("goatest: send resource start: %w", err))
 	}
@@ -304,7 +311,7 @@ func start(parent context.Context, capability, requestID string, spec Spec) (*in
 	if err != nil {
 		return nil, provider.abort(fmt.Errorf("goatest: resource %q readiness: %w", capability, err))
 	}
-	if response.Version != protocolVersion || response.Status != "ready" || response.Instance == "" || response.Error != "" {
+	if response.Version != ProtocolVersion || response.Status != "ready" || response.Instance == "" || response.Error != "" {
 		return nil, provider.abort(fmt.Errorf("goatest: resource %q returned invalid ready response: version=%d status=%q instance=%q error=%q",
 			capability, response.Version, response.Status, response.Instance, response.Error))
 	}
@@ -367,7 +374,7 @@ func (provider *instance) decode(ctx context.Context) (Response, error) {
 	go func() {
 		var response Response
 		line, err := provider.stdout.ReadSlice('\n')
-		if errors.Is(err, bufio.ErrBufferFull) || len(line) > protocolOutputLimit {
+		if errors.Is(err, bufio.ErrBufferFull) || len(line) > ProtocolOutputLimit {
 			err = errors.New("goatest: resource response exceeded output limit")
 		}
 		if err == nil {
@@ -452,7 +459,7 @@ func (provider *instance) stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), provider.timeout)
 		defer cancel()
 		if err := encodeResourceRequest(provider.encoder, Request{
-			Version: protocolVersion, Action: "stop", Capability: provider.capability,
+			Version: ProtocolVersion, Action: "stop", Capability: provider.capability,
 			RequestID: provider.requestID, Instance: provider.instanceID,
 		}); err != nil {
 			provider.stopErr = provider.abort(fmt.Errorf("goatest: send resource stop: %w", err))
@@ -486,7 +493,7 @@ func (provider *instance) stop() error {
 }
 
 func validateStoppedResponse(response Response, instanceID string) error {
-	if response.Version != protocolVersion {
+	if response.Version != ProtocolVersion {
 		return fmt.Errorf("invalid stopped response: version=%d status=%q instance=%q", response.Version, response.Status, response.Instance)
 	}
 	if response.Status != "stopped" {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -180,7 +181,7 @@ func buildGraph(root string, model goanalysis.Model, targetEvidence []TargetEvid
 	}
 	for _, target := range targetEvidence {
 		graph.Targets = append(graph.Targets, evidence.Target{
-			ID: target.Target.ID, Package: target.Target.Package, Kind: string(target.Target.Kind),
+			ID: target.Target.ID, Package: target.Target.Package,
 			Dependencies: slices.Clone(target.Target.Dependencies), CoveredFiles: slices.Clone(target.CoveredFiles),
 		})
 	}
@@ -204,9 +205,6 @@ func mergeGraph(current evidence.Graph, prior *evidence.GraphRecord, selection i
 	return merged
 }
 
-// scopedMutationInclude bounds the mutation catalog to the resolved packages
-// of an explicit scope, one non-recursive glob per package directory, because
-// a Go package's non-test sources live in exactly its own directory.
 func scopedMutationInclude(model goanalysis.Model) []string {
 	include := make([]string, 0, len(model.Packages))
 	for _, item := range model.Packages {
@@ -225,9 +223,22 @@ func mutationScope(selection impactSelection) (include, packages []string) {
 	if selection.broad {
 		return nil, nil
 	}
+	wholePackages := make(map[string]bool)
 	for _, path := range selection.changed {
-		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+		if strings.HasSuffix(path, "_test.go") {
+			wholePackages[packageDirectoryOfPath(path)] = true
+		}
+	}
+	for _, path := range selection.changed {
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") && !wholePackages[packageDirectoryOfPath(path)] {
 			include = append(include, path)
+		}
+	}
+	for directory := range wholePackages {
+		if directory == "." {
+			include = append(include, "*.go")
+		} else {
+			include = append(include, directory+"/*.go")
 		}
 	}
 	for _, target := range selection.targets {
@@ -244,4 +255,29 @@ func mutationScope(selection impactSelection) (include, packages []string) {
 	slices.Sort(packages)
 	packages = slices.Compact(packages)
 	return include, packages
+}
+
+func packageDirectoryOfPath(name string) string {
+	directory := path.Dir(filepath.ToSlash(name))
+	if directory == "" {
+		return "."
+	}
+	return directory
+}
+
+func mutationDiscoveryPackages(include, tests []string) []string {
+	if len(include) == 0 {
+		return slices.Clone(tests)
+	}
+	var packages []string
+	for _, pattern := range include {
+		directory := path.Dir(filepath.ToSlash(pattern))
+		if directory == "." {
+			packages = append(packages, ".")
+		} else {
+			packages = append(packages, "./"+strings.TrimPrefix(directory, "./"))
+		}
+	}
+	slices.Sort(packages)
+	return slices.Compact(packages)
 }

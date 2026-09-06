@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted, 2026-09-03; revised 2026-09-04 after review (decisions 5 to 8).
-Implemented by `internal/buildcache` (the two-layer store, the `GOCACHEPROG`
-server, and the locked collection), the hidden `goatest cacheprog` subcommand in
+Accepted, 2026-09-03; revised 2026-09-04 after review (decisions 5 to 8), and
+2026-09-05 by ADR 0017.
+Implemented by `internal/buildcache` (the two-layer store, native projection,
+the `GOCACHEPROG` server, and the locked collection), the hidden `goatest cacheprog` subcommand in
 `cmd/goatest`, the run wiring and the persist rule in `internal/assure`
 (`buildCacheWorkspace`, `persistingCommand`, `collectRunBuildCache`), the
 `[cache] build_max_bytes` and `build_dir` settings in `internal/config`, and the
@@ -52,17 +53,23 @@ toolchain makes by TTL.
    vet, build and test-binary compile, and the run's `go version`, `go list
    -json ./...`, `go list -m -json all`, and the selected-package listing.
 
-3. **Nothing that runs the project's tests may.** The baseline target runs, the
+3. **Nothing that runs the project's tests may write to the persistent layer.** The baseline target runs, the
    race verification, the original-mutation control, the go-mutants session, and
-   candidate validation all write to the run's scratch layer, which dies with
-   the run. This is the load-bearing half. A baseline target is the project's
-   own test binary wrapped in `go tool test2json`, so its argument list begins
-   with the go binary exactly as a compile does — and it is precisely the
-   command whose children produce the throwaway fixture builds. Were it to
-   persist, every fixture package would be written into the base layer and would
-   evict the standard library the layer exists to hold: the cache would grow
-   without bound and get slower the more it was used. The rule therefore reads
-   the *subcommand*, never the executable.
+   candidate validation all write to run-owned storage, which dies with the run.
+   Compile/list work, including mutation preparation, may write reusable
+   objects to the persistent layer; mutation preparation's instrumented test
+   run and candidate validation use continuously bounded external scratch;
+   baseline, race, probe, and prepared mutant executions use the gated native projection specified by
+   [ADR 0017](0017-project-controls-use-a-native-cache-projection.md). This is
+   the load-bearing half. A current baseline target begins with
+   the compiled test binary itself; older versions wrapped it in `go tool
+   test2json`, whose argument list began with the go binary exactly as a compile
+   does. Both shapes can spawn children that produce throwaway fixture builds.
+   Were either to persist, every fixture package would be written into the base
+   layer and would evict the standard library the layer exists to hold: the
+   cache would grow without bound and get slower the more it was used. The rule
+   therefore reads the *subcommand* for go commands and treats every direct test
+   binary as non-persisting.
 
 4. **The rule lives in one place and is pinned by a test.** `persistingCommand`
    is the whole policy, `buildCacheWorkspace` is the only thing that applies it,
@@ -168,11 +175,13 @@ toolchain makes by TTL.
 - `GOCACHEPROG` is deliberately not in `buildEnvironmentNames`, so it takes no
   part in the assurance digest. It names a per-run scratch directory, and a
   cache identity that changed every run would never hit.
-- A run's scratch layer is a temporary directory like the baseline scratch, so
-  `--keep-temp` keeps it and records it as a `build-cache-scratch` artifact.
-- The layout is versioned twice over: in the directory name (`build-v1`) and in
-  the marker name (`goatest-build-cache-v1`). A later layout is a new
-  directory, not a migration of somebody's disk, and the old one ages out.
+- A run's external scratch layer is a temporary directory like the baseline
+  scratch, so `--keep-temp` keeps it and records it as a
+  `build-cache-scratch` artifact. Its native projection is separately owned
+  beside the base and recorded as `native-build-cache-scratch`.
+- The layout identity appears in both the directory name (`build-v1`) and the
+  marker name (`goatest-build-cache-v1`). A different layout uses a different
+  directory and retention eventually collects the unreferenced one.
 - The bound is soft by at most one `MinIdle` of writes, which is two touch
   intervals: everything read inside that window is spared however far over the
   cap the layer is, and the next collection takes the rest.
@@ -188,7 +197,8 @@ toolchain makes by TTL.
   the layer — is path independent and hits regardless, and the effort goes
   instead into giving go-mutants a snapshot directory that is stable per
   repository root, so successive runs of one repository hit each other.
-- What a run asked the cache for is reported as a `build-cache-summary` progress
-  note, and what its final collection removed as `build-cache-collected`. A reader who sees goatest go faster can see how much of it was the
+- What a run asked the cache for, projected into native form, and pruned is
+  reported as a `build-cache-summary` progress note, and what its final base
+  collection removed as `build-cache-collected`. A reader who sees goatest go faster can see how much of it was the
   cache, which is the same rule [0004](0004-proof-layers-not-budgets.md) asks of
   a proof layer: the answer is in the recording, never in a configuration file.

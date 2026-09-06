@@ -10,40 +10,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/tempowner"
 )
 
-// sweepPrefixes are the names a goatest sweep is allowed to collect. The tests
-// below use one of them wherever the name itself is not the point.
-func sweepPrefixes() []string { return []string{"goatest-run-", "goatest-baseline-"} }
+const (
+	abandonedDirectoryBytes = 4096
+	unnamedParentBytes      = 16
+)
 
-// directory makes one child of parent holding a file of a known size, so that
-// what a sweep reports as reclaimed can be checked against what was there.
+func sweepPrefixes() []string { return []string{"goatest-run-", "fixture-owned-"} }
+
 func directory(t *testing.T, parent, name string, bytes int) string {
 	t.Helper()
 	dir := filepath.Join(parent, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "payload"), make([]byte, bytes), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "payload"), make([]byte, bytes), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-// aged backdates a directory past the age at which an unowned one is a
-// leftover.
 func aged(t *testing.T, dir string, now time.Time) string {
 	t.Helper()
-	moment := now.Add(-tempowner.LegacyMaxAge - time.Hour)
+	moment := now.Add(-tempowner.UnclaimedMaxAge - time.Hour)
 	if err := os.Chtimes(dir, moment, moment); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-// abandon claims a directory and then frees the lock without recording a keep,
-// which is what an operating system does for a run it killed.
 func abandon(t *testing.T, dir string) {
 	t.Helper()
 	owner, err := tempowner.Claim(dir, tempowner.Marker{RunID: filepath.Base(dir)}, time.Now())
@@ -58,7 +56,7 @@ func abandon(t *testing.T, dir string) {
 func TestSweepCollectsTheDirectoryOfARunThatWasKilled(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
-	dead := directory(t, parent, "goatest-run-dead", 4096)
+	dead := directory(t, parent, "goatest-run-dead", abandonedDirectoryBytes)
 	abandon(t, dead)
 	result, err := tempowner.Sweep(parent, sweepPrefixes(), time.Now())
 	if err != nil || len(result.Errors) != 0 {
@@ -67,9 +65,8 @@ func TestSweepCollectsTheDirectoryOfARunThatWasKilled(t *testing.T) {
 	if !slices.Equal(result.Removed, []string{dead}) || result.Live != 0 || result.Kept != 0 {
 		t.Fatalf("sweep = %+v, want the abandoned directory alone", result)
 	}
-	// The bytes are what a person watching a disk fill up wants reported, so
-	// they have to be the ones the directory actually held.
-	if result.RemovedBytes < 4096 {
+
+	if result.RemovedBytes < abandonedDirectoryBytes {
 		t.Fatalf("reclaimed bytes = %d, want at least the 4096 the directory held", result.RemovedBytes)
 	}
 	if _, err := os.Stat(dead); !os.IsNotExist(err) {
@@ -106,8 +103,7 @@ func TestSweepNeverCollectsADirectoryKeptOnPurpose(t *testing.T) {
 	if err := owner.Keep(); err != nil {
 		t.Fatal(err)
 	}
-	// A kept directory has no live process behind it and never will have one.
-	// The marker is the whole of its protection, whatever its age.
+
 	now := time.Now()
 	aged(t, kept, now)
 	result, err := tempowner.Sweep(parent, sweepPrefixes(), now)
@@ -126,11 +122,9 @@ func TestSweepCollectsAnUnownedDirectoryOnlyOnceItIsOldEnough(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	parent := t.TempDir()
-	// Both are directories no version of goatest ever claimed. Age is the only
-	// evidence there is, and a young one may be a run in progress under a
-	// binary from before the owner pair existed.
-	old := aged(t, directory(t, parent, "goatest-baseline-old", 32), now)
-	young := directory(t, parent, "goatest-baseline-young", 32)
+
+	old := aged(t, directory(t, parent, "fixture-owned-old", 32), now)
+	young := directory(t, parent, "fixture-owned-young", 32)
 	result, err := tempowner.Sweep(parent, sweepPrefixes(), now)
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +135,7 @@ func TestSweepCollectsAnUnownedDirectoryOnlyOnceItIsOldEnough(t *testing.T) {
 	if _, err := os.Stat(young); err != nil {
 		t.Fatalf("stat the young unowned directory = %v, want it spared", err)
 	}
-	// A spared directory is not a live one: counting it as live would put a
-	// number in the result that nothing on the disk backs up.
+
 	if result.Live != 0 || result.Kept != 0 {
 		t.Fatalf("sweep = %+v, want the young directory counted as neither live nor kept", result)
 	}
@@ -154,10 +147,10 @@ func TestSweepTouchesNothingItWasNotToldAbout(t *testing.T) {
 	parent := t.TempDir()
 	unrelated := aged(t, directory(t, parent, "somebody-elses-work", 8), now)
 	prefixedFile := filepath.Join(parent, "goatest-run-notadirectory")
-	if err := os.WriteFile(prefixedFile, []byte("data"), 0o600); err != nil {
+	if err := os.WriteFile(prefixedFile, []byte("data"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(prefixedFile, now.Add(-2*tempowner.LegacyMaxAge), now.Add(-2*tempowner.LegacyMaxAge)); err != nil {
+	if err := os.Chtimes(prefixedFile, now.Add(-2*tempowner.UnclaimedMaxAge), now.Add(-2*tempowner.UnclaimedMaxAge)); err != nil {
 		t.Fatal(err)
 	}
 	result, err := tempowner.Sweep(parent, sweepPrefixes(), now)
@@ -180,10 +173,8 @@ func TestSweepNeverFollowsASymbolicLink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("this platform does not let the test make a symbolic link: %v", err)
 	}
-	// A link wearing a swept prefix is somebody's shortcut to a directory that
-	// is none of the sweep's business, and removing it through the link would
-	// take the target with it.
-	result, err := tempowner.Sweep(parent, sweepPrefixes(), now.Add(2*tempowner.LegacyMaxAge))
+
+	result, err := tempowner.Sweep(parent, sweepPrefixes(), now.Add(2*tempowner.UnclaimedMaxAge))
 	if err != nil || len(result.Removed) != 0 {
 		t.Fatalf("sweep = (%+v, %v), want the link left alone", result, err)
 	}
@@ -200,12 +191,11 @@ func TestSweepFinishesTheOthersWhenOneEntryCannotBeJudged(t *testing.T) {
 	parent := t.TempDir()
 	unreadable := directory(t, parent, "goatest-run-unreadable", 8)
 	abandon(t, unreadable)
-	// A lock that is a directory can be neither opened nor taken, which is the
-	// shape every "this entry cannot be judged" failure has.
+
 	if err := os.Remove(tempowner.LockPath(unreadable)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(tempowner.LockPath(unreadable), 0o700); err != nil {
+	if err := os.Mkdir(tempowner.LockPath(unreadable), filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
 	dead := directory(t, parent, "goatest-run-dead", 8)
@@ -214,8 +204,7 @@ func TestSweepFinishesTheOthersWhenOneEntryCannotBeJudged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep = %v, want the parent itself readable", err)
 	}
-	// Leaving a gigabyte on the disk because of one unrelated permission
-	// problem would be the wrong trade.
+
 	if !slices.Equal(result.Removed, []string{dead}) || len(result.Errors) != 1 {
 		t.Fatalf("sweep = %+v, want the other directory collected and one failure reported", result)
 	}
@@ -250,8 +239,7 @@ func TestInspectClassifiesExactlyAsASweepAndRemovesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// `cache status` reports what a `cache gc` would reclaim, so an inspection
-	// has to name the same directories a sweep would have taken.
+
 	if !slices.Equal(result.Removed, []string{dead}) || result.Kept != 1 || result.RemovedBytes < 2048 {
 		t.Fatalf("inspect = %+v, want the abandoned directory named and the kept one counted", result)
 	}
@@ -265,9 +253,7 @@ func TestADetailLineSaysWhatTheSweepDid(t *testing.T) {
 	result := tempowner.Result{
 		Removed: []string{"a", "b"}, RemovedBytes: 2048, Live: 3, Kept: 1,
 	}
-	// The same four counts read from a progress note and from a report's
-	// evidence, so they are rendered in one place; only the first count is
-	// named by the caller, because a sweep removed what an inspection found.
+
 	if got, want := result.Detail("removed"), "removed=2 bytes=2048 live=3 kept=1"; got != want {
 		t.Fatalf("detail = %q, want %q", got, want)
 	}
@@ -280,9 +266,6 @@ func TestADetailLineSaysWhatTheSweepDid(t *testing.T) {
 	}
 }
 
-// unnamedParentFixture makes a directory in this process's own temporary
-// directory that a sweep would take if it swept there: goatest's name, no
-// marker, and older than the age at which an unowned directory is a leftover.
 func unnamedParentFixture(t *testing.T, now time.Time) string {
 	t.Helper()
 	dir, err := os.MkdirTemp(os.TempDir(), "goatest-run-unnamed-parent-")
@@ -290,7 +273,7 @@ func unnamedParentFixture(t *testing.T, now time.Time) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if err := os.WriteFile(filepath.Join(dir, "payload"), make([]byte, 16), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "payload"), make([]byte, unnamedParentBytes), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	return aged(t, dir, now)
@@ -300,12 +283,7 @@ func TestASweepOfAParentNobodyNamedCollectsNothing(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	fixture := unnamedParentFixture(t, now)
-	// The empty parent is the case that matters, because it is the one a caller
-	// reaches by accident rather than on purpose: a value that names no
-	// temporary directory. Reading it as the machine's own temporary directory
-	// would collect the directories of every goatest on the machine, including
-	// the ones live runs are working in — which is exactly what happened once.
-	// A directory nobody named is nobody's to sweep.
+
 	result, err := tempowner.Sweep("", sweepPrefixes(), now)
 	if err != nil || len(result.Removed) != 0 || len(result.Errors) != 0 {
 		t.Fatalf("sweep of an unnamed parent = (%+v, %v), want an empty answer", result, err)

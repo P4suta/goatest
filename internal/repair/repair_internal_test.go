@@ -14,8 +14,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
+)
+
+const (
+	secondCommitRename  = 2
+	rollbackRenameCount = 3
 )
 
 func TestNormalizeCanonicalizesLocalPathsAndRejectsEveryEscapeForm(t *testing.T) {
@@ -55,13 +61,13 @@ func TestConfinedPathHandlesMissingFinalPathsAndRejectsNonDirectories(t *testing
 		t.Fatalf("confinedPath = (%q, %v), want %q", got, err, want)
 	}
 	final := filepath.Join(root, "existing_test.go")
-	if err := os.WriteFile(final, []byte("existing"), 0o644); err != nil {
+	if err := os.WriteFile(final, []byte("existing"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := confinedPath(root, "existing_test.go"); err != nil || got != final {
 		t.Fatalf("existing confinedPath = (%q, %v)", got, err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "blocked"), []byte("file"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "blocked"), []byte("file"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	_, err = confinedPath(root, "blocked/value_test.go")
@@ -70,7 +76,7 @@ func TestConfinedPathHandlesMissingFinalPathsAndRejectsNonDirectories(t *testing
 		t.Fatalf("confinedPath error = %v, want %q", err, wantError)
 	}
 	fileRoot := filepath.Join(t.TempDir(), "root-file")
-	if err := os.WriteFile(fileRoot, []byte("file"), 0o644); err != nil {
+	if err := os.WriteFile(fileRoot, []byte("file"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := confinedPath(fileRoot, "value_test.go"); err == nil || !strings.Contains(err.Error(), "is not a directory") {
@@ -113,16 +119,16 @@ func TestMatchesPreimageCoversMissingMatchingDirtyAndFaults(t *testing.T) {
 		match    bool
 	}{
 		{expected: "", match: true},
-		{expected: strings.Repeat("0", 64), match: false},
+		{expected: strings.Repeat("0", hex.EncodedLen(sha256.Size)), match: false},
 	} {
 		match, mode, err := matchesPreimage(missing, test.expected)
-		if err != nil || match != test.match || mode != 0o644 {
+		if err != nil || match != test.match || mode != filemode.ReadableFile {
 			t.Fatalf("matchesPreimage(missing, %q) = (%t, %o, %v)", test.expected, match, mode, err)
 		}
 	}
 	path := filepath.Join(root, "existing_test.go")
 	contents := []byte("package fixture\n")
-	if err := os.WriteFile(path, contents, 0o600); err != nil {
+	if err := os.WriteFile(path, contents, filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -133,7 +139,7 @@ func TestMatchesPreimageCoversMissingMatchingDirtyAndFaults(t *testing.T) {
 	if err != nil || !match || mode != info.Mode().Perm() {
 		t.Fatalf("matching preimage = (%t, %o, %v), want mode %o", match, mode, err, info.Mode().Perm())
 	}
-	match, _, err = matchesPreimage(path, strings.Repeat("f", 64))
+	match, _, err = matchesPreimage(path, strings.Repeat("f", hex.EncodedLen(sha256.Size)))
 	if err != nil || match {
 		t.Fatalf("dirty preimage = (%t, %v)", match, err)
 	}
@@ -184,7 +190,7 @@ func TestAtomicWritePropagatesEveryStageAndCleansTemporaryFile(t *testing.T) {
 				}
 				return nil
 			}
-			err := atomicWrite(root, "nested/value_test.go", []byte("contents"), 0o640)
+			err := atomicWrite(root, "nested/value_test.go", []byte("contents"), filemode.GroupReadableFile)
 			if !errors.Is(err, sentinel) && stage != "confine" {
 				t.Fatalf("atomicWrite error = %v", err)
 			}
@@ -199,7 +205,7 @@ func TestAtomicWritePropagatesEveryStageAndCleansTemporaryFile(t *testing.T) {
 					t.Fatalf("close calls = %d", file.closes)
 				}
 			}
-			if stage == "rename" && (file.mode != 0o640 || !slices.Equal(file.data, []byte("contents"))) {
+			if stage == "rename" && (file.mode != filemode.GroupReadableFile || !slices.Equal(file.data, []byte("contents"))) {
 				t.Fatalf("file mode=%o data=%q", file.mode, file.data)
 			}
 		})
@@ -218,7 +224,7 @@ func TestArtifactMarshalAndApplyFailuresArePropagated(t *testing.T) {
 	})
 	t.Run("artifact write", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocked"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocked"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		_, err := writeArtifact(root, report.Finding{ID: "finding-a"}, provider.Candidate{Kind: "patch", Path: "value_test.go"})
@@ -266,11 +272,11 @@ func TestApplyCandidatesCommitsAllFilesAndRejectsDuplicatePaths(t *testing.T) {
 
 func TestApplyCandidatesPreimageMismatchAppliesNothing(t *testing.T) {
 	root := t.TempDir()
-	originalA, originalB := []byte("package fixture\n// a\n"), []byte("package fixture\n// user edit\n")
-	if err := os.WriteFile(filepath.Join(root, "a_test.go"), originalA, 0o644); err != nil {
+	originalA, originalB := []byte("package fixture\n\nvar a = true\n"), []byte("package fixture\n\nvar userEdit = true\n")
+	if err := os.WriteFile(filepath.Join(root, "a_test.go"), originalA, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "b_test.go"), originalB, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "b_test.go"), originalB, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	results, err := ApplyCandidates(root, []Application{
@@ -291,9 +297,9 @@ func TestApplyCandidatesPreimageMismatchAppliesNothing(t *testing.T) {
 func TestApplyCandidatesRollsBackEarlierWritesAfterLaterFailure(t *testing.T) {
 	preserveRepairHooks(t)
 	root := t.TempDir()
-	originalA, originalB := []byte("package fixture\n// a\n"), []byte("package fixture\n// b\n")
+	originalA, originalB := []byte("package fixture\n\nvar a = true\n"), []byte("package fixture\n\nvar b = true\n")
 	for path, content := range map[string][]byte{"a_test.go": originalA, "b_test.go": originalB} {
-		if err := os.WriteFile(filepath.Join(root, path), content, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, path), content, filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -302,7 +308,7 @@ func TestApplyCandidatesRollsBackEarlierWritesAfterLaterFailure(t *testing.T) {
 	renames := 0
 	renameRepairFile = func(source, target string) error {
 		renames++
-		if renames == 2 {
+		if renames == secondCommitRename {
 			return sentinel
 		}
 		return originalRename(source, target)
@@ -311,7 +317,7 @@ func TestApplyCandidatesRollsBackEarlierWritesAfterLaterFailure(t *testing.T) {
 		{Finding: report.Finding{ID: "finding-a"}, Candidate: provider.Candidate{Kind: "patch", Path: "a_test.go", PreimageSHA256: sha256Hex(originalA), Content: []byte("new a")}},
 		{Finding: report.Finding{ID: "finding-b"}, Candidate: provider.Candidate{Kind: "patch", Path: "b_test.go", PreimageSHA256: sha256Hex(originalB), Content: []byte("new b")}},
 	})
-	if !errors.Is(err, sentinel) || results[0].Status != StatusCandidate || renames != 3 {
+	if !errors.Is(err, sentinel) || results[0].Status != StatusCandidate || renames != rollbackRenameCount {
 		t.Fatalf("ApplyCandidates = (%+v, %v), renames=%d", results, err, renames)
 	}
 	for path, want := range map[string][]byte{"a_test.go": originalA, "b_test.go": originalB} {
@@ -355,7 +361,7 @@ func TestValidateAndApplyPropagatesPostValidationReadAndArtifactFailures(t *test
 	t.Run("artifact write", func(t *testing.T) {
 		preserveRepairHooks(t)
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, "value_test.go"), []byte("user edit"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "value_test.go"), []byte("user edit"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		sentinel := errors.New("artifact rename failed")
@@ -371,7 +377,7 @@ func TestValidateAndApplyPropagatesPostValidationReadAndArtifactFailures(t *test
 
 type successfulValidator struct{}
 
-func (successfulValidator) OriginalStable(context.Context, provider.Candidate) error { return nil }
+func (successfulValidator) OriginalPasses(context.Context, provider.Candidate) error { return nil }
 func (successfulValidator) Kills(context.Context, report.Finding, provider.Candidate) error {
 	return nil
 }
@@ -379,7 +385,7 @@ func (successfulValidator) Suite(context.Context, provider.Candidate) error { re
 
 type callbackValidator struct{ suite func() error }
 
-func (callbackValidator) OriginalStable(context.Context, provider.Candidate) error { return nil }
+func (callbackValidator) OriginalPasses(context.Context, provider.Candidate) error { return nil }
 func (callbackValidator) Kills(context.Context, report.Finding, provider.Candidate) error {
 	return nil
 }
@@ -444,8 +450,6 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// resolvedTempDir returns t.TempDir() with symbolic links and short names
-// resolved, matching the root that confinedPath canonicalizes before joining.
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())

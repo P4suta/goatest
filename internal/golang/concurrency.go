@@ -15,8 +15,6 @@ import (
 	"strings"
 )
 
-// ConcurrencyPackages conservatively identifies module packages that use Go
-// concurrency syntax or the standard synchronization libraries.
 func ConcurrencyPackages(root string, packages []Package) ([]string, error) {
 	var result []string
 	for _, pkg := range packages {

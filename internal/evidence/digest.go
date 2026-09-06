@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package evidence computes complete assurance identities and impact graphs.
 package evidence
 
 import (
@@ -27,6 +26,7 @@ type Inputs struct {
 	Corpus           map[string]string
 	Contract         string
 	GoatestVersion   string
+	GoatestBuild     string
 	GoMutantsVersion string
 }
 
@@ -41,6 +41,7 @@ func (inputs Inputs) Clone() Inputs {
 		Corpus:           cloneMap(inputs.Corpus),
 		Contract:         inputs.Contract,
 		GoatestVersion:   inputs.GoatestVersion,
+		GoatestBuild:     inputs.GoatestBuild,
 		GoMutantsVersion: inputs.GoMutantsVersion,
 	}
 }
@@ -53,10 +54,9 @@ func cloneMap(input map[string]string) map[string]string {
 	return result
 }
 
-// Digest identifies every input whose change can invalidate assurance.
 func Digest(inputs Inputs) string {
 	h := sha256.New()
-	write(h, "goatest-evidence-v1")
+	write(h, "goatest-evidence-v2")
 	writeMap(h, "files", inputs.Files)
 	writeMap(h, "dependencies", inputs.Dependencies)
 	write(h, "toolchain", inputs.Toolchain)
@@ -71,6 +71,7 @@ func Digest(inputs Inputs) string {
 	writeMap(h, "corpus", inputs.Corpus)
 	write(h, "contract", inputs.Contract)
 	write(h, "goatest", inputs.GoatestVersion)
+	write(h, "goatest-build", inputs.GoatestBuild)
 	write(h, "go-mutants", inputs.GoMutantsVersion)
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -96,13 +97,10 @@ func write(h hash.Hash, fields ...string) {
 	}
 }
 
-// Scan hashes the repository's observable files, separating standard fuzz
-// corpus entries so callers can invalidate corpus evidence independently.
 func Scan(root string) (map[string]string, map[string]string, error) {
 	return scanWithHooks(root, scanHooks{})
 }
 
-// scanWithHooks is Scan against a filesystem the caller supplies.
 func scanWithHooks(root string, hooks scanHooks) (map[string]string, map[string]string, error) {
 	hooks = hooks.resolved()
 	files := make(map[string]string)
@@ -158,8 +156,6 @@ func isCorpus(relative string) bool {
 	return strings.HasPrefix(relative, "testdata/fuzz/") || strings.Contains(relative, "/testdata/fuzz/")
 }
 
-// fileDigestWithHooks hashes one file's mode and contents. It is the digest a
-// scan computes unless the caller supplies its own.
 func fileDigestWithHooks(path string, mode fs.FileMode, hooks scanHooks) (string, error) {
 	file, err := hooks.resolved().open(path)
 	if err != nil {

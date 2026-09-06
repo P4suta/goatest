@@ -6,6 +6,7 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"math/bits"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,35 +16,22 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// Shape of the report.
 const (
-	// execClassWords is how many arguments of a command line make its class.
-	// Six is what keeps the package under test inside the class of a mutation
-	// control run — "go test -count=1 <package> -args -test.run=<value>" — so
-	// the packages a run pays for stay separate rather than collapsing into
-	// one "go test" line.
 	execClassWords = 6
-	// execClassLimit and mutantLimit cap the two tables a real recording would
-	// otherwise print thousands of rows of. What the cap leaves out is
-	// accounted for in a line under the table rather than dropped.
+
 	execClassLimit = 15
 	mutantLimit    = 10
-	// columnGap separates two columns of a table.
+
 	columnGap = "  "
 )
 
-// Placeholders for a value the recording did not carry. They are printed
-// rather than left blank so that a missing value reads as missing.
 const (
-	noCommand  = "(no command)"
-	noOutcome  = "(none)"
-	noValue    = "-"
-	ellipsis   = "..."
-	unrecorded = "(unrecorded)"
+	noCommand = "(no command)"
+	noOutcome = "(none)"
+	noValue   = "-"
+	ellipsis  = "..."
 )
 
-// renderSummary renders the whole breakdown of one recording, ending in a
-// newline. It reads the events alone: the same events render the same bytes.
 func renderSummary(source string, events []trace.Event) string {
 	if len(events) == 0 {
 		return "trace: " + source + "\nthe stream carries no events\n"
@@ -51,9 +39,11 @@ func renderSummary(source string, events []trace.Event) string {
 	blocks := [][]string{
 		headerBlock(source, events),
 		phaseBlock(events),
+		prepareBlock(events),
 		execBlock(events),
 		routingBlock(events),
 		probeBlock(events),
+		controlBlock(events),
 		mutantBlock(events),
 		runBlock(events),
 	}
@@ -70,8 +60,6 @@ func renderSummary(source string, events []trace.Event) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// headerBlock names the recording and counts what it holds, which is what
-// tells a complete stream from a fragment before any total is read.
 func headerBlock(source string, events []trace.Event) []string {
 	lines := []string{"trace: " + source}
 	if schema := events[0].Schema; schema != "" {
@@ -85,11 +73,9 @@ func headerBlock(source string, events []trace.Event) []string {
 	return append(lines, fmt.Sprintf("events: %d (%s)", len(events), census(events)))
 }
 
-// census counts the events by type, in the order the contract lists them,
-// naming only the types the recording carries.
 func census(events []trace.Event) string {
 	order := []string{
-		trace.TypeRunStart, trace.TypePhaseStart, trace.TypePhaseEnd, trace.TypeExec,
+		trace.TypeRunStart, trace.TypePhaseStart, trace.TypePhaseEnd, trace.TypePrepare, trace.TypeExec,
 		trace.TypeMutantExec, trace.TypeRoute, trace.TypeProbeExec, trace.TypeProgress,
 		trace.TypeArtifact, trace.TypeRunEnd,
 	}
@@ -106,17 +92,114 @@ func census(events []trace.Event) string {
 	return strings.Join(parts, ", ")
 }
 
-// phaseTotal is the time one phase cost across every pass through it. A run
-// that promotes a repair passes through the mutation phase again, so a phase
-// is a total and a count rather than a single duration.
+type prepareTotal struct {
+	phase     string
+	duration  int64
+	started   int
+	finished  int
+	succeeded int
+	failed    int
+	skipped   int
+}
+
+func prepareBlock(events []trace.Event) []string {
+	totals := prepareTotals(events)
+	if len(totals) == 0 {
+		return nil
+	}
+	overall, started, finished := int64(0), 0, 0
+	for _, total := range totals {
+		overall += total.duration
+		started += total.started
+		finished += total.finished
+	}
+	rows := make([][]string, 0, len(totals))
+	for _, total := range totals {
+		rows = append(rows, []string{
+			formatDuration(total.duration),
+			formatShare(total.duration, overall),
+			strconv.Itoa(total.started),
+			strconv.Itoa(total.finished),
+			strconv.Itoa(total.succeeded),
+			strconv.Itoa(total.failed),
+			strconv.Itoa(total.skipped),
+			total.phase,
+		})
+	}
+	columns := []column{
+		{"duration", true},
+		{"share", true},
+		{"started", true},
+		{"finished", true},
+		{"succeeded", true},
+		{"failed", true},
+		{"skipped", true},
+		{"stage", false},
+	}
+	lines := []string{"preparation by total duration"}
+	lines = append(lines, renderTable(columns, rows)...)
+	return append(lines, fmt.Sprintf("total: %s across %s and %s",
+		formatDuration(overall), plural(started, "started stage", "started stages"),
+		plural(finished, "finished stage", "finished stages")))
+}
+
+func prepareTotals(events []trace.Event) []prepareTotal {
+	index := make(map[string]*prepareTotal)
+	ordered := make([]*prepareTotal, 0)
+	for _, event := range events {
+		if event.Type != trace.TypePrepare || event.Prepare == nil {
+			continue
+		}
+		record := event.Prepare
+		total, kept := index[record.Phase]
+		if !kept {
+			total = &prepareTotal{phase: record.Phase}
+			index[record.Phase] = total
+			ordered = append(ordered, total)
+		}
+		switch record.State {
+		case trace.PrepareStateStarted:
+			total.started++
+		case trace.PrepareStateFinished:
+			total.finished++
+			if record.DurationMS != nil {
+				total.duration += *record.DurationMS
+			}
+			switch record.Result {
+			case trace.PrepareResultSucceeded:
+				total.succeeded++
+			case trace.PrepareResultFailed:
+				total.failed++
+			case trace.PrepareResultSkipped:
+				total.skipped++
+			}
+		}
+	}
+	totals := make([]prepareTotal, 0, len(ordered))
+	for _, total := range ordered {
+		totals = append(totals, *total)
+	}
+	slices.SortFunc(totals, func(first, second prepareTotal) int {
+		if order := cmp.Compare(second.duration, first.duration); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(second.finished, first.finished); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(second.started, first.started); order != 0 {
+			return order
+		}
+		return cmp.Compare(first.phase, second.phase)
+	})
+	return totals
+}
+
 type phaseTotal struct {
 	name     string
 	duration int64
 	passes   int
 }
 
-// phaseBlock breaks the recording down by phase, which is the first question
-// about a run's cost: which part of it was the run.
 func phaseBlock(events []trace.Event) []string {
 	totals := phaseTotals(events)
 	lines := []string{"phases by total duration"}
@@ -143,9 +226,9 @@ func phaseBlock(events []trace.Event) []string {
 		formatDuration(overall), plural(len(totals), "phase", "phases"), plural(passes, "pass", "passes")))
 }
 
-// phaseTotals sums the phases of a recording, longest first.
 func phaseTotals(events []trace.Event) []phaseTotal {
 	index := make(map[string]*phaseTotal)
+	ordered := make([]*phaseTotal, 0)
 	for _, event := range events {
 		if event.Type != trace.TypePhaseEnd || event.Phase == nil {
 			continue
@@ -154,12 +237,13 @@ func phaseTotals(events []trace.Event) []phaseTotal {
 		if !kept {
 			total = &phaseTotal{name: event.Phase.Name}
 			index[event.Phase.Name] = total
+			ordered = append(ordered, total)
 		}
 		total.duration += event.Phase.DurationMS
 		total.passes++
 	}
-	totals := make([]phaseTotal, 0, len(index))
-	for _, total := range index {
+	totals := make([]phaseTotal, 0, len(ordered))
+	for _, total := range ordered {
 		totals = append(totals, *total)
 	}
 	slices.SortFunc(totals, func(first, second phaseTotal) int {
@@ -174,17 +258,12 @@ func phaseTotals(events []trace.Event) []phaseTotal {
 	return totals
 }
 
-// execTotal is the time one class of command line cost across every call of
-// it.
 type execTotal struct {
 	class    string
 	duration int64
 	calls    int
 }
 
-// execBlock breaks the executed commands down by class, which is what turns
-// thousands of one-off command lines into the handful of commands a run
-// actually repeats.
 func execBlock(events []trace.Event) []string {
 	totals := execTotals(events)
 	lines := []string{"exec classes by total duration"}
@@ -228,9 +307,9 @@ func execBlock(events []trace.Event) []string {
 		plural(len(totals), "class", "classes")))
 }
 
-// execTotals sums the executed commands by class, most expensive first.
 func execTotals(events []trace.Event) []execTotal {
 	index := make(map[string]*execTotal)
+	ordered := make([]*execTotal, 0)
 	for _, event := range events {
 		if event.Type != trace.TypeExec || event.Exec == nil {
 			continue
@@ -240,12 +319,13 @@ func execTotals(events []trace.Event) []execTotal {
 		if !kept {
 			total = &execTotal{class: class}
 			index[class] = total
+			ordered = append(ordered, total)
 		}
 		total.duration += event.Exec.DurationMS
 		total.calls++
 	}
-	totals := make([]execTotal, 0, len(index))
-	for _, total := range index {
+	totals := make([]execTotal, 0, len(ordered))
+	for _, total := range ordered {
 		totals = append(totals, *total)
 	}
 	slices.SortFunc(totals, func(first, second execTotal) int {
@@ -260,19 +340,6 @@ func execTotals(events []trace.Event) []execTotal {
 	return totals
 }
 
-// execClass reduces one argument vector to the class of command it belongs to:
-// its opening arguments, with the parts that differ between two otherwise
-// identical commands replaced by a placeholder.
-//
-//   - "-flag=value" becomes "-flag=<value>", which is what collapses the
-//     per-mutant "-test.run=^TestSomething$" into one class;
-//   - an absolute path becomes "<path>", which is what collapses the compiled
-//     test binaries a run leaves in a temporary directory;
-//   - every other argument is kept verbatim, so the package under test still
-//     separates one class from another.
-//
-// A command line longer than the class ends in an ellipsis, so a class is
-// never mistaken for a complete command line.
 func execClass(argv []string) string {
 	if len(argv) == 0 {
 		return noCommand
@@ -287,8 +354,6 @@ func execClass(argv []string) string {
 	return strings.Join(words, " ")
 }
 
-// classArgument replaces the part of one argument that varies between two runs
-// of the same command.
 func classArgument(argument string) string {
 	if isAbsolutePath(argument) {
 		return "<path>"
@@ -301,9 +366,6 @@ func classArgument(argument string) string {
 	return argument
 }
 
-// isAbsolutePath reports whether an argument is an absolute path, on the
-// platform that recorded the trace rather than on the one reading it: a trace
-// is read on any machine, so both forms are recognized everywhere.
 func isAbsolutePath(argument string) bool {
 	if strings.HasPrefix(argument, "/") {
 		return true
@@ -315,90 +377,49 @@ func isAbsolutePath(argument string) bool {
 	return drive >= 'a' && drive <= 'z' && (argument[2] == '\\' || argument[2] == '/')
 }
 
-// labelCount is one label of a tally and how often the recording carried it.
-// A tally is built in a fixed order rather than by iterating a map, so the
-// same recording prints the same line.
 type labelCount struct {
 	label string
 	count int
 }
 
-// routeTotal is what the route events of a recording add up to: how many
-// routes there were, over how many mutants, how each of them was decided, and
-// how many targets they selected out of the ones the file alone would have.
 type routeTotal struct {
 	routes  int
 	mutants int
-	// reasons, granularities and fallbacks tally the routes by each of the
-	// three labels a route carries, in the order the block prints them.
+
 	reasons       []labelCount
 	granularities []labelCount
 	fallbacks     []labelCount
-	// discharges tallies the targets a proof removed from a reaching set by
-	// the proof that removed them, in the order the engine applies the proofs,
-	// and dischargedRoutes counts the routes that carry at least one. A target
-	// is discharged once, so the tally counts targets while the count beside it
-	// counts routes.
+
 	discharges       []labelCount
 	dischargedRoutes int
-	// probed counts the routes whose mutant the engine compiled a probe of. A
-	// recording made before the probe pass carries none, which is the absence
-	// the block reports rather than a count of zero.
+
+	suiteCoverage  int
+	suiteReached   int
+	suiteUnreached int
+
 	probed int
-	// reused counts the routes whose verdict the run took from an earlier
-	// run's evidence instead of executing anything. It is a count of routes
-	// rather than of the kills and survivals behind them, because a route is
-	// all a recording says about a mutant nothing ran for. A recording made
-	// before evidence was reused carries none, and the block says nothing
-	// rather than a count of zero.
+
 	reused int
-	// fanOut counts the routes by how many targets they reached, one entry
-	// per bucket of fanOutBucketLabels.
+
 	fanOut []int
-	// reaching is the targets every route selected, whatever it recorded of
-	// how it was decided.
+
 	reaching int
-	// recorded is how many routes named a granularity, which is what marks a
-	// route as carrying its routing metadata at all. recordedReaching and
-	// candidates are the two sides of the reduction those routes bought: the
-	// targets they selected, and the targets covering the mutated file that
-	// they were selected from. Both are summed over the recorded routes
-	// alone, so a route that recorded nothing cannot move either side.
-	recorded         int
-	recordedReaching int
-	candidates       int
+
+	candidates int
 }
 
-// fanOutBucketLabels names the buckets of the reaching-target histogram, which
-// is the one place their number is decided. The buckets double, because the
-// interesting difference between two routings is an order of magnitude of
-// fan-out rather than a target or two.
 func fanOutBucketLabels() []string {
 	return []string{"0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"}
 }
 
-// fanOutBucketIndex is the bucket a fan-out of the given size belongs to.
-// Nothing and one target get a bucket each, because "no test reaches this" and
-// "exactly one does" are the two answers a routing change is judged by;
-// everything above the last bound falls into the open bucket that closes the
-// histogram.
 func fanOutBucketIndex(reaching int) int {
 	if reaching <= 0 {
 		return 0
 	}
 	last := len(fanOutBucketLabels()) - 1
-	index := 1
-	for bound := 2; index < last && reaching >= bound; bound *= 2 {
-		index++
-	}
-	return index
+	return min(bits.Len(uint(reaching)), last)
 }
 
-// routingBlock breaks the routing decisions down: how many mutants were
-// routed, on what evidence, and how much of the file-wide candidate set the
-// routes actually selected. A recording made before routing reported its
-// granularity carries none of it, and the block says so rather than reading
-// the absence as a decision.
 func routingBlock(events []trace.Event) []string {
 	total := routeTotals(events)
 	lines := []string{"routing"}
@@ -412,17 +433,16 @@ func routingBlock(events []trace.Event) []string {
 	if countedLabels(total.fallbacks) > 0 {
 		lines = append(lines, "fallbacks: "+formatLabelCounts(total.fallbacks))
 	}
-	// A recording no proof discharged a target in renders as it did before the
-	// proofs existed, so the line is absent rather than a tally of zeroes, and
-	// so does one whose routes name no probe. The two lines have one slot each,
-	// discharged then probed, so that a block reads in the same order whichever
-	// of them a recording carries: the targets a proof already removed, then
-	// the routes the probe pass is yet to narrow, then the reduction so far.
+
 	if discharged := countedLabels(total.discharges); discharged > 0 {
 		lines = append(lines, fmt.Sprintf("discharged: %s across %s (%s)",
 			plural(discharged, "target", "targets"),
 			plural(total.dischargedRoutes, "route", "routes"),
 			formatLabelCounts(total.discharges)))
+	}
+	if total.suiteCoverage > 0 {
+		lines = append(lines, fmt.Sprintf("suite coverage: %s (%d reached, %d unreached)",
+			plural(total.suiteCoverage, "route", "routes"), total.suiteReached, total.suiteUnreached))
 	}
 	lines = append(lines, probedLines(total.probed)...)
 	if total.reused > 0 {
@@ -430,7 +450,7 @@ func routingBlock(events []trace.Event) []string {
 			plural(total.reused, "route", "routes"), total.routes))
 	}
 	lines = append(lines,
-		"reduction: "+formatReduction(total.recorded, total.candidates, total.recordedReaching),
+		"reduction: "+formatReduction(total.candidates, total.reaching),
 		"", "reaching targets per route")
 	labels := fanOutBucketLabels()
 	rows := make([][]string, 0, len(labels))
@@ -444,7 +464,6 @@ func routingBlock(events []trace.Event) []string {
 	return append(lines, renderTable(columns, rows)...)
 }
 
-// routeTotals sums the route events of a recording.
 func routeTotals(events []trace.Event) routeTotal {
 	reasons := make(map[string]int)
 	granularities := make(map[string]int)
@@ -460,11 +479,7 @@ func routeTotals(events []trace.Event) routeTotal {
 		total.routes++
 		mutants[record.MutantID] = struct{}{}
 		reasons[record.Reason]++
-		granularity := record.Granularity
-		if granularity == "" {
-			granularity = unrecorded
-		}
-		granularities[granularity]++
+		granularities[record.Granularity]++
 		if record.Fallback != "" {
 			fallbacks[record.Fallback]++
 		}
@@ -476,30 +491,30 @@ func routeTotals(events []trace.Event) routeTotal {
 		for _, discharge := range record.Discharged {
 			discharges[discharge.Reason]++
 		}
+		if record.SuiteCoverage != "" {
+			total.suiteCoverage++
+			if record.SuiteReached {
+				total.suiteReached++
+			} else {
+				total.suiteUnreached++
+			}
+		}
 		if record.Probed {
 			total.probed++
 		}
 		if record.Reused {
 			total.reused++
 		}
-		if record.Granularity == "" {
-			continue
-		}
-		total.recorded++
-		total.recordedReaching += len(record.ReachingTargets)
 		total.candidates += record.FileCandidates
 	}
 	total.mutants = len(mutants)
-	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonUnreached)
-	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile, unrecorded)
+	total.reasons = tally(reasons, trace.ReasonCoverageReaching, trace.ReasonProbeReaching, trace.ReasonUnreached)
+	total.granularities = tally(granularities, trace.GranularityBlock, trace.GranularityFile)
 	total.fallbacks = tally(fallbacks, trace.FallbackPositionUnknown, trace.FallbackOutsideBlocks)
 	total.discharges = tally(discharges, trace.DischargeBranchNeverTaken, trace.DischargeNeverInfected)
 	return total
 }
 
-// tally projects counted labels onto the labels the contract names, in that
-// order. The map is read by key alone, so no iteration order reaches the
-// output.
 func tally(counts map[string]int, labels ...string) []labelCount {
 	projected := make([]labelCount, 0, len(labels))
 	for _, label := range labels {
@@ -508,7 +523,6 @@ func tally(counts map[string]int, labels ...string) []labelCount {
 	return projected
 }
 
-// countedLabels is how many routes a whole tally accounts for.
 func countedLabels(counts []labelCount) int {
 	total := 0
 	for _, count := range counts {
@@ -517,7 +531,6 @@ func countedLabels(counts []labelCount) int {
 	return total
 }
 
-// formatLabelCounts renders a tally as one line.
 func formatLabelCounts(counts []labelCount) string {
 	parts := make([]string, 0, len(counts))
 	for _, count := range counts {
@@ -526,21 +539,7 @@ func formatLabelCounts(counts []labelCount) string {
 	return strings.Join(parts, ", ")
 }
 
-// formatReduction renders what routing saved over the routes that recorded
-// how they were decided: the targets the file alone would have selected
-// against the ones those routes did.
-//
-// A granularity is what marks a route as carrying its routing metadata, so
-// recorded is how many routes carry any of it. On such a route an absent
-// candidate count is a count of zero, which is a file no test binary was ever
-// linked against rather than a missing measurement; on a route without a
-// granularity the metadata was never recorded at all, and nothing but that is
-// reported. A zero candidate count has no share to take, so the reduction it
-// bought is named rather than divided by nothing.
-func formatReduction(recorded, candidates, reaching int) string {
-	if recorded <= 0 {
-		return "not recorded"
-	}
+func formatReduction(candidates, reaching int) string {
 	if candidates <= 0 {
 		return fmt.Sprintf("file candidates %d -> reaching %d (nothing to reduce)", candidates, reaching)
 	}
@@ -548,8 +547,6 @@ func formatReduction(recorded, candidates, reaching int) string {
 		candidates, reaching, formatShare(int64(candidates-reaching), int64(candidates)))
 }
 
-// probedLines is the routing line naming the routes whose mutant the engine
-// compiled a probe of, and nothing at all for a recording that carries none.
 func probedLines(routes int) []string {
 	if routes <= 0 {
 		return nil
@@ -557,66 +554,77 @@ func probedLines(routes int) []string {
 	return []string{"probed: " + plural(routes, "route", "routes")}
 }
 
-// probeError is the label a probe execution that failed before it reached an
-// outcome is tallied under. It is no outcome of the contract — the record
-// carries the error that stopped it instead — and the tally names it so that
-// an execution nothing became of is counted rather than dropped.
 const probeError = "error"
 
-// probeTotal is what the probe executions of a recording add up to: how many
-// there were, over how many targets, what became of them, and how much of the
-// (target, mutant) space they measured.
 type probeTotal struct {
 	executions int
 	targets    int
+	suites     int
 	outcomes   []labelCount
-	// pairs counts every recorded infection, mutants the distinct mutants
-	// among them, and barren the measured targets that infected none: the
-	// targets the pass answered for outright.
-	pairs   int
-	mutants int
-	barren  int
+
+	pairs         int
+	mutants       int
+	barrenTargets int
+	barrenSuites  int
+
+	wholeTreeSuites  int
+	wholeTreeReasons []labelCount
 }
 
-// probeBlock breaks the probe pass down: how many targets were probed, what
-// became of the executions, and which mutants they infected. Only a measured
-// execution says anything about a mutant, so the outcomes are printed beside
-// the infections rather than under them. A recording made before the pass
-// existed carries no probe execution at all, and the block says so rather than
-// reading the absence as a pass that infected nothing.
 func probeBlock(events []trace.Event) []string {
 	total := probeTotals(events)
 	if total.executions == 0 {
 		return []string{"probe: not recorded"}
 	}
-	return []string{
-		fmt.Sprintf("probe: %s across %s",
-			plural(total.executions, "execution", "executions"), plural(total.targets, "target", "targets")),
-		"outcomes: " + formatLabelCounts(total.outcomes),
-		fmt.Sprintf("infections: %s across %s; %s infected nothing",
-			plural(total.pairs, "(target, mutant) pair", "(target, mutant) pairs"),
-			plural(total.mutants, "mutant", "mutants"),
-			plural(total.barren, "measured target", "measured targets")),
+	scope := plural(total.targets, "target", "targets")
+	pair := "(target, mutant) pair"
+	pairs := "(target, mutant) pairs"
+	barren := plural(total.barrenTargets, "measured target", "measured targets") + " infected nothing"
+	if total.suites != 0 {
+		scope += " and " + plural(total.suites, "package suite", "package suites")
+		pair, pairs = "(probe, mutant) pair", "(probe, mutant) pairs"
+		barren += "; " + plural(total.barrenSuites, "measured package suite", "measured package suites") + " infected nothing"
 	}
+	lines := []string{
+		fmt.Sprintf("probe: %s across %s", plural(total.executions, "execution", "executions"), scope),
+		"outcomes: " + formatLabelCounts(total.outcomes),
+		fmt.Sprintf("infections: %s across %s; %s",
+			plural(total.pairs, pair, pairs), plural(total.mutants, "mutant", "mutants"), barren),
+	}
+	if total.wholeTreeSuites != 0 {
+		lines = append(lines, fmt.Sprintf("whole-tree keys: %s of %d observed; %s",
+			plural(total.wholeTreeSuites, "package suite", "package suites"),
+			total.suites, formatLabelCounts(total.wholeTreeReasons)))
+	}
+	return lines
 }
 
-// probeTotals sums the probe executions of a recording.
 func probeTotals(events []trace.Event) probeTotal {
 	outcomes := make(map[string]int)
 	targets := make(map[string]struct{})
+	suites := make(map[string]struct{})
 	mutants := make(map[string]struct{})
-	// measured says, of every target a measured execution ran, whether any of
-	// them infected a mutant, so that a target the pass answered for is
-	// counted once however often it was probed.
-	measured := make(map[string]bool)
+
+	measuredTargets := make(map[string]bool)
+	measuredSuites := make(map[string]bool)
+	wholeTreeReasons := make(map[string]int)
+	wholeTreeSuites := make(map[string]struct{})
 	total := probeTotal{}
 	for _, event := range events {
-		if event.Type != trace.TypeProbeExec || event.Probe == nil {
+		if event.Type != trace.TypeProbeExec || event.Probe == nil || event.Probe.Control {
 			continue
 		}
 		record := event.Probe
 		total.executions++
-		targets[record.Target] = struct{}{}
+		if record.Suite {
+			suites[record.Target] = struct{}{}
+			if record.WholeTree {
+				wholeTreeSuites[record.Target] = struct{}{}
+				wholeTreeReasons[record.WholeTreeReason]++
+			}
+		} else {
+			targets[record.Target] = struct{}{}
+		}
 		switch {
 		case record.Outcome != "":
 			outcomes[record.Outcome]++
@@ -624,6 +632,10 @@ func probeTotals(events []trace.Event) probeTotal {
 			outcomes[probeError]++
 		}
 		if record.Outcome == trace.ProbeOutcomeMeasured {
+			measured := measuredTargets
+			if record.Suite {
+				measured = measuredSuites
+			}
 			measured[record.Target] = measured[record.Target] || len(record.Infected) > 0
 		}
 		total.pairs += len(record.Infected)
@@ -632,20 +644,56 @@ func probeTotals(events []trace.Event) probeTotal {
 		}
 	}
 	total.targets = len(targets)
+	total.suites = len(suites)
 	total.mutants = len(mutants)
-	// The map is counted rather than iterated into the output, so no iteration
-	// order reaches a line.
-	for _, infected := range measured {
+
+	for _, infected := range measuredTargets {
 		if !infected {
-			total.barren++
+			total.barrenTargets++
+		}
+	}
+	for _, infected := range measuredSuites {
+		if !infected {
+			total.barrenSuites++
 		}
 	}
 	total.outcomes = tally(outcomes, trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
 		trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)
+	total.wholeTreeSuites = len(wholeTreeSuites)
+	total.wholeTreeReasons = tally(wholeTreeReasons,
+		trace.WholeTreeStaticUnobservable, trace.WholeTreeLogUnavailable, trace.WholeTreeLogAmbiguous,
+		trace.WholeTreeDirectoryAccess, trace.WholeTreeOutsideInput)
 	return total
 }
 
-// mutantTotal is what one mutant cost across every execution of it.
+func controlBlock(events []trace.Event) []string {
+	outcomes := make(map[string]int)
+	executions := 0
+	var duration int64
+	for _, event := range events {
+		if event.Type != trace.TypeProbeExec || event.Probe == nil || !event.Probe.Control {
+			continue
+		}
+		executions++
+		duration += event.Probe.DurationMS
+		switch {
+		case event.Probe.Outcome != "":
+			outcomes[event.Probe.Outcome]++
+		case event.Probe.Error != "":
+			outcomes[probeError]++
+		}
+	}
+	if executions == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("exact original preflights: %s in %s", plural(executions, "execution", "executions"), formatDuration(duration)),
+		"outcomes: " + formatLabelCounts(tally(outcomes,
+			trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
+			trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)),
+	}
+}
+
 type mutantTotal struct {
 	id         string
 	display    string
@@ -654,17 +702,12 @@ type mutantTotal struct {
 	executions int
 }
 
-// outcomeTotal is what one outcome cost across the executions that reached it.
 type outcomeTotal struct {
 	outcome    string
 	duration   int64
 	executions int
 }
 
-// dispositionTotal is what one final disposition cost. A mutant a repair round
-// revisits is executed again and may end elsewhere than it started, so an
-// outcome total answers "what did the executions conclude" while a disposition
-// total answers "what did the mutants that concluded this way cost".
 type dispositionTotal struct {
 	disposition string
 	mutants     int
@@ -672,10 +715,6 @@ type dispositionTotal struct {
 	duration    int64
 }
 
-// dispositionTotals charges every execution of a mutant to the outcome its
-// last execution reached, most executions first. That is the whole point of
-// the table: a mutant that survives in the end was paid for by every execution
-// it took to get there, including the ones that killed an earlier version.
 func dispositionTotals(events []trace.Event) []dispositionTotal {
 	type mutantRun struct {
 		outcome    string
@@ -683,6 +722,7 @@ func dispositionTotals(events []trace.Event) []dispositionTotal {
 		duration   int64
 	}
 	runs := make(map[string]*mutantRun)
+	orderedRuns := make([]*mutantRun, 0)
 	for _, event := range events {
 		if event.Type != trace.TypeMutantExec || event.Mutant == nil {
 			continue
@@ -692,13 +732,15 @@ func dispositionTotals(events []trace.Event) []dispositionTotal {
 		if !kept {
 			run = &mutantRun{}
 			runs[record.ID] = run
+			orderedRuns = append(orderedRuns, run)
 		}
 		run.outcome = record.Outcome
 		run.executions++
 		run.duration += record.DurationMS
 	}
 	index := make(map[string]*dispositionTotal, len(runs))
-	for _, run := range runs {
+	orderedTotals := make([]*dispositionTotal, 0)
+	for _, run := range orderedRuns {
 		disposition := run.outcome
 		if disposition == "" {
 			disposition = noOutcome
@@ -707,13 +749,14 @@ func dispositionTotals(events []trace.Event) []dispositionTotal {
 		if !kept {
 			total = &dispositionTotal{disposition: disposition}
 			index[disposition] = total
+			orderedTotals = append(orderedTotals, total)
 		}
 		total.mutants++
 		total.executions += run.executions
 		total.duration += run.duration
 	}
-	totals := make([]dispositionTotal, 0, len(index))
-	for _, total := range index {
+	totals := make([]dispositionTotal, 0, len(orderedTotals))
+	for _, total := range orderedTotals {
 		totals = append(totals, *total)
 	}
 	slices.SortFunc(totals, func(first, second dispositionTotal) int {
@@ -728,10 +771,6 @@ func dispositionTotals(events []trace.Event) []dispositionTotal {
 	return totals
 }
 
-// mutantBlock breaks the mutant executions down: how many there were, how many
-// mutants they covered, what became of them, and which mutants were executed
-// most. A trace records executions rather than a catalog, so the mutants are
-// counted as the distinct identities the executions名 name.
 func mutantBlock(events []trace.Event) []string {
 	mutants, outcomes, executions, duration := mutantTotals(events)
 	lines := []string{"mutant executions"}
@@ -809,8 +848,6 @@ func mutantBlock(events []trace.Event) []string {
 	return lines
 }
 
-// mutantName is the identity a mutant is reported by: the readable one the
-// engine gave it, and the full identity when it gave none.
 func mutantName(total mutantTotal) string {
 	if total.display != "" {
 		return total.display
@@ -818,12 +855,11 @@ func mutantName(total mutantTotal) string {
 	return total.id
 }
 
-// mutantTotals sums the mutant executions by mutant and by outcome, returning
-// the mutants most executed first, the outcomes most reached first, and the
-// executions and their total duration.
 func mutantTotals(events []trace.Event) ([]mutantTotal, []outcomeTotal, int, int64) {
 	byMutant := make(map[string]*mutantTotal)
 	byOutcome := make(map[string]*outcomeTotal)
+	orderedMutants := make([]*mutantTotal, 0)
+	orderedOutcomes := make([]*outcomeTotal, 0)
 	executions, duration := 0, int64(0)
 	for _, event := range events {
 		if event.Type != trace.TypeMutantExec || event.Mutant == nil {
@@ -836,6 +872,7 @@ func mutantTotals(events []trace.Event) ([]mutantTotal, []outcomeTotal, int, int
 		if !kept {
 			total = &mutantTotal{id: record.ID, display: record.DisplayID, pkg: record.Package}
 			byMutant[record.ID] = total
+			orderedMutants = append(orderedMutants, total)
 		}
 		total.duration += record.DurationMS
 		total.executions++
@@ -843,12 +880,13 @@ func mutantTotals(events []trace.Event) ([]mutantTotal, []outcomeTotal, int, int
 		if !kept {
 			outcome = &outcomeTotal{outcome: record.Outcome}
 			byOutcome[record.Outcome] = outcome
+			orderedOutcomes = append(orderedOutcomes, outcome)
 		}
 		outcome.duration += record.DurationMS
 		outcome.executions++
 	}
-	mutants := make([]mutantTotal, 0, len(byMutant))
-	for _, total := range byMutant {
+	mutants := make([]mutantTotal, 0, len(orderedMutants))
+	for _, total := range orderedMutants {
 		mutants = append(mutants, *total)
 	}
 	slices.SortFunc(mutants, func(first, second mutantTotal) int {
@@ -860,8 +898,8 @@ func mutantTotals(events []trace.Event) ([]mutantTotal, []outcomeTotal, int, int
 		}
 		return cmp.Compare(first.id, second.id)
 	})
-	outcomes := make([]outcomeTotal, 0, len(byOutcome))
-	for _, total := range byOutcome {
+	outcomes := make([]outcomeTotal, 0, len(orderedOutcomes))
+	for _, total := range orderedOutcomes {
 		outcomes = append(outcomes, *total)
 	}
 	slices.SortFunc(outcomes, func(first, second outcomeTotal) int {
@@ -876,8 +914,6 @@ func mutantTotals(events []trace.Event) ([]mutantTotal, []outcomeTotal, int, int
 	return mutants, outcomes, executions, duration
 }
 
-// runBlock closes the summary with the verdict and the event accounting, which
-// is what says whether the totals above were read from a complete recording.
 func runBlock(events []trace.Event) []string {
 	lines := []string{"run"}
 	last := events[len(events)-1]
@@ -893,16 +929,11 @@ func runBlock(events []trace.Event) []string {
 		fmt.Sprintf("events dropped: %d", last.Run.EventsDropped))
 }
 
-// column is one column of a rendered table: its heading, and whether its cells
-// are numbers that read better against the right edge.
 type column struct {
 	header string
 	right  bool
 }
 
-// renderTable renders a heading and its rows as aligned columns. Every line is
-// free of trailing spaces, so a table stays the same bytes however wide its
-// widest cell is.
 func renderTable(columns []column, rows [][]string) []string {
 	widths := make([]int, len(columns))
 	for index, definition := range columns {
@@ -929,7 +960,6 @@ func renderTable(columns []column, rows [][]string) []string {
 	return lines
 }
 
-// pad widens one cell to its column.
 func pad(cell string, width int, right bool) string {
 	padding := strings.Repeat(" ", max(width-utf8.RuneCountInString(cell), 0))
 	if right {
@@ -938,13 +968,10 @@ func pad(cell string, width int, right bool) string {
 	return cell + padding
 }
 
-// formatDuration renders recorded milliseconds. The recording is the only
-// source of the value, so the same trace prints the same duration forever.
 func formatDuration(milliseconds int64) string {
 	return (time.Duration(milliseconds) * time.Millisecond).String()
 }
 
-// formatMean renders the mean of a total over the calls that made it.
 func formatMean(total int64, calls int) string {
 	if calls <= 0 {
 		return noValue
@@ -952,8 +979,6 @@ func formatMean(total int64, calls int) string {
 	return formatDuration(total / int64(calls))
 }
 
-// formatShare renders a part of a total as a percentage, and a part of nothing
-// as no share at all rather than as zero.
 func formatShare(part, total int64) string {
 	if total <= 0 {
 		return noValue
@@ -961,7 +986,6 @@ func formatShare(part, total int64) string {
 	return strconv.FormatFloat(100*float64(part)/float64(total), 'f', 1, 64) + "%"
 }
 
-// plural renders a count with the word for it.
 func plural(count int, singular, plural string) string {
 	if count == 1 {
 		return "1 " + singular
@@ -969,7 +993,6 @@ func plural(count int, singular, plural string) string {
 	return strconv.Itoa(count) + " " + plural
 }
 
-// orNoValue renders a value the recording did not carry as a placeholder.
 func orNoValue(value string) string {
 	if value == "" {
 		return noValue

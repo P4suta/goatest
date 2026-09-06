@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package processtree starts shell-free child processes inside a platform
-// primitive that permits deterministic descendant cleanup.
 package processtree
 
 import (
@@ -46,7 +44,6 @@ func Start(command *exec.Cmd) (*Tree, error) {
 	return &Tree{command: command, handle: handle}, nil
 }
 
-// Kill terminates the process and every descendant in its platform group.
 func (tree *Tree) Kill() error {
 	if tree == nil || tree.command == nil || tree.command.Process == nil {
 		return nil
@@ -58,8 +55,13 @@ func (tree *Tree) Kill() error {
 	return err
 }
 
-// Close releases the platform group. KILL_ON_JOB_CLOSE semantics ensure a
-// provider cannot leave descendants behind after its parent exits normally.
+func (tree *Tree) Wait() error {
+	if tree == nil || tree.command == nil {
+		return nil
+	}
+	return waitStartedCommand(tree.command)
+}
+
 func (tree *Tree) Close() error {
 	if tree == nil {
 		return nil

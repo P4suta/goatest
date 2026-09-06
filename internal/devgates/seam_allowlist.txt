@@ -1,20 +1,5 @@
 # SPDX-FileCopyrightText: 2026 goatest contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
-#
-# The package-level seams goatest still has, one per line as
-# "package-path name", sorted by package and then by name.
-#
-# A seam is a package-level variable a test replaces to change what production
-# code does. It makes the package impossible to test in parallel, because a
-# test that overwrites one owns the package while it runs. New code injects
-# behaviour as an argument instead: production calls an internal
-# xxxWithHooks(args, hooks) with an immutable default, and a test passes its
-# own hooks.
-#
-# This file is a ratchet, and internal/devgates/seams_test.go holds it to that.
-# It may shrink and never grow: a seam it does not name fails the gate, and so
-# does an entry the tree no longer has. When a package moves to hooks, delete
-# its lines in the same commit that removed them.
 internal/app operatingSystemAtomicWrites
 internal/app readConfigurationFile
 internal/app startDoctorProcess
@@ -54,16 +39,7 @@ internal/config openConfigFile
 internal/config removeConfigFile
 internal/config renameConfigFile
 internal/golang relativePackagePath
-internal/mutationbridge absoluteCorpusPath
-internal/mutationbridge createCorpusTemp
-internal/mutationbridge evaluateCorpusSymlinks
-internal/mutationbridge linkCorpusFile
-internal/mutationbridge lstatCorpusPath
-internal/mutationbridge mkdirCorpusAll
 internal/mutationbridge openMutationWorkspace
-internal/mutationbridge readCorpusFile
-internal/mutationbridge removeCorpusFile
-internal/mutationbridge statCorpusPath
 internal/processtree assignWindowsProcessToJob
 internal/processtree attachTreeCommand
 internal/processtree closeTreeCommand

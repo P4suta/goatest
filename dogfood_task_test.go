@@ -14,9 +14,12 @@ func TestDogfoodTaskRunsBuiltCLIWithoutGoRunWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const marker = "[tasks.dogfood]"
-	parts := strings.SplitN(string(data), marker, 2)
-	if len(parts) != 2 {
+	const (
+		marker           = "[tasks.dogfood]"
+		dogfoodTaskParts = 2
+	)
+	parts := strings.SplitN(string(data), marker, dogfoodTaskParts)
+	if len(parts) != dogfoodTaskParts {
 		t.Fatal("mise.toml has no dogfood task")
 	}
 	task := parts[1]
@@ -26,8 +29,7 @@ func TestDogfoodTaskRunsBuiltCLIWithoutGoRunWrapper(t *testing.T) {
 	if strings.Contains(task, "go run") {
 		t.Fatal("dogfood uses a go run wrapper that can retain the CLI after Ctrl-C")
 	}
-	// The task names the verify command explicitly, because a bare invocation
-	// prints the help text rather than starting a run.
+
 	for _, required := range []string{
 		"go build -o ./dist/dogfood/goatest ./cmd/goatest",
 		"./dist/dogfood/goatest verify --ui=plain",

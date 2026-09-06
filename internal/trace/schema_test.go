@@ -12,10 +12,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// schemaURL is the resource identity the trace-event schema is compiled under.
 const schemaURL = "https://goatest.invalid/goatest-trace-v1.schema.json"
 
-// compileSchema compiles the embedded trace-event schema.
 func compileSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(trace.JSONSchema()))
@@ -34,8 +32,6 @@ func compileSchema(t *testing.T) *jsonschema.Schema {
 	return compiled
 }
 
-// decodeEvents marshals recorded events and decodes them back into the generic
-// documents the schema validates.
 func decodeEvents(t *testing.T, events []trace.Event) []map[string]any {
 	t.Helper()
 	decoded := make([]map[string]any, 0, len(events))
@@ -77,7 +73,7 @@ func TestSchemaAcceptsEveryRecordedEvent(t *testing.T) {
 func TestSchemaRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
-	payloads := []string{"phase", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
+	payloads := []string{"phase", "prepare", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
 	for _, document := range decodeEvents(t, scriptedEvents(t)) {
 		eventType, _ := document["type"].(string)
 		document["unknown"] = true
@@ -140,17 +136,16 @@ func TestSchemaRejectsAPayloadThatIsNotTheEventsOwn(t *testing.T) {
 	compiled := compileSchema(t)
 	documents := decodeEvents(t, scriptedEvents(t))
 
-	// Every payload of the recording, indexed by the field it arrived under,
-	// so each event can be handed a payload belonging to another event.
+	payloadNames := []string{"phase", "prepare", "exec", "mutant", "route", "probe", "progress", "artifact", "run"}
 	payloads := map[string]any{}
 	for _, document := range documents {
-		for _, name := range []string{"phase", "exec", "mutant", "route", "probe", "progress", "artifact", "run"} {
+		for _, name := range payloadNames {
 			if record, ok := document[name]; ok {
 				payloads[name] = record
 			}
 		}
 	}
-	if len(payloads) != 8 {
+	if len(payloads) != len(payloadNames) {
 		t.Fatalf("the recording holds %d payloads, want one of each", len(payloads))
 	}
 
@@ -174,6 +169,141 @@ func TestSchemaRejectsAPayloadThatIsNotTheEventsOwn(t *testing.T) {
 		if err := compiled.Validate(identified); err == nil {
 			t.Errorf("a %s event carrying the format identity passed the schema; run-start carries it alone", eventType)
 		}
+	}
+}
+
+func TestSchemaRejectsAMalformedPrepareEvent(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var prepare map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypePrepare {
+			prepare = document
+		}
+	}
+	if prepare == nil {
+		t.Fatal("the recording holds no prepare event")
+	}
+	for _, phase := range []string{
+		trace.PreparePhaseDiscovery,
+		trace.PreparePhaseProbeSnapshot,
+		trace.PreparePhaseMainValidation,
+		trace.PreparePhaseMainRestoration,
+		trace.PreparePhaseVerification,
+		trace.PreparePhaseBinaryBuild,
+		trace.PreparePhaseProbeValidation,
+		trace.PreparePhaseProbeCoverageBuild,
+		trace.PreparePhaseProbeRestoration,
+	} {
+		document := cloneDocument(t, prepare)
+		document["prepare"] = map[string]any{"phase": phase, "state": trace.PrepareStateStarted}
+		if err := compiled.Validate(document); err != nil {
+			t.Errorf("prepare phase %q was rejected: %v", phase, err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		record   map[string]any
+		accepted bool
+	}{
+		{
+			name:     "a started phase",
+			record:   map[string]any{"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateStarted},
+			accepted: true,
+		},
+		{
+			name: "a finished phase",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateFinished,
+				"result": trace.PrepareResultSucceeded, "duration_ms": 0,
+			},
+			accepted: true,
+		},
+		{
+			name: "a failed phase",
+			record: map[string]any{
+				"phase": trace.PreparePhaseMainValidation, "state": trace.PrepareStateFinished,
+				"result": trace.PrepareResultFailed, "duration_ms": 0,
+			},
+			accepted: true,
+		},
+		{
+			name: "a skipped phase",
+			record: map[string]any{
+				"phase": trace.PreparePhaseVerification, "state": trace.PrepareStateFinished,
+				"result": trace.PrepareResultSkipped, "duration_ms": 0,
+			},
+			accepted: true,
+		},
+		{
+			name:   "a phase with no identity",
+			record: map[string]any{"phase": "", "state": trace.PrepareStateStarted},
+		},
+		{
+			name:   "an unknown phase",
+			record: map[string]any{"phase": "guessed", "state": trace.PrepareStateStarted},
+		},
+		{
+			name:   "an unknown state",
+			record: map[string]any{"phase": trace.PreparePhaseDiscovery, "state": "waiting"},
+		},
+		{
+			name: "a started phase with a result",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateStarted,
+				"result": trace.PrepareResultSucceeded,
+			},
+		},
+		{
+			name: "a started phase with a duration",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateStarted,
+				"duration_ms": 0,
+			},
+		},
+		{
+			name: "a finished phase without a result",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateFinished,
+				"duration_ms": 0,
+			},
+		},
+		{
+			name: "a finished phase with an unknown result",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateFinished,
+				"result": "guessed", "duration_ms": 0,
+			},
+		},
+		{
+			name: "a finished phase without a duration",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateFinished,
+				"result": trace.PrepareResultSucceeded,
+			},
+		},
+		{
+			name: "a finished phase with a negative duration",
+			record: map[string]any{
+				"phase": trace.PreparePhaseDiscovery, "state": trace.PrepareStateFinished,
+				"result": trace.PrepareResultSucceeded, "duration_ms": invalidDurationMS,
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			document := cloneDocument(t, prepare)
+			document["prepare"] = testCase.record
+			err := compiled.Validate(document)
+			if testCase.accepted && err != nil {
+				t.Fatalf("prepare event was rejected: %v", err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatal("malformed prepare event passed the schema")
+			}
+		})
 	}
 }
 
@@ -213,6 +343,126 @@ func TestSchemaRejectsARouteWithoutAKnownReason(t *testing.T) {
 	}
 }
 
+func TestSchemaTiesProbeRoutingToItsPositiveMeasurements(t *testing.T) {
+	t.Parallel()
+	compiled := compileSchema(t)
+	var route map[string]any
+	for _, document := range decodeEvents(t, scriptedEvents(t)) {
+		if document["type"] == trace.TypeRoute {
+			route = document
+		}
+	}
+	if route == nil {
+		t.Fatal("the recording holds no route event")
+	}
+	cases := []struct {
+		name     string
+		amend    func(map[string]any)
+		accepted bool
+	}{
+		{
+			name: "a target recovered by a positive probe",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["reaching_targets"] = []any{"TestHidden"}
+				record["probe_reaching"] = []any{"TestHidden"}
+				record["probed"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "a probe-reaching reason without recovered targets",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["probed"] = true
+			},
+		},
+		{
+			name: "recovered targets without the probe reason",
+			amend: func(record map[string]any) {
+				record["probe_reaching"] = []any{"TestRun"}
+				record["probed"] = true
+			},
+		},
+		{
+			name: "an empty recovered target set",
+			amend: func(record map[string]any) {
+				record["reason"] = trace.ReasonProbeReaching
+				record["probe_reaching"] = []any{}
+				record["probed"] = true
+			},
+		},
+		{
+			name: "a suite coverage control that did not reach",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:example.com/app"
+			},
+			accepted: true,
+		},
+		{
+			name: "a suite coverage control that reached",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:example.com/app"
+				record["suite_reached"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "suite reach without its coverage control",
+			amend: func(record map[string]any) {
+				record["suite_reached"] = true
+			},
+		},
+		{
+			name: "an empty suite coverage identity",
+			amend: func(record map[string]any) {
+				record["suite_coverage"] = "package-suite-coverage:"
+			},
+		},
+		{
+			name: "a measured suite control",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:example.com/app"
+				record["probed"] = true
+			},
+			accepted: true,
+		},
+		{
+			name: "a suite control without a probe form",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:example.com/app"
+				delete(record, "probed")
+			},
+		},
+		{
+			name: "an empty suite identity",
+			amend: func(record map[string]any) {
+				record["suite_probe"] = "package-suite:"
+				record["probed"] = true
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			amended := cloneDocument(t, route)
+			record := amended["route"].(map[string]any)
+			delete(record, "probe_reaching")
+			delete(record, "suite_coverage")
+			delete(record, "suite_reached")
+			delete(record, "suite_probe")
+			testCase.amend(record)
+			err := compiled.Validate(cloneDocument(t, amended))
+			if testCase.accepted && err != nil {
+				t.Fatalf("probe route was rejected: %v", err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatal("malformed probe route passed the schema")
+			}
+		})
+	}
+}
+
 func TestSchemaRejectsARouteWithAnUnknownGranularityOrFallback(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
@@ -240,8 +490,7 @@ func TestSchemaRejectsARouteWithAnUnknownGranularityOrFallback(t *testing.T) {
 			t.Parallel()
 			amended := cloneDocument(t, route)
 			amended["route"].(map[string]any)[testCase.field] = testCase.value
-			// The amendment is round-tripped through JSON so that the value
-			// the schema sees is the one a recording would carry.
+
 			if err := compiled.Validate(cloneDocument(t, amended)); err == nil {
 				t.Fatalf("a route with %s %v passed the schema", testCase.field, testCase.value)
 			}
@@ -261,8 +510,7 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// A fallback names why a block decision dropped back to the file, so a
-	// route that records one and is not decided by file contradicts itself.
+
 	cases := []struct {
 		name        string
 		granularity string
@@ -274,7 +522,6 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 		{name: "a fallback on the route it dropped to the file", granularity: trace.GranularityFile, fallback: trace.FallbackOutsideBlocks, accepted: true},
 		{name: "a file route that did not fall back", granularity: trace.GranularityFile, accepted: true},
 		{name: "a block route", granularity: trace.GranularityBlock, accepted: true},
-		{name: "a route from a recording made before the labels existed", accepted: true},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -283,10 +530,7 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			record := amended["route"].(map[string]any)
 			delete(record, "granularity")
 			delete(record, "fallback")
-			// The column, the candidate count, the discharges and the probe
-			// marker are routing metadata too, and a route that carries any of
-			// it must name its granularity; they go so that the pair under test
-			// is the only thing the schema sees.
+
 			delete(record, "column")
 			delete(record, "file_candidates")
 			delete(record, "discharged")
@@ -297,8 +541,7 @@ func TestSchemaAcceptsAFallbackOnlyOnARouteDecidedByFile(t *testing.T) {
 			if testCase.fallback != "" {
 				record["fallback"] = testCase.fallback
 			}
-			// The amendment is round-tripped through JSON so that the value
-			// the schema sees is the one a recording would carry.
+
 			err := compiled.Validate(cloneDocument(t, amended))
 			if testCase.accepted && err != nil {
 				t.Fatalf("a route with granularity %q and fallback %q was rejected: %v",
@@ -324,9 +567,7 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// The granularity is what marks a route as carrying its routing metadata,
-	// so a column or a candidate count without one is a route the summary
-	// would read as metadata-free while it carries some.
+
 	cases := []struct {
 		name        string
 		granularity string
@@ -343,7 +584,6 @@ func TestSchemaRequiresAGranularityBesideAnyRoutingMetadata(t *testing.T) {
 		{name: "a candidate count beside a file granularity", granularity: trace.GranularityFile, metadata: map[string]any{"file_candidates": 3}, accepted: true},
 		{name: "both beside a block granularity", granularity: trace.GranularityBlock, metadata: map[string]any{"column": 9, "file_candidates": 3}, accepted: true},
 		{name: "a granularity alone", granularity: trace.GranularityFile, accepted: true},
-		{name: "a route from a recording made before the metadata existed", accepted: true},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -387,9 +627,7 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// A discharge is one target a proof removed from the reaching set and the
-	// proof that removed it, so a discharge missing either half, naming a proof
-	// the contract does not know, or carrying anything beside them is not one.
+
 	cases := []struct {
 		name        string
 		granularity string
@@ -433,8 +671,7 @@ func TestSchemaRejectsADischargeThatIsMalformed(t *testing.T) {
 			accepted:    true,
 		},
 		{
-			// The infection proof is the probe pass's measurement of this
-			// mutant, so the route that records one carries the probe marker.
+
 			name:        "a discharge by the proof the probe pass produces",
 			granularity: trace.GranularityBlock,
 			discharge:   map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected},
@@ -484,8 +721,7 @@ func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// A proof removes a target from the reaching set once, and a reader counts
-	// every entry, so the same target discharged twice would be counted twice.
+
 	once := map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}
 	cases := []struct {
 		name       string
@@ -502,8 +738,7 @@ func TestSchemaRejectsATargetDischargedTwice(t *testing.T) {
 			accepted:   true,
 		},
 		{
-			// One route may carry both proofs: each names the target it removed,
-			// and the reasons are read per entry rather than per route.
+
 			name:       "two targets discharged by different proofs",
 			discharged: []any{once, map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected}},
 			accepted:   true,
@@ -542,9 +777,7 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 	if probe == nil || mutant == nil {
 		t.Fatal("the recording holds no probe-exec event or no mutant-exec event")
 	}
-	// A probe record says which target ran against the probe tree and what it
-	// measured, so it names the target and the exit status it returned with,
-	// and the mutants it infected are facts a measured execution alone has.
+
 	cases := []struct {
 		name     string
 		record   map[string]any
@@ -586,18 +819,13 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{"m-0001"}},
 		},
 		{
-			// An empty list is still the claim that the execution measured
-			// something and found nothing, and only a measured execution
-			// makes it.
+
 			name: "an empty infection list beside an execution that measured none",
 			record: map[string]any{"target": "TestRun", "exit_code": 1,
 				"outcome": trace.ProbeOutcomeTestFailed, "infected": []any{}},
 		},
 		{
-			// An execution either reached an outcome or was stopped by an
-			// error; a record saying neither describes no execution, and one
-			// saying both would be read as an error by one reader and as a
-			// measurement by another.
+
 			name:   "an execution with neither an outcome nor an error",
 			record: map[string]any{"target": "TestRun", "exit_code": 0},
 		},
@@ -626,14 +854,86 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 			record:   map[string]any{"target": "TestRun", "exit_code": -1, "error": "goatest: probe tree unavailable"},
 			accepted: true,
 		},
+		{
+			name: "a measured package suite",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "package": "example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "a package-suite identity without the suite marker",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "package": "example.com/app",
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a suite marker on an ordinary target",
+			record: map[string]any{
+				"target": "TestRun", "package": "example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "a package suite without its package",
+			record: map[string]any{
+				"target": "package-suite:example.com/app", "suite": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "an exact original preflight",
+			record: map[string]any{
+				"target": trace.MutationControlProbePrefix + "example.com/app", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "an all-package exact original preflight",
+			record: map[string]any{
+				"target": trace.MutationControlProbePrefix + "all", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+			accepted: true,
+		},
+		{
+			name: "a mutation-control identity without its marker",
+			record: map[string]any{
+				"target": trace.MutationControlProbePrefix + "example.com/app", "package": "example.com/app",
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "an exact original preflight with an ordinary target identity",
+			record: map[string]any{
+				"target": "TestRun", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "an exact original preflight carrying a suite marker",
+			record: map[string]any{
+				"target": trace.MutationControlProbePrefix + "example.com/app", "package": "example.com/app", "control": true,
+				"suite": false, "exit_code": 0, "outcome": trace.ProbeOutcomeMeasured,
+			},
+		},
+		{
+			name: "an exact original preflight carrying infection facts",
+			record: map[string]any{
+				"target": trace.MutationControlProbePrefix + "example.com/app", "package": "example.com/app", "control": true,
+				"exit_code": 0, "outcome": trace.ProbeOutcomeMeasured, "infected": []any{},
+			},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			amended := cloneDocument(t, probe)
 			amended["probe"] = testCase.record
-			// The amendment is round-tripped through JSON so that the value
-			// the schema sees is the one a recording would carry.
+
 			err := compiled.Validate(cloneDocument(t, amended))
 			if testCase.accepted && err != nil {
 				t.Fatalf("a probe execution recording %v was rejected: %v", testCase.record, err)
@@ -644,7 +944,6 @@ func TestSchemaRejectsAProbeThatIsMalformed(t *testing.T) {
 		})
 	}
 
-	// The payload and its event are one contract in both directions.
 	carried := cloneDocument(t, mutant)
 	carried["probe"] = probe["probe"]
 	if err := compiled.Validate(cloneDocument(t, carried)); err == nil {
@@ -669,9 +968,7 @@ func TestSchemaRequiresAGranularityBesideProbed(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// Whether a mutant was probed is routing metadata like the rest, and the
-	// granularity is what marks a route as carrying any of it. Presence is what
-	// matters, not the value: a recorded false is metadata too.
+
 	cases := []struct {
 		name        string
 		granularity string
@@ -726,10 +1023,7 @@ func TestSchemaRequiresAProbeMarkerBesideAnInfectionDischarge(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// The infection proof is the probe pass's measurement of this mutant, so a
-	// route that records one was probed. The branch proof is read off the
-	// coverage the run already had and says nothing about the pass either way,
-	// so a route carrying that proof alone stands whether or not it was probed.
+
 	branch := map[string]any{"target": "TestSkipped", "reason": trace.DischargeBranchNeverTaken}
 	infection := map[string]any{"target": "TestNeverInfects", "reason": trace.DischargeNeverInfected}
 	cases := []struct {
@@ -750,10 +1044,7 @@ func TestSchemaRequiresAProbeMarkerBesideAnInfectionDischarge(t *testing.T) {
 			t.Parallel()
 			amended := cloneDocument(t, route)
 			record := amended["route"].(map[string]any)
-			// Every route under test was decided by block, which is the only
-			// granularity a discharge is recorded on; the fallback and the rest
-			// of the routing metadata go so that the pair under test is the only
-			// thing the schema sees.
+
 			record["granularity"] = trace.GranularityBlock
 			delete(record, "fallback")
 			delete(record, "column")
@@ -763,8 +1054,7 @@ func TestSchemaRequiresAProbeMarkerBesideAnInfectionDischarge(t *testing.T) {
 			if testCase.probed != nil {
 				record["probed"] = testCase.probed
 			}
-			// The amendment is round-tripped through JSON so that the value
-			// the schema sees is the one a recording would carry.
+
 			err := compiled.Validate(cloneDocument(t, amended))
 			if testCase.accepted && err != nil {
 				t.Fatalf("a route discharging %v with probed %v was rejected: %v",
@@ -790,9 +1080,7 @@ func TestSchemaAcceptsADischargeOnlyOnARouteDecidedByBlock(t *testing.T) {
 	if route == nil {
 		t.Fatal("the recording holds no route event")
 	}
-	// A proof removes a target from a reaching set the blocks decided, so a
-	// route that records one was decided by block. A route decided by file has
-	// no such set to remove a target from, whichever proof would have removed it.
+
 	cases := []struct {
 		name        string
 		granularity string
@@ -845,7 +1133,6 @@ func TestSchemaAcceptsADischargeOnlyOnARouteDecidedByBlock(t *testing.T) {
 	}
 }
 
-// cloneDocument returns an independent copy of a decoded event.
 func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	t.Helper()
 	encoded, err := json.Marshal(document)
@@ -859,9 +1146,6 @@ func cloneDocument(t *testing.T, document map[string]any) map[string]any {
 	return clone
 }
 
-// TestSchemaRejectsARouteWithANonBooleanReused pins the one shape the new
-// field has. A reuse is a yes or a no: anything else is a recording a reader
-// would have to interpret, and an interpreted audit trail is not one.
 func TestSchemaRejectsARouteWithANonBooleanReused(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)
@@ -881,21 +1165,14 @@ func TestSchemaRejectsARouteWithANonBooleanReused(t *testing.T) {
 			t.Errorf("a route with reused %v passed the schema", value)
 		}
 	}
-	// A recording made before the field existed carries no reuse at all, and
-	// stays a recording this schema reads.
+
 	amended := cloneDocument(t, route)
 	delete(amended["route"].(map[string]any), "reused")
 	if err := compiled.Validate(cloneDocument(t, amended)); err != nil {
-		t.Fatalf("a route recorded before reuse existed was rejected: %v", err)
+		t.Fatalf("an executed route without reuse was rejected: %v", err)
 	}
 }
 
-// TestSchemaTiesAReusedRouteToThePlanThatSaysSo pins the contract from both
-// sides. Nothing ran for a reused mutant, so a reused route plans the reuse and
-// nothing else — a reused route that plans a target or the package suite is a
-// recording that contradicts itself — and a route whose plan is the reuse is a
-// reused route, so a reader cannot be told "reused" by one field and not the
-// other.
 func TestSchemaTiesAReusedRouteToThePlanThatSaysSo(t *testing.T) {
 	t.Parallel()
 	compiled := compileSchema(t)

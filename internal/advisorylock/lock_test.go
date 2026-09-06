@@ -9,15 +9,12 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/advisorylock"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// open opens one more file description on path. Two descriptions of one file
-// are what two processes hold, and the lock contends between them even inside
-// one process, which is what lets these tests stay in this one rather than
-// spawning a helper.
 func open(t *testing.T, path string) *os.File {
 	t.Helper()
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, filemode.ReadableFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +29,7 @@ func TestTryRefusesADescriptionWhileAnotherHoldsTheLock(t *testing.T) {
 	if locked, err := advisorylock.Try(holder); err != nil || !locked {
 		t.Fatalf("first lock = (%t, %v), want it taken", locked, err)
 	}
-	// A lock somebody else holds is the answer the callers act on, so it has to
-	// arrive as a refusal rather than as an error.
+
 	if locked, err := advisorylock.Try(contender); err != nil || locked {
 		t.Fatalf("lock against a held one = (%t, %v), want it refused without an error", locked, err)
 	}
@@ -55,9 +51,7 @@ func TestClosingTheFileReleasesTheLock(t *testing.T) {
 	if locked, err := advisorylock.Try(holder); err != nil || !locked {
 		t.Fatalf("first lock = (%t, %v), want it taken", locked, err)
 	}
-	// A process that is killed mid-run never reaches Release, so the close the
-	// operating system performs for it is what has to free the next caller.
-	// Nothing here would ever recover otherwise.
+
 	if err := holder.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -77,13 +71,7 @@ func TestTryOnADescriptionThatAlreadyHoldsTheLockKeepsIt(t *testing.T) {
 	if locked, err := advisorylock.Try(holder); err != nil || !locked {
 		t.Fatalf("first lock = (%t, %v), want it taken", locked, err)
 	}
-	// What the second call reports differs by platform: flock re-asserts the
-	// lock the description already holds and reports it taken, while a second
-	// overlapping LockFileEx on one handle is a lock violation and reports it
-	// refused. Only what both agree on is pinned here — it is not an error, and
-	// the description still holds the lock afterwards — because pinning either
-	// answer would make one platform's behaviour the contract of a package that
-	// has to mean the same thing on both.
+
 	if _, err := advisorylock.Try(holder); err != nil {
 		t.Fatalf("locking a description that already holds the lock = %v, want no error", err)
 	}

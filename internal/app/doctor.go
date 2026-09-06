@@ -18,12 +18,27 @@ import (
 
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/processtree"
 	"github.com/P4suta/goatest/internal/report"
 )
 
-const doctorOutputLimit = 1 << 20
+const (
+	doctorOutputLimit           = 1 << 20
+	doctorQuickCommandTimeout   = 30 * time.Second
+	doctorDefaultCommandTimeout = 10 * time.Minute
+	doctorMinimumFreeBytes      = 512 << 20
+	doctorGoEnvironmentFields   = 5
+)
+
+const (
+	doctorGoModField = iota
+	doctorGoWorkField
+	doctorCGOEnabledField
+	doctorGOOSField
+	doctorGOARCHField
+)
 
 type doctorProcessTree interface {
 	Kill() error
@@ -60,24 +75,24 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 	offline := withEnvironment(environment, map[string]string{
 		"GOPROXY": "off", "GOSUMDB": "off", "GOTELEMETRY": "off", "GOTOOLCHAIN": "local",
 	})
-	version, err := doctorCommand(ctx, root, offline, 30*time.Second, goBinary, "version")
+	version, err := doctorCommand(ctx, root, offline, doctorQuickCommandTimeout, goBinary, "version")
 	if err != nil {
 		return doctorFailure(result, "toolchain", "go-version", err), nil
 	}
 	result.Toolchain = report.Toolchain{Go: strings.TrimSpace(version), Goatest: "local", OS: runtime.GOOS, Arch: runtime.GOARCH}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "go-version", Status: "ready", Detail: strings.TrimSpace(version)})
-	envOutput, err := doctorCommand(ctx, root, offline, 30*time.Second, goBinary, "env", "GOMOD", "GOWORK", "CGO_ENABLED", "GOOS", "GOARCH")
+	envOutput, err := doctorCommand(ctx, root, offline, doctorQuickCommandTimeout, goBinary, "env", "GOMOD", "GOWORK", "CGO_ENABLED", "GOOS", "GOARCH")
 	if err != nil {
 		return doctorFailure(result, "toolchain", "go-env", err), nil
 	}
-	values := splitDoctorLines(envOutput, 5)
-	if values[0] == "" || values[0] == os.DevNull {
+	values := splitDoctorLines(envOutput, doctorGoEnvironmentFields)
+	if values[doctorGoModField] == "" || values[doctorGoModField] == os.DevNull {
 		return doctorFailure(result, "workspace", "module", errors.New("go env GOMOD does not identify a module")), nil
 	}
 	result.Evidence = append(result.Evidence,
-		report.Evidence{Kind: "doctor", ID: "module", Status: "ready", Detail: filepath.ToSlash(values[0])},
-		report.Evidence{Kind: "doctor", ID: "workspace", Status: doctorOptionalStatus(values[1]), Detail: filepath.ToSlash(values[1])},
-		report.Evidence{Kind: "doctor", ID: "cgo", Status: doctorBooleanStatus(values[2] == "1"), Detail: "CGO_ENABLED=" + values[2]},
+		report.Evidence{Kind: "doctor", ID: "module", Status: "ready", Detail: filepath.ToSlash(values[doctorGoModField])},
+		report.Evidence{Kind: "doctor", ID: "workspace", Status: doctorOptionalStatus(values[doctorGoWorkField]), Detail: filepath.ToSlash(values[doctorGoWorkField])},
+		report.Evidence{Kind: "doctor", ID: "cgo", Status: doctorBooleanStatus(values[doctorCGOEnabledField] == "1"), Detail: "CGO_ENABLED=" + values[doctorCGOEnabledField]},
 	)
 	packages := slices.Clone(loaded.Project.Packages)
 	if len(packages) == 0 {
@@ -104,8 +119,8 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 	if _, err := doctorCommand(ctx, root, offline, loaded.Execution.Timeout, goBinary, raceArgs...); err != nil {
 		return doctorFailure(result, "race", "race-detector", err), nil
 	}
-	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "race-detector", Status: "ready", Detail: values[3] + "/" + values[4]})
-	if git, err := doctorCommand(ctx, root, environment, 30*time.Second, "git", "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(git) != "true" {
+	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "race-detector", Status: "ready", Detail: values[doctorGOOSField] + "/" + values[doctorGOARCHField]})
+	if git, err := doctorCommand(ctx, root, environment, doctorQuickCommandTimeout, "git", "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(git) != "true" {
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "git", Status: "unavailable", Detail: doctorErrorDetail(err)})
 		result.Limitations = append(result.Limitations, report.Limitation{Code: "git-unavailable", Summary: "changeset scope and Git identity cannot be resolved"})
 	} else {
@@ -132,9 +147,7 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		}
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "generation-provider", Status: "ready", Detail: command})
 	}
-	// A verification writes its cache under .goatest/ and its artifacts under
-	// reports/; a doctor that cannot write there reports it before a long run
-	// finds out the hard way.
+
 	for _, directory := range []string{".goatest", "reports"} {
 		if err := probeWritableDirectory(service.doctorFilesystem, filepath.Join(root, directory)); err != nil {
 			return doctorFailure(result, "filesystem", "writable-"+directory, err), nil
@@ -146,16 +159,12 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "filesystem", "disk", err), nil
 	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "disk", Status: "ready", Detail: fmt.Sprintf("free-bytes=%d", free)})
-	if free < 512<<20 {
+	if free < doctorMinimumFreeBytes {
 		return doctorFailure(result, "filesystem", "disk-capacity", fmt.Errorf("only %d bytes are free", free)), nil
 	}
 	return result, nil
 }
 
-// doctorProbeFilesystem is the filesystem the writability probe runs through.
-// Its zero value is the os package; a test fills in only the operation it
-// wants to answer for, because the failures a probe must report are not
-// failures a disk produces on demand.
 type doctorProbeFilesystem struct {
 	Stat      func(string) (os.FileInfo, error)
 	MkdirAll  func(string, os.FileMode) error
@@ -163,8 +172,6 @@ type doctorProbeFilesystem struct {
 	Remove    func(string) error
 }
 
-// resolved returns the hooks with every unset operation filled in from the os
-// package.
 func (hooks doctorProbeFilesystem) resolved() doctorProbeFilesystem {
 	if hooks.Stat == nil {
 		hooks.Stat = os.Stat
@@ -181,9 +188,6 @@ func (hooks doctorProbeFilesystem) resolved() doctorProbeFilesystem {
 	return hooks
 }
 
-// probeWritableDirectory proves a directory can be written by writing into it,
-// and leaves the tree exactly as it found it: the probe file is removed, and a
-// directory the probe itself created is removed with it.
 func probeWritableDirectory(hooks doctorProbeFilesystem, directory string) error {
 	hooks = hooks.resolved()
 	created := false
@@ -191,13 +195,13 @@ func probeWritableDirectory(hooks doctorProbeFilesystem, directory string) error
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if err := hooks.MkdirAll(directory, 0o755); err != nil {
+		if err := hooks.MkdirAll(directory, filemode.ReadableDirectory); err != nil {
 			return err
 		}
 		created = true
 	}
 	probe := filepath.Join(directory, fmt.Sprintf(".goatest-doctor-probe-%d", os.Getpid()))
-	if err := hooks.WriteFile(probe, []byte("goatest doctor writability probe"), 0o644); err != nil {
+	if err := hooks.WriteFile(probe, []byte("goatest doctor writability probe"), filemode.ReadableFile); err != nil {
 		if created {
 			_ = hooks.Remove(directory)
 		}
@@ -230,7 +234,7 @@ func doctorProviderCommand(root, name string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("provider command %s is not a regular file", name)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&filemode.AnyExecute == 0 {
 		return fmt.Errorf("provider command %s is not executable", name)
 	}
 	return nil
@@ -247,7 +251,7 @@ func doctorFailure(input report.Report, kind, id string, cause error) report.Rep
 
 func doctorCommand(ctx context.Context, root string, environment []string, timeout time.Duration, name string, arguments ...string) (string, error) {
 	if timeout <= 0 {
-		timeout = 10 * time.Minute
+		timeout = doctorDefaultCommandTimeout
 	}
 	commandContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

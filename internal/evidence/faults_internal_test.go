@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 type stubEvidenceEntry struct {
@@ -90,7 +92,7 @@ func TestScanPropagatesEveryFilesystemStage(t *testing.T) {
 			failure := errors.New(stage + " failure")
 			hooks := scanHooks{}
 			entry := stubEvidenceEntry{
-				name: "sample", info: stubEvidenceInfo{name: "sample", mode: 0o644},
+				name: "sample", info: stubEvidenceInfo{name: "sample", mode: filemode.ReadableFile},
 			}
 			hooks.walk = func(root string, visit fs.WalkDirFunc) error {
 				if stage == "walk" {
@@ -132,14 +134,14 @@ func TestFileDigestPropagatesOpenAndCopyFailures(t *testing.T) {
 	t.Parallel()
 	openFailure := errors.New("open failure")
 	openHooks := scanHooks{open: func(string) (io.ReadCloser, error) { return nil, openFailure }}
-	if _, err := fileDigestWithHooks("missing", 0o644, openHooks); !errors.Is(err, openFailure) {
+	if _, err := fileDigestWithHooks("missing", filemode.ReadableFile, openHooks); !errors.Is(err, openFailure) {
 		t.Fatalf("open error = %v", err)
 	}
 
 	copyFailure := errors.New("copy failure")
 	reader := &failingEvidenceReader{err: copyFailure}
 	copyHooks := scanHooks{open: func(string) (io.ReadCloser, error) { return reader, nil }}
-	if _, err := fileDigestWithHooks("unreadable", 0o644, copyHooks); !errors.Is(err, copyFailure) {
+	if _, err := fileDigestWithHooks("unreadable", filemode.ReadableFile, copyHooks); !errors.Is(err, copyFailure) {
 		t.Fatalf("copy error = %v", err)
 	}
 	if !reader.closed {
@@ -147,12 +149,10 @@ func TestFileDigestPropagatesOpenAndCopyFailures(t *testing.T) {
 	}
 }
 
-// TestScanDigestsThroughItsOpenHook keeps the wiring the default digest hook
-// depends on: a scan that is given only an open hook still digests through it.
 func TestScanDigestsThroughItsOpenHook(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("open failure")
-	entry := stubEvidenceEntry{name: "sample", info: stubEvidenceInfo{name: "sample", mode: 0o644}}
+	entry := stubEvidenceEntry{name: "sample", info: stubEvidenceInfo{name: "sample", mode: filemode.ReadableFile}}
 	hooks := scanHooks{
 		walk: func(root string, visit fs.WalkDirFunc) error {
 			return visit(filepath.Join(root, "sample"), entry, nil)

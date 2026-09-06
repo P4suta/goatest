@@ -4,44 +4,36 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// The fixtures below are the two halves of a recorded run: a trace written
-// with the trace types themselves, so a change to the contract reaches these
-// tests through the compiler, and coverage profiles written in the format
-// cmd/cover emits, so the evidence is always the bytes a run would have left.
 const (
-	// fixtureModule is the module the fixture profiles name their files under.
-	fixtureModule = "example.com/audited"
-	// subjectPath is the module-relative file every fixture mutant lives in.
+	fixtureModule       = "example.com/audited"
+	fixtureBinaryPrefix = "/tmp/goatest-baseline/fixture-"
+
 	subjectPath = "pkg/subject.go"
-	// fixtureTime is the moment every fixture event carries. The audit never
-	// reads a clock, so one moment is enough for a whole recording.
+
 	fixtureTime = "2026-01-01T00:00:00Z"
 )
 
-// The fixture identities. A target is named by the 16 hexadecimal characters a
-// run derives, and a mutant by the 64 of its content address with the first 20
-// of them as the display identity, so the widths a real recording prints are
-// the widths these tests assert on.
 const (
 	killerTarget = "a1b2c3d4e5f60718"
 	secondTarget = "b1c2d3e4f5061728"
 	thirdTarget  = "d1e2f30415162738"
 	absentTarget = "c1d2e3f405162738"
-	// fuzzTarget is the fixture target whose test is a fuzz target. Go names
-	// one by its Fuzz prefix and nothing else, so the fixture says it in the
-	// name and the rule reads it from there.
+
 	fuzzTarget = "e1f203142536475a"
 
 	firstMutant   = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
@@ -58,15 +50,10 @@ const (
 	sixthDisplay  = "f1a2b3c4d5e60718293a"
 )
 
-// ran renders one profile line for a block of the subject file the profiled
-// execution executed.
 func ran(startLine, startColumn, endLine, endColumn int) string {
 	return profileLine(startLine, startColumn, endLine, endColumn, 1)
 }
 
-// linked renders one profile line for a block the profile instrumented and the
-// profiled execution never executed. It is what puts a position inside the
-// coverage the toolchain measured without any target having reached it.
 func linked(startLine, startColumn, endLine, endColumn int) string {
 	return profileLine(startLine, startColumn, endLine, endColumn, 0)
 }
@@ -76,22 +63,18 @@ func profileLine(startLine, startColumn, endLine, endColumn, count int) string {
 		fixtureModule, subjectPath, startLine, startColumn, endLine, endColumn, count)
 }
 
-// writeProfiles writes one "mode: set" profile per target into a fresh
-// directory, named the way a run names them, and returns the directory.
 func writeProfiles(t *testing.T, profiles map[string][]string) string {
 	t.Helper()
 	directory := t.TempDir()
 	for target, lines := range profiles {
 		body := "mode: set\n" + strings.Join(lines, "\n") + "\n"
-		if err := os.WriteFile(filepath.Join(directory, target+".cover"), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(directory, target+".cover"), []byte(body), filemode.ReadableFile); err != nil {
 			t.Fatalf("write the profile of %s: %v", target, err)
 		}
 	}
 	return directory
 }
 
-// recordedEvidence writes the fixture profiles and reads them back through the
-// tool, so a fixture proves the reading as well as the rule.
 func recordedEvidence(t *testing.T, profiles map[string][]string) evidence {
 	t.Helper()
 	recorded, err := readEvidence(writeProfiles(t, profiles), fixtureModule)
@@ -101,18 +84,14 @@ func recordedEvidence(t *testing.T, profiles map[string][]string) evidence {
 	return recorded
 }
 
-// routeEvent is one recorded routing decision.
 func routeEvent(seq int64, record trace.RouteRecord) trace.Event {
 	return trace.Event{Seq: seq, Type: trace.TypeRoute, Timestamp: fixtureTime, Route: &record}
 }
 
-// mutantEvent is one recorded mutant execution.
 func mutantEvent(seq int64, record trace.MutantRecord) trace.Event {
 	return trace.Event{Seq: seq, Type: trace.TypeMutantExec, Timestamp: fixtureTime, Mutant: &record}
 }
 
-// blockRoute is the route of a mutant coverage blocks decided: the targets
-// that reach the position, and the individual run planned for each of them.
 func blockRoute(seq int64, mutant string, line, column int, targets ...string) trace.Event {
 	plan := make([]string, 0, len(targets))
 	for _, target := range targets {
@@ -121,12 +100,6 @@ func blockRoute(seq int64, mutant string, line, column int, targets ...string) t
 	return batchedRoute(seq, mutant, line, column, targets, plan)
 }
 
-// batchedRoute is the route shape a run records once it reaches more targets
-// than it executes one at a time: the plan holds one entry per execution, so it
-// is shorter than the reaching set, and a batch of a single target is rendered
-// exactly like an individual run. Past the individual prefix the two lists no
-// longer line up, which is why the position of a plan entry says nothing about
-// which target an execution belonged to.
 func batchedRoute(seq int64, mutant string, line, column int, targets, plan []string) trace.Event {
 	return routeEvent(seq, trace.RouteRecord{
 		MutantID: mutant, Rule: "eq-to-neq", Path: subjectPath, Line: line, Column: column,
@@ -135,9 +108,6 @@ func batchedRoute(seq int64, mutant string, line, column int, targets, plan []st
 	})
 }
 
-// testNameOf is the test a fixture target runs. A kill is attributed through
-// the baseline measurements, so the name only has to be the same in the
-// measurement of a target and in the execution that names it.
 func testNameOf(target string) string {
 	if target == fuzzTarget {
 		return "FuzzTarget" + strings.ToUpper(target[:2])
@@ -145,30 +115,19 @@ func testNameOf(target string) string {
 	return "TestTarget" + strings.ToUpper(target[:2])
 }
 
-// The plan entries a run records. A plan holds one entry per execution rather
-// than one per reaching target, and a batch of a single target is rendered
-// exactly like an individual run, so it is a recording shape the fixtures
-// reproduce and never an identity the audit reads.
 const (
 	individualPlan   = "individual:"
 	packageSuitePlan = "package-suite"
 )
 
-// measured is the baseline measurement of one target, in the package and under
-// the test name the fixtures use by default.
 func measured(seq int64, target string) trace.Event {
 	return measuredIn(seq, target, fixtureModule+"/pkg", testNameOf(target))
 }
 
-// measuredIn is the baseline measurement of one target: the command a run
-// executes to record what that target covers. Its arguments are the only place
-// in a recording where a target's identity, the test it runs and the package it
-// runs in meet, which is what a kill is attributed through.
 func measuredIn(seq int64, target, packagePath, test string) trace.Event {
 	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
 		Argv: []string{
-			"go", "tool", "test2json", "-t", "-p", packagePath,
-			"/tmp/goatest-baseline/" + target + ".test", "-test.v=test2json",
+			fixtureBinary(packagePath), "-test.v=test2json",
 			"-test.run=^" + test + "$",
 			"-test.coverprofile=/tmp/goatest-baseline/" + target + profileSuffix,
 			"-test.count=1",
@@ -176,14 +135,26 @@ func measuredIn(seq int64, target, packagePath, test string) trace.Event {
 	}}
 }
 
-// killedBy is one execution of a mutant that its target killed.
+func compiledBaseline(seq int64, binary, packagePath string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{"go", "test", "-c", "-coverpkg=" + fixtureModule + "/...", "-o", binary, packagePath},
+	}}
+}
+
+func directlyMeasuredIn(seq int64, target, binary, test string) trace.Event {
+	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
+		Argv: []string{
+			binary, "-test.v=test2json", "-test.run=^" + test + "$",
+			"-test.coverprofile=/tmp/goatest-baseline/" + target + profileSuffix,
+			"-test.count=1",
+		},
+	}}
+}
+
 func killedBy(seq int64, mutant, display, target string) trace.Event {
 	return killedIn(seq, mutant, display, fixtureModule+"/pkg", testNameOf(target))
 }
 
-// killedIn is one execution of a mutant that a named test of a named package
-// killed. A recording says which package an execution ran in, and a test name
-// is only unique within one.
 func killedIn(seq int64, mutant, display, packagePath, test string) trace.Event {
 	return mutantEvent(seq, trace.MutantRecord{
 		ID: mutant, DisplayID: display, Package: packagePath,
@@ -191,10 +162,6 @@ func killedIn(seq int64, mutant, display, packagePath, test string) trace.Event 
 	})
 }
 
-// executedBy is one execution of a mutant against a single target's test,
-// whatever became of it. The executions a proof would remove are the ones no
-// kill has to be preserved from, so the savings measurement counts these and
-// not only the kills.
 func executedBy(seq int64, mutant, display, target, outcome string) trace.Event {
 	return mutantEvent(seq, trace.MutantRecord{
 		ID: mutant, DisplayID: display, Package: fixtureModule + "/pkg",
@@ -202,7 +169,6 @@ func executedBy(seq int64, mutant, display, target, outcome string) trace.Event 
 	})
 }
 
-// gatedBody is the span of a branch body a proof names.
 func gatedBody(startLine, startColumn, endLine, endColumn int) *branchProof {
 	return &branchProof{
 		BodyStartLine: startLine, BodyStartColumn: startColumn,
@@ -210,13 +176,10 @@ func gatedBody(startLine, startColumn, endLine, endColumn int) *branchProof {
 	}
 }
 
-// cataloguedMutant is one entry of a fixture catalog: where the engine placed
-// the mutant, and the body its condition gates when it proved one.
 func cataloguedMutant(id string, line, column int, proof *branchProof) catalogMutant {
 	return catalogMutant{ID: id, Path: subjectPath, Line: line, Column: column, Branch: proof}
 }
 
-// fixtureCatalog is a catalog listing exactly the given mutants.
 func fixtureCatalog(mutants ...catalogMutant) *mutantCatalog {
 	catalog := &mutantCatalog{mutants: make(map[string]catalogMutant, len(mutants))}
 	for _, mutant := range mutants {
@@ -225,11 +188,6 @@ func fixtureCatalog(mutants ...catalogMutant) *mutantCatalog {
 	return catalog
 }
 
-// recordedRun renders the recording of a run that measured the given targets
-// before it did the given work. Every real recording opens this way — a run
-// measures each target's coverage before it mutates anything — and a kill is
-// attributed through those measurements, so a fixture without them would be a
-// recording no run ever wrote.
 func recordedRun(t *testing.T, measurements []string, events ...trace.Event) string {
 	t.Helper()
 	recording := make([]trace.Event, 0, len(measurements)+len(events))
@@ -239,9 +197,27 @@ func recordedRun(t *testing.T, measurements []string, events ...trace.Event) str
 	return recordedTrace(t, append(recording, events...)...)
 }
 
-// recordedTrace renders events as the JSONL a recording is made of.
 func recordedTrace(t *testing.T, events ...trace.Event) string {
 	t.Helper()
+	binaries := make(map[string]string)
+	for _, event := range events {
+		if event.Exec == nil || len(event.Exec.Argv) == 0 {
+			continue
+		}
+		if packagePath, ok := fixtureBinaryPackage(event.Exec.Argv[0]); ok {
+			binaries[event.Exec.Argv[0]] = packagePath
+		}
+	}
+	names := make([]string, 0, len(binaries))
+	for binary := range binaries {
+		names = append(names, binary)
+	}
+	slices.Sort(names)
+	prefix := make([]trace.Event, 0, len(names))
+	for _, binary := range names {
+		prefix = append(prefix, compiledBaseline(0, binary, binaries[binary]))
+	}
+	events = append(prefix, events...)
 	var builder strings.Builder
 	for _, event := range events {
 		line, err := json.Marshal(event)
@@ -254,29 +230,54 @@ func recordedTrace(t *testing.T, events ...trace.Event) string {
 	return builder.String()
 }
 
-// auditFixture runs the layers of a run audited without a catalog — the reach
-// layer alone — over a fixture recording.
+func fixtureBinary(packagePath string) string {
+	return fixtureBinaryPrefix + base64.RawURLEncoding.EncodeToString([]byte(packagePath)) + ".test"
+}
+
+func fixtureBinaryPackage(binary string) (string, bool) {
+	encoded, found := strings.CutPrefix(binary, fixtureBinaryPrefix)
+	if !found {
+		return "", false
+	}
+	encoded, found = strings.CutSuffix(encoded, ".test")
+	if !found {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	return string(decoded), err == nil && len(decoded) != 0
+}
+
 func auditFixture(t *testing.T, stream string, recorded evidence) auditResult {
 	t.Helper()
 	return auditWithCatalog(t, stream, recorded, nil)
 }
 
-// auditWithCatalog runs every layer a catalog enables over a fixture recording.
 func auditWithCatalog(t *testing.T, stream string, recorded evidence, catalog *mutantCatalog) auditResult {
 	t.Helper()
-	result, err := auditTrace(strings.NewReader(stream), recorded, catalog, auditLayers(catalog))
+	result, err := auditTrace(&terminalAuditReader{reader: strings.NewReader(stream)}, recorded, catalog, auditLayers(catalog))
 	if err != nil {
 		t.Fatalf("audit the recording: %v", err)
 	}
 	return result
 }
 
+type terminalAuditReader struct {
+	reader   io.Reader
+	terminal bool
+}
+
+func (reader *terminalAuditReader) Read(destination []byte) (int, error) {
+	if reader.terminal {
+		panic("read after terminal trace result")
+	}
+	read, err := reader.reader.Read(destination)
+	reader.terminal = read == 0 && err != nil
+	return read, err
+}
+
 func TestAuditFailsWhenAKillerLiesOutsideItsBlocks(t *testing.T) {
 	t.Parallel()
-	// The killer ran the top of the file and the mutation is at the bottom of
-	// it, inside a block the profile instrumented. Block routing would leave
-	// the killer out, and leaving a proven killer out is the one thing a
-	// routing layer may never do.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
@@ -312,10 +313,7 @@ func TestAuditFailsWhenAKillerLiesOutsideItsBlocks(t *testing.T) {
 
 func TestAuditFailsWhenAKillerCoversNoneOfTheFile(t *testing.T) {
 	t.Parallel()
-	// The killer's profile never names the file the mutation lives in, so
-	// neither the block rule nor the file rule behind it would keep the
-	// target. The recording says it killed the mutant there all the same,
-	// which is a contradiction worth a violation rather than a shrug.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {profileLine(10, 2, 12, 16, 0)},
 		secondTarget: {ran(10, 2, 12, 16)},
@@ -336,8 +334,8 @@ func TestAuditFailsWhenAKillerCoversNoneOfTheFile(t *testing.T) {
 
 func TestAuditPassesWhenEveryKillerReachesByBlock(t *testing.T) {
 	t.Parallel()
-	// Both killers ran the block the mutation sits in, which is exactly what
-	// block routing keeps.
+	const soundRoutingPairs = 2
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 		secondTarget: {ran(10, 2, 12, 16), ran(20, 2, 24, 3)},
@@ -349,7 +347,7 @@ func TestAuditPassesWhenEveryKillerReachesByBlock(t *testing.T) {
 	)
 
 	result := auditFixture(t, stream, recorded)
-	if result.pairs != 2 {
+	if result.pairs != soundRoutingPairs {
 		t.Fatalf("audited %d kill pairs, want 2", result.pairs)
 	}
 	if len(result.violations) != 0 {
@@ -358,10 +356,10 @@ func TestAuditPassesWhenEveryKillerReachesByBlock(t *testing.T) {
 	if len(result.unverifiable) != 0 {
 		t.Fatalf("reported %d unverifiable pairs, want none: %+v", len(result.unverifiable), result.unverifiable)
 	}
-	if got := result.layers[0]; got.kept != 2 || got.audited != 2 {
+	if got := result.layers[0]; got.kept != soundRoutingPairs || got.audited != soundRoutingPairs {
 		t.Errorf("the reach layer audited %+v, want two audited pairs it keeps", got)
 	}
-	if result.targets != 2 {
+	if result.targets != len(recorded.targets) {
 		t.Errorf("the audit counted %d targets with profiles, want 2", result.targets)
 	}
 	if result.routes != 1 {
@@ -371,9 +369,7 @@ func TestAuditPassesWhenEveryKillerReachesByBlock(t *testing.T) {
 
 func TestAuditKeepsAKillerWhenThePositionIsUnknown(t *testing.T) {
 	t.Parallel()
-	// A mutant whose position the engine did not report cannot be placed in a
-	// block, so the file decides and every target that ran the file is kept.
-	// Dropping such a killer would be the audit inventing a rule of its own.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -406,9 +402,7 @@ func TestAuditKeepsAKillerWhenThePositionIsUnknown(t *testing.T) {
 
 func TestAuditKeepsAKillerOutsideEveryInstrumentedBlock(t *testing.T) {
 	t.Parallel()
-	// A position no instrumented block contains is a gap between the blocks
-	// cmd/cover cut, not proof that nothing runs it, so routing falls back to
-	// the file and the audit has to fall back with it.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 		secondTarget: {ran(10, 2, 12, 16)},
@@ -430,9 +424,7 @@ func TestAuditKeepsAKillerOutsideEveryInstrumentedBlock(t *testing.T) {
 
 func TestAuditReportsAMissingProfileAsUnverifiable(t *testing.T) {
 	t.Parallel()
-	// A target whose baseline failed leaves no profile. goatest keeps such a
-	// target for the whole file, so the audit has nothing to check and says
-	// so instead of counting a violation it cannot prove.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
@@ -466,9 +458,7 @@ func TestAuditReportsAMissingProfileAsUnverifiable(t *testing.T) {
 
 func TestAuditCountsAPackageSuiteKillWithoutAuditingIt(t *testing.T) {
 	t.Parallel()
-	// A mutant no target reaches is settled by its package suite, which runs
-	// without a -test.run argument. No single test is named, so no pair can be
-	// attributed, and the kill is counted rather than audited or lost.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
@@ -499,9 +489,7 @@ func TestAuditCountsAPackageSuiteKillWithoutAuditingIt(t *testing.T) {
 
 func TestAuditCountsABatchKillWithoutAttributingIt(t *testing.T) {
 	t.Parallel()
-	// A batch runs several targets under one -test.run pattern, so a kill
-	// proves one of them killed the mutant without saying which. There is no
-	// pair to preserve, so the kill is counted and left alone.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 		secondTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
@@ -526,11 +514,7 @@ func TestAuditCountsABatchKillWithoutAttributingIt(t *testing.T) {
 
 func TestAuditCountsAKillItCannotAttributeToATarget(t *testing.T) {
 	t.Parallel()
-	// A kill with no route at all and an execution that selected no test — the
-	// fuzzing of a target asks for "^$" — are recordings the audit cannot read
-	// as a pair: there is no target to check the rule against. They are counted
-	// so that a trace whose halves disagree is visible rather than silently
-	// narrowing what was audited.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -548,7 +532,7 @@ func TestAuditCountsAKillItCannotAttributeToATarget(t *testing.T) {
 				blockRoute(2, firstMutant, 11, 4, killerTarget),
 				mutantEvent(3, trace.MutantRecord{
 					ID: firstMutant, DisplayID: firstDisplay,
-					Args: []string{"-test.run=^$", "-test.fuzz=^FuzzTarget$"}, Outcome: outcomeKilled,
+					Args: []string{"-test.run=^$"}, Outcome: outcomeKilled,
 				}),
 			},
 		},
@@ -567,17 +551,13 @@ func TestAuditCountsAKillItCannotAttributeToATarget(t *testing.T) {
 	}
 }
 
-// failingReader is a stream that breaks partway, which is what a trace on a
-// failing disk or an interrupted pipe reads like.
 type failingReader struct{ err error }
 
 func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
 
 func TestAuditReportsAStreamItCannotRead(t *testing.T) {
 	t.Parallel()
-	// A stream that breaks is not an interrupted recording: nothing says how
-	// much of it was read, so the audit refuses rather than reporting a total
-	// over the part that arrived.
+
 	broken := errors.New("the stream broke")
 
 	_, err := auditTrace(failingReader{err: broken}, evidence{}, nil, auditLayers(nil))
@@ -588,9 +568,8 @@ func TestAuditReportsAStreamItCannotRead(t *testing.T) {
 
 func TestAuditCountsOneKillPairPerMutantAndTarget(t *testing.T) {
 	t.Parallel()
-	// goatest confirms a kill by running it again, so one pair is recorded
-	// twice. The pair is audited once and both executions are counted, so the
-	// two numbers say what they mean.
+	const repeatedKillExecutions = 2
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -604,15 +583,14 @@ func TestAuditCountsOneKillPairPerMutantAndTarget(t *testing.T) {
 	if result.pairs != 1 {
 		t.Errorf("audited %d kill pairs, want the one pair the two executions prove", result.pairs)
 	}
-	if result.killedExecutions != 2 {
+	if result.killedExecutions != repeatedKillExecutions {
 		t.Errorf("counted %d killed executions, want 2", result.killedExecutions)
 	}
 }
 
 func TestAuditIgnoresAnExecutionThatDidNotKill(t *testing.T) {
 	t.Parallel()
-	// A survived execution proves nothing about reach: the target ran the
-	// mutant and it lived. Only a kill is a pair the rule must preserve.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
@@ -633,9 +611,7 @@ func TestAuditIgnoresAnExecutionThatDidNotKill(t *testing.T) {
 
 func TestAuditToleratesATruncatedTrailingLine(t *testing.T) {
 	t.Parallel()
-	// A run that was interrupted leaves its last line half written. That is
-	// what an interrupted recording looks like rather than a deviation, so the
-	// audit reports the whole recording it did read and counts the fragment.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -658,9 +634,7 @@ func TestAuditToleratesATruncatedTrailingLine(t *testing.T) {
 
 func TestAuditRejectsAMalformedLineBeforeTheEnd(t *testing.T) {
 	t.Parallel()
-	// A broken line with a whole recording behind it is not an interrupted
-	// run: something wrote a line no reader can trust, and an audit that
-	// skipped it would be auditing less than it claims.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 	})
@@ -673,11 +647,36 @@ func TestAuditRejectsAMalformedLineBeforeTheEnd(t *testing.T) {
 	}
 }
 
+func TestAuditRejectsUnknownFieldsAndTrailingDocuments(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{
+			name:   "unknown field",
+			stream: `{"seq":1,"type":"run-start","timestamp":"2026-01-01T00:00:00Z","unknown":true}`,
+			want:   `unknown field "unknown"`,
+		},
+		{
+			name:   "trailing document",
+			stream: `{"seq":1,"type":"run-start","timestamp":"2026-01-01T00:00:00Z"}{}`,
+			want:   "trailing data",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := auditTrace(strings.NewReader(test.stream), evidence{}, nil, auditLayers(nil))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("audit error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAuditOrdersViolationsByPosition(t *testing.T) {
 	t.Parallel()
-	// The report is read as a list of places to look at, so it is ordered by
-	// where the mutants are and not by the order the run happened to execute
-	// them in.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3), linked(30, 2, 34, 3)},
 	})
@@ -729,17 +728,16 @@ func TestReadEvidenceReportsADirectoryItCannotRead(t *testing.T) {
 
 func TestReadEvidenceReadsTheProfilesAndNothingElse(t *testing.T) {
 	t.Parallel()
-	// A temporary directory of a run holds more than profiles. Only the
-	// profiles are evidence, and a file that is not one is left alone rather
-	// than refused, so an audit runs against the directory a run really left.
+	const recordedProfileCount = 2
+
 	directory := writeProfiles(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 		secondTarget: {ran(20, 2, 24, 3)},
 	})
-	if err := os.WriteFile(filepath.Join(directory, "targets.json"), []byte("{}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "targets.json"), []byte("{}\n"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(directory, "nested.cover"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(directory, "nested.cover"), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 
@@ -747,11 +745,10 @@ func TestReadEvidenceReadsTheProfilesAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the recorded evidence: %v", err)
 	}
-	if len(recorded.targets) != 2 {
+	if len(recorded.targets) != recordedProfileCount {
 		t.Errorf("read %d targets, want the 2 profiles of the directory", len(recorded.targets))
 	}
-	// The instrumented union is what the outside-blocks fallback is decided
-	// on, so it has to hold the blocks of every profile rather than of one.
+
 	for _, position := range []struct{ line, column int }{{11, 4}, {21, 4}} {
 		if !recorded.instrumentedAt(subjectPath, position.line, position.column) {
 			t.Errorf("the instrumented union does not contain %d.%d, which a profile named",
@@ -760,7 +757,6 @@ func TestReadEvidenceReadsTheProfilesAndNothingElse(t *testing.T) {
 	}
 }
 
-// layerNames is the audit's layer list, which is what a catalog changes.
 func layerNames(layers []layer) []string {
 	names := make([]string, 0, len(layers))
 	for _, audited := range layers {
@@ -771,10 +767,7 @@ func layerNames(layers []layer) []string {
 
 func TestAuditLayersAddsTheBranchLayerOnlyWithACatalog(t *testing.T) {
 	t.Parallel()
-	// The branch layer decides by a proof only a catalog carries, so a run
-	// audited without one is a run the layer was not held to. Adding it
-	// silently would be worse than not adding it: a reader would take the
-	// missing row for a clean one.
+
 	if got := layerNames(auditLayers(nil)); slices.Contains(got, branchLayerName) {
 		t.Errorf("without a catalog the audit runs %v, want no %q layer", got, branchLayerName)
 	}
@@ -786,11 +779,7 @@ func TestAuditLayersAddsTheBranchLayerOnlyWithACatalog(t *testing.T) {
 
 func TestDecideBranchKeepsEveryKillerItCannotProveInert(t *testing.T) {
 	t.Parallel()
-	// The subject of every case below: a condition at 20:4 gating a body that
-	// runs from its opening brace at 20:15 to its closing one at 22:3. The
-	// mutated condition implies the original, so a test during which no
-	// statement of that body ran cannot observe the mutation — and every other
-	// state of the evidence keeps the killer.
+
 	cases := []struct {
 		name     string
 		catalog  *mutantCatalog
@@ -940,9 +929,8 @@ func TestDecideBranchKeepsEveryKillerItCannotProveInert(t *testing.T) {
 
 func TestAuditCountsWhatTheBranchLayerHasNoProofFor(t *testing.T) {
 	t.Parallel()
-	// A mutant the layer has no proof for is not a mutant it keeps: it is one
-	// the layer changes nothing about. Counting it as kept would let a layer
-	// that proves almost nothing report almost every pair as its own.
+	const auditedLayerCount = 2
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), ran(20, 15, 22, 3)},
 	})
@@ -958,14 +946,14 @@ func TestAuditCountsWhatTheBranchLayerHasNoProofFor(t *testing.T) {
 	)
 
 	result := auditWithCatalog(t, stream, recorded, catalog)
-	if len(result.layers) != 2 {
+	if len(result.layers) != auditedLayerCount {
 		t.Fatalf("audited %d layers, want the reach layer and the branch layer", len(result.layers))
 	}
 	branch := result.layers[1]
 	if branch.name != branchLayerName {
 		t.Fatalf("the second layer is %q, want %q", branch.name, branchLayerName)
 	}
-	if branch.audited != 2 || branch.kept != 1 || branch.inapplicable != 1 {
+	if branch.audited != auditedLayerCount || branch.kept != 1 || branch.inapplicable != 1 {
 		t.Errorf("the branch layer audited %+v, want one pair it keeps and one it has no proof for", branch)
 	}
 	if result.layers[0].inapplicable != 0 {
@@ -979,10 +967,7 @@ func TestAuditCountsWhatTheBranchLayerHasNoProofFor(t *testing.T) {
 
 func TestAuditFailsWhenAKillerNeverTookTheBodyItsMutationGates(t *testing.T) {
 	t.Parallel()
-	// The killer ran the condition and never a statement of the body behind
-	// it. The proof says such a target cannot observe the mutation, and the
-	// recording says it killed the mutant, so one of the two is wrong and the
-	// audit prints which pair to look at.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(18, 2, 20, 15), linked(20, 15, 22, 3)},
 	})
@@ -1010,10 +995,7 @@ func TestAuditFailsWhenAKillerNeverTookTheBodyItsMutationGates(t *testing.T) {
 
 func TestAuditMeasuresWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	t.Parallel()
-	// Soundness is the invariant; this is the value. The recording was made by
-	// a run that discharged nothing, so what the layer would have bought is
-	// read off the routes and the profiles rather than off a field the trace
-	// does not carry.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), ran(20, 15, 22, 3), linked(30, 15, 32, 3)},
 		secondTarget: {ran(10, 2, 12, 16), linked(20, 15, 22, 3), linked(30, 15, 32, 3)},
@@ -1047,7 +1029,7 @@ func TestAuditMeasuresWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 	)
 
 	result := auditWithCatalog(t, stream, recorded, catalog)
-	want := dischargeSavings{routes: 2, reaching: 4, discharged: 3, emptied: 1, executions: 2}
+	want := dischargeSavings{routes: 2, reaching: 4, discharged: 4, emptied: 2, executions: 3}
 	if result.branch != want {
 		t.Errorf("the audit measured %+v, want %+v", result.branch, want)
 	}
@@ -1055,9 +1037,7 @@ func TestAuditMeasuresWhatTheBranchLayerWouldHaveSaved(t *testing.T) {
 
 func TestAuditMeasuresNoSavingWithoutACatalog(t *testing.T) {
 	t.Parallel()
-	// Without a catalog the layer is not audited at all, and a savings block
-	// of zeroes would read as a layer that buys nothing rather than as one
-	// nobody measured.
+
 	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(20, 15, 22, 3)}})
 	stream := recordedTrace(t,
 		measured(1, killerTarget),
@@ -1076,9 +1056,7 @@ func TestAuditMeasuresNoSavingWithoutACatalog(t *testing.T) {
 
 func TestAuditRefusesToDischargeAnUninstrumentedBody(t *testing.T) {
 	t.Parallel()
-	// A body no profile instrumented is a gap in the measurement, not proof
-	// that nothing ran it: cmd/cover may simply not have cut a block there.
-	// Nothing is discharged, so nothing is saved either.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16)},
 		secondTarget: {ran(10, 2, 12, 16)},
@@ -1102,18 +1080,7 @@ func TestAuditRefusesToDischargeAnUninstrumentedBody(t *testing.T) {
 
 func TestAuditAttributesAKillToTheTargetThatMeasuredItsTest(t *testing.T) {
 	t.Parallel()
-	// A route's plan holds one entry per execution and not one per reaching
-	// target: past the targets a run executes one at a time the rest are
-	// batched, and a batch of a single target is rendered exactly like an
-	// individual run. The two lists stop lining up there, so the position of a
-	// plan entry is not the identity of a target. The identity comes from the
-	// baseline measurements, which say which target ran which test.
-	//
-	// Here the plan names the first and the third target while the second sits
-	// between them in the reaching set. The kill belongs to the third target,
-	// whose profile never ran the mutated block; reading it off the plan
-	// position would credit the second target, whose profile did, and the audit
-	// would report a clean run over a killer a layer drops.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 		secondTarget: {ran(10, 2, 12, 16), ran(20, 2, 24, 3)},
@@ -1126,8 +1093,6 @@ func TestAuditAttributesAKillToTheTargetThatMeasuredItsTest(t *testing.T) {
 		killedBy(5, firstMutant, firstDisplay, thirdTarget),
 	)
 
-	// Attribution is not one layer's business: it decides the pair every layer
-	// is held to, so it has to hold with the reach layer alone.
 	result := auditFixture(t, stream, recorded)
 	if len(result.layers) != 1 || result.layers[0].name != reachLayerName {
 		t.Fatalf("the audit ran %+v, want the reach layer alone", result.layers)
@@ -1152,20 +1117,60 @@ func TestAuditAttributesAKillToTheTargetThatMeasuredItsTest(t *testing.T) {
 		t.Errorf("the violation explains itself as %q, want the decision read off the attributed target's profile",
 			violation.why)
 	}
-	// The route is still what says where the mutant is.
+
 	if violation.pair.path != subjectPath || violation.pair.line != 21 || violation.pair.column != 4 {
 		t.Errorf("the pair places the mutant at %s:%d:%d, want the position the route recorded",
 			violation.pair.path, violation.pair.line, violation.pair.column)
 	}
 }
 
+func TestAuditAttributesADirectBaselineExecutionThroughItsCompileRecord(t *testing.T) {
+	t.Parallel()
+	binary := "/tmp/goatest-baseline/direct.test"
+	packagePath := fixtureModule + "/pkg"
+	recorded := recordedEvidence(t, map[string][]string{killerTarget: {ran(20, 2, 24, 3)}})
+	stream := recordedTrace(t,
+		compiledBaseline(1, binary, packagePath),
+		directlyMeasuredIn(2, killerTarget, binary, testNameOf(killerTarget)),
+		blockRoute(3, firstMutant, 20, 4, killerTarget),
+		killedIn(4, firstMutant, firstDisplay, packagePath, testNameOf(killerTarget)),
+	)
+
+	result := auditFixture(t, stream, recorded)
+	if result.pairs != 1 || result.unattributedKills != 0 || len(result.violations) != 0 {
+		t.Fatalf("direct measurement audit = pairs %d unattributed %d violations %+v",
+			result.pairs, result.unattributedKills, result.violations)
+	}
+}
+
+func TestCompiledTestBinaryRejectsRunsAndReadsPortableGoNames(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		argv         []string
+		wantBinary   string
+		wantPackage  string
+		wantCompiled bool
+	}{
+		{name: "ordinary", argv: []string{"go", "test", "-c", "-o", "pkg.test", fixtureModule + "/pkg"}, wantBinary: "pkg.test", wantPackage: fixtureModule + "/pkg", wantCompiled: true},
+		{name: "windows executable", argv: []string{`C:\\Go\\bin\\go.exe`, "test", "-c", "-o=package.test.exe", fixtureModule + "/pkg"}, wantBinary: "package.test.exe", wantPackage: fixtureModule + "/pkg", wantCompiled: true},
+		{name: "run", argv: []string{"go", "test", "-o", "pkg.test", fixtureModule + "/pkg"}},
+		{name: "no output", argv: []string{"go", "test", "-c", fixtureModule + "/pkg"}},
+		{name: "other tool", argv: []string{"cargo", "test", "-c", "-o", "pkg.test", fixtureModule + "/pkg"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			binary, packagePath, compiled := compiledTestBinary(test.argv)
+			if binary != test.wantBinary || packagePath != test.wantPackage || compiled != test.wantCompiled {
+				t.Fatalf("compiledTestBinary(%q) = (%q, %q, %t)", test.argv, binary, packagePath, compiled)
+			}
+		})
+	}
+}
+
 func TestAuditAttributesAKillByThePackageItRanIn(t *testing.T) {
 	t.Parallel()
-	// A test name is only unique within a package, and two packages of one
-	// repository routinely define a test of the same name. An execution records
-	// the package it ran in, and that is the half of the identity telling the
-	// two apart — without it the audit would decide one target's kill against
-	// another target's coverage.
+
 	const shared = "TestTheSameNameInTwoPackages"
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), ran(20, 2, 24, 3)},
@@ -1223,10 +1228,7 @@ func TestAuditAttributesAKillByThePackageItRanIn(t *testing.T) {
 
 func TestAuditCountsAKillNoMeasurementNames(t *testing.T) {
 	t.Parallel()
-	// A killer the baseline never measured is a killer the audit cannot place:
-	// no target's coverage is the one the rule would be checked against.
-	// Guessing a target would be inventing the evidence the audit exists to
-	// check, so the kill is counted and no layer decides it.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})
@@ -1263,11 +1265,7 @@ func TestAuditCountsAKillNoMeasurementNames(t *testing.T) {
 
 func TestAuditCountsAReusedRouteAsAClassOfItsOwn(t *testing.T) {
 	t.Parallel()
-	// A mutant the run resolved from an earlier run's evidence has a route and
-	// no execution beside it. Nothing was measured for it here, so it is
-	// neither a kill this audit can hold to the layers nor a mutant the
-	// recording lost: it is its own class, counted so that the audited share of
-	// a run is read against the part of it that ran.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget: {ran(10, 2, 12, 16), linked(20, 2, 24, 3)},
 	})

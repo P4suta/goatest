@@ -6,11 +6,15 @@ package evidence_test
 import (
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/P4suta/goatest/internal/evidence"
+)
+
+const (
+	changedCommandTimeout = 31 * time.Second
+	changedTargetTimeout  = 6 * time.Minute
 )
 
 func targetInputsFixture() evidence.TargetInputs {
@@ -26,15 +30,14 @@ func targetInputsFixture() evidence.TargetInputs {
 		CommandTimeout:   30 * time.Second,
 		TargetTimeout:    5 * time.Minute,
 		GoatestVersion:   "v0.1.0",
+		GoatestBuild:     "build-one",
 		GoMutantsVersion: "v0.1.0",
 		Corpus:           map[string]string{"testdata/fuzz/FuzzValue/seed": "ccc"},
 	}
 }
 
-// isBehaviorKey reports whether a key is the 64 lowercase hex characters every
-// consumer of the store is allowed to assume.
 func isBehaviorKey(key string) bool {
-	if len(key) != 64 {
+	if len(key) != len(mutationDigest("a")) {
 		return false
 	}
 	for _, character := range key {
@@ -61,9 +64,10 @@ func TestTargetBehaviorKeyIsDeterministicAndEveryInputInvalidatesIt(t *testing.T
 		func(inputs *evidence.TargetInputs) { inputs.Contract = "deep-v1" },
 		func(inputs *evidence.TargetInputs) { inputs.TestArgs = []string{"-run", "TestOther"} },
 		func(inputs *evidence.TargetInputs) { inputs.BuildTags = []string{"integration"} },
-		func(inputs *evidence.TargetInputs) { inputs.CommandTimeout = 31 * time.Second },
-		func(inputs *evidence.TargetInputs) { inputs.TargetTimeout = 6 * time.Minute },
+		func(inputs *evidence.TargetInputs) { inputs.CommandTimeout = changedCommandTimeout },
+		func(inputs *evidence.TargetInputs) { inputs.TargetTimeout = changedTargetTimeout },
 		func(inputs *evidence.TargetInputs) { inputs.GoatestVersion = "v0.2.0" },
+		func(inputs *evidence.TargetInputs) { inputs.GoatestBuild = "build-two" },
 		func(inputs *evidence.TargetInputs) { inputs.GoMutantsVersion = "v0.2.0" },
 		func(inputs *evidence.TargetInputs) { inputs.Corpus["testdata/fuzz/FuzzValue/seed"] = "changed" },
 		func(inputs *evidence.TargetInputs) { inputs.Files["added.go"] = "ddd" },
@@ -79,8 +83,7 @@ func TestTargetBehaviorKeyIsDeterministicAndEveryInputInvalidatesIt(t *testing.T
 			t.Errorf("mutation %d did not invalidate the key", index)
 		}
 	}
-	// A configured but empty argument list is not the same configuration as no
-	// argument list, so the two must not share a verdict.
+
 	absent := base.Clone()
 	absent.TestArgs = nil
 	present := base.Clone()
@@ -90,16 +93,13 @@ func TestTargetBehaviorKeyIsDeterministicAndEveryInputInvalidatesIt(t *testing.T
 	}
 }
 
-// TestBehaviorKeyContractV2Golden makes an execution-contract change an
-// explicit persisted-key migration rather than an accidental cache hit or
-// miss. Update these values only when old mutation evidence must be retired.
-func TestBehaviorKeyContractV2Golden(t *testing.T) {
+func TestBehaviorKeyContractV3Golden(t *testing.T) {
 	t.Parallel()
 	inputs := targetInputsFixture()
 	target := evidence.TargetBehaviorKey(inputs)
 	suite := evidence.SuiteBehaviorKey(inputs, suiteTargetsFixture())
-	const wantTarget = "0a9ef3a12487b5b85ea1242b3fce6dcecb78721f29b5a403c420a3df12615869"
-	const wantSuite = "ba69d8777e6835daca3b548a9502b0535d64da4519e8d845131b8723e2401d09"
+	const wantTarget = "30ea61a42e0bd3ef8598b7b707d0c3755a1a8da408a1112a2e24b596ea9fd172"
+	const wantSuite = "785e338cf127d2abfd3f310db020c8e09cd7791b1dac5650923efbc33e3a11eb"
 	if target != wantTarget || suite != wantSuite {
 		t.Fatalf("behavior keys = target %s, suite %s", target, suite)
 	}
@@ -117,8 +117,7 @@ func TestTargetBehaviorKeyOrdersFilesAndEnvironmentIndependently(t *testing.T) {
 	if got := evidence.TargetBehaviorKey(reordered); got != want {
 		t.Errorf("environment order changed the key: %s != %s", got, want)
 	}
-	// The caller's slice is theirs: sorting the environment must not reach back
-	// into it.
+
 	unsorted := base.Clone()
 	unsorted.Environment = []string{"B=2", "A=1"}
 	evidence.TargetBehaviorKey(unsorted)
@@ -132,31 +131,24 @@ func TestTargetBehaviorKeyOrdersFilesAndEnvironmentIndependently(t *testing.T) {
 	if got := evidence.TargetBehaviorKey(insertionOrdered); got != want {
 		t.Errorf("file insertion order changed the key: %s != %s", got, want)
 	}
-	// The behaviour key answers a different question than the run identity, so
-	// the two must never collide on the same inputs.
+
 	analogous := evidence.Inputs{
 		Files: base.Files, Dependencies: base.Dependencies, Toolchain: base.Toolchain,
 		Platform: base.Platform, Environment: base.Environment, Corpus: base.Corpus,
-		Contract: base.Contract, GoatestVersion: base.GoatestVersion, GoMutantsVersion: base.GoMutantsVersion,
+		Contract: base.Contract, GoatestVersion: base.GoatestVersion, GoatestBuild: base.GoatestBuild,
+		GoMutantsVersion: base.GoMutantsVersion,
 	}
 	if evidence.Digest(analogous) == want {
 		t.Error("the behaviour key equals the run digest of the analogous inputs")
 	}
 }
 
-// TestTargetBehaviorKeyIgnoresJobsTraceAndKeepTemp pins the allowlist. Every
-// field of TargetInputs is, by construction, part of a target's behaviour;
-// anything absent from this list is by definition not. It is the ratchet that
-// stops MutationJobs (parallelism does not change a result), Packages,
-// PackageScope, Replay*, Changed (always default under the full-run guard),
-// FuzzExecutions (fuzz evidence is never reused), and Trace or KeepTemp (ADR
-// 0002: diagnostics never enter identity) from silently joining the key.
 func TestTargetBehaviorKeyIgnoresJobsTraceAndKeepTemp(t *testing.T) {
 	t.Parallel()
 	want := []string{
 		"Files", "Dependencies", "Toolchain", "Platform", "Environment", "Contract",
 		"TestArgs", "BuildTags", "CommandTimeout", "TargetTimeout", "GoatestVersion",
-		"GoMutantsVersion", "Corpus",
+		"GoatestBuild", "GoMutantsVersion", "Corpus",
 	}
 	inputsType := reflect.TypeOf(evidence.TargetInputs{})
 	got := make([]string, 0, inputsType.NumField())
@@ -188,21 +180,13 @@ func TestTargetInputsCloneIsEqualAndOwnsEveryMutableCollection(t *testing.T) {
 	}
 }
 
-// suiteTargetsFixture is what a package's suite runs: two targets of the same
-// package, each with the behaviour key it had.
 func suiteTargetsFixture() []evidence.TargetKey {
 	return []evidence.TargetKey{
-		{Package: "example.com/module", Name: "TestValue", Kind: "test", Key: strings.Repeat("a", 64)},
-		{Package: "example.com/module", Name: "FuzzValue", Kind: "fuzz", Key: strings.Repeat("b", 64)},
+		{Package: "example.com/module", Name: "TestValue", Kind: "test", Key: mutationDigest("a")},
+		{Package: "example.com/module", Name: "FuzzValue", Kind: "fuzz", Key: mutationDigest("b")},
 	}
 }
 
-// TestSuiteBehaviorKeyIsTheConjunctionOfItsTargetsAndItsOwnInputs pins what an
-// unreached mutant's verdict is a statement about. The package suite runs every
-// target of the package, fuzz targets included, as one command: it observes
-// what all of them observe, so a change to any one of them, to which targets
-// there are, or to what the package-level run itself reads is a change to the
-// suite. The order the targets arrive in is not, because a suite is a set.
 func TestSuiteBehaviorKeyIsTheConjunctionOfItsTargetsAndItsOwnInputs(t *testing.T) {
 	t.Parallel()
 	inputs := targetInputsFixture()
@@ -226,11 +210,11 @@ func TestSuiteBehaviorKeyIsTheConjunctionOfItsTargetsAndItsOwnInputs(t *testing.
 	}{
 		{name: "a target whose behaviour key moved", targets: func() []evidence.TargetKey {
 			changed := suiteTargetsFixture()
-			changed[0].Key = strings.Repeat("c", 64)
+			changed[0].Key = mutationDigest("c")
 			return changed
 		}()},
 		{name: "a target that entered the package", targets: append(suiteTargetsFixture(),
-			evidence.TargetKey{Package: "example.com/module", Name: "TestLate", Kind: "test", Key: strings.Repeat("d", 64)})},
+			evidence.TargetKey{Package: "example.com/module", Name: "TestLate", Kind: "test", Key: mutationDigest("d")})},
 		{name: "a target that left the package", targets: suiteTargetsFixture()[:1]},
 		{name: "a target renamed to another kind", targets: func() []evidence.TargetKey {
 			changed := suiteTargetsFixture()
