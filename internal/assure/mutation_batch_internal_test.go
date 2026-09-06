@@ -16,26 +16,28 @@ import (
 )
 
 const (
-	aggregatePrimaryTargets       = 3
-	aggregateSecondaryTargets     = 2
-	expectedAggregateGroups       = 2
-	aggregateUnboundedTargetCount = 65
-	aggregateLongTargetNameBytes  = 9_000
-	aggregateFastDuration         = 10 * time.Second
-	aggregateSlowDuration         = 30 * time.Second
-	aggregateSlowProbeDuration    = 41 * time.Second
-	aggregateSuiteSampleDuration  = 11 * time.Second
-	aggregateSingleSuiteDuration  = 20 * time.Second
-	aggregateControlBaselineA     = 2 * time.Millisecond
-	aggregateControlBaselineB     = 3 * time.Millisecond
-	aggregateControlProbeA        = 5 * time.Millisecond
-	aggregateControlProbeB        = 7 * time.Millisecond
-	aggregateExactControlDuration = 11 * time.Millisecond
-	aggregatePriorDeadline        = aggregateControlBaselineA + aggregateControlBaselineB + aggregateControlProbeA + aggregateControlProbeB
-	aggregateMutantDeadline       = aggregatePriorDeadline + aggregateExactControlDuration
-	expectedTargetTimeout         = 82 * time.Second
-	expectedCombinedTimeout       = 104 * time.Second
-	expectedSingleCombinedTimeout = 41 * time.Second
+	aggregatePrimaryTargets   = 3
+	aggregateSecondaryTargets = 2
+	expectedAggregateGroups   = 2
+
+	aggregateRequestsWithRemeasuredRetry = expectedAggregateGroups + 1
+	aggregateUnboundedTargetCount        = 65
+	aggregateLongTargetNameBytes         = 9_000
+	aggregateFastDuration                = 10 * time.Second
+	aggregateSlowDuration                = 30 * time.Second
+	aggregateSlowProbeDuration           = 41 * time.Second
+	aggregateSuiteSampleDuration         = 11 * time.Second
+	aggregateSingleSuiteDuration         = 20 * time.Second
+	aggregateControlBaselineA            = 2 * time.Millisecond
+	aggregateControlBaselineB            = 3 * time.Millisecond
+	aggregateControlProbeA               = 5 * time.Millisecond
+	aggregateControlProbeB               = 7 * time.Millisecond
+	aggregateExactControlDuration        = 11 * time.Millisecond
+	aggregatePriorDeadline               = aggregateControlBaselineA + aggregateControlBaselineB + aggregateControlProbeA + aggregateControlProbeB
+	aggregateMutantDeadline              = aggregatePriorDeadline + aggregateExactControlDuration
+	expectedTargetTimeout                = 82 * time.Second
+	expectedCombinedTimeout              = 104 * time.Second
+	expectedSingleCombinedTimeout        = 41 * time.Second
 )
 
 func aggregateTargets() []TargetEvidence {
@@ -88,7 +90,7 @@ func TestLaterGroupKillDominatesEarlierUnknown(t *testing.T) {
 		return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
 	}}
 	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
-	if seed.err != nil || !seed.resolved || len(session.requests) != expectedAggregateGroups || len(seed.evaluation.Findings) != 0 || seed.evaluation.Evidence[0].Status != "killed" {
+	if seed.err != nil || !seed.resolved || len(session.requests) != aggregateRequestsWithRemeasuredRetry || len(seed.evaluation.Findings) != 0 || seed.evaluation.Evidence[0].Status != "killed" {
 		t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
 	}
 }
@@ -104,7 +106,7 @@ func TestUnknownGroupsAreAggregatedAfterEveryGroupRuns(t *testing.T) {
 		return gomutants.MutantResult{ID: mutant.ID, Outcome: outcome}, nil
 	}}
 	seed := evaluateMutationSeed(t.Context(), session, mutant, targets, mutationOptionsForTest(MutationOptions{}))
-	if seed.err != nil || !seed.resolved || len(session.requests) != expectedAggregateGroups || len(seed.evaluation.Findings) != 1 {
+	if seed.err != nil || !seed.resolved || len(session.requests) != aggregateRequestsWithRemeasuredRetry || len(seed.evaluation.Findings) != 1 {
 		t.Fatalf("seed = %+v, requests = %+v", seed, session.requests)
 	}
 	finding := seed.evaluation.Findings[0]

@@ -103,7 +103,7 @@ func TestAcquireStateMachine(t *testing.T) {
 		if !errors.Is(err, failure) {
 			t.Fatalf("Acquire error = %v, want %v", err, failure)
 		}
-		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+		if err := file.Close(); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("lock file remained open: %v", err)
 		}
 	})
@@ -159,7 +159,7 @@ func TestAcquireStateMachine(t *testing.T) {
 		if lease != nil || !errors.Is(err, context.Canceled) || !waited || !terminated || !announced {
 			t.Fatalf("Acquire = (%v, %v), waited = %t, terminated = %t, announced = %t", lease, err, waited, terminated, announced)
 		}
-		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+		if err := file.Close(); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("lock file remained open: %v", err)
 		}
 	})

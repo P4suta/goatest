@@ -144,10 +144,15 @@ func TestSeedNativeProjectsExactObjectsWithoutAliasingIndexes(t *testing.T) {
 	outputName := fmt.Sprintf("%x", output)
 	nativeAction := filepath.Join(destination, actionName[:2], actionName+"-a")
 	nativeObject := filepath.Join(destination, outputName[:2], outputName+"-d")
-	preserved := moment.Add(-time.Hour)
-	if err := os.Chtimes(nativeAction, preserved, preserved); err != nil {
+	aged := moment.Add(-time.Hour)
+	if err := os.Chtimes(nativeAction, aged, aged); err != nil {
 		t.Fatal(err)
 	}
+	stamped, err := os.Stat(nativeAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := stamped.ModTime()
 	seed, err = buildcache.SeedNative(base, destination, moment.Add(2*time.Minute))
 	if err != nil || seed.Actions != 1 || seed.Objects != 1 || seed.Bytes != int64(len(body)) || seed.Skipped != 0 {
 		t.Fatalf("idempotent SeedNative = (%+v, %v), want the complete logical projection", seed, err)

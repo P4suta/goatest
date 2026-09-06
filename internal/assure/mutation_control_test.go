@@ -222,7 +222,7 @@ func TestPassingUnreachedPackageControlCalibratesTheMutantWatchdog(t *testing.T)
 	}
 }
 
-func TestTimeoutRunsAgainOnlyWhenTheMachineMeasurablySlowed(t *testing.T) {
+func TestTimeoutRunsAgainOnceUnderARemeasuredBudget(t *testing.T) {
 	t.Parallel()
 	const (
 		controlDuration = time.Millisecond
@@ -236,17 +236,26 @@ func TestTimeoutRunsAgainOnlyWhenTheMachineMeasurablySlowed(t *testing.T) {
 		wantControls int
 	}{
 		{
-			name: "steady machine", controls: []gomutants.CommandResult{{Duration: controlDuration}},
-			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut},
-			wantKind: "mutation-timeout", wantControls: 2,
+			name:     "a completed second control widens the budget",
+			controls: []gomutants.CommandResult{{Duration: controlDuration}},
+			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
+			wantKind: "unreached-mutant", wantControls: 2,
 		},
 		{
-			name: "measurably slower machine",
+			name: "a slower second control widens it by the measured ratio",
 			controls: []gomutants.CommandResult{
 				{Duration: controlDuration}, {Duration: slowedDuration},
 			},
 			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
 			wantKind: "unreached-mutant", wantControls: 2,
+		},
+		{
+			name: "a second control that expires widens nothing",
+			controls: []gomutants.CommandResult{
+				{Duration: controlDuration}, {TimedOut: true},
+			},
+			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut},
+			wantKind: "mutation-timeout", wantControls: 2,
 		},
 		{
 			name: "original timed out", controls: []gomutants.CommandResult{{TimedOut: true}},

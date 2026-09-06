@@ -43,14 +43,15 @@ into a proof. Persisting the result merely made an unanswered question durable.
    observation, or a passing control with no positive duration produces
    `mutation-control-unavailable`.
 5. After the exact original passes, one completed mutant execution decides that
-   compatible group's comparative outcome — unless the machine measurably slowed
-   while it ran. On expiration the exact original is measured once more, outside
-   the memo. If it now completes slower than it did before the mutant started,
-   the machine and not the mutation is what the first budget failed to describe:
-   the budget is scaled by that measured ratio, capped by the ceiling, and the
-   mutant runs exactly once more. If it does not complete slower, the budget
-   described the machine correctly and the group is inconclusive. There is no
-   split, no post-timeout confirmation, and no second retry. Other compatible
+   compatible group's comparative outcome — unless its budget expires. On
+   expiration the exact original is measured once more, outside the memo. A
+   completed second control is a new distinct clean observation of the same
+   request: it joins the sum, and when the machine also completed it slower than
+   the first, the budget is additionally scaled by that measured ratio. The
+   larger of the two, capped by the ceiling, buys exactly one more execution. A
+   second control that fails or expires buys none and the group is
+   inconclusive. There is no split, no post-timeout confirmation, and no third
+   execution. Other compatible
    groups still run because any completed failure establishes the existential
    kill claim. If none kills, unknown groups are combined deterministically.
 6. Timeout findings are never written to mutation evidence. Reusable mutation
@@ -77,13 +78,14 @@ Removing timeout reuse
 cannot manufacture a verdict: a later run either proves an outcome from
 completed executions or remains inconclusive again.
 
-Running a mutant again after a measured slowdown does not turn expiration into
-evidence. The premise for that second run is the second control's completed
-duration — a clean observation of how fast the machine is now — and never the
-expiration itself. A mutation that never returns leaves its control exactly as
-fast as before, so the ratio never widens the budget and the group stays
-inconclusive. Executions per compatible group are bounded at two however slow
-the machine becomes.
+Re-measuring after an expiration does not turn the expiration into evidence.
+The premise for the second run is the second control's completed duration — a
+clean observation of the same request on the machine as it is now — and never
+the expiration itself. A mutation that never returns spends that second budget
+and is then left inconclusive, exactly as a slow one that still does not finish
+is. Executions per compatible group are bounded at two however slow the machine
+becomes, and a group whose second control cannot be measured runs no second
+execution at all.
 
 The budget affects liveness, not proof validity. Summing only distinct positive
 clean observations makes the bound wholly data-derived, and the one ratio in the
@@ -107,8 +109,8 @@ result in that case is still inconclusive.
 - Target and package-suite observations contribute together, in the probe pass
   as well as the mutation pass, so measured scheduling variation does not
   require a fixed margin or multiplier.
-- A nonterminating mutant consumes at most two data-derived budgets, and the
-  second only when the machine measurably slowed. A request with no justified
+- A nonterminating mutant consumes at most two data-derived budgets, the second
+  only when a second control could be measured. A request with no justified
   budget consumes no mutant process at all.
 - Timeout findings must be re-evaluated on a later run; they are not durable
   evidence and cannot make a warm run inherit an old non-answer.

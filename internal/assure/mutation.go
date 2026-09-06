@@ -740,10 +740,13 @@ func budgetAfterMeasuredSlowdown(
 	controlRequest := request
 	controlRequest.Timeout = options.Timeout
 	fresh, err := options.freshControl(ctx, controlRequest)
-	if err != nil || fresh.TimedOut || fresh.ExitCode != 0 || fresh.Duration <= control {
+	if err != nil || fresh.TimedOut || fresh.ExitCode != 0 || fresh.Duration <= 0 {
 		return 0, false
 	}
-	widened := scaledMutationTimeout(options.Timeout, request.Timeout, control, fresh.Duration)
+	widened := max(
+		mutationExecutionTimeout(options.Timeout, request.Timeout, fresh.Duration),
+		scaledMutationTimeout(options.Timeout, request.Timeout, control, fresh.Duration),
+	)
 	if widened <= request.Timeout {
 		return 0, false
 	}

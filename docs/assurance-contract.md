@@ -239,15 +239,15 @@ re-verified afterwards. Repeating a mutant a finite number of times would not
 prove determinism, so goatest does not pay for a second mutant execution or
 treat repetition as stronger evidence.
 
-A mutant that exhausts its budget is the one exception, and it is a measurement
-of the machine rather than of the mutation. goatest measures the exact original
-once more, outside the memo. If that control now completes slower than it did
-before the mutant started, the budget described a machine that no longer
-exists: it is scaled by the measured ratio, capped by the ceiling, and the
-mutant runs exactly once more. If the control is not slower, the budget was
-sound and the group stays inconclusive. Expiration is never the premise — the
-second control's completed duration is — and a mutation that never returns
-leaves its control as fast as before, so it is never run a second time.
+A mutant that exhausts its budget is the one exception, and what answers it is
+a fresh measurement rather than the expiration. goatest measures the exact
+original once more, outside the memo. A completed second control is another
+clean observation of the same request: it joins the sum, and when the machine
+also completed it slower than the first, the budget is additionally scaled by
+that measured ratio. The larger of the two, capped by the ceiling, buys exactly
+one more execution. A second control that fails or expires buys none, and the
+group is inconclusive. Expiration is never the premise — the second control's
+completed duration is — and no compatible group runs a mutant more than twice.
 
 An original control failure or timeout at the ceiling is inconclusive and
 prevents the mutant from starting. A mutation that does not compile is `compile-rejected`, never

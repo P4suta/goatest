@@ -472,6 +472,8 @@ func batchedEvidenceTargets(count int) []TargetEvidence {
 	return targets
 }
 
+const aggregateAttemptAndRemeasuredRetry = 2
+
 func TestEvaluateMutationsStopsAnUnattributableBatchTimeoutWithoutEvidence(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -503,8 +505,13 @@ func TestEvaluateMutationsStopsAnUnattributableBatchTimeoutWithoutEvidence(t *te
 	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-timeout" {
 		t.Fatalf("findings = %+v, want one inconclusive timeout", evaluation.Findings)
 	}
-	if got, want := len(session.requests), 1; got != want {
-		t.Fatalf("requests = %d, want one aggregate attempt", got)
+	if got, want := len(session.requests), aggregateAttemptAndRemeasuredRetry; got != want {
+		t.Fatalf("requests = %d, want the aggregate attempt and its remeasured retry", got)
+	}
+	for _, request := range session.requests {
+		if !slices.ContainsFunc(request.Args, func(argument string) bool { return strings.Contains(argument, "|") }) {
+			t.Fatalf("a timed-out aggregate was split into %+v", request.Args)
+		}
 	}
 	if records := index.store(catalog, evidenceModule).Records; len(records) != 0 {
 		t.Fatalf("recorded %+v, want no durable timeout evidence", records)

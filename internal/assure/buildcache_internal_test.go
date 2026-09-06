@@ -338,6 +338,7 @@ func TestEmptyBuildCachePreparationImportsIntoThePersistentLayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	environment := cache.preparationEnvironment()
 	if !slices.Contains(environment, "GOCACHE="+cache.fallback) {
 		t.Fatalf("preparation environment = %q, want the bounded backing directory", environment)
@@ -363,6 +364,7 @@ func TestProjectExecutionProjectsTheBaseIntoTheNativeCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
 	body := "compiled archive"
 	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
@@ -403,6 +405,7 @@ func TestMutationPreparationUsesTheNativeProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	defer func() {
 		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 			t.Error(err)
@@ -432,6 +435,7 @@ func TestMutationPreparationFallsBackFromAnUntrustworthyProjection(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	defer func() {
 		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 			t.Error(err)
@@ -466,6 +470,7 @@ func TestPersistentCommandRefreshesTheProjectionBeforeTheNextExecution(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	defer func() {
 		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 			t.Error(err)
@@ -559,6 +564,7 @@ func TestProjectExecutionFallsBackWhenTheNativeProjectionIsNotTrustworthy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
 	body := "trusted object"
 	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
@@ -688,6 +694,7 @@ func TestNativeCollectionDrainsActiveExecutionsBeforeRemovingAnything(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	defer func() {
 		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 			t.Error(err)
@@ -721,6 +728,7 @@ func TestNativeCollectionFailureClosesAdmissionAndFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	release, native := cache.beginNative()
 	if !native {
 		t.Fatal("initial native execution fell back")
@@ -801,6 +809,7 @@ func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	layer := buildcache.Layer{Dir: base}
 	layers := buildcache.Layers{Base: layer, Persist: true}
 	moment := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
@@ -845,6 +854,7 @@ func TestCollectBaseSkipsWhatAnotherProcessIsAlreadyCollecting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 
 	release, held, err := (buildcache.Layer{Dir: base}).HoldCollection()
 	if err != nil || !held {
@@ -894,6 +904,7 @@ func TestReleaseBuildCacheKeepsAndNamesTheScratchItWasAskedToKeep(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	if err := releaseBuildCache(Options{KeepTemp: true}, cache, runScratch{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -912,6 +923,7 @@ func TestReleaseBuildCacheBoundsANativeCacheBeforeKeepingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = cache.close(false) })
 	layers := buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}
 	for index := byte(1); index <= 2; index++ {
 		if _, err := layers.Put(buildCacheTestKey(index), buildCacheTestKey(index+0x20),
