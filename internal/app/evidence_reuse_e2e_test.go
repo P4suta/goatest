@@ -84,7 +84,6 @@ func executedMutants(events []trace.Event) map[string]bool {
 
 func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().File("docs/notes.md", "first\n").Git()
 	service := app.Service{
 		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
@@ -153,7 +152,6 @@ func TestASecondVerifyReusesTheKillsItRecordedUntilTheKillingTestChanges(t *test
 
 func TestRepositoryReadObservationWidensOnlyTheMutantsEstablishedByTheReader(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("reader/reader.go", repositoryReaderSource).
 		File("reader/repository_access.go", actualRepositoryReaderSource).
@@ -303,7 +301,6 @@ func TestBoundaryAtZero(t *testing.T) {
 
 func TestASecondVerifyReusesEveryMutantAndRunsNoMutantExecution(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().File("docs/notes.md", "first\n").Git()
 	service := app.Service{
 		Root: repository.Root(), GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
@@ -342,7 +339,6 @@ func TestASecondVerifyReusesEveryMutantAndRunsNoMutantExecution(t *testing.T) {
 
 func TestChangingASourceFileForcesItsMutantsToRunAgain(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("other/other.go", otherSource).
 		File("other/other_test.go", otherTestSource).
@@ -379,7 +375,6 @@ func TestChangingASourceFileForcesItsMutantsToRunAgain(t *testing.T) {
 
 func TestChangingATestFileForcesTheSurvivorsThatTestReachesToRunAgain(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().
 		File("unsure/unsure.go", survivingSource).
 		File("unsure/unsure_test.go", survivingTestSource).
