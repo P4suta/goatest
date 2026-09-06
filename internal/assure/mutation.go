@@ -752,7 +752,8 @@ func executeMutation(ctx context.Context, session MutationSession, request gomut
 		observation = repositoryObservation{reason: wholeTreeLogUnavailable}
 		err = fmt.Errorf("goatest: repository observation for mutant %s failed", request.Mutant)
 	}
-	options.Trace.MutantExec(mutantExecutionRecord(request, result, err))
+	reason := options.RepositoryObserver.wholeTreeSuiteReason(request.Package, observation)
+	options.Trace.MutantExec(mutantExecutionRecord(request, result, reason, err))
 	return result, observation, err
 }
 

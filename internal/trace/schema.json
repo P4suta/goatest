@@ -225,6 +225,14 @@
         "outcome": { "type": "string" },
         "killed_by": { "type": "string" },
         "duration_ms": { "type": "integer", "minimum": 0 },
+        "whole_tree": {
+          "description": "Whether this mutant execution keys the whole snapshot rather than its ordinary closure. A killing execution that opens a repository-reading branch the baseline never took widens the key here, which is where a mutant-only reader would otherwise escape it.",
+          "type": "boolean"
+        },
+        "whole_tree_reason": {
+          "description": "Why the key was widened: the package is statically beyond the action log, no log could be created or read back, the completed log was malformed or carried an operation the reader does not model, the execution read a repository directory, or it read a file outside its ordinary input set.",
+          "enum": ["static-unobservable", "log-unavailable", "log-ambiguous", "directory-access", "outside-input"]
+        },
         "error": { "type": "string" }
       }
     },

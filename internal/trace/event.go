@@ -140,7 +140,11 @@ type MutantRecord struct {
 	Outcome    string   `json:"outcome,omitempty"`
 	KilledBy   string   `json:"killed_by,omitempty"`
 	DurationMS int64    `json:"duration_ms,omitempty"`
-	Error      string   `json:"error,omitempty"`
+
+	WholeTree       bool   `json:"whole_tree,omitempty"`
+	WholeTreeReason string `json:"whole_tree_reason,omitempty"`
+
+	Error string `json:"error,omitempty"`
 }
 
 type RouteRecord struct {

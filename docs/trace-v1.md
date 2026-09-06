@@ -230,10 +230,17 @@ costs the path, not the event.
 | `outcome` | `killed`, `survived`, `timed_out`, `inconclusive`, `errored`, or `not_run` |
 | `killed_by` | what the engine reports killed it, when something did |
 | `duration_ms` | how long the execution took |
+| `whole_tree` | `true` when this execution keys the whole snapshot rather than its ordinary closure |
+| `whole_tree_reason` | why the key was widened, from the same five boundaries a probe record uses |
 | `error` | the error the execution failed with, if it failed |
 
 Mutant executions run concurrently and the recorder serialises them, so the
 stream holds one complete line per execution, in completion order.
+
+A mutant execution carries its own `whole_tree` because a mutation can open a
+repository-reading branch the baseline never took. Recording the killing
+execution's observation directly is what stops a mutant-only reader from
+escaping the key its verdict is stored under.
 
 ### `route`
 
