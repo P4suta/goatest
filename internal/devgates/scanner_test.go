@@ -9,14 +9,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// The fixtures below are parsed, never compiled: they are written to a
-// temporary directory outside the module so the scanner can be held to its
-// rules on declarations this repository does not happen to contain.
-
-// TestScanSeamsFindsReplaceableDeclarations holds the scanner to the four
-// shapes that make a package-level var replaceable behaviour.
 func TestScanSeamsFindsReplaceableDeclarations(t *testing.T) {
 	t.Parallel()
 	found := scanFixture(t, map[string]string{
@@ -72,9 +68,6 @@ var firstPairSeam, secondPairSeam = os.Remove, os.Rename
 	}
 }
 
-// TestScanSeamsIgnoresData keeps the gate off the declarations a test never
-// replaces: sentinels, compiled-in assets, tables, zero-valued concurrency
-// primitives, and the blank identifier.
 func TestScanSeamsIgnoresData(t *testing.T) {
 	t.Parallel()
 	found := scanFixture(t, map[string]string{
@@ -143,10 +136,6 @@ var directiveWins = os.Remove
 	}
 }
 
-// TestScanSeamsReadsEveryFileOfAPackage keeps a build-constrained file inside
-// the gate: the scan applies no constraints, so a seam behind //go:build is
-// counted once wherever it is declared and a function declared in one file is
-// recognised from another.
 func TestScanSeamsReadsEveryFileOfAPackage(t *testing.T) {
 	t.Parallel()
 	found := scanFixture(t, map[string]string{
@@ -188,9 +177,6 @@ var killProcess = prepare
 	}
 }
 
-// TestScanSeamsSkipsWhatIsNotProduction keeps the gate to the shipped tree:
-// tests, fixtures, tool-ignored directories, and the generated output
-// directories at the repository root are not production code.
 func TestScanSeamsSkipsWhatIsNotProduction(t *testing.T) {
 	t.Parallel()
 	found := scanFixture(t, map[string]string{
@@ -221,8 +207,6 @@ func TestScanSeamsSkipsWhatIsNotProduction(t *testing.T) {
 	}
 }
 
-// TestScanSeamsRejectsUnparsableSource keeps a broken tree loud: a file the
-// parser cannot read is never silently scanned as empty.
 func TestScanSeamsRejectsUnparsableSource(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -232,14 +216,12 @@ func TestScanSeamsRejectsUnparsableSource(t *testing.T) {
 	}
 }
 
-// TestReadAllowlistReadsTheLedgerFormat holds the ledger parser to one seam
-// per line, with room for the documentation that explains the ratchet.
 func TestReadAllowlistReadsTheLedgerFormat(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "seam_allowlist.txt")
 	ledger := "# a comment\n\ninternal/cache readCacheFile\ninternal/evidence removeGraphFile\n"
-	if err := os.WriteFile(path, []byte(ledger), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(ledger), filemode.ReadableFile); err != nil {
 		t.Fatalf("write the ledger: %v", err)
 	}
 	allowed, err := readAllowlist(path)
@@ -255,13 +237,11 @@ func TestReadAllowlistReadsTheLedgerFormat(t *testing.T) {
 	}
 }
 
-// TestReadAllowlistRejectsAMalformedEntry keeps a typo from quietly allowing
-// nothing, or everything.
 func TestReadAllowlistRejectsAMalformedEntry(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "seam_allowlist.txt")
-	if err := os.WriteFile(path, []byte("internal/cache\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("internal/cache\n"), filemode.ReadableFile); err != nil {
 		t.Fatalf("write the ledger: %v", err)
 	}
 	if _, err := readAllowlist(path); err == nil {
@@ -269,9 +249,6 @@ func TestReadAllowlistRejectsAMalformedEntry(t *testing.T) {
 	}
 }
 
-// TestReadAllowlistTreatsAMissingLedgerAsEmpty keeps a deleted ledger failing
-// the ratchet with the seams it should have recorded, rather than erroring
-// before the gate can report them.
 func TestReadAllowlistTreatsAMissingLedgerAsEmpty(t *testing.T) {
 	t.Parallel()
 	allowed, err := readAllowlist(filepath.Join(t.TempDir(), "seam_allowlist.txt"))
@@ -283,8 +260,6 @@ func TestReadAllowlistTreatsAMissingLedgerAsEmpty(t *testing.T) {
 	}
 }
 
-// scanFixture writes the sources to a temporary tree, scans it, and returns
-// the seams in ledger format.
 func scanFixture(t *testing.T, sources map[string]string) []string {
 	t.Helper()
 	root := t.TempDir()
@@ -298,14 +273,13 @@ func scanFixture(t *testing.T, sources map[string]string) []string {
 	return formatSeamLines(found)
 }
 
-// writeSource writes one fixture file, creating the directories it needs.
 func writeSource(t *testing.T, root, relative, source string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatalf("create the directory of %s: %v", relative, err)
 	}
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(source), filemode.ReadableFile); err != nil {
 		t.Fatalf("write %s: %v", relative, err)
 	}
 }

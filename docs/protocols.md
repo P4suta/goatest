@@ -76,7 +76,7 @@ base64. At most 64 candidates and 4 MiB of provider output are accepted.
 Allowed paths are still independently confined to `_test.go` or standard
 `testdata/fuzz` locations.
 
-Provider output never changes the worktree. Each candidate must pass three
-original-code stability runs, two mutant-kill checks, the related suite/race
+Provider output never changes the worktree. Each candidate must pass one
+original-code check, one target-mutant kill check, the related suite/race
 validation, and preimage checks before it is stored. Explicit `fix --apply`
-repeats fresh validation and preimage checks.
+performs fresh validation and preimage checks.

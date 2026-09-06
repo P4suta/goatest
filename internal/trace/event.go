@@ -3,26 +3,19 @@
 
 package trace
 
-// SchemaV1 is the first trace contract. It identifies the event format in the
-// run-start event and in the embedded JSON Schema. Pre-release trace shapes are
-// replaced in place instead of consuming a public version.
 const SchemaV1 = "goatest-trace-v1"
 
-// Synthetic target identity prefixes are shared by trace producers and
-// consumers. Keeping the vocabulary here prevents either side from silently
-// accepting a spelling the other no longer emits.
 const (
 	PackageSuiteProbePrefix    = "package-suite:"
 	PackageSuiteCoveragePrefix = "package-suite-coverage:"
-	PairedControlProbePrefix   = "paired-control:"
+	MutationControlProbePrefix = "mutation-control:"
 )
 
-// Event types. Every recorded event carries exactly one of these discriminators
-// and at most one payload record, named after the same concept.
 const (
 	TypeRunStart   = "run-start"
 	TypePhaseStart = "phase-start"
 	TypePhaseEnd   = "phase-end"
+	TypePrepare    = "prepare"
 	TypeExec       = "exec"
 	TypeMutantExec = "mutant-exec"
 	TypeRoute      = "route"
@@ -32,49 +25,50 @@ const (
 	TypeRunEnd     = "run-end"
 )
 
-// Routing reasons explain why a mutant was given the execution plan it was
-// given. A mutant no test reaches is unreached; an execution a positive probe
-// recovered is probe-reaching; every other plan is derived from coverage.
+const (
+	PrepareStateStarted  = "started"
+	PrepareStateFinished = "finished"
+)
+
+const (
+	PreparePhaseDiscovery          = "discovery"
+	PreparePhaseProbeSnapshot      = "probe_snapshot"
+	PreparePhaseMainValidation     = "main_validation"
+	PreparePhaseMainRestoration    = "main_restoration"
+	PreparePhaseVerification       = "verification"
+	PreparePhaseBinaryBuild        = "binary_build"
+	PreparePhaseProbeValidation    = "probe_validation"
+	PreparePhaseProbeCoverageBuild = "probe_coverage_build"
+	PreparePhaseProbeRestoration   = "probe_restoration"
+)
+
+const (
+	PrepareResultSucceeded = "succeeded"
+	PrepareResultFailed    = "failed"
+	PrepareResultSkipped   = "skipped"
+)
+
 const (
 	ReasonCoverageReaching = "coverage-reaching"
 	ReasonProbeReaching    = "probe-reaching"
 	ReasonUnreached        = "unreached"
 )
 
-// Routing granularities name the evidence a route was decided on: the coverage
-// blocks that contain the mutated position, or the whole file when the
-// position could not be placed in one.
 const (
 	GranularityBlock = "block"
 	GranularityFile  = "file"
 )
 
-// Routing fallbacks name why a route that would have been decided by block
-// dropped back to the file. A mutant whose position the engine did not report
-// cannot be placed in any block; a position no instrumented block contains is
-// outside the coverage the toolchain measured, which is a gap in the evidence
-// rather than an absence of tests. Both fall back to the file, which is the
-// conservative side.
 const (
 	FallbackPositionUnknown = "position-unknown"
 	FallbackOutsideBlocks   = "outside-blocks"
 )
 
-// Discharge reasons name the proof that removed a target from a reaching set.
-// A target whose coverage reaches the mutated position through a branch it
-// never takes cannot observe the mutation, and neither can one the probe pass
-// measured and never saw make the mutated site differ: it ran the original and
-// the mutant through identical states. Each proof discharges its targets
-// instead of the run executing them. Only the reasons a proof produces are
-// named here; the rest arrive with their producers.
 const (
 	DischargeBranchNeverTaken = "branch-never-taken"
 	DischargeNeverInfected    = "never-infected"
 )
 
-// Outcomes of a probe execution. Only a measured one carries facts: the other
-// three, and an execution that errored, say nothing about any mutant, and the
-// consumer treats every mutant as infected by that target.
 const (
 	ProbeOutcomeMeasured    = "measured"
 	ProbeOutcomeTestFailed  = "test-failed"
@@ -82,12 +76,14 @@ const (
 	ProbeOutcomeUnavailable = "unavailable"
 )
 
-// Event is one line of a trace. Its JSON field order is part of the contract
-// consumers read, so the declaration order below is the wire order: the
-// identity of the event first, then the single payload it carries.
-//
-// Everything in an event is deterministic except the timestamp and the
-// durations, which are the only fields a second identical run may change.
+const (
+	WholeTreeStaticUnobservable = "static-unobservable"
+	WholeTreeLogUnavailable     = "log-unavailable"
+	WholeTreeLogAmbiguous       = "log-ambiguous"
+	WholeTreeDirectoryAccess    = "directory-access"
+	WholeTreeOutsideInput       = "outside-input"
+)
+
 type Event struct {
 	Seq       int64  `json:"seq"`
 	Type      string `json:"type"`
@@ -96,6 +92,7 @@ type Event struct {
 	ElapsedMS int64  `json:"elapsed_ms"`
 
 	Phase    *PhaseRecord    `json:"phase,omitempty"`
+	Prepare  *PrepareRecord  `json:"prepare,omitempty"`
 	Exec     *ExecRecord     `json:"exec,omitempty"`
 	Mutant   *MutantRecord   `json:"mutant,omitempty"`
 	Route    *RouteRecord    `json:"route,omitempty"`
@@ -105,20 +102,18 @@ type Event struct {
 	Run      *RunRecord      `json:"run,omitempty"`
 }
 
-// PhaseRecord names a phase of a run. A phase is only timed when it ends, so
-// DurationMS is absent from the phase-start event.
 type PhaseRecord struct {
 	Name       string `json:"name"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
-// ExecRecord describes one command a run executed.
-//
-// EnvNames holds variable names alone, sorted and deduplicated: a trace records
-// which part of the environment a command could see and never what it held.
-// Output is the captured combined output, digested into the record and
-// preserved beside the trace by a sink that can store it; it is never
-// serialised into the event itself.
+type PrepareRecord struct {
+	Phase      string `json:"phase"`
+	State      string `json:"state"`
+	Result     string `json:"result,omitempty"`
+	DurationMS *int64 `json:"duration_ms,omitempty"`
+}
+
 type ExecRecord struct {
 	Argv            []string `json:"argv"`
 	Dir             string   `json:"dir,omitempty"`
@@ -133,13 +128,9 @@ type ExecRecord struct {
 	OutputPath      string   `json:"output_path,omitempty"`
 	Error           string   `json:"error,omitempty"`
 
-	// Output is the captured bytes themselves, preserved beside the trace
-	// instead of inside it.
 	Output []byte `json:"-"`
 }
 
-// MutantRecord describes one mutant execution: which mutant ran, how it ran,
-// and what became of it.
 type MutantRecord struct {
 	ID         string   `json:"id"`
 	DisplayID  string   `json:"display_id,omitempty"`
@@ -152,49 +143,6 @@ type MutantRecord struct {
 	Error      string   `json:"error,omitempty"`
 }
 
-// RouteRecord explains how a mutant was routed: the targets coverage or a
-// positive probe says reach it, the plan derived from them, and the reason that
-// plan was chosen.
-//
-// Granularity, Fallback, FileCandidates, Column, ProbeReaching, SuiteCoverage,
-// SuiteReached, SuiteProbe and Probed describe how the reaching set was
-// decided. They are additive: a recording made before they existed carries
-// none of them, so every one of them is omitted when it is empty.
-//
-// Granularity is what marks a route as carrying that metadata at all. On a
-// route that names one, an absent FileCandidates is a count of zero — a file
-// no test binary was ever linked against — rather than a missing measurement;
-// on a route that names none, the metadata was never recorded. A Fallback is
-// why a decision by block dropped back to the file, so a route carrying one is
-// a route of GranularityFile.
-//
-// Discharged is the other half of the reaching measurement: on a route of
-// GranularityBlock, ReachingTargets together with the targets of Discharged
-// are the targets whose covered blocks contain the mutated position. A proof
-// removed the discharged ones, so a discharged target never appears in
-// ReachingTargets as well.
-//
-// Probed says that the engine compiled a probe of this mutant into the probe
-// tree, so a measured target that does not name the mutant among its
-// infections never made its site differ. Routing discharges such a target from
-// this mutant's reaching set, which is what the flag lets a reader tell from a
-// mutant no measurement could ever have named. It is absent on a recording made
-// before the probe pass existed and on a mutant the engine has no probe form
-// for.
-//
-// ProbeReaching names the targets a positive infection measurement added even
-// though coverage did not route them. SuiteCoverage names the passing
-// whole-suite coverage control that decided the exact mutant position;
-// SuiteReached says its covered blocks contained that position. SuiteProbe
-// names the package-suite infection probe used to replace the conservative
-// package-suite fallback.
-//
-// Reused says the run resolved this mutant from evidence an earlier run
-// recorded instead of executing it. Nothing ran, so the recording carries no
-// execution of the mutant at all and the plan is the reuse itself: a reader
-// that finds a reused route and an execution of the same mutant is reading a
-// contradiction. It is absent on a recording made before evidence was reused
-// and on every mutant a run executed.
 type RouteRecord struct {
 	MutantID        string      `json:"mutant_id,omitempty"`
 	Rule            string      `json:"rule,omitempty"`
@@ -204,7 +152,7 @@ type RouteRecord struct {
 	ReachingTargets []string    `json:"reaching_targets,omitempty"`
 	Plan            []string    `json:"plan,omitempty"`
 	Reason          string      `json:"reason"`
-	Granularity     string      `json:"granularity,omitempty"`
+	Granularity     string      `json:"granularity"`
 	Fallback        string      `json:"fallback,omitempty"`
 	FileCandidates  int         `json:"file_candidates,omitempty"`
 	Discharged      []Discharge `json:"discharged,omitempty"`
@@ -216,39 +164,11 @@ type RouteRecord struct {
 	Reused          bool        `json:"reused,omitempty"`
 }
 
-// Discharge is one target a proof removed from a reaching set, and the proof
-// that removed it. Discharging a target is a claim that executing it would
-// prove nothing about the mutant, so the trace records which proof made the
-// claim rather than the removal alone.
 type Discharge struct {
 	Target string `json:"target"`
 	Reason string `json:"reason"`
 }
 
-// ProbeRecord describes one prepared probe-tree execution: which target,
-// package suite, or paired semantic-original control ran, how it ran, and —
-// for an infection probe — which mutants it infected.
-//
-// Target is the target ID, the same string a Discharge and the KilledBy of a
-// MutantRecord name. A package suite carries a synthetic package-suite: ID and
-// Suite true so it cannot be mistaken for one top-level target. Outcome is one
-// of the ProbeOutcome constants, and is empty only on an execution carrying
-// the Error that stopped it instead.
-//
-// Infected names the mutants whose site the target made differ from the
-// constant the mutant would put there, by their full mutant ID, each once and
-// in ascending catalogue order. It is the whole measurement: a mutant a
-// measured target left out is one that target can never observe. Only a
-// measured execution carries it, so a consumer reading any other outcome, or
-// an execution that errored, treats every mutant as infected by that target.
-//
-// Control marks a second use of the probe tree: an execution with no mutant
-// active between two mutant executions, used only to confirm that a kill
-// belongs to the mutant. Its infections are deliberately not routing facts.
-//
-// Args are the test flags the execution ran with. The record carries no
-// environment and no path into the probe tree: a probe execution is described
-// by the target that ran and the mutants it infected.
 type ProbeRecord struct {
 	Target     string   `json:"target"`
 	Package    string   `json:"package,omitempty"`
@@ -260,24 +180,23 @@ type ProbeRecord struct {
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms,omitempty"`
 	Infected   []string `json:"infected,omitempty"`
-	Error      string   `json:"error,omitempty"`
+
+	WholeTree       bool   `json:"whole_tree,omitempty"`
+	WholeTreeReason string `json:"whole_tree_reason,omitempty"`
+
+	Error string `json:"error,omitempty"`
 }
 
-// ProgressRecord carries a human readable progress note forwarded from the run.
 type ProgressRecord struct {
 	Kind   string `json:"kind"`
 	Detail string `json:"detail,omitempty"`
 }
 
-// ArtifactRecord names a file a run wrote, relative to the repository.
 type ArtifactRecord struct {
 	Kind string `json:"kind"`
 	Path string `json:"path"`
 }
 
-// RunRecord closes a trace with the verdict, the error that ended the run if
-// there was one, and the event accounting. The accounting is never optional: a
-// reader must be able to tell a complete trace from a lossy one.
 type RunRecord struct {
 	Verdict       string `json:"verdict,omitempty"`
 	Error         string `json:"error,omitempty"`

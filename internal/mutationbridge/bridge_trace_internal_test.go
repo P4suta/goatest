@@ -16,18 +16,13 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// traceOrigin fixes the clock of a recording, so that nothing a bridge test
-// asserts depends on when the test ran.
 var traceOrigin = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 
-// newRecording returns a recording kept in memory, which is how these tests
-// read what a command recorded.
 func newRecording() (*trace.MemorySink, *trace.Recorder) {
 	sink := trace.NewMemorySink(0)
 	return sink, trace.New(sink, func() time.Time { return traceOrigin })
 }
 
-// recordedExecs returns the exec records of a recording in emission order.
 func recordedExecs(sink *trace.MemorySink) []trace.ExecRecord {
 	var records []trace.ExecRecord
 	for _, event := range sink.Events() {

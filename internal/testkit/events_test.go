@@ -13,9 +13,10 @@ import (
 
 func eventFixture() []assure.Event {
 	return []assure.Event{
-		{Kind: "baseline-target", Detail: "fixture.example/assured.TestBoundary"},
+		{Kind: "baseline-progress", Detail: "0/2"},
 		{Kind: "snapshot", Detail: "sha256:abc"},
-		{Kind: "baseline-target", Detail: "fixture.example/assured.FuzzBoundary"},
+		{Kind: "baseline-progress", Detail: "1/2"},
+		{Kind: "baseline-progress", Detail: "2/2"},
 		{Kind: "mutation-progress", Detail: "1/2"},
 		{Kind: "mutation-progress", Detail: "2/2"},
 	}
@@ -24,7 +25,7 @@ func eventFixture() []assure.Event {
 func TestHasEventReportsPresence(t *testing.T) {
 	t.Parallel()
 	events := eventFixture()
-	for _, kind := range []string{"baseline-target", "snapshot", "mutation-progress"} {
+	for _, kind := range []string{"baseline-progress", "snapshot", "mutation-progress"} {
 		if !testkit.HasEvent(events, kind) {
 			t.Errorf("HasEvent(%q) = false, want true", kind)
 		}
@@ -41,7 +42,7 @@ func TestCountEventCountsMatchingKinds(t *testing.T) {
 	t.Parallel()
 	events := eventFixture()
 	for kind, want := range map[string]int{
-		"baseline-target":   2,
+		"baseline-progress": 3,
 		"snapshot":          1,
 		"mutation-progress": 2,
 		"cache-hit":         0,
@@ -58,8 +59,8 @@ func TestCountEventCountsMatchingKinds(t *testing.T) {
 func TestEventDetailsPreservesOrderAndReturnsNilWhenAbsent(t *testing.T) {
 	t.Parallel()
 	events := eventFixture()
-	want := []string{"fixture.example/assured.TestBoundary", "fixture.example/assured.FuzzBoundary"}
-	if got := testkit.EventDetails(events, "baseline-target"); !slices.Equal(got, want) {
+	want := []string{"0/2", "1/2", "2/2"}
+	if got := testkit.EventDetails(events, "baseline-progress"); !slices.Equal(got, want) {
 		t.Errorf("EventDetails = %q, want %q", got, want)
 	}
 	if got := testkit.EventDetails(events, "cache-hit"); got != nil {

@@ -24,21 +24,25 @@ planner reduces commands from 82,353 to 78,208 when those blocks are restored.
 ## Decision
 
 1. Each completed baseline target stores its positive coverage grouped by
-   module-relative file and exact 1-based line/byte-column span.
+   module-relative file and exact 1-based line/byte-column span. At most one
+   deterministic completed target per package also stores the package binary's
+   instrumented coverage; this anchor lets a partial continuation rebuild that
+   package's global instrumentation set without repeating it on every target.
 2. The append-only journal writes that target-local fact once. It does not
    rewrite blocks belonging to earlier targets; phase-boundary compaction
    canonicalizes file and block order.
 3. Restore validates positive coordinates and non-reversed spans, then sorts
    and deduplicates before routing performs binary searches.
-4. The field is optional within checkpoint v1. Absence identifies a checkpoint
-   written by an older binary and restores `nil`, which retains the existing
-   conservative whole-file route. A present object with an empty file array is
-   an exact empty measurement, not missing evidence.
-5. Once the baseline completes, its deduplicated global instrumentation and
-   successful package-suite coverage controls are stored once at the phase
-   boundary. Their presence lets an exact-input resume reconstruct the baseline
-   without compiling or executing any baseline command. Absence in an
-   unfinished or legacy checkpoint reruns the controls.
+4. Positive target coverage is required whenever target evidence is present.
+   Package instrumentation is optional only while a baseline is partial,
+   because at most one completed target per package owns that recovery anchor.
+   A present object with an empty file array is an exact empty measurement.
+5. Each terminal package-suite control is journaled while the baseline remains
+   incomplete. Once the baseline completes, its deduplicated global
+   instrumentation and successful package-suite coverage controls are compacted
+   into routing state at the phase boundary. Their presence lets an exact-input
+   resume reconstruct the baseline without compiling or executing any baseline
+   command. An unfinished checkpoint reruns only missing controls.
 6. Probe infection facts remain a separate phase-level fact. Their complete,
    catalog-bound checkpoint and fail-closed restoration are specified by
    [ADR 0014](0014-resume-complete-probe-phase.md); this decision carries only
@@ -50,9 +54,8 @@ Preservation creates no new proof. The resumed run has the same exact input
 digest, including source, tests, dependencies, toolchain, build options, and
 test arguments. It merely supplies routing with the positive blocks the first
 attempt already parsed from a passing target execution. Invalid or unavailable
-checkpoint data is rejected and causes the established cold fallback. A
-legacy checkpoint can only execute more because missing blocks are never read
-as negative coverage.
+checkpoint data is rejected and causes the established cold fallback. Missing
+blocks are never read as negative coverage.
 
 ## Consequences
 
@@ -62,6 +65,4 @@ as negative coverage.
   package-suite command.
 - Checkpoint storage grows by a measured tens of megabytes on this repository,
   while encoding remains far below one second and journal writes stay linear.
-- Older checkpoints remain safely consumable. Downgraded binaries reject the
-  additive field under their strict decoder and start cold rather than
-  misreading it.
+- The checkpoint contract describes only the current pre-release format.

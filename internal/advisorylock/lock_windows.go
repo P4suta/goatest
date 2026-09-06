@@ -12,8 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Try takes an exclusive lock on one open file without waiting. See the unix
-// build of this file for why a held lock is not a failure.
 func Try(file *os.File) (bool, error) {
 	overlapped := new(windows.Overlapped)
 	err := windows.LockFileEx(windows.Handle(file.Fd()),
@@ -27,8 +25,6 @@ func Try(file *os.File) (bool, error) {
 	return false, err
 }
 
-// Release drops the lock without closing the file, for the callers that keep
-// the file open afterwards.
 func Release(file *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, new(windows.Overlapped))
 }

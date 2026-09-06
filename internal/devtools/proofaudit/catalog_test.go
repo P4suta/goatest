@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// writeCatalog writes one catalog document into a temporary directory and
-// returns its path, so a fixture proves the decoding as well as the rule.
 func writeCatalog(t *testing.T, document string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "catalog.json")
-	if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(document), filemode.ReadableFile); err != nil {
 		t.Fatalf("write the catalog: %v", err)
 	}
 	return path
@@ -23,11 +23,7 @@ func writeCatalog(t *testing.T, document string) string {
 
 func TestReadCatalogReadsWhatTheLayerNeedsAndIgnoresTheRest(t *testing.T) {
 	t.Parallel()
-	// A catalog is written by another tool on its own release schedule, so the
-	// audit reads documents older and newer than itself. Everything the layer
-	// does not decide by — the workspace, the operator, the replacement text,
-	// the diagnostic direction of a proof — is carried past rather than
-	// refused, and only the position and the gated body are read.
+
 	path := writeCatalog(t, `{
 	  "document_type": "go-mutants/catalog",
 	  "schema_version": 1,
@@ -75,10 +71,7 @@ func TestReadCatalogReadsWhatTheLayerNeedsAndIgnoresTheRest(t *testing.T) {
 
 func TestReadCatalogRefusesADocumentItCannotBeSureOf(t *testing.T) {
 	t.Parallel()
-	// A document of another kind or another version may name the same fields
-	// and mean something else by them. An audit that read it anyway would
-	// report a soundness result it has no evidence for, so it refuses and says
-	// what it was given.
+
 	cases := []struct {
 		name     string
 		document string
@@ -137,9 +130,7 @@ func TestReadCatalogReportsADocumentItCannotRead(t *testing.T) {
 
 func TestALookupWithoutACatalogListsNothing(t *testing.T) {
 	t.Parallel()
-	// A run audited without -catalog has no catalog at all, and the layer that
-	// reads one is not in the audit. Every other caller still asks, so the
-	// absent catalog answers rather than panicking.
+
 	var absent *mutantCatalog
 	if _, listed := absent.lookup(firstMutant); listed {
 		t.Error("a run audited without a catalog listed a mutant")

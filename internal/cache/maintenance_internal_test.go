@@ -7,24 +7,23 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// A process that ignores the advisory lease can replace an entry after both
-// inspections. Removal must unlink that replacement, never traverse it to a
-// file outside the descriptor-rooted cache directory.
 func TestFlushDoesNotFollowAnEntryReplacedAfterValidation(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	entry := filepath.Join(root, "v1", "entry")
-	if err := os.MkdirAll(entry, 0o755); err != nil {
+	if err := os.MkdirAll(entry, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(entry, "report.json"), []byte("original"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(entry, "report.json"), []byte("original"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	victim := t.TempDir()
 	victimReport := filepath.Join(victim, "report.json")
-	if err := os.WriteFile(victimReport, []byte("outside"), 0o600); err != nil {
+	if err := os.WriteFile(victimReport, []byte("outside"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	probe := filepath.Join(root, "symlink-probe")

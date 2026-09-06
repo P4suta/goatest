@@ -12,10 +12,6 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 )
 
-// The engine copies the whole module into its snapshot, so the tree a mutant
-// actually ran in is the one place the question "what did this look like" can
-// be answered. A run asked to keep its temporary directories has to be able to
-// keep that one too, and the request has exactly one way to reach the engine.
 func TestOpenTellsTheEngineWhetherToKeepItsTemporaryDirectories(t *testing.T) {
 	for _, keep := range []bool{false, true} {
 		original := openMutationWorkspace
@@ -34,9 +30,6 @@ func TestOpenTellsTheEngineWhetherToKeepItsTemporaryDirectories(t *testing.T) {
 	}
 }
 
-// What the engine collected on the way in and what it left behind on the way
-// out are facts about the machine that no report carries, so the bridge passes
-// them through unchanged for the run to report as progress and as artifacts.
 func TestTheWorkspacePassesOnWhatTheEngineSweptAndPreserved(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("permission denied")
@@ -55,9 +48,7 @@ func TestTheWorkspacePassesOnWhatTheEngineSweptAndPreserved(t *testing.T) {
 	if !slices.Equal(workspace.Preserved(), []string{"/tmp/go-mutants-snapshot", "/tmp/go-mutants-scratch"}) {
 		t.Fatalf("Preserved = %v, want the paths the engine kept", workspace.Preserved())
 	}
-	// The engine names what it kept as it closes, so the answer has to survive
-	// the close: a run reads it exactly once, on the way out, and the workspace
-	// it reads it from has already let go of the engine by then.
+
 	if err := workspace.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -67,8 +58,7 @@ func TestTheWorkspacePassesOnWhatTheEngineSweptAndPreserved(t *testing.T) {
 	if got := workspace.Swept(); !slices.Equal(got.Removed, []string{"/tmp/go-mutants-dead"}) {
 		t.Fatalf("Swept after Close = %+v, want what the engine reported", got)
 	}
-	// A workspace that was never opened swept nothing and kept nothing, which
-	// is what every caller that reports on both has to be able to ask.
+
 	for _, empty := range []*Workspace{nil, {}} {
 		if got := empty.Swept(); got.Removed != nil || got.Err != nil {
 			t.Fatalf("Swept of an unopened workspace = %+v, want nothing", got)

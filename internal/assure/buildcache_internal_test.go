@@ -5,28 +5,59 @@ package assure
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer pins the one rule the
-// build cache turns on: which of goatest's own commands may write into the
-// layer this machine keeps.
-//
-// It is written from the argv builders the run uses rather than from literals,
-// so a change to what goatest runs is a change this test sees. The case that
-// matters most is the baseline target: a suite whose tests spawn go commands
-// of their own — this repository's does — would fill the base layer with
-// fixture packages and evict the standard library it exists to hold.
+const (
+	cacheRoutingCommandCount  = 2
+	baselineCacheCommandCount = 4
+)
+
+func TestRacePersistentCompileIsOnlyNeededWithoutANativeProjection(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		cache runBuildCache
+		want  bool
+	}{
+		{name: "no cache"},
+		{name: "external cache only", cache: runBuildCache{plain: "program"}, want: true},
+		{name: "native projection", cache: runBuildCache{plain: "program", native: "native"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := test.cache.needsPersistentCompile(); got != test.want {
+				t.Fatalf("needsPersistentCompile = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeAdmissionDoesNotWaitWhileOpen(t *testing.T) {
+	t.Parallel()
+	projection := &nativeCacheProjection{}
+	projection.once.Do(func() { projection.attempted = true })
+	cache := runBuildCache{plain: "program", native: "native", projection: projection}
+	release, native := cache.beginNative()
+	if !native {
+		t.Fatal("open native admission fell back")
+	}
+	release()
+}
+
 func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 	t.Parallel()
 	target := gomutants.Command{Argv: []string{filepath.Join("artifacts", "internal-assure.test"), "-test.run=^TestValue$"}}
@@ -38,7 +69,7 @@ func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 		{name: "baseline vet", argv: baselineGoCommand("vet", nil, []string{"./..."}), want: true},
 		{name: "baseline build", argv: baselineBuildCommand(nil, []string{"./..."}), want: true},
 		{name: "baseline build with tags", argv: baselineBuildCommand([]string{"integration"}, []string{"./..."}), want: true},
-		{name: "baseline test binary compile", argv: baselineCompileCommand("fixture.example/module", "fixture.example/module/pkg", "binary", nil), want: true},
+		{name: "baseline test binary compile", argv: baselineCompileCommand([]string{"fixture.example/module/pkg"}, "fixture.example/module/pkg", "binary", nil), want: true},
 		{name: "workspace toolchain", argv: []string{"go", "version"}, want: true},
 		{name: "workspace package list", argv: []string{"go", "list", "-json", "./..."}, want: true},
 		{name: "workspace module list", argv: []string{"go", "list", "-m", "-json", "all"}, want: true},
@@ -53,10 +84,6 @@ func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 		{name: "no command at all", argv: nil, want: false},
 		{name: "a bare go", argv: []string{"go"}, want: false},
 
-		// The go command accepts -C only as its first flag, and it changes the
-		// directory before reading the subcommand. A rule that read argv[1]
-		// blindly would classify every one of these as neither a compile nor a
-		// test run and quietly stop persisting.
 		{name: "a directory change before a build", argv: []string{"go", "-C", "sub", "build", "./..."}, want: true},
 		{name: "a joined directory change before a build", argv: []string{"go", "-C=sub", "build", "./..."}, want: true},
 		{name: "a directory change before a list", argv: []string{"go", "-C", "sub", "list", "-json", "./..."}, want: true},
@@ -75,9 +102,6 @@ func TestOnlyCommandsThatCompileOrListPersistToTheBaseLayer(t *testing.T) {
 	}
 }
 
-// TestPersistingCommandReadsTheSubcommandOfAnyGoBinary holds the rule to the go
-// command wherever it is: a run may be given an absolute go binary, and Windows
-// spells it with an extension.
 func TestPersistingCommandReadsTheSubcommandOfAnyGoBinary(t *testing.T) {
 	t.Parallel()
 	for _, executable := range []string{"go", "go.exe", "/usr/local/go/bin/go", filepath.Join("C:", "Go", "bin", "go.exe")} {
@@ -95,8 +119,6 @@ func TestPersistingCommandReadsTheSubcommandOfAnyGoBinary(t *testing.T) {
 	}
 }
 
-// recordingWorkspace is a workspace that answers nothing and remembers what it
-// was asked to run.
 type recordingWorkspace struct{ commands []gomutants.Command }
 
 func (workspace *recordingWorkspace) Exec(_ context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
@@ -106,28 +128,27 @@ func (workspace *recordingWorkspace) Exec(_ context.Context, command gomutants.C
 
 func TestBuildCacheWorkspaceAttachesThePersistingProgramToCompilesAlone(t *testing.T) {
 	t.Parallel()
-	cache := runBuildCache{scratch: "scratch", base: "base", plain: "goatest cacheprog", persisting: "goatest cacheprog --persist"}
+	cache := runBuildCache{scratch: "scratch", base: "base", fallback: "fallback", native: "native", plain: "goatest cacheprog", persisting: "goatest cacheprog --persist"}
 	inner := &recordingWorkspace{}
 	wrapped := withBuildCache(inner, cache)
 	if _, err := wrapped.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "build", "./..."}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := wrapped.Exec(t.Context(), gomutants.Command{
-		Argv: []string{"go", "tool", "test2json", "binary"}, Env: []string{"RESOURCE=ready"},
+		Argv: []string{"binary", "-test.v=test2json", "-test.run=^TestValue$", "-test.coverprofile=value.cover"},
+		Env:  []string{"RESOURCE=ready"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.commands) != 2 {
+	if len(inner.commands) != cacheRoutingCommandCount {
 		t.Fatalf("commands = %d, want two", len(inner.commands))
 	}
-	if !slices.Equal(inner.commands[0].Env, []string{"GOCACHEPROG=goatest cacheprog --persist"}) {
+	if !slices.Equal(inner.commands[0].Env, []string{"GOCACHE=fallback", "GOCACHEPROG=goatest cacheprog --persist"}) {
 		t.Fatalf("compile environment = %q, want the persisting program", inner.commands[0].Env)
 	}
-	// A target run keeps the overlay it came with and gains nothing: it
-	// inherits the scratch-writing program from the frozen environment of the
-	// workspace, which is where every command of the run reads it from.
-	if !slices.Equal(inner.commands[1].Env, []string{"RESOURCE=ready"}) {
-		t.Fatalf("target environment = %q, want only the resources it was given", inner.commands[1].Env)
+
+	if !slices.Equal(inner.commands[1].Env, []string{"RESOURCE=ready", "GOCACHE=native", "GOCACHEPROG="}) {
+		t.Fatalf("target environment = %q, want resources and the projected native cache", inner.commands[1].Env)
 	}
 }
 
@@ -140,44 +161,41 @@ func TestBuildCacheWorkspaceReplacesACacheProgramItWasHandedAndWrapsNothingWitho
 	if wrapped := withBuildCache(nil, runBuildCache{plain: "program", persisting: "program --persist"}); wrapped != nil {
 		t.Fatalf("wrapping no workspace produced %T", wrapped)
 	}
-	wrapped := withBuildCache(inner, runBuildCache{plain: "program", persisting: "program --persist"})
+	wrapped := withBuildCache(inner, runBuildCache{fallback: "fallback", native: "native", plain: "program", persisting: "program --persist"})
 	if _, err := wrapped.Exec(t.Context(), gomutants.Command{
-		Argv: []string{"go", "list", "-json", "./..."}, Env: []string{"gocacheprog=stale", "RESOURCE=ready"},
+		Argv: []string{"go", "list", "-json", "./..."}, Env: []string{"gocacheprog=stale", "gocache=stale", "RESOURCE=ready"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(inner.commands[0].Env, []string{"RESOURCE=ready", "GOCACHEPROG=program --persist"}) {
-		t.Fatalf("environment = %q, want the stale cache program replaced and the resources kept", inner.commands[0].Env)
+	if !slices.Equal(inner.commands[0].Env, []string{"RESOURCE=ready", "GOCACHE=fallback", "GOCACHEPROG=program --persist"}) {
+		t.Fatalf("environment = %q, want stale cache settings replaced and resources kept", inner.commands[0].Env)
 	}
 }
 
-// TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns holds the rule
-// where it is actually applied: a whole baseline round through the wrapper.
 func TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns(t *testing.T) {
 	workspace := &baselineFakeWorkspace{}
-	// The coverage profile is written whichever way the target was run, so the
-	// round completes with the directly executed framed test binary.
+
 	workspace.exec = func(command gomutants.Command) (gomutants.CommandResult, error) {
 		if profile := coverageProfileArgument(command); profile != "" {
 			contents := "mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n"
-			if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
+			if err := os.WriteFile(profile, []byte(contents), filemode.PrivateFile); err != nil {
 				t.Fatal(err)
 			}
 		}
 		return gomutants.CommandResult{Duration: time.Second}, nil
 	}
-	cache := runBuildCache{scratch: "scratch", base: "base", plain: "program", persisting: "program --persist"}
+	cache := runBuildCache{scratch: "scratch", base: "base", fallback: "fallback", native: "native", plain: "program", persisting: "program --persist"}
 	result, err := CollectBaseline(t.Context(), withBuildCache(workspace, cache), baselineModel(), []BaselineTarget{{
 		Target: baselineTestTarget("TestValue"),
 	}}, BaselineOptions{ArtifactDirectory: t.TempDir(), UseTestFraming: true})
 	if err != nil || len(result.Targets) != 1 {
 		t.Fatalf("CollectBaseline = (%+v, %v)", result, err)
 	}
-	if len(workspace.commands) != 4 {
+	if len(workspace.commands) != baselineCacheCommandCount {
 		t.Fatalf("commands = %d, want vet, build, a compile, and one target run", len(workspace.commands))
 	}
 	for index, command := range workspace.commands[:3] {
-		if !slices.Contains(command.Env, "GOCACHEPROG=program --persist") {
+		if !slices.Contains(command.Env, "GOCACHE=fallback") || !slices.Contains(command.Env, "GOCACHEPROG=program --persist") {
 			t.Errorf("command %d %q = %q, want the persisting program", index, command.Argv, command.Env)
 		}
 	}
@@ -185,9 +203,53 @@ func TestCollectBaselinePersistsItsCompilesAndNeverItsTargetRuns(t *testing.T) {
 	if filepath.Base(targetRun.Argv[0]) != binaryName("fixture.example/module") || !slices.Contains(targetRun.Argv, "-test.v=test2json") {
 		t.Fatalf("the fourth command was %q, want the directly executed framed target", targetRun.Argv)
 	}
-	for _, entry := range targetRun.Env {
-		if strings.HasPrefix(entry, cacheProgramVariable+"=") {
-			t.Fatalf("the target run carried %q; a test binary's children would fill the base layer", entry)
+	if !slices.Contains(targetRun.Env, "GOCACHE=native") || !slices.Contains(targetRun.Env, "GOCACHEPROG=") {
+		t.Fatalf("target environment = %q, want the projected native cache", targetRun.Env)
+	}
+}
+
+func TestBuildCacheWorkspaceUsesNativeCacheForWholeSuitesAndRaceRuns(t *testing.T) {
+	t.Parallel()
+	cache := runBuildCache{fallback: "fallback", native: "native", plain: "program", persisting: "program --persist"}
+	inner := &recordingWorkspace{}
+	wrapped := withBuildCache(inner, cache)
+	commands := []gomutants.Command{
+		{Argv: []string{"binary", "-test.coverprofile=suite.cover", "-test.count=1"}},
+		{Argv: []string{"go", "test", "-race", "-count=1", "./..."}},
+		{Argv: []string{"binary", "-test.run=^TestValue$"}},
+	}
+	for _, command := range commands {
+		if _, err := wrapped.Exec(t.Context(), command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, command := range inner.commands[:2] {
+		if !slices.Contains(command.Env, "GOCACHE=native") || !slices.Contains(command.Env, "GOCACHEPROG=") {
+			t.Errorf("command %d environment = %q, want the native run cache", index, command.Env)
+		}
+	}
+	if command := inner.commands[2]; !slices.Contains(command.Env, "GOCACHE=fallback") || !slices.Contains(command.Env, "GOCACHEPROG=program") {
+		t.Errorf("unclassified direct binary environment = %q, want the bounded external fallback", command.Env)
+	}
+}
+
+func TestOnlyProjectExecutingCommandsUseTheProjectedNativeCache(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		argv []string
+		want bool
+	}{
+		{argv: []string{"binary", "-test.run=^TestValue$", "-test.coverprofile=value.cover"}, want: true},
+		{argv: []string{"binary", "-test.v=test2json", "-test.coverprofile=value.cover", "-test.run=^TestValue$"}, want: true},
+		{argv: []string{"binary", "-test.coverprofile=suite.cover"}, want: true},
+		{argv: []string{"binary", "-test.run=^TestValue$"}},
+		{argv: []string{"go", "test", "-run=TestValue", "-coverprofile=value.cover", "./..."}, want: true},
+		{argv: []string{"go", "test", "-c", "./pkg"}},
+		{argv: []string{"go", "tool", "test2json", "binary"}},
+		{argv: nil},
+	} {
+		if got := nativeExecutionCommand(test.argv); got != test.want {
+			t.Errorf("nativeExecutionCommand(%q) = %t, want %t", test.argv, got, test.want)
 		}
 	}
 }
@@ -201,17 +263,25 @@ func TestOpenRunBuildCacheServesNothingWithoutAProgramOrABase(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			cache, err := openRunBuildCache(test.program, test.base, runScratch{fallback: t.TempDir()}, 2<<30)
+			cache, err := openRunBuildCache(test.program, test.base, "", runScratch{dir: t.TempDir()}, 2<<30)
 			if err != nil || cache.serves() || cache.environment() != nil || cache.persistingEnvironment() != nil {
 				t.Fatalf("openRunBuildCache = (%+v, %v), want a cache that serves nothing", cache, err)
 			}
 			if summary := cache.summarize(); summary != "" {
 				t.Fatalf("summary = %q, want nothing to report", summary)
 			}
-			if err := releaseBuildCache(Options{}, cache); err != nil {
+			if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 				t.Fatalf("releaseBuildCache = %v", err)
 			}
 		})
+	}
+}
+
+func TestOpenRunBuildCacheRefusesAnUnownedScratchTopology(t *testing.T) {
+	t.Parallel()
+	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), "", runScratch{}, 0)
+	if err == nil || cache.serves() || !strings.Contains(err.Error(), "run scratch is unavailable") {
+		t.Fatalf("openRunBuildCache = (%+v, %v), want the ownership failure", cache, err)
 	}
 }
 
@@ -219,7 +289,7 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	t.Parallel()
 	base := t.TempDir()
 	temporary := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: temporary}, 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: temporary}, 2<<30)
 	if err != nil || !cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v)", cache, err)
 	}
@@ -229,51 +299,485 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	if !strings.HasPrefix(cache.scratch, temporary) {
 		t.Fatalf("scratch = %q, want it below %q", cache.scratch, temporary)
 	}
-	// Preparing the base layer is the writability probe, so the layer exists
-	// before a single go command has been handed the program.
+	if filepath.Dir(cache.native) != filepath.Dir(base) || !strings.HasPrefix(filepath.Base(cache.native), buildcache.NativeDirectoryPrefix) || cache.native == cache.scratch {
+		t.Fatalf("native cache = %q, want a separate owned directory beside base %q", cache.native, base)
+	}
+	if filepath.Dir(cache.fallback) != cache.scratch || filepath.Base(cache.fallback) != goCacheScratchName {
+		t.Fatalf("external backing cache = %q, want it inside run scratch %q", cache.fallback, cache.scratch)
+	}
+	if got := cache.environment(); !slices.Equal(got, []string{"GOCACHE=" + cache.fallback, "GOCACHEPROG=" + cache.plain}) {
+		t.Fatalf("non-persisting environment = %q", got)
+	}
+
 	if _, err := os.Stat(filepath.Join(base, buildcache.MarkerName)); err != nil {
 		t.Fatalf("base layer = %v, want it prepared", err)
 	}
-	// The bound the run's scratch layer is pruned to travels to the served
-	// child on its command line, because the child reads no configuration.
+
 	if !strings.Contains(cache.plain, "--max-bytes") || !strings.Contains(cache.persisting, "--max-bytes") {
 		t.Fatalf("programs = plain %q persisting %q, want the bound on both", cache.plain, cache.persisting)
 	}
-	if err := releaseBuildCache(Options{}, cache); err != nil {
+	if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cache.scratch); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("scratch after close = %v, want it gone", err)
+	}
+	if _, err := os.Stat(cache.native); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native cache after close = %v, want it gone", err)
 	}
 	if _, err := os.Stat(base); err != nil {
 		t.Fatalf("base after close = %v, want the layer the machine keeps left alone", err)
 	}
 }
 
+func TestEmptyBuildCachePreparationImportsIntoThePersistentLayer(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	source := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, source, runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := cache.preparationEnvironment()
+	if !slices.Contains(environment, "GOCACHE="+cache.fallback) {
+		t.Fatalf("preparation environment = %q, want the bounded backing directory", environment)
+	}
+	var program string
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "GOCACHEPROG=") {
+			program = strings.TrimPrefix(entry, "GOCACHEPROG=")
+		}
+	}
+	if !strings.Contains(program, "--persist") || !strings.Contains(program, "--native-source "+source) {
+		t.Fatalf("preparation program = %q, want persistent on-demand native imports", program)
+	}
+	if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectExecutionProjectsTheBaseIntoTheNativeCache(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
+	body := "compiled archive"
+	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
+		action, output, strings.NewReader(body), int64(len(body)), time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	inner := &recordingWorkspace{}
+	if _, err := withBuildCache(inner, cache).Exec(t.Context(), gomutants.Command{
+		Argv: []string{"project.test", "-test.coverprofile=target.cover"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(inner.commands[0].Env, "GOCACHE="+cache.native) || !slices.Contains(inner.commands[0].Env, "GOCACHEPROG=") {
+		t.Fatalf("project environment = %q, want the native cache", inner.commands[0].Env)
+	}
+	baseInfo, err := os.Stat(buildCacheObjectPath(base, 0x21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := hex.EncodeToString(output)
+	nativeInfo, err := os.Stat(filepath.Join(cache.native, name[:2], name+"-d"))
+	if err != nil || !os.SameFile(baseInfo, nativeInfo) {
+		t.Fatalf("native output = (%v, %v), want a hard link to the base", nativeInfo, err)
+	}
+	if summary := cache.summarize(); !strings.Contains(summary, "native-seed=ready native-actions=1 native-objects=1 native-bytes=16") {
+		t.Fatalf("summary = %q, want the successful projection measured", summary)
+	}
+	if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMutationPreparationUsesTheNativeProjection(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+			t.Error(err)
+		}
+	}()
+	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
+	body := "compiled archive"
+	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
+		action, output, strings.NewReader(body), int64(len(body)), time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	environment := cache.preparationEnvironment()
+	if !slices.Equal(environment, []string{"GOCACHE=" + cache.native, "GOCACHEPROG="}) {
+		t.Fatalf("preparation environment = %q, want the native projection", environment)
+	}
+	name := hex.EncodeToString(output)
+	if _, err := os.Stat(filepath.Join(cache.native, name[:2], name+"-d")); err != nil {
+		t.Fatalf("native preparation object = %v", err)
+	}
+}
+
+func TestMutationPreparationFallsBackFromAnUntrustworthyProjection(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+			t.Error(err)
+		}
+	}()
+	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
+	body := "trusted object"
+	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
+		action, output, strings.NewReader(body), int64(len(body)), time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	name := hex.EncodeToString(output)
+	directory := filepath.Join(cache.native, name[:2])
+	if err := os.MkdirAll(directory, filemode.PrivateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name+"-d"), []byte("untrusted"), filemode.PrivateFile); err != nil {
+		t.Fatal(err)
+	}
+	if environment := cache.preparationEnvironment(); !slices.Equal(environment, []string{
+		"GOCACHE=" + cache.fallback, "GOCACHEPROG=" + cache.persisting,
+	}) {
+		t.Fatalf("preparation environment = %q, want the persistent fallback", environment)
+	}
+}
+
+func TestPersistentCommandRefreshesTheProjectionBeforeTheNextExecution(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+			t.Error(err)
+		}
+	}()
+	layers := buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}
+	if _, err := layers.Put(buildCacheTestKey(1), buildCacheTestKey(0x21), strings.NewReader("first"), 5, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	inner := &recordingWorkspace{}
+	wrapper := withBuildCache(inner, cache)
+	if _, err := wrapper.Exec(t.Context(), gomutants.Command{Argv: []string{"project.test", "-test.coverprofile=first.cover"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layers.Put(buildCacheTestKey(2), buildCacheTestKey(0x22), strings.NewReader("second"), 6, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := wrapper.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "test", "-race", "-c", "-o", os.DevNull, "./..."}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrapper.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "test", "-race", "-count=1", "./..."}}); err != nil {
+		t.Fatal(err)
+	}
+	secondName := hex.EncodeToString(buildCacheTestKey(0x22))
+	if _, err := os.Stat(filepath.Join(cache.native, secondName[:2], secondName+"-d")); err != nil {
+		t.Fatalf("persistent generation was not projected before execution: %v", err)
+	}
+	if summary := cache.summarize(); !strings.Contains(summary, "native-actions=2 native-objects=2") {
+		t.Fatalf("refreshed projection summary = %q, want both persistent generations", summary)
+	}
+}
+
+func TestPersistPreparationRequiresAndUpdatesAReadyProjection(t *testing.T) {
+	sentinel := errors.New("not attempted")
+	unavailable := &nativeCacheProjection{persistErr: sentinel}
+	runBuildCache{projection: unavailable}.persistPreparation()
+	if unavailable.persistErr != sentinel {
+		t.Fatalf("unavailable persistence error = %v", unavailable.persistErr)
+	}
+	runBuildCache{plain: "program", native: "native"}.persistPreparation()
+
+	base := t.TempDir()
+	if err := (buildcache.Layer{Dir: base}).Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	projection := &nativeCacheProjection{persistErr: sentinel}
+	cache := runBuildCache{base: base, native: t.TempDir(), plain: "program", projection: projection}
+	cache.persistPreparation()
+	projection.mutex.Lock()
+	attempted := projection.attempted
+	persistErr := projection.persistErr
+	projection.mutex.Unlock()
+	if !attempted || persistErr != nil {
+		t.Fatalf("ready persistence = (attempted=%t, err=%v)", attempted, persistErr)
+	}
+}
+
+func TestRecordNativePersistenceAccumulatesEveryMeasurement(t *testing.T) {
+	const (
+		initialMeasurement   = 2
+		persistedMeasurement = 3
+		totalMeasurement     = initialMeasurement + persistedMeasurement
+	)
+	projection := &nativeCacheProjection{
+		seed:      buildcache.NativeSeed{Actions: initialMeasurement, Objects: initialMeasurement, Bytes: initialMeasurement, Skipped: initialMeasurement},
+		persisted: buildcache.NativePersisted{Actions: initialMeasurement, Objects: initialMeasurement, Bytes: initialMeasurement, Skipped: initialMeasurement},
+		collected: buildcache.NativeCollected{BeforeBytes: initialMeasurement, AfterBytes: initialMeasurement},
+	}
+	seed := projection.seed
+	persisted := buildcache.NativePersisted{
+		Actions: persistedMeasurement, Objects: persistedMeasurement, Bytes: persistedMeasurement, Skipped: persistedMeasurement, Deferred: true,
+	}
+	recordNativePersistence(projection, seed, persisted, nil)
+	if projection.persisted.Actions != totalMeasurement || projection.persisted.Objects != totalMeasurement || projection.persisted.Bytes != totalMeasurement ||
+		projection.persisted.Skipped != totalMeasurement || !projection.persisted.Deferred || projection.persistErr != nil {
+		t.Fatalf("persisted summary = %+v, err = %v", projection.persisted, projection.persistErr)
+	}
+	if projection.seed.Actions != totalMeasurement || projection.seed.Objects != totalMeasurement || projection.seed.Bytes != totalMeasurement || projection.seed.Skipped != totalMeasurement {
+		t.Fatalf("updated seed = %+v", projection.seed)
+	}
+	if projection.collected.BeforeBytes != totalMeasurement || projection.collected.AfterBytes != totalMeasurement {
+		t.Fatalf("updated collection = %+v", projection.collected)
+	}
+}
+
+func TestProjectExecutionFallsBackWhenTheNativeProjectionIsNotTrustworthy(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, output := buildCacheTestKey(1), buildCacheTestKey(0x21)
+	body := "trusted object"
+	if _, err := (buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}).Put(
+		action, output, strings.NewReader(body), int64(len(body)), time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	name := hex.EncodeToString(output)
+	directory := filepath.Join(cache.native, name[:2])
+	if err := os.MkdirAll(directory, filemode.PrivateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name+"-d"), []byte("wrong contents"), filemode.PrivateFile); err != nil {
+		t.Fatal(err)
+	}
+	inner := &recordingWorkspace{}
+	if _, err := withBuildCache(inner, cache).Exec(t.Context(), gomutants.Command{
+		Argv: []string{"project.test", "-test.coverprofile=target.cover"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(inner.commands[0].Env, "GOCACHEPROG="+cache.plain) || slices.Contains(inner.commands[0].Env, "GOCACHEPROG=") {
+		t.Fatalf("project environment = %q, want the bounded external fallback", inner.commands[0].Env)
+	}
+	if summary := cache.summarize(); !strings.Contains(summary, "native-seed=fallback") {
+		t.Fatalf("summary = %q, want the projection fallback reported", summary)
+	}
+	if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildCacheCloseToleratesAnUnavailableNativeOwner(t *testing.T) {
+	t.Parallel()
+	for _, keep := range []bool{false, true} {
+		t.Run(strconv.FormatBool(keep), func(t *testing.T) {
+			t.Parallel()
+			scratch := t.TempDir()
+			cache := runBuildCache{
+				scratch: scratch, plain: "fallback-program",
+				projection: &nativeCacheProjection{},
+			}
+			if err := cache.close(keep); err != nil {
+				t.Fatal(err)
+			}
+			_, err := os.Stat(scratch)
+			if keep && err != nil {
+				t.Fatalf("kept external scratch = %v, want it preserved", err)
+			}
+			if !keep && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("closed external scratch = %v, want it removed", err)
+			}
+		})
+	}
+}
+
+func TestPreparedMutationExecutionsUseTheProjectedNativeCache(t *testing.T) {
+	t.Parallel()
+	underlying := &mutationUnitSession{catalog: gomutants.Catalog{Digest: "catalog-digest"}}
+	wrapped := withNativeBuildCache(underlying, runBuildCache{
+		fallback: "fallback", native: "native", plain: "program", persisting: "program --persist",
+	})
+	if wrapped == MutationSession(underlying) {
+		t.Fatal("withNativeBuildCache returned the unwrapped session")
+	}
+	if _, err := wrapped.Exec(t.Context(), gomutants.ExecRequest{
+		Mutant: "mutant", Env: []string{"gocache=stale", "GOCACHEPROG=stale", "RESOURCE=ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrapped.Probe(t.Context(), gomutants.ProbeRequest{
+		Env: []string{"RESOURCE=ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requests := underlying.requests
+	if len(requests) != 1 || !slices.Equal(requests[0].Env, []string{"RESOURCE=ready", "GOCACHE=native", "GOCACHEPROG="}) {
+		t.Fatalf("mutant environment = %q, want resources and the native cache", requests[0].Env)
+	}
+	probes := underlying.probeRequests()
+	if len(probes) != 1 || !slices.Equal(probes[0].Env, []string{"RESOURCE=ready", "GOCACHE=native", "GOCACHEPROG="}) {
+		t.Fatalf("probe environment = %q, want resources and the native cache", probes[0].Env)
+	}
+	if got := wrapped.Catalog(); got.Digest != underlying.catalog.Digest {
+		t.Fatalf("wrapped catalog = %+v, want the underlying catalog", got)
+	}
+
+	fallbackProjection := &nativeCacheProjection{}
+	fallbackProjection.once.Do(func() {
+		fallbackProjection.attempted = true
+		fallbackProjection.err = errors.New("projection unavailable")
+	})
+	fallbackSession := &mutationUnitSession{}
+	fallbackWrapped := withNativeBuildCache(fallbackSession, runBuildCache{
+		fallback: "fallback", native: "native", plain: "program",
+		projection: fallbackProjection,
+	})
+	if _, err := fallbackWrapped.Exec(t.Context(), gomutants.ExecRequest{
+		Mutant: "mutant", Env: []string{"GOCACHE=stale", "GOCACHEPROG=stale", "RESOURCE=ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fallbackSession.requests[0].Env; !slices.Equal(got, []string{"RESOURCE=ready", "GOCACHE=fallback", "GOCACHEPROG=program"}) {
+		t.Fatalf("mutant fallback environment = %q, want independent external backing", got)
+	}
+
+	noNativeSession := &mutationUnitSession{}
+	noNativeWrapped := withNativeBuildCache(noNativeSession, runBuildCache{
+		fallback: "fallback", plain: "program", persisting: "program --persist",
+	})
+	if noNativeWrapped == MutationSession(noNativeSession) {
+		t.Fatal("a cache without a native directory left executions unwrapped")
+	}
+	if _, err := noNativeWrapped.Exec(t.Context(), gomutants.ExecRequest{
+		Mutant: "mutant", Env: []string{"GOCACHE=fallback", "GOCACHEPROG=program --persist", "RESOURCE=ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := noNativeSession.requests[0].Env; !slices.Equal(got, []string{"RESOURCE=ready", "GOCACHE=fallback", "GOCACHEPROG=program"}) {
+		t.Fatalf("no-native mutant environment = %q, want the bounded external fallback", got)
+	}
+}
+
+func TestNativeCollectionDrainsActiveExecutionsBeforeRemovingAnything(t *testing.T) {
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Now()); err != nil {
+			t.Error(err)
+		}
+	}()
+	firstRelease, native := cache.beginNative()
+	if !native {
+		t.Fatal("first native execution fell back")
+	}
+	cache.projection.mutex.Lock()
+	cache.projection.lastCollect = time.Now().Add(-buildcache.NativeCollectInterval - time.Second)
+	cache.projection.mutex.Unlock()
+	drained := false
+	cache.projection.beforeDrain = func() {
+		if drained {
+			panic("repeated drain")
+		}
+		drained = true
+		firstRelease()
+	}
+	secondRelease, native := cache.beginNative()
+	if !native || !drained {
+		t.Fatalf("second native execution = admitted %t, drained %t", native, drained)
+	}
+	secondRelease()
+}
+
+func TestNativeCollectionFailureClosesAdmissionAndFallsBack(t *testing.T) {
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, native := cache.beginNative()
+	if !native {
+		t.Fatal("initial native execution fell back")
+	}
+	release()
+
+	if err := cache.nativeOwner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cache.native); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache.native, []byte("not a cache directory"), filemode.PrivateFile); err != nil {
+		t.Fatal(err)
+	}
+	cache.projection.mutex.Lock()
+	cache.projection.lastCollect = time.Now().Add(-buildcache.NativeCollectInterval - time.Second)
+	cache.projection.mutex.Unlock()
+	if release, admitted := cache.beginNative(); admitted {
+		release()
+		t.Fatal("native execution entered after collection failed")
+	}
+	if release, admitted := cache.beginNative(); admitted {
+		release()
+		t.Fatal("native execution re-entered after the fallback became sticky")
+	}
+	inner := &recordingWorkspace{}
+	if _, err := withBuildCache(inner, cache).Exec(t.Context(), gomutants.Command{
+		Argv: []string{"project.test", "-test.coverprofile=target.cover"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.commands[0].Env; !slices.Equal(got, []string{"GOCACHE=" + cache.fallback, "GOCACHEPROG=" + cache.plain}) {
+		t.Fatalf("collection fallback environment = %q, want independent external backing", got)
+	}
+	if summary := cache.summarize(); !strings.Contains(summary, "native-seed=collection-failed") {
+		t.Fatalf("summary = %q, want the collection fallback reported", summary)
+	}
+}
+
 func TestOpenRunBuildCacheReportsABaseLayerItCannotPrepare(t *testing.T) {
 	t.Parallel()
 	blocked := filepath.Join(t.TempDir(), "occupied")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+	if err := os.WriteFile(blocked, []byte("not a directory"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := openRunBuildCache("/opt/goatest", blocked, runScratch{fallback: t.TempDir()}, 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", blocked, "", runScratch{dir: t.TempDir()}, 2<<30)
 	if err == nil || cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v), want the unusable layer reported", cache, err)
 	}
 }
 
-// TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor holds the
-// error path to the same cleanliness rule as the happy one. The scratch
-// directory is made before the two programs are rendered, so a program the go
-// command cannot be handed leaves a run with no cache — and must leave it with
-// no directory either.
 func TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor(t *testing.T) {
 	t.Parallel()
 	temporary := t.TempDir()
-	// A path holding both kinds of quote cannot be rendered as a GOCACHEPROG
-	// value at all, which is the one failure that falls between making the
-	// directory and returning the cache.
-	cache, err := openRunBuildCache(`/opt/o'say"what/goatest`, t.TempDir(), runScratch{fallback: temporary}, 2<<30)
+
+	cache, err := openRunBuildCache(`/opt/o'say"what/goatest`, t.TempDir(), "", runScratch{dir: temporary}, 2<<30)
 	if err == nil || cache.serves() {
 		t.Fatalf("openRunBuildCache = (%+v, %v), want the unrenderable program reported", cache, err)
 	}
@@ -290,13 +794,10 @@ func TestOpenRunBuildCacheRemovesTheScratchItCannotRenderAProgramFor(t *testing.
 	}
 }
 
-// TestCollectBaseBoundsTheLayerTheMachineKeeps is the cap actually being a cap.
-// A bound enforced only by a command a developer remembers to type is not a
-// bound, so a run collects the base layer when it ends.
 func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: t.TempDir()}, 20)
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,8 +810,7 @@ func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Two entries were last read long ago; the third is one a build running
-	// beside this collection is reading, so MinIdle must spare it.
+
 	for _, key := range []byte{1, 2} {
 		aged := moment.Add(-90 * 24 * time.Hour)
 		if err := os.Chtimes(buildCacheActionPath(base, key), aged, aged); err != nil {
@@ -341,13 +841,11 @@ func TestCollectBaseBoundsTheLayerTheMachineKeeps(t *testing.T) {
 func TestCollectBaseSkipsWhatAnotherProcessIsAlreadyCollecting(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cache, err := openRunBuildCache("/opt/goatest", base, runScratch{fallback: t.TempDir()}, 20)
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The concurrent collector is a run of another repository, which shares
-	// this layer. Yielding to it costs this run nothing: the layer is bounded
-	// either way, and the next run collects whatever this one left.
+
 	release, held, err := (buildcache.Layer{Dir: base}).HoldCollection()
 	if err != nil || !held {
 		t.Fatalf("holding the collection lock = (%t, %v)", held, err)
@@ -372,24 +870,19 @@ func TestCollectBaseDoesNothingForARunWithoutACache(t *testing.T) {
 	}
 }
 
-// buildCacheTestKey renders an identifier of the length the go command uses.
 func buildCacheTestKey(value byte) []byte {
-	identifier := make([]byte, 32)
+	identifier := make([]byte, sha256.Size)
 	for index := range identifier {
 		identifier[index] = value
 	}
 	return identifier
 }
 
-// buildCacheActionPath is where a layer stores one cache key, as this test
-// knows the layout rather than as the package computes it.
 func buildCacheActionPath(dir string, key byte) string {
 	name := hex.EncodeToString(buildCacheTestKey(key))
 	return filepath.Join(dir, "actions", name[:2], name)
 }
 
-// buildCacheObjectPath is where a layer stores one cached output, as this test
-// knows the layout rather than as the package computes it.
 func buildCacheObjectPath(dir string, key byte) string {
 	name := hex.EncodeToString(buildCacheTestKey(key))
 	return filepath.Join(dir, "objects", name[:2], name)
@@ -397,14 +890,46 @@ func buildCacheObjectPath(dir string, key byte) string {
 
 func TestReleaseBuildCacheKeepsAndNamesTheScratchItWasAskedToKeep(t *testing.T) {
 	t.Parallel()
-	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), runScratch{fallback: t.TempDir()}, 2<<30)
+	cache, err := openRunBuildCache("/opt/goatest", t.TempDir(), "", runScratch{dir: t.TempDir()}, 2<<30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := releaseBuildCache(Options{KeepTemp: true}, cache); err != nil {
+	if err := releaseBuildCache(Options{KeepTemp: true}, cache, runScratch{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cache.scratch); err != nil {
 		t.Fatalf("scratch after a kept close = %v, want it left where it was made", err)
+	}
+	if _, err := os.Stat(cache.native); err != nil {
+		t.Fatalf("native cache after a kept close = %v, want it left where it was made", err)
+	}
+}
+
+func TestReleaseBuildCacheBoundsANativeCacheBeforeKeepingIt(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cache, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layers := buildcache.Layers{Base: buildcache.Layer{Dir: base}, Persist: true}
+	for index := byte(1); index <= 2; index++ {
+		if _, err := layers.Put(buildCacheTestKey(index), buildCacheTestKey(index+0x20),
+			strings.NewReader("0123456789"), 10, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inner := &recordingWorkspace{}
+	if _, err := withBuildCache(inner, cache).Exec(t.Context(), gomutants.Command{
+		Argv: []string{"project.test", "-test.coverprofile=target.cover"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseBuildCache(Options{KeepTemp: true}, cache, runScratch{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := buildcache.CollectNative(cache.native, 0)
+	if err != nil || status.BeforeBytes > 10 {
+		t.Fatalf("kept native cache = (%+v, %v), want it inside the configured bound", status, err)
 	}
 }

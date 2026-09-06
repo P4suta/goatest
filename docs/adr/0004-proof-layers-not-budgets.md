@@ -65,8 +65,9 @@ known.
 5. **Every layer is audited independently before it ships, and stays
    auditable.** `proofaudit` reimplements each rule from a recording and the
    coverage profiles a run left behind, and holds it to every kill that run
-   proved: a layer that would drop one recorded killer is unsound, and a layer
-   ships only with zero violations on a real recording of this repository. The
+   proved: a layer that would drop one recorded kill witness is unsound, and a
+   layer ships only with zero violations on a real recording of this
+   repository. The
    reimplementation is deliberate — the code under audit is not asked whether
    it agrees with itself.
 

@@ -65,11 +65,11 @@ func TestAcquireResourcesBuildsSortedUniqueCapabilitiesAndTargetEnvironments(t *
 		return manager
 	}
 	targets := []goanalysis.Target{
-		{ID: "beta-a", Capability: "beta"},
+		{ID: "beta-a", Capabilities: []string{"beta"}},
 		{ID: "ordinary"},
-		{ID: "alpha-a", Capability: "alpha"},
-		{ID: "alpha-b", Capability: "alpha"},
-		{ID: "alpha-beta", Capability: "alpha", Capabilities: []string{"alpha", "beta"}},
+		{ID: "alpha-a", Capabilities: []string{"alpha"}},
+		{ID: "alpha-b", Capabilities: []string{"alpha"}},
+		{ID: "alpha-beta", Capabilities: []string{"alpha", "beta"}},
 	}
 	gotManager, baseline, evidenceItems, environment, err := acquireResources(
 		t.Context(), loaded, targets, []string{"Path=C:/tools", "TOKEN=allowed", "SECRET=hidden"},
@@ -111,7 +111,7 @@ func TestAcquireResourcesHandlesNoCapabilitiesAcquireFailureAndEnvironmentConfli
 		cause := errors.New("resource failed")
 		manager := &scriptedRunResourceManager{errors: map[string]error{"alpha": cause}}
 		newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "alpha"}}, nil)
+		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capabilities: []string{"alpha"}}}, nil)
 		if !errors.Is(err, cause) || gotManager != nil || baseline != nil || evidenceItems != nil || environment != nil || manager.closed != 1 {
 			t.Fatalf("acquire failure = (%T, %+v, %+v, %v, %v), closed=%d", gotManager, baseline, evidenceItems, environment, err, manager.closed)
 		}
@@ -119,12 +119,28 @@ func TestAcquireResourcesHandlesNoCapabilitiesAcquireFailureAndEnvironmentConfli
 	t.Run("environment conflict", func(t *testing.T) {
 		manager := &scriptedRunResourceManager{environments: map[string][]string{"alpha": {"TOKEN=one"}, "beta": {"token=two"}}}
 		newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "beta"}, {Capability: "alpha"}}, nil)
+		gotManager, baseline, evidenceItems, environment, err := acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capabilities: []string{"beta"}}, {Capabilities: []string{"alpha"}}}, nil)
 		if err == nil || !strings.Contains(err.Error(), "resource beta") || gotManager != nil || baseline != nil || evidenceItems != nil || environment != nil || manager.closed != 1 ||
 			!slices.Equal(manager.acquired, []string{"alpha", "beta"}) {
 			t.Fatalf("conflict = (%T, %+v, %+v, %v, %v), manager=%+v", gotManager, baseline, evidenceItems, environment, err, manager)
 		}
 	})
+}
+
+func TestPlannedResourcesUsesCanonicalTargetCapabilities(t *testing.T) {
+	loaded := config.Config{Resources: map[string]config.Resource{"alpha": {}, "beta": {}}}
+	targets := []goanalysis.Target{
+		{Name: "TestBoth", Capabilities: []string{"beta", "alpha", "beta"}},
+		{Name: "TestNone"},
+	}
+	resources, err := plannedResources(targets, loaded)
+	if err != nil || !slices.Equal(resources, []string{"alpha", "beta"}) {
+		t.Fatalf("planned resources = (%v, %v)", resources, err)
+	}
+	_, err = plannedResources([]goanalysis.Target{{Name: "TestMissing", Capabilities: []string{"missing"}}}, loaded)
+	if err == nil || !strings.Contains(err.Error(), `target TestMissing requires unconfigured resource "missing"`) {
+		t.Fatalf("unconfigured resource error = %v", err)
+	}
 }
 
 var _ runResourceManager = (*scriptedRunResourceManager)(nil)

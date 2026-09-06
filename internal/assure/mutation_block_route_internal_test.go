@@ -15,8 +15,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// blockTarget is one measured target that reached value.go and knows which
-// blocks of it it ran.
 func blockTarget(name string, duration time.Duration, blocks ...goanalysis.CoverageBlock) TargetEvidence {
 	return TargetEvidence{
 		Target: goanalysis.Target{
@@ -28,9 +26,7 @@ func blockTarget(name string, duration time.Duration, blocks ...goanalysis.Cover
 	}
 }
 
-// resumedBlockTarget models a target restored from a legacy checkpoint: it
-// reached value.go, but that checkpoint kept no blocks, so it says it knows none.
-func resumedBlockTarget(name string, duration time.Duration) TargetEvidence {
+func inexactBlockTarget(name string, duration time.Duration) TargetEvidence {
 	return TargetEvidence{
 		Target: goanalysis.Target{
 			ID: "target-" + name, Name: name, Kind: goanalysis.KindTest, Package: "fixture.example/module",
@@ -40,19 +36,14 @@ func resumedBlockTarget(name string, duration time.Duration) TargetEvidence {
 	}
 }
 
-// blockRoutingTargets are the three targets every block routing test decides
-// between: one that ran the early block, one that ran the late block, and one
-// restored from a legacy checkpoint that cannot say which block it ran.
 func blockRoutingTargets() []TargetEvidence {
 	return []TargetEvidence{
 		blockTarget("TestEarly", 3*time.Millisecond, goanalysis.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3}),
 		blockTarget("TestLate", time.Millisecond, goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3}),
-		resumedBlockTarget("TestResumed", 2*time.Millisecond),
+		inexactBlockTarget("TestInexact", 2*time.Millisecond),
 	}
 }
 
-// blockRoutingInstrumentation is every block the baseline compiled
-// instrumentation for, which leaves lines 10 and 11 outside every block.
 func blockRoutingInstrumentation() []goanalysis.FileCoverage {
 	return []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 		{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3},
@@ -60,7 +51,6 @@ func blockRoutingInstrumentation() []goanalysis.FileCoverage {
 	}}}
 }
 
-// routedNames names the targets a route reaches, in the order they will run.
 func routedNames(route mutationRoute) []string {
 	names := make([]string, 0, len(route.reaching))
 	for _, target := range route.reaching {
@@ -73,9 +63,8 @@ func TestRouteMutantUsesBlockEvidenceWhenThePositionIsKnown(t *testing.T) {
 	t.Parallel()
 	mutant := gomutants.Mutant{Path: "value.go", Line: 8, Column: 5, Package: "fixture.example/module"}
 	route := routeMutant(mutant, blockRoutingTargets(), blockRoutingInstrumentation())
-	// The resumed target has no blocks to argue with, so it stays in; the late
-	// target proved it never ran line 8 and drops out.
-	if want := []string{"TestResumed", "TestEarly"}; !slices.Equal(routedNames(route), want) {
+
+	if want := []string{"TestInexact", "TestEarly"}; !slices.Equal(routedNames(route), want) {
 		t.Fatalf("reaching = %v, want %v", routedNames(route), want)
 	}
 	if route.granularity != trace.GranularityBlock || route.fallback != "" || route.fileCandidates != 3 {
@@ -92,7 +81,7 @@ func TestRouteMutantFallsBackToTheFileWhenThePositionIsUnknown(t *testing.T) {
 		{Path: "value.go", Line: -1, Column: -1},
 	} {
 		route := routeMutant(position, blockRoutingTargets(), blockRoutingInstrumentation())
-		want := []string{"TestLate", "TestResumed", "TestEarly"}
+		want := []string{"TestLate", "TestInexact", "TestEarly"}
 		if !slices.Equal(routedNames(route), want) {
 			t.Errorf("reaching for %+v = %v, want %v", position, routedNames(route), want)
 		}
@@ -106,7 +95,7 @@ func TestRouteMutantFallsBackToTheFileOutsideEveryInstrumentedBlock(t *testing.T
 	t.Parallel()
 	mutant := gomutants.Mutant{Path: "value.go", Line: 10, Column: 1, Package: "fixture.example/module"}
 	route := routeMutant(mutant, blockRoutingTargets(), blockRoutingInstrumentation())
-	want := []string{"TestLate", "TestResumed", "TestEarly"}
+	want := []string{"TestLate", "TestInexact", "TestEarly"}
 	if !slices.Equal(routedNames(route), want) {
 		t.Fatalf("reaching = %v, want %v", routedNames(route), want)
 	}
@@ -164,9 +153,7 @@ func TestRouteMutantNeverReachesBeyondTheFileCandidates(t *testing.T) {
 
 func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 	t.Parallel()
-	// The engine compiled a probe of this mutant, so the route says so: an
-	// offline audit reads the flag to tell a mutant a measurement can speak for
-	// from one no measurement will ever name.
+
 	mutant := gomutants.Mutant{
 		ID: "mutant-a", DisplayID: "arithmetic#1", Accepted: true, Rule: "arithmetic",
 		Path: "value.go", Line: 8, Column: 5, Package: "fixture.example/module", Probed: true,
@@ -177,9 +164,11 @@ func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 		blockTarget("TestEarly", 3*time.Millisecond, goanalysis.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3}),
 		blockTarget("TestLate", time.Millisecond, goanalysis.CoverageBlock{StartLine: 12, StartColumn: 2, EndLine: 14, EndColumn: 3}),
 	}
-	evaluation, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder, Instrumented: blockRoutingInstrumentation(),
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, targets, MutationOptions{
+		Trace: recorder, Instrumented: blockRoutingInstrumentation(),
+		SuiteCoverage: map[string]PackageSuiteCoverage{mutant.Package: {Duration: time.Second}},
 	})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,8 +195,7 @@ func TestEvaluateMutationsRoutesByBlockAndRecordsItInTheTrace(t *testing.T) {
 
 func TestEvaluateMutationsRunsThePackageSuiteForAMutantInAnUncoveredBlock(t *testing.T) {
 	t.Parallel()
-	// This mutant has no probe form, so the route omits the flag: no measurement
-	// can ever name it, and its absence from one says nothing about any target.
+
 	mutant := gomutants.Mutant{
 		ID: "mutant-b", DisplayID: "arithmetic#2", Accepted: true, Rule: "arithmetic",
 		Path: "value.go", Line: 13, Column: 3, Package: "fixture.example/module",
@@ -217,9 +205,11 @@ func TestEvaluateMutationsRunsThePackageSuiteForAMutantInAnUncoveredBlock(t *tes
 	targets := []TargetEvidence{
 		blockTarget("TestEarly", 3*time.Millisecond, goanalysis.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3}),
 	}
-	evaluation, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Trace: recorder, Instrumented: blockRoutingInstrumentation(),
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, targets, MutationOptions{
+		Trace: recorder, Instrumented: blockRoutingInstrumentation(),
+		SuiteCoverage: map[string]PackageSuiteCoverage{mutant.Package: {Duration: time.Second}},
 	})
+
 	if err != nil {
 		t.Fatal(err)
 	}

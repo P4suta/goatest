@@ -12,24 +12,29 @@ import (
 	"strings"
 
 	goanalysis "github.com/P4suta/goatest/internal/golang"
+	"github.com/P4suta/goatest/internal/trace"
 )
 
 var repositoryTestLogMagic = []byte("# test log\n")
 
-// RepositoryObserver turns Go's test action log into the one fact mutation
-// evidence needs: whether an execution consulted the frozen repository beyond
-// the files its ordinary behaviour key already names.
-//
-// It is active only for statically selected candidates. Its zero and every
-// failure state are conservative: a candidate that could not be observed is
-// keyed on the whole tree, while a package outside the candidate boundary is
-// left under the existing closure contract.
 type RepositoryObserver struct {
 	root       string
 	directory  string
 	candidates map[string]goanalysis.RepositoryReadCandidate
 	packages   map[string]goanalysis.Package
 	sources    targetKeySources
+}
+
+func repositoryObservationScope(root string, packages []goanalysis.Package) (map[string]goanalysis.RepositoryReadCandidate, map[string]bool) {
+	candidates := goanalysis.RepositoryReadCandidates(root, packages)
+	readers := make(map[string]bool, len(packages))
+	for _, pkg := range packages {
+		if _, found := candidates[pkg.ImportPath]; !found {
+			candidates[pkg.ImportPath] = goanalysis.RepositoryReadCandidate{}
+		}
+		readers[pkg.ImportPath] = true
+	}
+	return candidates, readers
 }
 
 func newRepositoryObserver(root, directory string, candidates map[string]goanalysis.RepositoryReadCandidate, sources targetKeySources) *RepositoryObserver {
@@ -51,8 +56,6 @@ func newRepositoryObserver(root, directory string, candidates map[string]goanaly
 	if strings.ContainsRune(absolute, '\n') || slices.ContainsFunc(sources.extraFiles, func(name string) bool {
 		return strings.ContainsRune(name, '\n')
 	}) {
-		// internal/testlog intentionally omits names containing a newline. A
-		// tree that can produce one cannot be narrowed from its action log.
 		for path, candidate := range selected {
 			candidate.Unobservable = true
 			selected[path] = candidate
@@ -71,15 +74,28 @@ func (observer *RepositoryObserver) instrumentPackage(pkg string, arguments []st
 	owner, known := observer.packages[pkg]
 	if !known {
 		if _, selected := observer.candidate(pkg); selected {
-			return arguments, func() repositoryObservation { return repositoryObservation{unknown: true} }
+			return arguments, func() repositoryObservation {
+				return repositoryObservation{reason: wholeTreeStaticUnobservable}
+			}
 		}
 		return arguments, func() repositoryObservation { return repositoryObservation{} }
 	}
 	return observer.instrument(pkg, owner.RelativeDir, arguments)
 }
 
+type wholeTreeReason string
+
+const (
+	wholeTreeObserved           wholeTreeReason = ""
+	wholeTreeStaticUnobservable wholeTreeReason = trace.WholeTreeStaticUnobservable
+	wholeTreeLogUnavailable     wholeTreeReason = trace.WholeTreeLogUnavailable
+	wholeTreeLogAmbiguous       wholeTreeReason = trace.WholeTreeLogAmbiguous
+	wholeTreeDirectoryAccess    wholeTreeReason = trace.WholeTreeDirectoryAccess
+	wholeTreeOutsideInput       wholeTreeReason = trace.WholeTreeOutsideInput
+)
+
 type repositoryObservation struct {
-	unknown  bool
+	reason   wholeTreeReason
 	accesses []repositoryAccess
 }
 
@@ -88,25 +104,33 @@ type repositoryAccess struct {
 	directory bool
 }
 
-// instrument adds one private test-binary flag and returns the operation that
-// must be called as soon as the execution ends. The log path is pre-created so
-// a setup failure cannot turn a test result into a false mutation kill.
 func (observer *RepositoryObserver) instrument(pkg, relativeDir string, arguments []string) ([]string, func() repositoryObservation) {
 	candidate, selected := observer.candidate(pkg)
 	if !selected {
 		return arguments, func() repositoryObservation { return repositoryObservation{} }
 	}
-	if candidate.Unobservable || observer.root == "" || observer.directory == "" {
-		return arguments, func() repositoryObservation { return repositoryObservation{unknown: true} }
+	if candidate.Unobservable {
+		return arguments, func() repositoryObservation {
+			return repositoryObservation{reason: wholeTreeStaticUnobservable}
+		}
+	}
+	if observer.root == "" || observer.directory == "" {
+		return arguments, func() repositoryObservation {
+			return repositoryObservation{reason: wholeTreeLogUnavailable}
+		}
 	}
 	file, err := os.CreateTemp(observer.directory, "test-action-*.log")
 	if err != nil {
-		return arguments, func() repositoryObservation { return repositoryObservation{unknown: true} }
+		return arguments, func() repositoryObservation {
+			return repositoryObservation{reason: wholeTreeLogUnavailable}
+		}
 	}
 	name := file.Name()
 	if err := file.Close(); err != nil {
 		_ = os.Remove(name)
-		return arguments, func() repositoryObservation { return repositoryObservation{unknown: true} }
+		return arguments, func() repositoryObservation {
+			return repositoryObservation{reason: wholeTreeLogUnavailable}
+		}
 	}
 	instrumented := append(slices.Clone(arguments), "-test.testlogfile="+name)
 	initialDirectory := filepath.Join(observer.root, filepath.FromSlash(relativeDir))
@@ -114,7 +138,7 @@ func (observer *RepositoryObserver) instrument(pkg, relativeDir string, argument
 		defer func() { _ = os.Remove(name) }()
 		data, err := os.ReadFile(name)
 		if err != nil {
-			return repositoryObservation{unknown: true}
+			return repositoryObservation{reason: wholeTreeLogUnavailable}
 		}
 		return parseRepositoryTestLog(data, observer.root, initialDirectory)
 	}
@@ -128,54 +152,59 @@ func (observer *RepositoryObserver) candidate(pkg string) (goanalysis.Repository
 	return candidate, selected
 }
 
-func (observer *RepositoryObserver) observes(pkg string) bool {
-	_, selected := observer.candidate(pkg)
-	return selected
+func (observer *RepositoryObserver) wholeTree(target goanalysis.Target, observation repositoryObservation) bool {
+	return observer.wholeTreeReason(target, observation) != wholeTreeObserved
 }
 
-func (observer *RepositoryObserver) wholeTree(target goanalysis.Target, observation repositoryObservation) bool {
+func (observer *RepositoryObserver) wholeTreeReason(target goanalysis.Target, observation repositoryObservation) wholeTreeReason {
 	candidate, selected := observer.candidate(target.Package)
 	if !selected {
-		return false
+		return wholeTreeObserved
 	}
-	if candidate.Unobservable || observation.unknown {
-		return true
+	if candidate.Unobservable {
+		return wholeTreeStaticUnobservable
+	}
+	if observation.reason != wholeTreeObserved {
+		return observation.reason
 	}
 	inputs := observer.sources.narrowInputsFor(target)
 	for _, access := range observation.accesses {
 		if access.directory {
-			return true
+			return wholeTreeDirectoryAccess
 		}
 		if _, known := inputs.Files[access.path]; known {
 			continue
 		}
 		if _, known := inputs.Corpus[access.path]; !known {
-			return true
+			return wholeTreeOutsideInput
 		}
 	}
-	return false
+	return wholeTreeObserved
 }
 
 func (observer *RepositoryObserver) wholeTreeSuite(pkg string, observation repositoryObservation) bool {
+	return observer.wholeTreeSuiteReason(pkg, observation) != wholeTreeObserved
+}
+
+func (observer *RepositoryObserver) wholeTreeSuiteReason(pkg string, observation repositoryObservation) wholeTreeReason {
 	if observer == nil {
-		return false
+		return wholeTreeObserved
 	}
 	owner, known := observer.packages[pkg]
 	if !known {
-		_, selected := observer.candidate(pkg)
-		return selected
+		if _, selected := observer.candidate(pkg); selected {
+			return wholeTreeStaticUnobservable
+		}
+		return wholeTreeObserved
 	}
-	return observer.wholeTree(goanalysis.Target{
+	return observer.wholeTreeReason(goanalysis.Target{
 		Package: pkg, RelativeDir: owner.RelativeDir, Dependencies: owner.Dependencies,
 	}, observation)
 }
 
-// parseRepositoryTestLog accepts the format shared by testing and cmd/go. It
-// keeps only accesses lexically inside root. Any malformed input is unknown,
-// which the caller turns into a whole-tree key rather than an execution error.
 func parseRepositoryTestLog(data []byte, root, initialDirectory string) repositoryObservation {
 	if !bytes.HasPrefix(data, repositoryTestLogMagic) || len(data) == 0 || data[len(data)-1] != '\n' {
-		return repositoryObservation{unknown: true}
+		return repositoryObservation{reason: wholeTreeLogAmbiguous}
 	}
 	observation := repositoryObservation{}
 	workingDirectory := initialDirectory
@@ -185,7 +214,7 @@ func parseRepositoryTestLog(data []byte, root, initialDirectory string) reposito
 		}
 		operation, name, found := strings.Cut(string(raw), " ")
 		if !found || name == "" {
-			observation.unknown = true
+			observation.reason = wholeTreeLogAmbiguous
 			continue
 		}
 		switch operation {
@@ -193,7 +222,7 @@ func parseRepositoryTestLog(data []byte, root, initialDirectory string) reposito
 			continue
 		case "chdir":
 			if !filepath.IsAbs(name) {
-				observation.unknown = true
+				observation.reason = wholeTreeLogAmbiguous
 				continue
 			}
 			workingDirectory = filepath.Clean(name)
@@ -212,14 +241,12 @@ func parseRepositoryTestLog(data []byte, root, initialDirectory string) reposito
 			}
 			info, err := os.Stat(resolved)
 			if err != nil {
-				// A missing or unreadable repository path can still decide a
-				// test through its error, and no narrow digest describes it.
 				observation.accesses = append(observation.accesses, repositoryAccess{path: relative, directory: true})
 				continue
 			}
 			observation.accesses = append(observation.accesses, repositoryAccess{path: relative, directory: info.IsDir()})
 		default:
-			observation.unknown = true
+			observation.reason = wholeTreeLogAmbiguous
 		}
 	}
 	return observation
@@ -236,11 +263,6 @@ func repositoryRelativePath(root, name string) (string, bool) {
 	return filepath.ToSlash(relative), true
 }
 
-// repositoryTestLogFailure reports the diagnostic emitted when testing could
-// not create or flush the private action log. Only that path-specific failure
-// triggers an unobserved retry; a panic or ordinary test failure may also leave
-// a truncated log, but remains the result of the test and merely gets a
-// conservative whole-tree key.
 func repositoryTestLogFailure(output string, arguments []string) bool {
 	path, found := repositoryTestLogPath(arguments)
 	if !found {
@@ -252,10 +274,7 @@ func repositoryTestLogFailure(output string, arguments []string) bool {
 	if strings.Contains(output, path) {
 		return true
 	}
-	// Legacy baseline output may already be a test2json event, where Windows
-	// path separators are escaped. Match the JSON string contents as well as
-	// raw framed test-binary output so an observation failure never becomes a
-	// test failure.
+
 	encoded, err := json.Marshal(path)
 	return err == nil && len(encoded) >= 2 && strings.Contains(output, string(encoded[1:len(encoded)-1]))
 }

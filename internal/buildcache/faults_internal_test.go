@@ -4,24 +4,25 @@
 package buildcache
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// faultsMoment is the fixed moment these assertions are timed against, so a
-// test states the age of an entry rather than racing the wall clock. It is the
-// twin of the external suite's reference clock: these tests reach inside the
-// package, so they cannot share the variable that suite declares.
+const stubCopiedBytes = 7
+
 var faultsMoment = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
-// stubLayerFile is a temporary file that fails at exactly one stage, so a test
-// can hold a write to what it does when the disk gives out halfway.
 type stubLayerFile struct {
 	name     string
 	writeErr error
@@ -43,12 +44,14 @@ func (file *stubLayerFile) Write(data []byte) (int, error) {
 func (file *stubLayerFile) Sync() error  { return file.syncErr }
 func (file *stubLayerFile) Close() error { return file.closeErr }
 
-// failingReader is a put body that gives out mid-stream.
 type failingReader struct{ err error }
 
 func (reader failingReader) Read([]byte) (int, error) { return 0, reader.err }
 
-// stubLayerInfo answers a stat with the size and time a test chose.
+type stalledReader struct{}
+
+func (stalledReader) Read([]byte) (int, error) { return 0, nil }
+
 type stubLayerInfo struct {
 	size     int64
 	modified time.Time
@@ -56,14 +59,13 @@ type stubLayerInfo struct {
 
 func (info stubLayerInfo) Name() string       { return "stub" }
 func (info stubLayerInfo) Size() int64        { return info.size }
-func (info stubLayerInfo) Mode() fs.FileMode  { return 0o644 }
+func (info stubLayerInfo) Mode() fs.FileMode  { return filemode.ReadableFile }
 func (info stubLayerInfo) ModTime() time.Time { return info.modified }
 func (info stubLayerInfo) IsDir() bool        { return false }
 func (info stubLayerInfo) Sys() any           { return nil }
 
-// key renders an identifier of the length the go command uses.
 func key(value byte) []byte {
-	identifier := make([]byte, 32)
+	identifier := make([]byte, sha256.Size)
 	for index := range identifier {
 		identifier[index] = value
 	}
@@ -86,7 +88,7 @@ func TestPutPropagatesEveryWriteStage(t *testing.T) {
 				stat:            func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist },
 				remove:          func(string) error { return nil },
 				rename:          func(string, string) error { return nil },
-				copyBody:        func(io.Writer, io.Reader) (int64, error) { return 7, nil },
+				copyBody:        func(io.Writer, io.Reader) (int64, error) { return stubCopiedBytes, nil },
 				mkdirAll:        func(string, os.FileMode) error { return nil },
 			}
 			switch stage {
@@ -125,11 +127,7 @@ func TestPutPropagatesEveryWriteStage(t *testing.T) {
 				renamed := 0
 				hooks.rename = func(string, string) error {
 					renamed++
-					// Both the first attempt and the retry after removing the
-					// destination have to fail, or the write succeeded. The
-					// object is published first, so its two attempts are calls
-					// one and two; an object that succeeds takes only call one
-					// and leaves the action every call from two on.
+
 					if (object && renamed <= 2) || (!object && renamed >= 2) {
 						return failure
 					}
@@ -268,13 +266,13 @@ func TestSummarizePropagatesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("filesystem failure")
 	scratch := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(scratch, statsDirectory), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, statsDirectory), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scratch, statsDirectory, "1-1.json"), []byte(`{"gets":2}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(scratch, statsDirectory, "1-1.json"), []byte(`{"gets":2}`), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scratch, statsDirectory, "2-2.json"), []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(scratch, statsDirectory, "2-2.json"), []byte("{not json"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	summed, err := Summarize(scratch)
@@ -321,7 +319,7 @@ func TestServeReportsAStoreThatFailedAsThatRequestsError(t *testing.T) {
 	layers := Layers{Scratch: Layer{Dir: t.TempDir()}}
 	var written strings.Builder
 	var stats Stats
-	err := serveWithHooks(t.Context(), strings.NewReader(`{"ID":1,"Command":"get","ActionID":"AQ=="}`+"\n"),
+	err := serveWithHooks(t.Context(), &terminalFaultReader{reader: strings.NewReader(`{"ID":1,"Command":"get","ActionID":"AQ=="}` + "\n")},
 		&written, layers, &stats, serveHooks{layer: layerHooks{
 			stat: func(string) (fs.FileInfo, error) { return nil, failure },
 		}})
@@ -336,6 +334,52 @@ func TestServeReportsAStoreThatFailedAsThatRequestsError(t *testing.T) {
 	}
 }
 
+func TestQuotedReaderReturnsPendingBytesAndThenEnds(t *testing.T) {
+	t.Parallel()
+	want := []byte("body")
+	body := &quotedReader{pending: slices.Clone(want), ended: true}
+	destination := make([]byte, len(want))
+	read, err := body.Read(destination)
+	if err != nil || read != len(want) || !bytes.Equal(destination, want) {
+		t.Fatalf("first Read = (%q, %d, %v), want (%q, %d, nil)", destination, read, err, want, len(want))
+	}
+	read, err = body.Read(destination)
+	if read != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("second Read = (%d, %v), want (0, EOF)", read, err)
+	}
+}
+
+func TestProgressReaderRejectsOnlyAStalledNonemptyRead(t *testing.T) {
+	t.Parallel()
+	stalled := progressReader{reader: stalledReader{}}
+	if read, err := stalled.Read(make([]byte, 1)); read != 0 || !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("stalled Read = (%d, %v), want (0, ErrNoProgress)", read, err)
+	}
+	if read, err := stalled.Read(nil); read != 0 || err != nil {
+		t.Fatalf("empty Read = (%d, %v), want (0, nil)", read, err)
+	}
+	want := []byte("content")
+	destination := make([]byte, len(want))
+	read, err := (progressReader{reader: bytes.NewReader(want)}).Read(destination)
+	if read != len(want) || err != nil || !bytes.Equal(destination, want) {
+		t.Fatalf("progressing Read = (%q, %d, %v), want (%q, %d, nil)", destination, read, err, want, len(want))
+	}
+}
+
+type terminalFaultReader struct {
+	reader   io.Reader
+	terminal bool
+}
+
+func (reader *terminalFaultReader) Read(destination []byte) (int, error) {
+	if reader.terminal {
+		panic("read after terminal stream result")
+	}
+	read, err := reader.reader.Read(destination)
+	reader.terminal = read == 0 && err != nil
+	return read, err
+}
+
 func TestServeReportsAResponseItCannotWrite(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("stream failure")
@@ -347,10 +391,6 @@ func TestServeReportsAResponseItCannotWrite(t *testing.T) {
 	}
 }
 
-// ageFaultsEntry sets the file times of the one entry these tests store to the
-// moment they are written against. A stored file carries the wall clock, and an
-// assertion about age has to be about the clock the test states rather than
-// about how close today happens to be to the fixed moment.
 func ageFaultsEntry(t *testing.T, layer Layer) {
 	t.Helper()
 	for _, path := range []string{layer.actionPath(key(1)), layer.objectPath(key(2))} {
@@ -360,7 +400,6 @@ func ageFaultsEntry(t *testing.T, layer Layer) {
 	}
 }
 
-// failingWriter is a protocol stream that refuses everything.
 type failingWriter struct{ err error }
 
 func (writer failingWriter) Write([]byte) (int, error) { return 0, writer.err }

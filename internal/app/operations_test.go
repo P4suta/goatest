@@ -15,6 +15,7 @@ import (
 	"github.com/P4suta/goatest/internal/cache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
@@ -22,7 +23,7 @@ import (
 
 type operationValidator struct{ original, kills, suite int }
 
-func (validator *operationValidator) OriginalStable(context.Context, provider.Candidate) error {
+func (validator *operationValidator) OriginalPasses(context.Context, provider.Candidate) error {
 	validator.original++
 	return nil
 }
@@ -40,7 +41,7 @@ func TestFixPreviewsThenFreshlyValidatesAndExplicitlyAppliesCandidate(t *testing
 	finding := report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "survived", MutantID: "mutant-a"}
 	candidate := provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")}
 	record := repair.CandidateRecord{
-		Version: repair.CandidateVersion, ID: "0123456789abcdef", Snapshot: "snapshot-a",
+		ID: "0123456789abcdef", Snapshot: "snapshot-a",
 		Finding: finding, Candidate: candidate, Validation: "passed",
 	}
 	if _, err := repair.StoreCandidate(root, record); err != nil {
@@ -62,7 +63,7 @@ func TestFixPreviewsThenFreshlyValidatesAndExplicitlyAppliesCandidate(t *testing
 	if err != nil || applied.Verdict != report.VerdictCompleted || applied.Repairs[0].Status != "applied" {
 		t.Fatalf("apply = %+v, %v", applied, err)
 	}
-	if validator.original != 3 || validator.kills != 2 || validator.suite != 1 {
+	if validator.original != 1 || validator.kills != 1 || validator.suite != 1 {
 		t.Fatalf("fresh validation calls = (%d,%d,%d)", validator.original, validator.kills, validator.suite)
 	}
 	contents, err := os.ReadFile(filepath.Join(root, candidate.Path))
@@ -76,8 +77,7 @@ func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
 	planCalls, runCalls := 0, 0
 	service := app.Service{
 		Root: root,
-		// The cache commands below sweep the temporary directory they are
-		// given, so this test gives them one of its own.
+
 		TempDirectory: t.TempDir(),
 		Plan: func(_ context.Context, options assure.Options) (report.Report, error) {
 			planCalls++
@@ -106,7 +106,7 @@ func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
 	if err != nil || status.Verdict != report.VerdictCompleted || !strings.Contains(status.Evidence[1].Detail, "entries=1") {
 		t.Fatalf("cache status = %+v, %v", status, err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\ncontract = \"standard-v1\"\n[cache]\nmax_bytes = 1\nttl = \"720h\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".goatest.toml"), []byte("version = 1\ncontract = \"standard-v1\"\n[cache]\nmax_bytes = 1\nttl = \"720h\"\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
@@ -123,16 +123,15 @@ func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t 
 	if err := store.Put("entry-a", report.Report{Schema: report.SchemaV1, Snapshot: "entry-a"}); err != nil {
 		t.Fatal(err)
 	}
-	digest := func(character string) string { return strings.Repeat(character, 64) }
 	mutationPath := filepath.Join(cacheRoot, evidence.MutationFileName)
 	if err := evidence.SaveMutation(mutationPath, evidence.MutationStore{
 		ModulePath: "example/module",
 		Records: []evidence.MutationRecord{{
-			MutantID: digest("a"), Path: "value.go", Package: "example/module/pkg",
-			Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digest("f"),
-			KilledBy: &evidence.TargetKey{
-				Package: "example/module/pkg", Name: "TestValue", Kind: "test", Key: digest("1"),
-			},
+			MutantID: appTestDigest("a"), Path: "value.go", Package: "example/module/pkg",
+			Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + appTestDigest("f"),
+			KilledBy: []evidence.TargetKey{{
+				Package: "example/module/pkg", Name: "TestValue", Kind: "test", Key: appTestDigest("1"),
+			}},
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -145,10 +144,10 @@ func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t 
 		filepath.Join(root, "reports", "runs", "run-a", "report.json"),
 	}
 	for _, path := range preserved {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("preserve"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("preserve"), filemode.PrivateFile); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -207,7 +206,7 @@ func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t 
 	if !strings.Contains(againEvidence.Detail, "removed-entries=0") || !strings.Contains(againEvidence.Detail, "mutation-removed=false") {
 		t.Fatalf("idempotent flush = %+v", againEvidence)
 	}
-	if err := os.WriteFile(mutationPath, []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(mutationPath, []byte("{"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	invalid, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "status")
@@ -233,7 +232,7 @@ func TestCacheFlushPreflightsEvidenceBeforeRemovingExactCache(t *testing.T) {
 	if err := store.Put("entry-a", report.Report{Schema: report.SchemaV1, Snapshot: "entry-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(cacheRoot, evidence.MutationFileName), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(cacheRoot, evidence.MutationFileName), filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
 	service := app.Service{Root: root, TempDirectory: t.TempDir()}

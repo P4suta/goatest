@@ -4,6 +4,7 @@
 package buildcache
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,30 +13,21 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/advisorylock"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// collectMoment is the fixed moment these assertions are timed against.
+const minimumSafeTouchIntervals = 2
+
 var collectMoment = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 
-// collectKey renders an identifier of the length the go command uses.
 func collectKey(value byte) []byte {
-	identifier := make([]byte, 32)
+	identifier := make([]byte, sha256.Size)
 	for index := range identifier {
 		identifier[index] = value
 	}
 	return identifier
 }
 
-// TestMinIdleIsAtLeastTwoTouchIntervals is the inequality the whole LRU rests
-// on, stated for every layer there is.
-//
-// A collection may only remove an entry whose last touch is older than
-// MinIdle, and a read refreshes an entry's file time at most once per touch
-// interval. An entry a live build reads continuously therefore carries a file
-// time that is already up to one whole touch interval stale, and the go command
-// opens the file a response named it *after* that response. MinIdle must cover
-// both, so it is two touch intervals: one for the staleness the rate limit
-// allows, one for the window the go command needs.
 func TestMinIdleIsAtLeastTwoTouchIntervals(t *testing.T) {
 	t.Parallel()
 	for _, layer := range []Layer{
@@ -51,15 +43,11 @@ func TestMinIdleIsAtLeastTwoTouchIntervals(t *testing.T) {
 				layer.Dir, layer.MinIdle(), MinIdleTouchIntervals, layer.touchInterval())
 		}
 	}
-	if MinIdleTouchIntervals < 2 {
+	if MinIdleTouchIntervals < minimumSafeTouchIntervals {
 		t.Fatalf("MinIdleTouchIntervals = %d, want at least two", MinIdleTouchIntervals)
 	}
 }
 
-// TestAnEntryStaleByOneTouchIntervalSurvivesItsOwnCollection is the inequality
-// as behaviour rather than as arithmetic: the entry a build is reading right
-// now, whose file time the touch rate limit left a whole interval behind, is
-// not removed however far over the bound the layer is.
 func TestAnEntryStaleByOneTouchIntervalSurvivesItsOwnCollection(t *testing.T) {
 	t.Parallel()
 	for _, layer := range []Layer{{Dir: ""}, {Touch: ScratchTouchInterval}} {
@@ -71,8 +59,7 @@ func TestAnEntryStaleByOneTouchIntervalSurvivesItsOwnCollection(t *testing.T) {
 		if _, err := layers.Put(collectKey(1), collectKey(2), strings.NewReader("0123456789"), 10, collectMoment); err != nil {
 			t.Fatal(err)
 		}
-		// The read that refreshed this entry was one touch interval ago, which
-		// is the stalest a continuously read entry can be.
+
 		stale := collectMoment.Add(-layer.touchInterval())
 		if err := os.Chtimes(layer.actionPath(collectKey(1)), stale, stale); err != nil {
 			t.Fatal(err)
@@ -100,8 +87,7 @@ func TestCollectLockedRunsOncePerIntervalAndAgainAfterIt(t *testing.T) {
 		walks++
 		return os.ReadDir(path)
 	}}
-	// The first collection of a layer nothing has collected runs: there is no
-	// record of an earlier one to be inside the interval of.
+
 	if _, ran, err := layer.collectLockedWithHooks(Policy{}, time.Minute, collectMoment, hooks); err != nil || !ran {
 		t.Fatalf("first collection = (%t, %v), want it to have run", ran, err)
 	}
@@ -109,8 +95,7 @@ func TestCollectLockedRunsOncePerIntervalAndAgainAfterIt(t *testing.T) {
 	if after == 0 {
 		t.Fatal("the first collection walked nothing")
 	}
-	// A run issues thousands of go commands, and each one closes. Walking the
-	// layer on every close is the cost this gate exists to remove.
+
 	for index := range 8 {
 		moment := collectMoment.Add(time.Duration(index) * 5 * time.Second)
 		if _, ran, err := layer.collectLockedWithHooks(Policy{}, time.Minute, moment, hooks); err != nil || ran {
@@ -134,9 +119,7 @@ func TestCollectLockedWithoutAnIntervalRunsEveryTime(t *testing.T) {
 	if err := layer.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	// A run collects the base layer once, at its end, so it asks for no
-	// interval at all: the only thing that may stop it is another process
-	// already collecting.
+
 	for index := range 3 {
 		if _, ran, err := layer.collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err != nil || !ran {
 			t.Fatalf("collection %d = (%t, %v), want every one to run", index, ran, err)
@@ -150,10 +133,8 @@ func TestCollectLockedSkipsALayerAnotherProcessIsCollecting(t *testing.T) {
 	if err := layer.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	// A separate open file description is what a concurrent cacheprog child or
-	// a concurrent run holds, and flock contends between them even inside one
-	// process.
-	held, err := os.OpenFile(layer.collectionMarkerPath(), os.O_CREATE|os.O_RDWR, 0o644)
+
+	held, err := os.OpenFile(layer.collectionMarkerPath(), os.O_CREATE|os.O_RDWR, filemode.ReadableFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,10 +158,6 @@ func TestCollectLockedSkipsALayerAnotherProcessIsCollecting(t *testing.T) {
 	}
 }
 
-// TestServeCloseCollectsTheScratchLayerOncePerInterval is the cost this gate
-// exists to remove. A run issues thousands of go commands and every one of them
-// closes; walking the whole scratch layer on each close is work proportional to
-// the square of the run.
 func TestServeCloseCollectsTheScratchLayerOncePerInterval(t *testing.T) {
 	t.Parallel()
 	scratch := Layer{Dir: filepath.Join(t.TempDir(), "scratch"), Touch: ScratchTouchInterval}
@@ -233,14 +210,9 @@ func TestCollectLockedAnswersForALayerItHasNoDirectoryFor(t *testing.T) {
 	if _, ran, err := (Layer{}).collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err != nil || ran {
 		t.Fatalf("collection of a layer with no directory = (%t, %v), want nothing", ran, err)
 	}
-	// The marker is a directory, which no platform opens for writing — Linux
-	// answers EISDIR and Windows access denied — and neither answer is
-	// ErrNotExist, the one open failure that means a layer nobody has built
-	// yet. A parent that is a file would only do on Linux: Windows reports a
-	// path below a file as not existing, and the failure would be read as an
-	// unbuilt layer.
+
 	blocked := Layer{Dir: t.TempDir()}
-	if err := os.Mkdir(blocked.collectionMarkerPath(), 0o755); err != nil {
+	if err := os.Mkdir(blocked.collectionMarkerPath(), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if _, ran, err := blocked.collectLockedWithHooks(Policy{}, 0, collectMoment, layerHooks{}); err == nil || ran {

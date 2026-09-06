@@ -12,26 +12,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
-// claimMoment is the fixed moment these assertions are timed against, so a test
-// states the age of a leftover file rather than racing the wall clock.
 var claimMoment = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 
-// TestClaimSweepsOnlyTheMarkerTemporaryItsOwnCrashCouldHaveLeft is the recovery
-// from a crash in the middle of Prepare.
-//
-// Prepare writes the marker through a temporary in the layer root and renames
-// it into place, so a process killed between the two leaves `.marker-*.tmp`
-// behind. That file is goatest's own, and refusing the layer over it would put
-// the machine's build cache permanently out of reach of the tool that made it
-// until a human deleted the file by hand.
-//
-// It is swept only once it is stale. A Prepare running in another process right
-// now is between the create and the rename for microseconds, and its temporary
-// has to still be there for it to rename. Anything else at the root is still
-// somebody else's, which is the whole point of the check: a foreign directory
-// may well hold hidden temporaries of its own.
 func TestClaimSweepsOnlyTheMarkerTemporaryItsOwnCrashCouldHaveLeft(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -61,11 +47,11 @@ func TestClaimSweepsOnlyTheMarkerTemporaryItsOwnCrashCouldHaveLeft(t *testing.T)
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "layer")
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, testCase.leftover)
-			if err := os.WriteFile(path, []byte("half a marker"), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte("half a marker"), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Chtimes(path, testCase.modified, testCase.modified); err != nil {
@@ -105,11 +91,6 @@ func TestClaimSweepsOnlyTheMarkerTemporaryItsOwnCrashCouldHaveLeft(t *testing.T)
 	}
 }
 
-// TestClaimIgnoresAMarkerTemporaryThatVanishedWhileItLooked is the race two
-// processes recovering from the same crash run into: both read the directory,
-// both find the same stale temporary, and one of them gets to it first. Losing
-// that race is not a failure — the file being gone is what the sweep wanted —
-// and neither is losing it a moment earlier, before the age could be read.
 func TestClaimIgnoresAMarkerTemporaryThatVanishedWhileItLooked(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -130,11 +111,11 @@ func TestClaimIgnoresAMarkerTemporaryThatVanishedWhileItLooked(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "layer")
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, ".marker-abc.tmp")
-			if err := os.WriteFile(path, []byte("half a marker"), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte("half a marker"), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			stale := claimMoment.Add(-24 * time.Hour)

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testing.T) {
@@ -15,11 +17,11 @@ func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testi
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for index, name := range []string{"old", "middle", "new"} {
 		directory := filepath.Join(root, name)
-		if err := os.Mkdir(directory, 0o755); err != nil {
+		if err := os.Mkdir(directory, filemode.ReadableDirectory); err != nil {
 			t.Fatal(err)
 		}
 		path := filepath.Join(directory, "trace.jsonl")
-		if err := os.WriteFile(path, []byte("1234567890"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("1234567890"), filemode.PrivateFile); err != nil {
 			t.Fatal(err)
 		}
 		moment := base.Add(time.Duration(index) * time.Hour)
@@ -39,7 +41,7 @@ func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testi
 func TestCollectExpiresEmptyArtifactDirectoryByDirectoryTimestamp(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "empty")
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	if err := os.Mkdir(directory, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -55,17 +57,14 @@ func TestCollectExpiresEmptyArtifactDirectoryByDirectoryTimestamp(t *testing.T) 
 	}
 }
 
-// retainedDirectory makes one child of root holding a ten-byte file stamped at
-// moment, which is the shape of a report run directory as far as the count
-// bound is concerned.
 func retainedDirectory(t *testing.T, root, name string, moment time.Time) {
 	t.Helper()
 	directory := filepath.Join(root, name)
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	if err := os.Mkdir(directory, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "assurance-report-v1.json")
-	if err := os.WriteFile(path, []byte("1234567890"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("1234567890"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(path, moment, moment); err != nil {
@@ -77,8 +76,7 @@ func TestKeepRemovesOldestFirstAndTiesByName(t *testing.T) {
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	retainedDirectory(t, root, "run-a", base)
-	// Two runs of the same age: the order has to stay total, so the name breaks
-	// the tie exactly as it does for a byte budget.
+
 	retainedDirectory(t, root, "run-c", base.Add(time.Hour))
 	retainedDirectory(t, root, "run-b", base.Add(time.Hour))
 	retainedDirectory(t, root, "run-d", base.Add(2*time.Hour))
@@ -104,8 +102,7 @@ func TestKeepSparesAProtectedEntryOnTopOfTheBound(t *testing.T) {
 	for index, name := range []string{"run-a", "run-b", "run-c", "run-d"} {
 		retainedDirectory(t, root, name, base.Add(time.Duration(index)*time.Hour))
 	}
-	// The oldest entry is the one something still points at, so the bound keeps
-	// the newest two and this one as well rather than instead of one of them.
+
 	result, err := Keep(root, 2, func(name string) bool { return name == "run-a" }, base.Add(4*time.Hour))
 	if err != nil || result.RemovedEntries != 1 || result.After.Entries != 3 {
 		t.Fatalf("protected keep = (%+v, %v)", result, err)
@@ -129,7 +126,7 @@ func TestKeepWithoutASurplusOrWithoutABoundRemovesNothing(t *testing.T) {
 			t.Fatalf("keep %d = (%+v, %v), want an untouched root", keep, result, err)
 		}
 	}
-	// A root nothing has written yet is an empty history rather than a failure.
+
 	result, err := Keep(filepath.Join(t.TempDir(), "absent"), 1, nil, base)
 	if err != nil || result.Before.Entries != 0 || result.RemovedEntries != 0 {
 		t.Fatalf("absent root keep = (%+v, %v)", result, err)
@@ -138,7 +135,7 @@ func TestKeepWithoutASurplusOrWithoutABoundRemovesNothing(t *testing.T) {
 
 func TestKeepRefusesAChildThatIsNotADirectory(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hand written"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hand written"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Keep(root, 1, nil, time.Time{}); err == nil {
@@ -146,12 +143,10 @@ func TestKeepRefusesAChildThatIsNotADirectory(t *testing.T) {
 	}
 }
 
-// retainedFile makes one regular child of root, which is the shape of a stored
-// repair candidate or patch artifact.
 func retainedFile(t *testing.T, root, name, contents string, moment time.Time) {
 	t.Helper()
 	path := filepath.Join(root, name)
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(path, moment, moment); err != nil {
@@ -194,7 +189,7 @@ func TestFileAndDirectoryModesRefuseEachOthersRoots(t *testing.T) {
 func TestInspectFilesRefusesASymlinkedEntry(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(t.TempDir(), "elsewhere.json")
-	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte("{}"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(root, "linked.json")); err != nil {

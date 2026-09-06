@@ -5,6 +5,8 @@ package assure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -25,7 +27,7 @@ type generationValidator struct {
 	suite    func(context.Context, provider.Candidate) error
 }
 
-func (validator generationValidator) OriginalStable(ctx context.Context, candidate provider.Candidate) error {
+func (validator generationValidator) OriginalPasses(ctx context.Context, candidate provider.Candidate) error {
 	if validator.original == nil {
 		return nil
 	}
@@ -250,7 +252,7 @@ func TestAttemptGeneratedRepairsUsesDefaultValidatorAndAppliesFirstPassingCandid
 		Finding: finding.ID, Path: candidate.Path, Status: "applied",
 	}
 	contents, readErr := os.ReadFile(filepath.Join(root, candidate.Path))
-	if err != nil || readErr != nil || !reflect.DeepEqual(received, repositoryOptions) || originalCalls != 3 || killCalls != 2 || suiteCalls != 1 ||
+	if err != nil || readErr != nil || !reflect.DeepEqual(received, repositoryOptions) || originalCalls != 1 || killCalls != 1 || suiteCalls != 1 ||
 		!evaluation.Applied || !reflect.DeepEqual(evaluation.Repairs, []report.Repair{wantRepair}) || !slices.Equal(contents, candidate.Content) {
 		t.Fatalf("applied evaluation = (%+v, %v), read=%v calls=(%d,%d,%d) options=%+v", evaluation, err, readErr, originalCalls, killCalls, suiteCalls, received)
 	}
@@ -262,7 +264,7 @@ func TestAttemptGeneratedRepairsRecordsEveryRejectionAndArtifactBeforeApplying(t
 	candidates := []provider.Candidate{
 		{Kind: "patch", Path: "unsafe.go", Content: []byte("unsafe")},
 		{Kind: "patch", Path: "rejected_test.go", Content: []byte("rejected")},
-		{Kind: "patch", Path: "conflict_test.go", PreimageSHA256: strings.Repeat("a", 64), Content: []byte("artifact")},
+		{Kind: "patch", Path: "conflict_test.go", PreimageSHA256: strings.Repeat("a", hex.EncodedLen(sha256.Size)), Content: []byte("artifact")},
 		{Kind: "patch", Path: "applied_test.go", Content: []byte("applied")},
 		{Kind: "patch", Path: "late_test.go", Content: []byte("late")},
 	}

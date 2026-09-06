@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package config loads the optional strict .goatest.toml v1 configuration.
 package config
 
 import (
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/testargs"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -51,30 +51,13 @@ type Execution struct {
 type Cache struct {
 	MaxBytes int64
 	TTL      time.Duration
-	// BuildMaxBytes bounds the build cache goatest serves its go commands
-	// from: the compiled standard library, dependencies, and packages that
-	// every run would otherwise compile again. It is separate from MaxBytes
-	// because the two hold different things at different scales — one holds
-	// verdicts of a few kilobytes, the other holds object files of gigabytes —
-	// and a single bound would let either starve the other.
+
 	BuildMaxBytes int64
-	// BuildDir is where that cache lives. An empty directory is, under the
-	// goatest CLI, the per-machine one below the user cache directory, which
-	// is the right default because the compiled standard library is the same
-	// for every repository on the machine; a process that names no such
-	// directory keeps no build cache then. A project whose disk cannot hold
-	// it says so here; a relative path is read from the repository root.
+
 	BuildDir string
 }
 
-// Reports bounds the durable run history under reports/runs.
 type Reports struct {
-	// Keep is how many run directories the history holds, newest first. It is a
-	// count and not a byte budget because a report is product evidence rather
-	// than exhaust: what somebody wants back is "the last few runs", and the
-	// runs an index still points at are kept whatever this says. Zero or absent
-	// is the default; a value of zero cannot mean "keep none", because the run
-	// that just finished is the newest entry.
 	Keep int
 }
 
@@ -176,32 +159,22 @@ var (
 	renameConfigFile = os.Rename
 )
 
-// defaultBuildMaxBytes bounds the build cache by default.
-//
-// It is deliberately modest. The cache is one directory on one machine and a
-// developer's disk is shared with everything else they do, so the default has
-// to be a size nobody notices; two gigabytes holds a compiled standard library
-// and a normal dependency set with room to spare, and a project that wants more
-// says so. A larger default would buy a few seconds on a toolchain upgrade at
-// the price of most of a small disk.
-const defaultBuildMaxBytes int64 = 2 << 30
+const (
+	defaultExecutionTimeout = 10 * time.Minute
+	defaultCacheMaxBytes    = 5 << 30
+	defaultCacheTTL         = 30 * 24 * time.Hour
+	defaultBuildMaxBytes    = 2 << 30
+	defaultResourceTimeout  = 30 * time.Second
+)
 
-// defaultReportsKeep is how many run directories reports/runs holds by default.
-//
-// Twenty is roughly a working week of verifications: enough that a comparison
-// against "the run before the one that broke" is still on the disk, and few
-// enough that a directory of five artifacts per run stays a few tens of
-// megabytes rather than the hundreds it reaches when nothing collects it. The
-// runs the latest-* indexes point at are kept on top of this, so the bound can
-// be small without ever losing the report a command reads.
-const defaultReportsKeep = 20
+const DefaultReportsKeep = 20
 
 func defaults() Config {
 	return Config{
 		Version: 1, Contract: "standard-v1", Project: Project{Packages: []string{"./..."}},
-		Execution: Execution{Timeout: 10 * time.Minute},
-		Cache:     Cache{MaxBytes: 5 << 30, TTL: 30 * 24 * time.Hour, BuildMaxBytes: defaultBuildMaxBytes},
-		Reports:   Reports{Keep: defaultReportsKeep},
+		Execution: Execution{Timeout: defaultExecutionTimeout},
+		Cache:     Cache{MaxBytes: defaultCacheMaxBytes, TTL: defaultCacheTTL, BuildMaxBytes: defaultBuildMaxBytes},
+		Reports:   Reports{Keep: DefaultReportsKeep},
 		Resources: map[string]Resource{},
 	}
 }
@@ -237,7 +210,7 @@ func Load(root string) (Config, error) {
 	if err := validateProjectExcludes(raw.Project.Exclude); err != nil {
 		return Config{}, err
 	}
-	executionTimeout := 10 * time.Minute
+	executionTimeout := defaultExecutionTimeout
 	if raw.Execution.Timeout != "" {
 		parsed, parseErr := time.ParseDuration(raw.Execution.Timeout)
 		if parseErr != nil || parsed <= 0 {
@@ -260,7 +233,7 @@ func Load(root string) (Config, error) {
 	}
 	cacheMaxBytes := raw.Cache.MaxBytes
 	if cacheMaxBytes == 0 {
-		cacheMaxBytes = 5 << 30
+		cacheMaxBytes = defaultCacheMaxBytes
 	}
 	if cacheMaxBytes < 0 {
 		return Config{}, errors.New("goatest: cache max_bytes must not be negative")
@@ -278,12 +251,12 @@ func Load(root string) (Config, error) {
 	}
 	reportsKeep := raw.Reports.Keep
 	if reportsKeep == 0 {
-		reportsKeep = defaultReportsKeep
+		reportsKeep = DefaultReportsKeep
 	}
 	if reportsKeep < 0 {
 		return Config{}, errors.New("goatest: reports keep must not be negative")
 	}
-	cacheTTL := 30 * 24 * time.Hour
+	cacheTTL := defaultCacheTTL
 	if raw.Cache.TTL != "" {
 		parsed, parseErr := time.ParseDuration(raw.Cache.TTL)
 		if parseErr != nil || parsed <= 0 {
@@ -312,7 +285,7 @@ func Load(root string) (Config, error) {
 		if name == "" || len(rawResource.Command) == 0 || rawResource.Command[0] == "" {
 			return Config{}, fmt.Errorf("goatest: resource %q requires a command", name)
 		}
-		timeout := 30 * time.Second
+		timeout := defaultResourceTimeout
 		if rawResource.Timeout != "" {
 			parsed, parseErr := time.ParseDuration(rawResource.Timeout)
 			if parseErr != nil {
@@ -362,70 +335,13 @@ func Load(root string) (Config, error) {
 	return result, nil
 }
 
-// initTemplate is what Init writes: the two active keys the strict defaults
-// need, and every other section as commented guidance, so that turning a
-// setting on is uncommenting a line rather than hunting documentation. The
-// strict parser ignores comments, so loading this file yields exactly the
-// defaults.
-const initTemplate = `# goatest strict configuration. version is required; every other key is
-# optional and unknown keys are refused. The commented values below are the
-# defaults or examples; uncomment a line to change a setting.
-version = 1
-
-# contract selects the fault model: "standard-v1" or "deep-v1".
+const initTemplate = `version = 1
 contract = "standard-v1"
-
-# [project]
-# packages = ["./..."]        # Go package patterns the assurance covers
-# exclude = ["generated/**"]  # path patterns recorded as explicit limitations
-
-# [execution]
-# build_tags = ["integration"]   # tags applied to every build and test
-# test_binary_args = ["-short"]  # only -short and -test.parallel are accepted
-# environment = ["FEATURE_MODE"] # variable names tests may read; values never reach reports
-# timeout = "10m"                # hard ceiling; mutation deadlines normally follow same-run controls
-# jobs = 4                       # baseline/probe/mutation workers; the automatic default is capped at 4
-
-# [cache]
-# max_bytes = 5368709120        # 5 GiB evidence cache budget
-# ttl = "720h"                  # entries older than this are collected
-# build_max_bytes = 2147483648  # 2 GiB build cache budget, collected at the end of every run
-# build_dir = ".goatest/build"  # where the build cache lives; the default is per machine
-
-# Durable run history under reports/runs. The runs latest-any.json and
-# latest-full.json point at are kept whatever this says.
-# [reports]
-# keep = 20                     # newest run directories kept; older ones are collected
-
-# One table per managed test resource; docs/protocols.md defines the provider
-# contract. Tests declare a capability with goatest.Integration("postgres") or
-# a //goatest:resources directive.
-# [resources.postgres]
-# command = ["./tools/postgres-provider"]
-# timeout = "30s"
-# shared = true                    # one instance serves every target
-# exclusive = true                 # serializes access instead; at most one of shared and exclusive
-# environment = ["POSTGRES_IMAGE"] # variable names forwarded to the provider
-
-# [generation]
-# command = ["./tools/test-generator"] # candidate generator; docs/protocols.md defines the contract
-# allowed_paths = ["**/*_test.go", "**/testdata/fuzz/**"]
-# environment = ["GENERATOR_TOKEN"]
-
-# Explicit, expiring finding acceptances, normally written by 'goatest accept'.
-# [[acceptance]]
-# id = "0123456789abcdef"
-# reason = "reviewed equivalent boundary"
-# expires = "2026-12-31T00:00:00Z"
-# owner = "quality-team"
-# ticket = "QA-123"
 `
 
-// Init creates the annotated strict v1 configuration and never overwrites an
-// existing file.
 func Init(root string) error {
 	path := filepath.Join(root, FileName)
-	file, err := openConfigFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	file, err := openConfigFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, filemode.ReadableFile)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("goatest: %s already exists", FileName)
@@ -450,8 +366,6 @@ func Init(root string) error {
 	return nil
 }
 
-// AddAcceptance appends one explicit, expiring finding acceptance through an
-// atomic rewrite of the strict known-key configuration.
 func AddAcceptance(root string, acceptance Acceptance) error {
 	if strings.TrimSpace(acceptance.ID) == "" || strings.TrimSpace(acceptance.Reason) == "" || acceptance.Expires.IsZero() {
 		return errors.New("goatest: acceptance requires id, reason, and expiry")
@@ -524,7 +438,7 @@ func save(root string, input Config) error {
 		_ = temporary.Close()
 		return err
 	}
-	if err := temporary.Chmod(0o644); err != nil {
+	if err := temporary.Chmod(filemode.ReadableFile); err != nil {
 		_ = temporary.Close()
 		return err
 	}

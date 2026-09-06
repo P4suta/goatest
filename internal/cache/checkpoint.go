@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/P4suta/goatest/internal/checkpoint"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 const (
@@ -30,11 +31,11 @@ type checkpointJournalRecord struct {
 	InputDigest    string                     `json:"input_digest"`
 	BaseDigest     string                     `json:"base_digest"`
 	BaselineTarget *checkpoint.BaselineTarget `json:"baseline_target,omitempty"`
+	BaselineSuite  *checkpoint.BaselineSuite  `json:"baseline_suite,omitempty"`
 	MutationResult *checkpoint.MutationResult `json:"mutation_result,omitempty"`
 	Checksum       string                     `json:"checksum"`
 }
 
-// GetCheckpoint reads strict interrupted-run state for exactly digest.
 func (store *Store) GetCheckpoint(digest string) (checkpoint.State, bool, error) {
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()
@@ -65,14 +66,6 @@ func (store *Store) GetCheckpoint(digest string) (checkpoint.State, bool, error)
 	return state, true, nil
 }
 
-// PendingCheckpoint reports whether this cache holds interrupted-run state for
-// any input at all.
-//
-// GetCheckpoint answers for one digest, because a run resuming itself knows
-// which input it is. Maintenance does not: what it needs to know before it
-// collects something a resume would re-read is whether any run could still come
-// back, and no digest names that question. A cache directory nothing has
-// created yet holds no such run.
 func (store *Store) PendingCheckpoint() (bool, error) {
 	cacheOperationMutex.RLock()
 	defer cacheOperationMutex.RUnlock()
@@ -85,8 +78,6 @@ func (store *Store) PendingCheckpoint() (bool, error) {
 		return false, fmt.Errorf("goatest: inspect checkpoints: %w", err)
 	}
 	for _, entry := range entries {
-		// Only a real directory is an entry. A symbolic link is not followed
-		// here for the same reason nothing else in this package follows one.
 		if !entry.IsDir() {
 			continue
 		}
@@ -101,8 +92,6 @@ func (store *Store) PendingCheckpoint() (bool, error) {
 	return false, nil
 }
 
-// PutCheckpoint atomically replaces interrupted-run state without writing a
-// completed report or changing a latest-report index.
 func (store *Store) PutCheckpoint(digest string, state checkpoint.State) error {
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()
@@ -117,7 +106,7 @@ func (store *Store) PutCheckpoint(digest string, state checkpoint.State) error {
 		return err
 	}
 	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	if err := os.MkdirAll(directory, filemode.ReadableDirectory); err != nil {
 		return fmt.Errorf("goatest: create checkpoint directory: %w", err)
 	}
 	temporary, err := os.CreateTemp(directory, ".checkpoint-*.tmp")
@@ -149,16 +138,14 @@ func (store *Store) PutCheckpoint(digest string, state checkpoint.State) error {
 	return nil
 }
 
-// AppendBaselineCheckpoint durably adds one completely classified baseline
-// target without rewriting the growing checkpoint document. The journal is
-// folded into the strict state by GetCheckpoint and compacted by the next full
-// PutCheckpoint.
 func (store *Store) AppendBaselineCheckpoint(digest string, unit checkpoint.BaselineTarget) error {
 	return store.appendCheckpointRecord(digest, checkpointJournalRecord{BaselineTarget: &unit})
 }
 
-// AppendMutationCheckpoint is the mutation-unit form of
-// AppendBaselineCheckpoint.
+func (store *Store) AppendBaselineSuiteCheckpoint(digest string, unit checkpoint.BaselineSuite) error {
+	return store.appendCheckpointRecord(digest, checkpointJournalRecord{BaselineSuite: &unit})
+}
+
 func (store *Store) AppendMutationCheckpoint(digest string, unit checkpoint.MutationResult) error {
 	return store.appendCheckpointRecord(digest, checkpointJournalRecord{MutationResult: &unit})
 }
@@ -189,7 +176,7 @@ func (store *Store) appendCheckpointRecord(digest string, record checkpointJourn
 	}
 	data = append(data, '\n')
 	journalPath := filepath.Join(filepath.Dir(path), CheckpointJournalFileName)
-	journal, err := os.OpenFile(journalPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	journal, err := os.OpenFile(journalPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, filemode.PrivateFile)
 	if err != nil {
 		return fmt.Errorf("goatest: open checkpoint journal: %w", err)
 	}
@@ -223,9 +210,7 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 	if len(data) == 0 {
 		return state, nil
 	}
-	// A killed writer may leave only the tail of its last record. Newline is
-	// the commit marker: every complete line is checksummed and replayed, while
-	// an unterminated tail was never a durable scheduling boundary.
+
 	lastNewline := bytes.LastIndexByte(data, '\n')
 	if lastNewline < 0 {
 		return state, nil
@@ -233,6 +218,10 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 	baselineIndexes := make(map[string]int, len(state.Baseline.Targets))
 	for index, unit := range state.Baseline.Targets {
 		baselineIndexes[unit.ID] = index
+	}
+	baselineSuiteIndexes := make(map[string]int, len(state.Baseline.Suites))
+	for index, unit := range state.Baseline.Suites {
+		baselineSuiteIndexes[unit.Package] = index
 	}
 	mutationIndexes := make(map[string]int)
 	if state.Mutation != nil {
@@ -258,41 +247,55 @@ func (store *Store) applyCheckpointJournal(digest, baseDigest string, state chec
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d has an invalid identity or checksum", index+1)
 		}
 		if record.BaseDigest != baseDigest {
-			// A crash after publishing a compacted base but before deleting its
-			// old journal is expected. Skip that stale prefix: a later process
-			// can already have appended records for the current base. Once a
-			// current record appears, another base would splice histories and is
-			// corruption rather than a compaction remainder.
 			if !currentBaseSeen {
 				continue
 			}
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d changed base identity", index+1)
 		}
 		currentBaseSeen = true
-		if (record.BaselineTarget == nil) == (record.MutationResult == nil) {
+		units := 0
+		if record.BaselineTarget != nil {
+			units++
+		}
+		if record.BaselineSuite != nil {
+			units++
+		}
+		if record.MutationResult != nil {
+			units++
+		}
+		if units != 1 {
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d does not contain exactly one unit", index+1)
 		}
 		if record.BaselineTarget != nil {
-			if existing, replaced := baselineIndexes[record.BaselineTarget.ID]; replaced {
-				state.Baseline.Targets[existing] = *record.BaselineTarget
-			} else {
-				baselineIndexes[record.BaselineTarget.ID] = len(state.Baseline.Targets)
-				state.Baseline.Targets = append(state.Baseline.Targets, *record.BaselineTarget)
+			if _, duplicate := baselineIndexes[record.BaselineTarget.ID]; duplicate {
+				return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d duplicates baseline target %s", index+1, record.BaselineTarget.ID)
 			}
+			baselineIndexes[record.BaselineTarget.ID] = len(state.Baseline.Targets)
+			state.Baseline.Targets = append(state.Baseline.Targets, *record.BaselineTarget)
+			continue
+		}
+		if record.BaselineSuite != nil {
+			if _, duplicate := baselineSuiteIndexes[record.BaselineSuite.Package]; duplicate {
+				return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d duplicates baseline suite %s", index+1, record.BaselineSuite.Package)
+			}
+			baselineSuiteIndexes[record.BaselineSuite.Package] = len(state.Baseline.Suites)
+			state.Baseline.Suites = append(state.Baseline.Suites, *record.BaselineSuite)
 			continue
 		}
 		if state.Mutation == nil {
 			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d records a mutant before its catalog", index+1)
 		}
-		if existing, replaced := mutationIndexes[record.MutationResult.ID]; replaced {
-			state.Mutation.Results[existing] = *record.MutationResult
-		} else {
-			mutationIndexes[record.MutationResult.ID] = len(state.Mutation.Results)
-			state.Mutation.Results = append(state.Mutation.Results, *record.MutationResult)
+		if _, duplicate := mutationIndexes[record.MutationResult.ID]; duplicate {
+			return checkpoint.State{}, fmt.Errorf("goatest: checkpoint journal line %d duplicates mutant %s", index+1, record.MutationResult.ID)
 		}
+		mutationIndexes[record.MutationResult.ID] = len(state.Mutation.Results)
+		state.Mutation.Results = append(state.Mutation.Results, *record.MutationResult)
 	}
 	slices.SortFunc(state.Baseline.Targets, func(left, right checkpoint.BaselineTarget) int {
 		return strings.Compare(left.ID, right.ID)
+	})
+	slices.SortFunc(state.Baseline.Suites, func(left, right checkpoint.BaselineSuite) int {
+		return strings.Compare(left.Package, right.Package)
 	})
 	if state.Mutation != nil {
 		slices.SortFunc(state.Mutation.Results, func(left, right checkpoint.MutationResult) int {
@@ -317,8 +320,6 @@ func checkpointJournalChecksum(record checkpointJournalRecord) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// DeleteCheckpoint removes only interrupted-run state. A completed cached
-// report in the same exact-input entry remains intact.
 func (store *Store) DeleteCheckpoint(digest string) error {
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()

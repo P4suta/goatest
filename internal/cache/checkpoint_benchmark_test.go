@@ -5,7 +5,6 @@ package cache
 
 import (
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/checkpoint"
@@ -14,7 +13,7 @@ import (
 
 func BenchmarkCheckpointIO(b *testing.B) {
 	store := New(b.TempDir())
-	digest := strings.Repeat("a", 64)
+	digest := cacheTestDigest("a")
 	state := checkpoint.State{Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1}
 	b.ResetTimer()
 	for range b.N {
@@ -29,10 +28,10 @@ func BenchmarkCheckpointIO(b *testing.B) {
 
 func BenchmarkCheckpointJournalAppend(b *testing.B) {
 	store := New(b.TempDir())
-	digest := strings.Repeat("b", 64)
+	digest := cacheTestDigest("b")
 	state := checkpoint.State{
 		Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1,
-		Mutation: &checkpoint.Mutation{CatalogFingerprint: strings.Repeat("c", 64)},
+		Mutation: &checkpoint.Mutation{CatalogFingerprint: cacheTestDigest("c")},
 	}
 	if err := store.PutCheckpoint(digest, state); err != nil {
 		b.Fatal(err)

@@ -13,15 +13,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/resource"
 	"github.com/P4suta/goatest/internal/testkit"
+)
+
+const (
+	resourceRequestDecodeExitCode  = 40
+	resourceResponseEncodeExitCode = 41
+	resourceStopDecodeExitCode     = 42
+	fixtureLogOpenExitCode         = 43
+	generationRequestExitCode      = 44
+	generationContentExitCode      = 45
+	generationResponseExitCode     = 46
+	endToEndMutationJobs           = 1
 )
 
 func TestRunResourceProviderHelper(t *testing.T) {
@@ -32,21 +45,21 @@ func TestRunResourceProviderHelper(t *testing.T) {
 	encoder := json.NewEncoder(os.Stdout)
 	var start resource.Request
 	if err := decoder.Decode(&start); err != nil {
-		os.Exit(40)
+		os.Exit(resourceRequestDecodeExitCode)
 	}
 	appendFixtureLog(os.Getenv("GOATEST_ASSURE_RESOURCE_LOG"), start.Action)
 	if err := encoder.Encode(resource.Response{
-		Version: 1, Status: "ready", Instance: "postgres-e2e",
+		Version: resource.ProtocolVersion, Status: "ready", Instance: "postgres-e2e",
 		Environment: map[string]string{"DATABASE_URL": "postgres://managed/test"},
 	}); err != nil {
-		os.Exit(41)
+		os.Exit(resourceResponseEncodeExitCode)
 	}
 	var stop resource.Request
 	if err := decoder.Decode(&stop); err != nil {
-		os.Exit(42)
+		os.Exit(resourceStopDecodeExitCode)
 	}
 	appendFixtureLog(os.Getenv("GOATEST_ASSURE_RESOURCE_LOG"), stop.Action)
-	_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-e2e"})
+	_ = encoder.Encode(resource.Response{Version: resource.ProtocolVersion, Status: "stopped", Instance: "postgres-e2e"})
 }
 
 func TestRunGenerationProviderHelper(t *testing.T) {
@@ -55,11 +68,11 @@ func TestRunGenerationProviderHelper(t *testing.T) {
 	}
 	var request provider.Request
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
-		os.Exit(44)
+		os.Exit(generationRequestExitCode)
 	}
 	content, err := os.ReadFile(os.Getenv("GOATEST_ASSURE_GENERATION_CONTENT"))
 	if err != nil {
-		os.Exit(45)
+		os.Exit(generationContentExitCode)
 	}
 	response := provider.Response{
 		Version: provider.ProtocolVersion, FindingID: request.Finding.ID,
@@ -69,12 +82,14 @@ func TestRunGenerationProviderHelper(t *testing.T) {
 		}},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
-		os.Exit(46)
+		os.Exit(generationResponseExitCode)
 	}
 	os.Exit(0)
 }
 
 func TestRunAssuresRepositoryAndWarmCacheStartsNoTestOrMutant(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/assured\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package assured
@@ -88,17 +103,19 @@ func Boundary(value int) int {
 
 import "testing"
 
-func TestBoundary(t *testing.T) {
-	for _, value := range []int{5, 10} {
-		want := value
-		if value >= 10 { want = 9 }
-		if got := Boundary(value); got != want { t.Fatalf("Boundary(%d) = %d, want %d", value, got, want) }
-	}
+func checkBoundary(t *testing.T, value, want int) {
+	t.Helper()
+	if got := Boundary(value); got != want { t.Fatalf("Boundary(%d) = %d, want %d", value, got, want) }
 }
+
+func TestBelowBoundary(t *testing.T) { checkBoundary(t, 5, 5) }
+func TestAtBoundary(t *testing.T) { checkBoundary(t, 10, 9) }
+func TestAboveBoundary(t *testing.T) { checkBoundary(t, 11, 9) }
 `))
 	options := assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t),
 		TempDirectory: t.TempDir(), MutationOperators: []string{"comparison"},
+		MutationJobs: endToEndMutationJobs,
 		Environment: append(os.Environ(),
 			"STARSHIP_SESSION_KEY=first-shell", "__MISE_SESSION=first-shell"),
 	}
@@ -125,30 +142,39 @@ func TestBoundary(t *testing.T) {
 		t.Fatalf("warm events = %+v", events)
 	}
 	for _, event := range events {
-		if event.Kind == "baseline-target" || event.Kind == "mutation-target" || event.Kind == "mutation-prepare" {
+		if event.Kind == "baseline-progress" || event.Kind == "mutation-target" {
 			t.Fatalf("warm cache started child work: %+v", events)
 		}
 	}
 }
 
 func TestPlanEnumeratesTargetsAndMutantsWithoutRunningTestTargets(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
+	marker := filepath.Join(t.TempDir(), "test-binary-ran")
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/plan\n\ngo 1.26.0\n")).
 		File("value.go", crlfFixture("package plan\n\nfunc Value(v int) bool { return v < 10 }\n")).
-		File("value_test.go", crlfFixture(`package plan
+		File("value_test.go", crlfFixture(fmt.Sprintf(`package plan
 
 import (
 	"os"
 	"testing"
 )
 
-func TestValue(t *testing.T) {
-	if err := os.WriteFile("test-target-ran", []byte("ran"), 0o600); err != nil { t.Fatal(err) }
+func init() {
+	file, err := os.Create(%q)
+	if err != nil { panic(err) }
+	if err := file.Close(); err != nil { panic(err) }
 }
-`))
+
+func TestValue(t *testing.T) {
+	t.Fatal("plan ran a test target")
+}
+`, marker)))
 	planned, err := assure.Plan(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -170,12 +196,14 @@ func TestValue(t *testing.T) {
 	if targetCount != 1 || mutantCount == 0 || summaryCount != 1 {
 		t.Fatalf("plan evidence = %+v", planned.Evidence)
 	}
-	if _, err := os.Stat(repository.Path("test-target-ran")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("plan ran a test target: %v", err)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plan ran a test binary: %v", err)
 	}
 }
 
-func TestRunReturnsDefectForRepeatableBaselineFailureWithoutPreparingMutants(t *testing.T) {
+func TestRunReturnsDefectForRepeatableBaselineFailureBeforeExecutingMutants(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/defect\n\ngo 1.26.0\n")).
 		File("value.go", crlfFixture("package defect\n\nfunc Value() int { return 1 }\n")).
@@ -190,7 +218,8 @@ func TestValue(t *testing.T) {
 	var events []assure.Event
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"}, Progress: func(event assure.Event) { events = append(events, event) },
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
+		Progress: func(event assure.Event) { events = append(events, event) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,12 +227,14 @@ func TestValue(t *testing.T) {
 	if result.Verdict != report.VerdictDefect || len(result.Findings) != 1 || result.Findings[0].Kind != "baseline-failure" {
 		t.Fatalf("report = %+v", result)
 	}
-	if testkit.HasEvent(events, "mutation-prepare") {
-		t.Fatalf("mutation was prepared after a baseline defect: %+v", events)
+	if testkit.HasEvent(events, "mutation-target") {
+		t.Fatalf("baseline defect execution boundary = %+v", events)
 	}
 }
 
 func TestRunChangedInvalidatesOnlyImpactedTargetsAndBroadensForUnknownFiles(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/incremental\n\ngo 1.26.0\n")).
 		File(".gitignore", crlfFixture(".goatest/\n")).
@@ -219,23 +250,26 @@ func TestA(t *testing.T) {
 func TestB(t *testing.T) {
 	for _, v := range []int{0, 1} { if got := B(v); got != (v > 0) { t.Fatalf("B(%d) = %t", v, got) } }
 }
+func TestShared(t *testing.T) {
+	if !A(9) || !B(1) { t.Fatal("shared behavior changed") }
+}
 `)).
 		Git()
 	base := assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
 	}
 	if result, err := assure.Run(t.Context(), base); err != nil || result.Verdict != report.VerdictAssured {
 		t.Fatalf("initial run = %+v, %v", result, err)
 	}
-	repository.File("a.go", crlfFixture("package incremental\n\n// changed comment\nfunc A(v int) bool { return v < 10 }\n"))
+	repository.File("a.go", crlfFixture("package incremental\n\n\nfunc A(v int) bool { return v < 10 }\n"))
 	var targeted []assure.Event
 	base.Changed = true
 	base.Progress = func(event assure.Event) { targeted = append(targeted, event) }
 	if result, err := assure.Run(t.Context(), base); err != nil || result.Verdict != report.VerdictAssured {
 		t.Fatalf("targeted run = %+v, %v", result, err)
 	}
-	if got := testkit.EventDetails(targeted, "baseline-target"); len(got) != 1 || !strings.Contains(got[0], "TestA") {
+	if got, want := testkit.EventDetails(targeted, "baseline-progress"), []string{"0/2", "1/2", "2/2"}; !slices.Equal(got, want) {
 		t.Fatalf("targeted baseline events = %v; all events=%+v", got, targeted)
 	}
 
@@ -245,12 +279,14 @@ func TestB(t *testing.T) {
 	if _, err := assure.Run(t.Context(), base); err != nil {
 		t.Fatal(err)
 	}
-	if got := testkit.EventDetails(broad, "baseline-target"); len(got) != 2 || !testkit.HasEvent(broad, "impact-broad") {
+	if got, want := testkit.EventDetails(broad, "baseline-progress"), []string{"0/3", "1/3", "2/3", "3/3"}; !slices.Equal(got, want) || !testkit.HasEvent(broad, "impact-broad") {
 		t.Fatalf("broad baseline events = %v; all events=%+v", got, broad)
 	}
 }
 
-func TestRunPromotesTargetedFuzzCorpusAndReverifiesFromFreshSnapshot(t *testing.T) {
+func TestRunUsesFuzzSeedCorpusAsDeterministicMutationEvidence(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/repair\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package repair
@@ -269,7 +305,7 @@ func TestBoundaryWeak(t *testing.T) {
 }
 
 func FuzzBoundary(f *testing.F) {
-	f.Add([]byte{})
+	f.Add([]byte{1})
 	f.Fuzz(func(t *testing.T, input []byte) {
 		value := 5
 		if len(input) > 0 { value = 10 }
@@ -279,28 +315,21 @@ func FuzzBoundary(f *testing.F) {
 	})
 }
 `))
-	var events []assure.Event
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"}, FuzzExecutions: 10_000,
-		Progress: func(event assure.Event) { events = append(events, event) },
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Verdict != report.VerdictAssured || len(result.Repairs) != 1 || result.Repairs[0].Status != "applied" {
+	if result.Verdict != report.VerdictAssured || len(result.Repairs) != 0 {
 		t.Fatalf("report = %+v", result)
-	}
-	if testkit.CountEvent(events, "snapshot") < 2 || !testkit.HasEvent(events, "repair-applied") {
-		t.Fatalf("events = %+v", events)
-	}
-	entries, err := os.ReadDir(repository.Path("testdata/fuzz/FuzzBoundary"))
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("promoted corpus = %v, %v", entries, err)
 	}
 }
 
 func TestRunValidatesAppliesGeneratedTestAndReverifiesFreshSnapshot(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/generated\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package generated
@@ -338,7 +367,7 @@ func TestBoundaryWeak(t *testing.T) {
 	generatedCalls := 0
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"}, Validator: stableValidator{},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs, Validator: stableValidator{},
 		AllowedGenerationPaths: []string{"boundary_test.go"},
 		Generate: func(_ context.Context, request provider.Request) (provider.Response, error) {
 			generatedCalls++
@@ -360,11 +389,13 @@ func TestBoundaryWeak(t *testing.T) {
 
 type stableValidator struct{}
 
-func (stableValidator) OriginalStable(context.Context, provider.Candidate) error        { return nil }
+func (stableValidator) OriginalPasses(context.Context, provider.Candidate) error        { return nil }
 func (stableValidator) Kills(context.Context, report.Finding, provider.Candidate) error { return nil }
 func (stableValidator) Suite(context.Context, provider.Candidate) error                 { return nil }
 
 func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	dependency := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/dependency\n\ngo 1.26.0\n")).
 		File("value.go", crlfFixture("package dependency\n\nfunc Value() int { return 1 }\n"))
@@ -375,7 +406,7 @@ func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) 
 		File("value_test.go", crlfFixture("package subject\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 1 { t.Fatal(Value()) } }\n"))
 	options := assure.Options{
 		Root: subject.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
 	}
 	first, err := assure.Run(t.Context(), options)
 	if err != nil || first.Verdict != report.VerdictAssured {
@@ -394,9 +425,13 @@ func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) 
 }
 
 func TestRunManagesIntegrationResourceAcrossBaselineAndMutants(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	log := filepath.Join(t.TempDir(), "resource.log")
-	t.Setenv("GOATEST_ASSURE_RESOURCE_HELPER", "1")
-	t.Setenv("GOATEST_ASSURE_RESOURCE_LOG", log)
+	environment := append(os.Environ(),
+		"GOATEST_ASSURE_RESOURCE_HELPER=1",
+		"GOATEST_ASSURE_RESOURCE_LOG="+log,
+	)
 	configuration := fmt.Sprintf(`version = 1
 contract = "standard-v1"
 
@@ -413,8 +448,8 @@ environment = ["GOATEST_ASSURE_RESOURCE_HELPER", "GOATEST_ASSURE_RESOURCE_LOG"]
 
 import "testing"
 
-type TestScope struct{ Capability string }
-func Integration(capability string) TestScope { return TestScope{Capability: capability} }
+type TestScope struct{ capabilities []string }
+func Integration(capabilities ...string) TestScope { return TestScope{capabilities: capabilities} }
 type T struct{ *testing.T }
 func Run(t *testing.T, _ TestScope, body func(*T)) { body(&T{T: t}) }
 `)).
@@ -446,7 +481,8 @@ func TestManagedPostgres(t *testing.T) {
 `))
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
+		Environment: environment,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -473,15 +509,17 @@ func TestManagedPostgres(t *testing.T) {
 }
 
 func appendFixtureLog(path, action string) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, filemode.PrivateFile)
 	if err != nil {
-		os.Exit(43)
+		os.Exit(fixtureLogOpenExitCode)
 	}
 	_, _ = fmt.Fprintln(file, action)
 	_ = file.Close()
 }
 
 func TestRunUsesExternalGenerationProtocolAndProductionValidator(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/provider-e2e\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package providere2e
@@ -516,9 +554,11 @@ func TestBoundaryWeak(t *testing.T) {
 	}
 }
 `))
-	t.Setenv("GOATEST_ASSURE_GENERATION_HELPER", "1")
-	t.Setenv("GOATEST_ASSURE_GENERATION_CONTENT", candidate.Path("candidate.go"))
-	t.Setenv("GOATEST_ASSURE_GENERATION_PREIMAGE", hex.EncodeToString(sum[:]))
+	environment := append(os.Environ(),
+		"GOATEST_ASSURE_GENERATION_HELPER=1",
+		"GOATEST_ASSURE_GENERATION_CONTENT="+candidate.Path("candidate.go"),
+		"GOATEST_ASSURE_GENERATION_PREIMAGE="+hex.EncodeToString(sum[:]),
+	)
 	configuration := fmt.Sprintf(`version = 1
 contract = "standard-v1"
 
@@ -530,7 +570,8 @@ environment = ["GOATEST_ASSURE_GENERATION_HELPER", "GOATEST_ASSURE_GENERATION_CO
 	repository.File(".goatest.toml", crlfFixture(configuration))
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t), TempDirectory: t.TempDir(),
-		MutationOperators: []string{"comparison"},
+		MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
+		Environment: environment,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -540,16 +581,10 @@ environment = ["GOATEST_ASSURE_GENERATION_HELPER", "GOATEST_ASSURE_GENERATION_CO
 	}
 }
 
-// crlfFixture pins a fixture's line endings to CRLF. These end-to-end
-// fixtures are written the way a Windows checkout delivers them, so that a run
-// proves the whole pipeline - analysis, mutation, patch preimages, corpus
-// promotion - reads the sources it is given rather than a normalized copy.
 func crlfFixture(contents string) string {
 	return strings.ReplaceAll(contents, "\n", "\r\n")
 }
 
-// tomlArgv renders an argument vector as the body of a TOML array, the form a
-// .goatest.toml fixture declares a provider command in.
 func tomlArgv(argv []string) string {
 	quoted := make([]string, len(argv))
 	for index, argument := range argv {
@@ -558,12 +593,9 @@ func tomlArgv(argv []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// A package-scoped verify must bound the mutation catalog to the resolved
-// scope. Include selects mutation candidates while Packages only selects test
-// binaries, so a mutant in a package outside the scope has no prepared test
-// binary; executing its package suite used to fail the whole run instead of
-// the mutant never entering the catalog.
 func TestRunPackageScopeBoundsTheMutationCatalogToTheResolvedPackages(t *testing.T) {
+	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/scoped\n\ngo 1.26.0\n")).
 		File("naked.go", crlfFixture("package scoped\n\nfunc Naked(value int) bool { return value < 10 }\n")).
@@ -588,7 +620,7 @@ func TestBoundary(t *testing.T) {
 `))
 	result, err := assure.Run(t.Context(), assure.Options{
 		Root: repository.Root(), Contract: "standard-v1", GoBinary: testkit.GoBinary(t),
-		TempDirectory: t.TempDir(), MutationOperators: []string{"comparison"},
+		TempDirectory: t.TempDir(), MutationOperators: []string{"comparison"}, MutationJobs: endToEndMutationJobs,
 		Packages: []string{"./covered"}, PackageScope: true,
 	})
 	if err != nil {

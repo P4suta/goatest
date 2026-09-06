@@ -15,16 +15,31 @@ import (
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/checkpoint"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
-	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
+)
+
+const (
+	baselineResumeCommandCount = 2
+	journalUnitCount           = 2
+	resumedProbeDuration       = 11 * time.Millisecond
 )
 
 type journalCheckpointCache struct {
 	coordinatorCache
-	baselineUnits []checkpoint.BaselineTarget
-	mutationUnits []checkpoint.MutationResult
-	journalErr    error
+	baselineUnits      []checkpoint.BaselineTarget
+	baselineSuiteUnits []checkpoint.BaselineSuite
+	mutationUnits      []checkpoint.MutationResult
+	journalErr         error
+}
+
+func (cache *journalCheckpointCache) AppendBaselineSuiteCheckpoint(_ string, unit checkpoint.BaselineSuite) error {
+	if cache.journalErr != nil {
+		return cache.journalErr
+	}
+	cache.baselineSuiteUnits = append(cache.baselineSuiteUnits, unit)
+	return nil
 }
 
 func (cache *journalCheckpointCache) AppendBaselineCheckpoint(_ string, unit checkpoint.BaselineTarget) error {
@@ -55,7 +70,7 @@ func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *test
 		}
 		if len(command.Argv) > 0 && command.Argv[0] != "go" {
 			profile := coverageProfileArgument(command)
-			if err := os.WriteFile(profile, []byte("mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n"), 0o600); err != nil {
+			if err := os.WriteFile(profile, []byte("mode: set\nfixture.example/module/value.go:1.1,2.1 1 1\n"), filemode.PrivateFile); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -76,7 +91,7 @@ func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *test
 	if err != nil || result.Executed != 2 || len(result.Targets) != 2 || len(result.Inventory) != 2 || !completed.Complete {
 		t.Fatalf("resumed baseline = (%+v, %v), checkpoint %+v", result, err, completed)
 	}
-	if len(second.commands) != 2 {
+	if len(second.commands) != baselineResumeCommandCount {
 		t.Fatalf("resumed commands = %d, want compile and pending target", len(second.commands))
 	}
 	for _, command := range second.commands {
@@ -88,7 +103,7 @@ func TestBaselineCancellationCheckpointsClassifiedTargetAndResumeSkipsIt(t *test
 
 func TestCheckpointControllerJournalsUnitsAndCompactsInDeterministicOrder(t *testing.T) {
 	t.Parallel()
-	digest := strings.Repeat("a", 64)
+	digest := digestText("journal-checkpoint")
 	store := &journalCheckpointCache{}
 	controller := openRunCheckpoint(store, digest, Options{}, true)
 	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true})
@@ -101,38 +116,89 @@ func TestCheckpointControllerJournalsUnitsAndCompactsInDeterministicOrder(t *tes
 		Inventory: report.TargetDisposition{ID: "target-b", Name: "TestB", Status: "passed"},
 	}
 	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{targetA}})
-	// Baseline assembles checkpoint state from a completed-unit map. Journal
-	// eligibility is therefore a set extension, not a slice-prefix property.
+
 	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{targetB, targetA}})
+	suite := checkpoint.BaselineSuite{Package: "example.test/project", Measured: false}
+	controller.saveBaseline(checkpoint.Baseline{
+		BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{targetA, targetB}, Suites: []checkpoint.BaselineSuite{suite},
+	})
 	controller.saveBaseline(checkpoint.Baseline{BuildVetComplete: true, Complete: true, Targets: []checkpoint.BaselineTarget{targetA, targetB}})
-	if len(store.baselineUnits) != 2 {
+	if len(store.baselineUnits) != journalUnitCount {
 		t.Fatalf("baseline journal units = %+v, want two", store.baselineUnits)
 	}
 	if got := []string{store.baselineUnits[0].ID, store.baselineUnits[1].ID}; !slices.Equal(got, []string{"target-a", "target-b"}) {
 		t.Fatalf("baseline journal = %v", got)
+	}
+	if !reflect.DeepEqual(store.baselineSuiteUnits, []checkpoint.BaselineSuite{suite}) {
+		t.Fatalf("baseline suite journal = %+v, want %+v", store.baselineSuiteUnits, suite)
 	}
 
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{
 		{ID: "mutant-z", Path: "z.go", Package: "fixture.example/module", Rule: "rule", Accepted: true},
 		{ID: "mutant-a", Path: "a.go", Package: "fixture.example/module", Rule: "rule", Accepted: true},
 	}}
-	controller.mutation(catalog, t.TempDir())
+	controller.mutation(catalog)
 	for _, id := range []string{"mutant-z", "mutant-a"} {
 		controller.saveMutant(id, MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: id, Status: "killed"}}})
 	}
 	controller.completeMutation()
-	if len(store.mutationUnits) != 2 {
+	if len(store.mutationUnits) != len(catalog.Mutants) {
 		t.Fatalf("mutation journal units = %+v, want two", store.mutationUnits)
 	}
 	if got := []string{store.mutationUnits[0].ID, store.mutationUnits[1].ID}; !slices.Equal(got, []string{"mutant-z", "mutant-a"}) {
 		t.Fatalf("mutation journal lost completions = %v", got)
 	}
 	results := store.checkpoint.Mutation.Results
-	if len(results) != 2 {
+	if len(results) != len(catalog.Mutants) {
 		t.Fatalf("compacted mutation results = %+v, want two", results)
 	}
 	if got := []string{results[0].ID, results[1].ID}; !slices.Equal(got, []string{"mutant-a", "mutant-z"}) {
 		t.Fatalf("compacted mutation order = %v, want deterministic ID order", got)
+	}
+}
+
+func TestBaselineResumeSkipsTerminalPackageSuite(t *testing.T) {
+	target := baselineTestTarget("TestResumed")
+	block := []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{infectionBlock()}}}
+	evidence := TargetEvidence{
+		Target: target, CoveredFiles: []string{"value.go"}, Covered: block, Instrumented: block,
+		Duration: 25 * time.Millisecond,
+	}
+	unit := baselineClassifiedUnit(
+		BaselineTarget{Target: target}, "passed", "", evidence.Duration, true, false, &evidence,
+		[]report.Evidence{{Kind: "target", ID: target.ID, Status: "passed"}}, nil,
+	)
+	for _, test := range []struct {
+		name     string
+		measured bool
+	}{
+		{name: "measured", measured: true},
+		{name: "unmeasured terminal control"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := packageSuiteCoverageRun{importPath: target.Package, measured: test.measured}
+			if test.measured {
+				run.suite = PackageSuiteCoverage{Covered: block, Instrumented: block, Duration: 40 * time.Millisecond}
+			}
+			resume := checkpoint.Baseline{
+				BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{unit},
+				Suites: []checkpoint.BaselineSuite{checkpointBaselineSuite(run)},
+			}
+			workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
+				t.Fatalf("resumed completed baseline unit executed %+v", command.Argv)
+				return gomutants.CommandResult{}, nil
+			}}
+			result, err := CollectBaseline(t.Context(), workspace, baselineModel(), []BaselineTarget{{Target: target}}, BaselineOptions{
+				ArtifactDirectory: t.TempDir(), PackageSuites: true, Resume: &resume,
+			})
+			if err != nil || len(workspace.commands) != 0 || len(result.Targets) != 1 {
+				t.Fatalf("resumed baseline = (%+v, %v), commands %+v", result, err, workspace.commands)
+			}
+			_, restored := result.Suites[target.Package]
+			if restored != test.measured {
+				t.Fatalf("restored suite present = %t, want %t", restored, test.measured)
+			}
+		})
 	}
 }
 
@@ -141,15 +207,12 @@ type resumeMutationSession struct {
 	calls    []string
 	requests []gomutants.ExecRequest
 	fail     map[string]error
-	// survive names the mutants no execution kills, which is the evidence a
-	// dying run is most expensive to lose.
+
 	survive map[string]bool
 }
 
 func (session *resumeMutationSession) Catalog() gomutants.Catalog { return session.catalog }
 
-// Probe answers with no facts: these tests resume mutation work, and a resumed
-// target is one the probe pass never measured.
 func (session *resumeMutationSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
 }
@@ -166,7 +229,6 @@ func (session *resumeMutationSession) Exec(_ context.Context, request gomutants.
 	return gomutants.MutantResult{Outcome: gomutants.OutcomeKilled}, nil
 }
 
-// findingKinds names the findings of one evaluation in order.
 func findingKinds(evaluation MutationEvaluation) []string {
 	kinds := make([]string, 0, len(evaluation.Findings))
 	for _, finding := range evaluation.Findings {
@@ -175,20 +237,12 @@ func findingKinds(evaluation MutationEvaluation) []string {
 	return kinds
 }
 
-// survivingMutant is a mutant every target of reachedMutationTargets reaches,
-// since the catalog reports no column for it and routing then keeps every
-// target that ran the file.
 func survivingMutant(id string, line int) gomutants.Mutant {
 	return gomutants.Mutant{
 		ID: id, DisplayID: id, Path: "value.go", Package: "fixture.example/module", Line: line, Accepted: true,
 	}
 }
 
-// TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails pins that a mutant
-// every reaching test passed is durable the moment those tests pass. A
-// checkpoint written only once every seed has finished is a checkpoint a dying
-// run never writes, and survivors are the mutants a resumed run pays the most
-// to execute a second time.
 func TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails(t *testing.T) {
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4), survivingMutant("mutant-b", 8)}}
 	session := &resumeMutationSession{
@@ -198,8 +252,8 @@ func TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails(t *testing.T) {
 	}
 	var saved, executedWhenSaved []string
 	checkpointed := make(map[string]MutationEvaluation)
-	_, err := EvaluateMutations(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+	_, err := evaluateMutationsForTest(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
+		Jobs: 1,
 		Checkpoint: func(id string, unit MutationEvaluation) {
 			saved = append(saved, id)
 			checkpointed[id] = unit
@@ -208,6 +262,7 @@ func TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails(t *testing.T) {
 			}
 		},
 	})
+
 	if !errors.Is(err, context.Canceled) || !slices.Equal(saved, []string{"mutant-a"}) {
 		t.Fatalf("interrupted mutation = %v, saved=%v", err, saved)
 	}
@@ -219,9 +274,6 @@ func TestMutationSurvivorIsCheckpointedBeforeALaterMutantFails(t *testing.T) {
 	}
 }
 
-// TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation pins that
-// finalising a survivor early neither saves it twice nor lets the serial pass
-// find the same mutation a second time.
 func TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation(t *testing.T) {
 	session := &resumeMutationSession{
 		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4)}},
@@ -229,13 +281,14 @@ func TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation(t *testing.T) 
 	}
 	var saved []string
 	checkpointed := make(map[string]MutationEvaluation)
-	evaluation, err := EvaluateMutations(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, reachedMutationTargets()[:9], MutationOptions{
+		Jobs: 1,
 		Checkpoint: func(id string, unit MutationEvaluation) {
 			saved = append(saved, id)
 			checkpointed[id] = unit
 		},
 	})
+
 	if err != nil || !slices.Equal(saved, []string{"mutant-a"}) || evaluation.Accounting.Survived != 1 {
 		t.Fatalf("surviving mutation = (%+v, %v), saved=%v", evaluation, err, saved)
 	}
@@ -243,47 +296,51 @@ func TestMutationSurvivorIsCheckpointedOnceWithItsFinalEvaluation(t *testing.T) 
 	if kinds := findingKinds(unit); !slices.Equal(kinds, []string{"surviving-mutant"}) {
 		t.Fatalf("checkpointed survivor = %+v, want one surviving-mutant finding", unit)
 	}
-	// What a resumed run reads back is exactly what this run reported.
+
 	if !reflect.DeepEqual(unit.Findings, evaluation.Findings) || !reflect.DeepEqual(unit.Evidence, evaluation.Evidence) {
 		t.Fatalf("checkpointed evaluation = %+v, want the reported %+v", unit, evaluation)
 	}
 }
 
-// TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterFuzzing pins the
-// one survivor that is not finished when its tests pass: fuzzing may still
-// kill it, so it is finalised only once the fuzzing has run.
-func TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterFuzzing(t *testing.T) {
+func TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterSeedExecution(t *testing.T) {
 	session := &resumeMutationSession{
 		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{survivingMutant("mutant-a", 4)}},
 		survive: map[string]bool{"mutant-a": true},
 	}
 	var saved []string
 	checkpointed := make(map[string]MutationEvaluation)
-	evaluation, err := EvaluateMutations(t.Context(), session, reachedMutationTargets(), MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, reachedMutationTargets(), MutationOptions{
+		Jobs: 1, Timeout: time.Second,
+		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+			return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		},
 		Checkpoint: func(id string, unit MutationEvaluation) {
 			saved = append(saved, id)
 			checkpointed[id] = unit
 		},
 	})
+
 	if err != nil || !slices.Equal(saved, []string{"mutant-a"}) || evaluation.Accounting.Survived != 1 {
-		t.Fatalf("fuzz-reached surviving mutation = (%+v, %v), saved=%v", evaluation, err, saved)
+		t.Fatalf("fuzz-seed-reached surviving mutation = (%+v, %v), saved=%v", evaluation, err, saved)
 	}
 	if kinds := findingKinds(checkpointed["mutant-a"]); !slices.Equal(kinds, []string{"surviving-mutant"}) {
 		t.Fatalf("checkpointed survivor = %+v, want one surviving-mutant finding", checkpointed["mutant-a"])
 	}
-	fuzzed := 0
+	fuzzSeedExecutions := 0
 	for index, request := range session.requests {
-		if !slices.ContainsFunc(request.Args, func(arg string) bool { return strings.HasPrefix(arg, "-test.fuzz=") }) {
+		if !slices.ContainsFunc(request.Args, func(arg string) bool { return strings.Contains(arg, "FuzzValue") }) {
 			continue
 		}
-		fuzzed++
+		fuzzSeedExecutions++
 		if index != len(session.requests)-1 {
-			t.Fatalf("fuzz request %d of %d ran before the unit executions finished", index+1, len(session.requests))
+			t.Fatalf("fuzz seed request %d of %d ran before the shorter unit executions finished", index+1, len(session.requests))
+		}
+		if slices.ContainsFunc(request.Args, func(arg string) bool { return strings.HasPrefix(arg, "-test.fuzz=") }) {
+			t.Fatalf("exploratory fuzzing was requested: %+v", request)
 		}
 	}
-	if fuzzed != 1 {
-		t.Fatalf("fuzz requests = %d, want the one that follows the unit executions: %+v", fuzzed, session.requests)
+	if fuzzSeedExecutions != 1 {
+		t.Fatalf("fuzz seed executions = %d, want one deterministic execution: %+v", fuzzSeedExecutions, session.requests)
 	}
 }
 
@@ -295,11 +352,15 @@ func TestMutationResumeReusesOnlyTerminalCatalogMatches(t *testing.T) {
 	session := &resumeMutationSession{catalog: catalog}
 	resumed := MutationEvaluation{Evidence: []report.Evidence{{Kind: "mutation", ID: "mutant-a", Status: "killed", Detail: "TestA"}}}
 	var saved []string
-	evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, nil, MutationOptions{
+		Jobs:       1,
 		Resume:     map[string]MutationEvaluation{"mutant-a": resumed},
 		Checkpoint: func(id string, _ MutationEvaluation) { saved = append(saved, id) },
+		SuiteCoverage: map[string]PackageSuiteCoverage{
+			"example.test/project": {Duration: time.Second},
+		},
 	})
+
 	if err != nil || !slices.Equal(session.calls, []string{"mutant-b"}) || !slices.Equal(saved, []string{"mutant-b"}) || evaluation.Accounting.Killed != 2 || evaluation.Accounting.Unknown != 0 {
 		t.Fatalf("resumed mutation = (%+v, %v), calls=%v saved=%v", evaluation, err, session.calls, saved)
 	}
@@ -317,9 +378,13 @@ func TestMutationCancellationKeepsEarlierTerminalUnitPendingNeverBecomesUnknown(
 	}}
 	session := &resumeMutationSession{catalog: catalog, fail: map[string]error{"mutant-b": context.Canceled}}
 	var saved []string
-	evaluation, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
-		Root: t.TempDir(), Jobs: 1, Checkpoint: func(id string, _ MutationEvaluation) { saved = append(saved, id) },
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, nil, MutationOptions{
+		Jobs: 1, Checkpoint: func(id string, _ MutationEvaluation) { saved = append(saved, id) },
+		SuiteCoverage: map[string]PackageSuiteCoverage{
+			"example.test/project": {Duration: time.Second},
+		},
 	})
+
 	if !errors.Is(err, context.Canceled) || len(evaluation.Mutants) != 0 || !slices.Equal(saved, []string{"mutant-a"}) {
 		t.Fatalf("cancelled mutation = (%+v, %v), saved=%v", evaluation, err, saved)
 	}
@@ -331,30 +396,24 @@ func TestCheckpointTargetConversionPreservesRoutingIdentity(t *testing.T) {
 		Capabilities: []string{"db"}, Dependencies: []string{"example.test/dependency"},
 	}, CoveredFiles: []string{"value.go"}, Environment: []string{"DB=ready"}, Duration: 17 * time.Millisecond,
 		ProbeDuration: 11 * time.Millisecond,
-		WholeTree:     true, RepositoryObserved: true, Probed: true, Infected: []uint32{1, 4},
+		WholeTree:     true, Probed: true, Infected: []uint32{1, 4},
 		Covered: []goanalysis.FileCoverage{{Path: "value.go", Blocks: []goanalysis.CoverageBlock{
 			{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1},
 		}}}}
 	restored := restoreTargetEvidence(*checkpointTargetEvidence(input))
-	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind || !slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration || restored.WholeTree != input.WholeTree || restored.RepositoryObserved != input.RepositoryObserved {
+	if restored.Target.ID != input.Target.ID || restored.Target.Kind != input.Target.Kind ||
+		!slices.Equal(restored.Target.Capabilities, input.Target.Capabilities) || !slices.Equal(restored.Target.Dependencies, input.Target.Dependencies) ||
+		!slices.Equal(restored.CoveredFiles, input.CoveredFiles) || !slices.Equal(restored.Environment, input.Environment) || restored.Duration != input.Duration || restored.WholeTree != input.WholeTree ||
+		restored.Probed != input.Probed || restored.ProbeDuration != input.ProbeDuration || !slices.Equal(restored.Infected, input.Infected) {
 		t.Fatalf("restored target = %+v, want %+v", restored, input)
 	}
-	// Positive blocks are part of the target's completed scheduling fact. They
-	// preserve the same exact route after interruption instead of widening the
-	// target to every mutant in a covered file.
+
 	if !reflect.DeepEqual(restored.Covered, input.Covered) {
 		t.Fatalf("restored blocks = %+v, want %+v", restored.Covered, input.Covered)
 	}
-	// Infection facts do not belong inside baseline target state. The separate
-	// mutation-probe phase may restore them only after it binds a complete pass
-	// to its prepared catalog; this conversion alone stays conservative.
-	if restored.Probed || restored.Infected != nil || restored.ProbeDuration != 0 {
-		t.Fatalf("restored infection facts = %+v, want none", restored)
-	}
-	legacy := checkpointTargetEvidence(input)
-	legacy.Coverage = nil
-	if got := restoreTargetEvidence(*legacy).Covered; got != nil {
-		t.Fatalf("legacy checkpoint blocks = %+v, want conservative nil", got)
+
+	if restored.Instrumented == nil {
+		t.Fatal("restored instrumentation is unknown, want an exact empty set")
 	}
 }
 
@@ -379,7 +438,7 @@ func TestCollectBaselineKeepsBlocksForFreshAndResumedTargets(t *testing.T) {
 			contents := "mode: set\n" +
 				"fixture.example/module/value.go:5.29,6.16 1 1\n" +
 				"fixture.example/module/value.go:7.3,8.4 1 0\n"
-			if err := os.WriteFile(coverageProfileArgument(command), []byte(contents), 0o600); err != nil {
+			if err := os.WriteFile(coverageProfileArgument(command), []byte(contents), filemode.PrivateFile); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -460,7 +519,7 @@ func TestCompletedBaselineRoutingResumesWithoutCompileOrSuiteCommands(t *testing
 }
 
 func TestCheckpointClaimFailureForcesColdRunAndCatalogMismatchPreservesBaseline(t *testing.T) {
-	digest := strings.Repeat("d", 64)
+	digest := digestText("claim-failure")
 	target := goanalysis.Target{ID: "target", Name: "TestValue", Kind: goanalysis.KindTest, Package: "example.test/project", Path: "value_test.go", Line: 5}
 	baseline := checkpoint.Baseline{BuildVetComplete: true, Targets: []checkpoint.BaselineTarget{{
 		ID: "target", Executed: true,
@@ -493,7 +552,7 @@ func TestCheckpointClaimFailureForcesColdRunAndCatalogMismatchPreservesBaseline(
 		newCatalog := oldCatalog
 		newCatalog.Mutants = slices.Clone(oldCatalog.Mutants)
 		newCatalog.Mutants[0].Rule = "new"
-		if resumed := controller.mutation(newCatalog, t.TempDir()); len(resumed) != 0 || !controller.state.Baseline.BuildVetComplete || len(controller.state.Baseline.Targets) != 1 || controller.state.Mutation.CatalogFingerprint != MutationCatalogFingerprint(newCatalog) {
+		if resumed := controller.mutation(newCatalog); len(resumed) != 0 || !controller.state.Baseline.BuildVetComplete || len(controller.state.Baseline.Targets) != 1 || controller.state.Mutation.CatalogFingerprint != MutationCatalogFingerprint(newCatalog) {
 			t.Fatalf("catalog mismatch resumed=%+v state=%+v", resumed, controller.state)
 		}
 	})
@@ -501,17 +560,17 @@ func TestCheckpointClaimFailureForcesColdRunAndCatalogMismatchPreservesBaseline(
 
 func TestCheckpointControllerPersistsCompleteProbeAndRejectsChangedInventory(t *testing.T) {
 	t.Parallel()
-	digest := strings.Repeat("9", 64)
+	digest := digestText("probe-checkpoint")
 	catalog := probeCatalog()
 	targets := []TargetEvidence{probeEvidence("TestValue", goanalysis.KindTest, 17*time.Millisecond)}
 	probed := slices.Clone(targets)
 	probed[0].Probed = true
-	probed[0].ProbeDuration = 11 * time.Millisecond
+	probed[0].ProbeDuration = resumedProbeDuration
 	probed[0].Infected = []uint32{0, 2}
 	evaluation := ProbeEvaluation{Targets: probed, Measured: 1}
 	store := &coordinatorCache{}
 	first := openRunCheckpoint(store, digest, Options{}, true)
-	if resumed := first.mutation(catalog, t.TempDir()); len(resumed) != 0 {
+	if resumed := first.mutation(catalog); len(resumed) != 0 {
 		t.Fatalf("new catalogue resumed %+v", resumed)
 	}
 	first.saveProbe(catalog, evaluation)
@@ -520,7 +579,7 @@ func TestCheckpointControllerPersistsCompleteProbeAndRejectsChangedInventory(t *
 	})
 
 	second := openRunCheckpoint(store, digest, Options{}, true)
-	resumedMutants := second.mutation(catalog, t.TempDir())
+	resumedMutants := second.mutation(catalog)
 	restored, reused, valid := second.probe(catalog, targets, nil)
 	if !valid || !reused || len(resumedMutants) != 1 || !reflect.DeepEqual(restored, evaluation) {
 		t.Fatalf("resume = probe (%+v, reused=%t valid=%t), mutants=%+v", restored, reused, valid, resumedMutants)
@@ -537,7 +596,7 @@ func TestCheckpointControllerPersistsCompleteProbeAndRejectsChangedInventory(t *
 }
 
 func TestCheckpointRaceAndCandidateValidationDiscardOnlyUnsafePhases(t *testing.T) {
-	digest := strings.Repeat("e", 64)
+	digest := digestText("phase-checkpoint")
 	baseline := checkpoint.Baseline{BuildVetComplete: true}
 
 	t.Run("matching race inventory is reused", func(t *testing.T) {
@@ -545,10 +604,12 @@ func TestCheckpointRaceAndCandidateValidationDiscardOnlyUnsafePhases(t *testing.
 			Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 2, Baseline: baseline,
 			Race: &checkpoint.Race{Complete: true, Packages: []string{"example.test/b", "example.test/a"}},
 		}}
+		wantAttempts := cache.checkpoint.Attempts + 1
+		wantPackages := len(cache.checkpoint.Race.Packages)
 		controller := openRunCheckpoint(cache, digest, Options{}, true)
 		resumed, ok := controller.race([]string{"example.test/a", "example.test/b"})
 		metadata := controller.resumeMetadata()
-		if !ok || resumed == nil || metadata.Attempts != 3 || metadata.ReusedRacePackages != 2 {
+		if !ok || resumed == nil || metadata.Attempts != wantAttempts || metadata.ReusedRacePackages != wantPackages {
 			t.Fatalf("race resume = (%+v, %t), metadata=%+v", resumed, ok, metadata)
 		}
 	})
@@ -557,27 +618,11 @@ func TestCheckpointRaceAndCandidateValidationDiscardOnlyUnsafePhases(t *testing.
 		cache := &coordinatorCache{checkpointFound: true, checkpoint: checkpoint.State{
 			Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1, Baseline: baseline,
 			Race:     &checkpoint.Race{Complete: true, Packages: []string{"example.test/old"}},
-			Mutation: &checkpoint.Mutation{CatalogFingerprint: strings.Repeat("f", 64)},
+			Mutation: &checkpoint.Mutation{CatalogFingerprint: digestText("changed-catalog")},
 		}}
 		controller := openRunCheckpoint(cache, digest, Options{}, true)
 		if resumed, ok := controller.race([]string{"example.test/new"}); ok || resumed != nil || controller.state.Race != nil || controller.state.Mutation != nil || !controller.state.Baseline.BuildVetComplete {
 			t.Fatalf("race mismatch = (%+v, %t), state=%+v", resumed, ok, controller.state)
-		}
-	})
-
-	t.Run("missing candidate discards mutation but preserves baseline", func(t *testing.T) {
-		catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant", Path: "value.go", Package: "example.test/project", Rule: "lt-to-le", Line: 4, Accepted: true}}}
-		fingerprint := MutationCatalogFingerprint(catalog)
-		cache := &coordinatorCache{checkpointFound: true, checkpoint: checkpoint.State{
-			Schema: checkpoint.SchemaV1, InputDigest: digest, Attempts: 1, Baseline: baseline,
-			Mutation: &checkpoint.Mutation{CatalogFingerprint: fingerprint, Results: []checkpoint.MutationResult{{
-				ID: "mutant", Findings: []report.Finding{{ID: "finding", MutantID: "mutant", Kind: "unpersisted-fuzz-kill", Summary: "candidate"}},
-				Repairs: []report.Repair{{ID: "missing-candidate", Status: string(repair.StatusCandidate)}},
-			}}},
-		}}
-		controller := openRunCheckpoint(cache, digest, Options{}, true)
-		if resumed := controller.mutation(catalog, t.TempDir()); len(resumed) != 0 || !controller.state.Baseline.BuildVetComplete || controller.state.Mutation.CatalogFingerprint != fingerprint || len(controller.state.Mutation.Results) != 0 {
-			t.Fatalf("missing artifact resumed=%+v state=%+v", resumed, controller.state)
 		}
 	})
 }

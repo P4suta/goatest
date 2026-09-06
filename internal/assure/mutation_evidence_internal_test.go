@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,19 +17,60 @@ import (
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
+const (
+	concurrentEvidenceMutants       = 32
+	concurrentEvidenceReuseDivisor  = 2
+	concurrentReusedEvidenceMutants = concurrentEvidenceMutants / concurrentEvidenceReuseDivisor
+	lazyWholeTreeTargetCount        = 2
+	changedCommandTimeout           = 11 * time.Minute
+	changedTargetTimeout            = 13 * time.Minute
+)
+
+func TestWholeTreeEvidenceKeysAreGeneratedOnlyWhenRequired(t *testing.T) {
+	t.Parallel()
+	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
+	targets := make([]TargetEvidence, 0, lazyWholeTreeTargetCount)
+	inventory := make([]report.TargetDisposition, 0, lazyWholeTreeTargetCount)
+	for index := range lazyWholeTreeTargetCount {
+		target := evidenceTarget("TestLazy"+strconv.Itoa(index), goanalysis.KindTest, time.Millisecond)
+		targets = append(targets, target)
+		inventory = append(inventory, report.TargetDisposition{
+			Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+		})
+	}
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, targets, inventory, nil, digestText("snapshot"))
+	if len(index.wholeKeys) != 0 || len(index.wholeSuites) != 0 {
+		t.Fatalf("eager whole keys = (%d, %d)", len(index.wholeKeys), len(index.wholeSuites))
+	}
+	first := targets[0]
+	first.WholeTree = true
+	if key, whole := index.targetKey(first); key == "" || !whole {
+		t.Fatalf("whole target key = (%q, %t)", key, whole)
+	}
+	if len(index.wholeKeys) != 1 || len(index.wholeSuites) != 0 {
+		t.Fatalf("target generation = (%d, %d)", len(index.wholeKeys), len(index.wholeSuites))
+	}
+	if key, whole := index.suiteKey(evidenceModule, true); key == "" || !whole {
+		t.Fatalf("whole suite key = (%q, %t)", key, whole)
+	}
+	if len(index.wholeKeys) != lazyWholeTreeTargetCount || len(index.wholeSuites) != 1 {
+		t.Fatalf("suite generation = (%d, %d)", len(index.wholeKeys), len(index.wholeSuites))
+	}
+}
+
 func TestMutationExecutionThatReadsTheRepositoryRecordsAWholeTreeKey(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
-	target.RepositoryObserved = true
 	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
 	sources.model.ModuleDir = root
 	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
@@ -36,18 +78,18 @@ func TestMutationExecutionThatReadsTheRepositoryRecordsAWholeTreeKey(t *testing.
 	}, sources)
 	index := newRunMutationEvidence(evidence.MutationStore{}, sources, []TargetEvidence{target}, []report.TargetDisposition{{
 		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
-	}}, digestText("snapshot"))
+	}}, nil, digestText("snapshot"))
 	mutant := evidenceMutant("repository-reader")
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		log, _ := repositoryTestLogPath(request.Args)
-		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), filemode.PrivateFile); err != nil {
 			return gomutants.MutantResult{}, err
 		}
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
 	}}
 
-	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
-		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	if _, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Evidence: index, RepositoryObserver: observer,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,20 +97,19 @@ func TestMutationExecutionThatReadsTheRepositoryRecordsAWholeTreeKey(t *testing.
 	if len(records) != 1 || len(records[0].Exhausted) != 1 || !records[0].Exhausted[0].WholeTree {
 		t.Fatalf("recorded evidence = %+v, want a whole-tree exhausted target", records)
 	}
-	want := sources.targetKey(target.Target, true)
+	want := sources.targetKey(target.Target, target.Environment, true)
 	if records[0].Exhausted[0].Key != want {
 		t.Fatalf("whole-tree key = %q, want %q", records[0].Exhausted[0].Key, want)
 	}
 }
 
-func TestConfirmedKillJoinsBothMutantRepositoryObservations(t *testing.T) {
+func TestSingleComparativeKillRecordsItsRepositoryObservation(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
-	target.RepositoryObserved = true
 	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
 	sources.model.ModuleDir = root
 	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
@@ -76,17 +117,14 @@ func TestConfirmedKillJoinsBothMutantRepositoryObservations(t *testing.T) {
 	}, sources)
 	index := newRunMutationEvidence(evidence.MutationStore{}, sources, []TargetEvidence{target}, []report.TargetDisposition{{
 		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
-	}}, digestText("snapshot"))
-	mutant := evidenceMutant("confirmed-repository-reader")
+	}}, nil, digestText("snapshot"))
+	mutant := evidenceMutant("repository-reader-kill")
 	calls := 0
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		calls++
 		log, _ := repositoryTestLogPath(request.Args)
-		contents := "# test log\n"
-		if calls == 2 {
-			contents += "open " + root + "\n"
-		}
-		if err := os.WriteFile(log, []byte(contents), 0o600); err != nil {
+		contents := "# test log\nopen " + root + "\n"
+		if err := os.WriteFile(log, []byte(contents), filemode.PrivateFile); err != nil {
 			return gomutants.MutantResult{}, err
 		}
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
@@ -94,21 +132,21 @@ func TestConfirmedKillJoinsBothMutantRepositoryObservations(t *testing.T) {
 	control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
 		return gomutants.CommandResult{}, nil
 	}
-	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{target}, MutationOptions{
-		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer, OriginalControl: control,
+	if _, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{target}, MutationOptions{
+		Evidence: index, RepositoryObserver: observer, OriginalControl: control,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	records := index.store(session.catalog, evidenceModule).Records
-	if calls != 2 || len(records) != 1 || records[0].KilledBy == nil || !records[0].KilledBy.WholeTree {
-		t.Fatalf("calls = %d, records = %+v; want a confirmed whole-tree kill", calls, records)
+	if calls != 1 || len(records) != 1 || len(records[0].KilledBy) != 1 || !records[0].KilledBy[0].WholeTree {
+		t.Fatalf("calls = %d, records = %+v; want one whole-tree kill", calls, records)
 	}
 }
 
 func TestRepositoryObservationWidensAPackageSuiteRecord(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
@@ -116,18 +154,19 @@ func TestRepositoryObservationWidensAPackageSuiteRecord(t *testing.T) {
 	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{
 		evidenceModule: {},
 	}, sources)
-	index := newRunMutationEvidence(evidence.MutationStore{}, sources, nil, nil, digestText("snapshot"))
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, nil, nil, nil, digestText("snapshot"))
 	mutant := evidenceMutant("repository-suite")
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		log, _ := repositoryTestLogPath(request.Args)
-		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(log, []byte("# test log\nopen "+root+"\n"), filemode.PrivateFile); err != nil {
 			return gomutants.MutantResult{}, err
 		}
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
 	}}
 
-	if _, err := EvaluateMutations(t.Context(), session, nil, MutationOptions{
-		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	if _, err := evaluateMutationsForTest(t.Context(), session, nil, MutationOptions{
+		Evidence: index, RepositoryObserver: observer,
+		SuiteCoverage: map[string]PackageSuiteCoverage{evidenceModule: {Duration: time.Second}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +178,9 @@ func TestRepositoryObservationWidensAPackageSuiteRecord(t *testing.T) {
 
 func TestRepositoryObservationOfABatchWidensEverySelectedTarget(t *testing.T) {
 	t.Parallel()
+	const repositoryBatchTargets = 10
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package fixture\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
@@ -150,15 +190,14 @@ func TestRepositoryObservationOfABatchWidensEverySelectedTarget(t *testing.T) {
 	}, sources)
 	var targets []TargetEvidence
 	var inventory []report.TargetDisposition
-	for index := range individualMutationTargetLimit + 2 {
+	for index := range repositoryBatchTargets {
 		target := evidenceTarget("TestBatch"+strconv.Itoa(index), goanalysis.KindTest, 3*time.Millisecond)
-		target.RepositoryObserved = true
 		targets = append(targets, target)
 		inventory = append(inventory, report.TargetDisposition{
 			Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
 		})
 	}
-	index := newRunMutationEvidence(evidence.MutationStore{}, sources, targets, inventory, digestText("snapshot"))
+	index := newRunMutationEvidence(evidence.MutationStore{}, sources, targets, inventory, nil, digestText("snapshot"))
 	mutant := evidenceMutant("repository-batch")
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		log, _ := repositoryTestLogPath(request.Args)
@@ -166,14 +205,14 @@ func TestRepositoryObservationOfABatchWidensEverySelectedTarget(t *testing.T) {
 		if strings.Contains(strings.Join(request.Args, " "), "|") {
 			contents += "open " + root + "\n"
 		}
-		if err := os.WriteFile(log, []byte(contents), 0o600); err != nil {
+		if err := os.WriteFile(log, []byte(contents), filemode.PrivateFile); err != nil {
 			return gomutants.MutantResult{}, err
 		}
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
 	}}
 
-	if _, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
-		Root: root, Contract: "standard-v1", Evidence: index, RepositoryObserver: observer,
+	if _, err := evaluateMutationsForTest(t.Context(), session, targets, MutationOptions{
+		Evidence: index, RepositoryObserver: observer,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,22 +221,20 @@ func TestRepositoryObservationOfABatchWidensEverySelectedTarget(t *testing.T) {
 		t.Fatalf("recorded evidence = %+v, want %d exhausted targets", records, len(targets))
 	}
 	for _, target := range records[0].Exhausted {
-		wantWhole := target.Name == "TestBatch8" || target.Name == "TestBatch9"
-		if target.WholeTree != wantWhole {
-			t.Errorf("target %s whole_tree = %t, want %t", target.Name, target.WholeTree, wantWhole)
+		if !target.WholeTree {
+			t.Errorf("target %s did not retain the aggregate repository observation", target.Name)
 		}
 	}
 }
 
-func TestWholeTreeMarkerMigratesOldReaderEvidenceWithoutUnsafeReuse(t *testing.T) {
+func TestWholeTreeMarkerSelectsTheMatchingRepositoryBoundary(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("reader-migration")
 	target := evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond)
-	target.RepositoryObserved = true
 	identity := identify(target.Target)
 	sources := repositoryReaderKeyFixture(map[string]bool{evidenceModule: true})
-	narrow := sources.targetKey(target.Target, false)
-	whole := sources.targetKey(target.Target, true)
+	narrow := sources.targetKey(target.Target, target.Environment, false)
+	whole := sources.targetKey(target.Target, target.Environment, true)
 	passed := []report.TargetDisposition{{
 		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
 	}}
@@ -207,28 +244,25 @@ func TestWholeTreeMarkerMigratesOldReaderEvidenceWithoutUnsafeReuse(t *testing.T
 		return evidence.MutationRecord{
 			MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
 			Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("earlier"),
-			KilledBy: &evidence.TargetKey{Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key, WholeTree: marked},
+			KilledBy: []evidence.TargetKey{{Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: key, WholeTree: marked}},
 		}
 	}
 	for _, test := range []struct {
 		name          string
 		baselineWhole bool
-		oldCheckpoint bool
 		record        evidence.MutationRecord
 		wantReuse     bool
 	}{
-		{name: "old narrow record", record: record(narrow, false), wantReuse: true},
-		{name: "old reader record without marker", record: record(whole, false)},
-		{name: "marked reader record", record: record(whole, true), wantReuse: true},
-		{name: "current baseline escaped an old narrow record", baselineWhole: true, record: record(narrow, false)},
-		{name: "old checkpoint cannot assert a narrow observation", oldCheckpoint: true, record: record(narrow, false)},
+		{name: "narrow record matches narrow baseline", record: record(narrow, false), wantReuse: true},
+		{name: "whole key without marker is not narrow", record: record(whole, false)},
+		{name: "whole record matches the available whole key", record: record(whole, true), wantReuse: true},
+		{name: "whole baseline refuses a narrow record", baselineWhole: true, record: record(narrow, false)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			current := target
 			current.WholeTree = test.baselineWhole
-			current.RepositoryObserved = !test.oldCheckpoint
 			index := newRunMutationEvidence(evidence.MutationStore{Records: []evidence.MutationRecord{test.record}},
-				sources, []TargetEvidence{current}, passed, digestText("current"))
+				sources, []TargetEvidence{current}, passed, nil, digestText("current"))
 			_, _, reused := index.reuseKill(mutant, route)
 			if reused != test.wantReuse {
 				t.Fatalf("reuse = %t, want %t", reused, test.wantReuse)
@@ -237,19 +271,14 @@ func TestWholeTreeMarkerMigratesOldReaderEvidenceWithoutUnsafeReuse(t *testing.T
 	}
 }
 
-// evidenceModule is the module every fixture in this file belongs to, and the
-// identity a store is only trusted under.
 const evidenceModule = "fixture.example/module"
 
-// evidenceTarget is one measured target that ran value.go:7-9, the block every
-// mutant in this file lives in.
 func evidenceTarget(name string, kind goanalysis.TargetKind, duration time.Duration) TargetEvidence {
 	target := blockTarget(name, duration, goanalysis.CoverageBlock{StartLine: 7, StartColumn: 2, EndLine: 9, EndColumn: 3})
 	target.Target.Kind = kind
 	return target
 }
 
-// evidenceMutant is one accepted mutant inside that block.
 func evidenceMutant(name string) gomutants.Mutant {
 	return gomutants.Mutant{
 		ID: digestText(name), DisplayID: "arithmetic#1", Accepted: true, Rule: "arithmetic",
@@ -257,23 +286,18 @@ func evidenceMutant(name string) gomutants.Mutant {
 	}
 }
 
-// evidenceIdentity names a target the way a record names it: by what
-// -test.run selects, never by a target ID, which carries a line number.
 func evidenceIdentity(name string, kind goanalysis.TargetKind) targetIdentity {
 	return targetIdentity{pkg: evidenceModule, name: name, kind: string(kind)}
 }
 
-// killedEvidenceRecord is an earlier run's record of one confirmed kill.
 func killedEvidenceRecord(mutant gomutants.Mutant, killer targetIdentity, key string) evidence.MutationRecord {
 	return evidence.MutationRecord{
 		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
 		Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("earlier-run"),
-		KilledBy: &evidence.TargetKey{Package: killer.pkg, Name: killer.name, Kind: killer.kind, Key: key},
+		KilledBy: []evidence.TargetKey{{Package: killer.pkg, Name: killer.name, Kind: killer.kind, Key: key}},
 	}
 }
 
-// evidenceIndex indexes the given records for a run in which every named
-// target carries the given behaviour key and passed the baseline.
 func evidenceIndex(records []evidence.MutationRecord, keys map[targetIdentity]string, passed map[targetIdentity]bool) *MutationEvidence {
 	return newMutationEvidence(
 		evidence.MutationStore{Schema: evidence.MutationSchemaV1, ModulePath: evidenceModule, Records: records},
@@ -281,7 +305,6 @@ func evidenceIndex(records []evidence.MutationRecord, keys map[targetIdentity]st
 	)
 }
 
-// refusingSession fails the test if the evaluation executes anything.
 func refusingSession(t *testing.T, catalog gomutants.Catalog) *mutationUnitSession {
 	t.Helper()
 	return &mutationUnitSession{catalog: catalog, exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -290,10 +313,6 @@ func refusingSession(t *testing.T, catalog gomutants.Catalog) *mutationUnitSessi
 	}}
 }
 
-// TestEvaluateMutationsReusesAKilledMutantWithoutExecutingIt pins the whole
-// claim of a reused kill: nothing runs, and what the run reports is what a
-// fresh confirmed kill by the same target reports, beside the provenance of
-// the run that established it.
 func TestEvaluateMutationsReusesAKilledMutantWithoutExecutingIt(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -305,9 +324,10 @@ func TestEvaluateMutationsReusesAKilledMutantWithoutExecutingIt(t *testing.T) {
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
 	session := refusingSession(t, catalog)
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
-	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	}, MutationOptions{Evidence: index})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,10 +352,33 @@ func TestEvaluateMutationsReusesAKilledMutantWithoutExecutingIt(t *testing.T) {
 	}
 }
 
-// TestEvaluateMutationsExecutesAKilledMutantWhoseKillerLeftTheReachingSet
-// pins that a record is only ever reused about a target this run would have
-// run: a killer coverage no longer routes to proves nothing about the mutant
-// now.
+func TestAggregateKillReuseRequiresOneCompatibleExecutionGroup(t *testing.T) {
+	t.Parallel()
+	mutant := evidenceMutant("mutant-a")
+	early := evidenceIdentity("TestEarly", goanalysis.KindTest)
+	late := evidenceIdentity("TestLate", goanalysis.KindTest)
+	earlyKey := digestText("early-key")
+	lateKey := digestText("late-key")
+	record := evidence.MutationRecord{
+		MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
+		Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("earlier-run"),
+		KilledBy: []evidence.TargetKey{
+			exhaustedKey(early, earlyKey), exhaustedKey(late, lateKey),
+		},
+	}
+	index := evidenceIndex([]evidence.MutationRecord{record},
+		map[targetIdentity]string{early: earlyKey, late: lateKey},
+		map[targetIdentity]bool{early: true, late: true})
+	targets := []TargetEvidence{
+		evidenceTarget("TestEarly", goanalysis.KindTest, time.Millisecond),
+		evidenceTarget("TestLate", goanalysis.KindTest, time.Millisecond),
+	}
+	targets[1].Environment = []string{"RESOURCE=other"}
+	if _, _, reused := index.reuseKill(mutant, mutationRoute{reaching: targets}); reused {
+		t.Fatal("a witness spanning incompatible execution groups was reused")
+	}
+}
+
 func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerLeftTheReachingSet(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -345,9 +388,10 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerLeftTheReachingSet(t *
 		map[targetIdentity]string{absent: key}, map[targetIdentity]bool{absent: true})
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
-	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	}, MutationOptions{Evidence: index})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,9 +403,6 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerLeftTheReachingSet(t *
 	}
 }
 
-// TestEvaluateMutationsExecutesAKilledMutantWhoseKillerKeyChanged pins the
-// other half: the target is still routed to, but it is not the target the
-// record is about, because something the test binary reads has changed.
 func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerKeyChanged(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -370,9 +411,10 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerKeyChanged(t *testing.
 		map[targetIdentity]string{killer: digestText("current-key")}, map[targetIdentity]bool{killer: true})
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
-	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	}, MutationOptions{Evidence: index})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,11 +423,6 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseKillerKeyChanged(t *testing.
 	}
 }
 
-// TestEvaluateMutationsExecutesAKilledMutantWhoseBaselineTargetDidNotPass pins
-// the control a reused kill stands on. The recording run confirmed the kill
-// against an original that passed; this run's fresh evidence that the original
-// still passes is its own baseline running that target. Without it there is no
-// control, and the mutant is executed.
 func TestEvaluateMutationsExecutesAKilledMutantWhoseBaselineTargetDidNotPass(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -395,9 +432,10 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseBaselineTargetDidNotPass(t *
 		map[targetIdentity]string{killer: key}, map[targetIdentity]bool{})
 	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
-	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Evidence: index})
+	}, MutationOptions{Evidence: index})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,11 +444,7 @@ func TestEvaluateMutationsExecutesAKilledMutantWhoseBaselineTargetDidNotPass(t *
 	}
 }
 
-// TestEvaluateMutationsNeverReusesAFuzzLoopKill pins both directions of the
-// one kill that is not a repeatable claim: fuzzing found an input this time,
-// which says nothing about the next budget, so a fuzz kill is neither recorded
-// nor believed.
-func TestEvaluateMutationsNeverReusesAFuzzLoopKill(t *testing.T) {
+func TestEvaluateMutationsReusesAnExactKillerSetWhenTheReachingSetGrows(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
 	fuzzer := evidenceIdentity("FuzzValue", goanalysis.KindFuzz)
@@ -424,35 +458,25 @@ func TestEvaluateMutationsNeverReusesAFuzzLoopKill(t *testing.T) {
 	loaded := killedEvidenceRecord(mutant, fuzzer, key)
 	index := evidenceIndex([]evidence.MutationRecord{loaded}, keys, passed)
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
-	session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
-		if slices.ContainsFunc(request.Args, func(argument string) bool { return strings.HasPrefix(argument, "-test.fuzz=") }) {
-			return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
-		}
-		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
-	}}
+	session := &mutationUnitSession{catalog: catalog}
 
-	evaluation, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, targets, MutationOptions{
+		Evidence: index,
 	})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(session.requests) == 0 || evaluation.Mutants[0].Reused {
-		t.Fatalf("a fuzz kill was reused: %+v", evaluation.Mutants)
+	if len(session.requests) != 0 || !evaluation.Mutants[0].Reused {
+		t.Fatalf("an exact historical witness was not reused: %+v", evaluation.Mutants)
 	}
-	// Fuzzing killed the mutant in this run too, and the store is exactly what
-	// it was: the kill added nothing, so nothing about it can be believed
-	// later. The record that was already there is kept because the mutant is
-	// still in the catalogue, and it stays as unusable as it was.
+
 	records := index.store(catalog, evidenceModule).Records
 	if len(records) != 1 || !reflect.DeepEqual(records[0], loaded) {
-		t.Fatalf("store = %+v, want only the record it was given", records)
+		t.Fatalf("store = %+v, want the reused witness", records)
 	}
 }
 
-// TestEvaluateMutationsRecordsAReusedRouteInTheTrace pins what an audit reads:
-// the route says the verdict was reused, its plan is the reuse itself, and no
-// execution is recorded for the mutant, because none happened.
 func TestEvaluateMutationsRecordsAReusedRouteInTheTrace(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -462,13 +486,13 @@ func TestEvaluateMutationsRecordsAReusedRouteInTheTrace(t *testing.T) {
 		map[targetIdentity]string{killer: key}, map[targetIdentity]bool{killer: true})
 	sink, recorder := newTraceRecording()
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
-	session := newTracedSession(refusingSession(t, catalog), recorder)
+	session := refusingSession(t, catalog)
 
-	if _, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	if _, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
 	}, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
-		Trace: recorder, Instrumented: blockRoutingInstrumentation(),
+		Evidence: index,
+		Trace:    recorder, Instrumented: blockRoutingInstrumentation(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -488,12 +512,6 @@ func TestEvaluateMutationsRecordsAReusedRouteInTheTrace(t *testing.T) {
 	}
 }
 
-// TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse pins what this
-// run is willing to write down. A kill one named target confirmed and a
-// survivor every reaching target was run against are both claims a later run
-// can check; an inconclusive outcome, a kill that did not reproduce, a control
-// that failed, and a kill by a batch of targets — which names no target a
-// later run could check the key of — each leave the store as they found it.
 func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 	t.Parallel()
 	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
@@ -504,11 +522,11 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 		targets  []TargetEvidence
 		exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
 		control  func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
-		killer   string
+		killer   bool
 		survivor bool
 	}{
 		{
-			name: "a kill one target confirmed", killer: "TestEarly",
+			name: "a kill by one target", killer: true,
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 			},
@@ -529,7 +547,7 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 			},
 		},
 		{
-			name: "a kill that did not reproduce", control: passingControl,
+			name: "a comparative kill is not retried", control: passingControl, killer: true,
 			exec: func() func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				attempts := 0
 				return func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -543,6 +561,7 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 		},
 		{
 			name: "a kill by a batch of targets", targets: reachedMutationTargets(),
+			killer: true,
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				if slices.ContainsFunc(request.Args, func(argument string) bool { return strings.Contains(argument, "|") }) {
 					return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
@@ -568,8 +587,8 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 			index := evidenceIndex(nil, keys, passed)
 			catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
 			session := &mutationUnitSession{catalog: catalog, exec: test.exec}
-			if _, err := EvaluateMutations(t.Context(), session, targets, MutationOptions{
-				Root: t.TempDir(), Contract: "standard-v1", Evidence: index, OriginalControl: test.control,
+			if _, err := evaluateMutationsForTest(t.Context(), session, targets, MutationOptions{
+				Evidence: index, OriginalControl: test.control,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -580,18 +599,32 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 				}
 				return
 			}
-			if test.killer == "" {
+			if !test.killer {
 				if len(records) != 0 {
 					t.Fatalf("recorded %+v, want nothing", records)
 				}
 				return
 			}
+			wantKillers := make([]evidence.TargetKey, 0, len(targets))
+			for _, target := range targets {
+				identity := identify(target.Target)
+				wantKillers = append(wantKillers, evidence.TargetKey{
+					Package: identity.pkg, Name: identity.name, Kind: identity.kind, Key: digestText(identity.name),
+				})
+			}
+			slices.SortFunc(wantKillers, func(first, second evidence.TargetKey) int {
+				if order := strings.Compare(first.Package, second.Package); order != 0 {
+					return order
+				}
+				if order := strings.Compare(first.Name, second.Name); order != 0 {
+					return order
+				}
+				return strings.Compare(first.Kind, second.Kind)
+			})
 			want := evidence.MutationRecord{
 				MutantID: mutant.ID, Path: mutant.Path, Package: mutant.Package,
 				Outcome: evidence.MutationOutcomeKilled, Provenance: "snapshot=" + digestText("this-run"),
-				KilledBy: &evidence.TargetKey{
-					Package: evidenceModule, Name: test.killer, Kind: string(goanalysis.KindTest), Key: digestText(test.killer),
-				},
+				KilledBy: wantKillers,
 			}
 			if len(records) != 1 || !reflect.DeepEqual(records[0], want) {
 				t.Fatalf("records = %+v, want [%+v]", records, want)
@@ -600,10 +633,6 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 	}
 }
 
-// TestEvaluateMutationsDoesNotRecordEvidenceForResumedMutants pins the
-// boundary between the two layers. A checkpoint keeps a mutant's verdict
-// inside one input digest and keeps no reaching set with it, so a resumed
-// mutant carries nothing a later digest could check a reuse against.
 func TestEvaluateMutationsDoesNotRecordEvidenceForResumedMutants(t *testing.T) {
 	t.Parallel()
 	mutant := evidenceMutant("mutant-a")
@@ -612,14 +641,15 @@ func TestEvaluateMutationsDoesNotRecordEvidenceForResumedMutants(t *testing.T) {
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}
 	session := refusingSession(t, catalog)
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
 	}, MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Evidence: index,
+		Evidence: index,
 		Resume: map[string]MutationEvaluation{mutant.ID: {Evidence: []report.Evidence{{
 			Kind: "mutation", ID: mutant.ID, Status: "killed", Detail: "TestEarly",
 		}}}},
 	})
+
 	if err != nil || len(evaluation.Evidence) != 1 || evaluation.Accounting.Killed != 1 {
 		t.Fatalf("evaluation = (%+v, %v)", evaluation, err)
 	}
@@ -631,15 +661,13 @@ func TestEvaluateMutationsDoesNotRecordEvidenceForResumedMutants(t *testing.T) {
 	}
 }
 
-// TestMutationEvidenceCollectsConcurrentlyWithoutRacing runs the workers the
-// mutation phase runs, because collection happens on all of them at once.
 func TestMutationEvidenceCollectsConcurrentlyWithoutRacing(t *testing.T) {
 	t.Parallel()
 	killer := evidenceIdentity("TestEarly", goanalysis.KindTest)
 	key := digestText("early-key")
 	catalog := gomutants.Catalog{}
-	records := make([]evidence.MutationRecord, 0, 32)
-	for index := range 32 {
+	records := make([]evidence.MutationRecord, 0, concurrentEvidenceMutants)
+	for index := range concurrentEvidenceMutants {
 		mutant := evidenceMutant("mutant-" + strconv.Itoa(index))
 		catalog.Mutants = append(catalog.Mutants, mutant)
 		if index%2 == 0 {
@@ -651,24 +679,19 @@ func TestMutationEvidenceCollectsConcurrentlyWithoutRacing(t *testing.T) {
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 	}}
 
-	evaluation, err := EvaluateMutations(t.Context(), session, []TargetEvidence{
+	evaluation, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
 		evidenceTarget("TestEarly", goanalysis.KindTest, 3*time.Millisecond),
-	}, MutationOptions{Root: t.TempDir(), Contract: "standard-v1", Jobs: 8, Evidence: index})
-	if err != nil || evaluation.Accounting.Killed != 32 || evaluation.Accounting.ReusedKilled != 16 {
+	}, MutationOptions{Jobs: 8, Evidence: index})
+
+	if err != nil || evaluation.Accounting.Killed != concurrentEvidenceMutants || evaluation.Accounting.ReusedKilled != concurrentReusedEvidenceMutants {
 		t.Fatalf("evaluation = (%+v, %v)", evaluation.Accounting, err)
 	}
-	// Every mutant is killed, half of them without running: the sixteen that
-	// ran are recorded, and the sixteen that were reused keep the record they
-	// were reused from.
-	if stored := index.store(catalog, evidenceModule).Records; len(stored) != 32 {
+
+	if stored := index.store(catalog, evidenceModule).Records; len(stored) != concurrentEvidenceMutants {
 		t.Fatalf("stored %d records, want 32", len(stored))
 	}
 }
 
-// TestTargetBehaviorKeyReadsEveryInputOfTheTestBinaryAndNothingElse pins the
-// builder against the allowlist from the other side: every input the key is
-// built from invalidates it, and everything a run may differ in without
-// changing what a target does leaves it alone.
 func TestTargetBehaviorKeyReadsEveryInputOfTheTestBinaryAndNothingElse(t *testing.T) {
 	t.Parallel()
 	base := targetKeyFixture()
@@ -680,7 +703,7 @@ func TestTargetBehaviorKeyReadsEveryInputOfTheTestBinaryAndNothingElse(t *testin
 	fuzzer := target
 	fuzzer.ID, fuzzer.Name, fuzzer.Kind = "target-FuzzValue", "FuzzValue", goanalysis.KindFuzz
 	key := func(sources targetKeySources, of goanalysis.Target) string {
-		return evidence.TargetBehaviorKey(sources.inputsFor(of))
+		return evidence.TargetBehaviorKey(sources.narrowInputsFor(of))
 	}
 	unchanged := key(base, target)
 
@@ -728,13 +751,16 @@ func TestTargetBehaviorKeyReadsEveryInputOfTheTestBinaryAndNothingElse(t *testin
 			sources.buildTags = []string{"integration"}
 		}},
 		{name: "the command timeout", want: true, change: func(sources *targetKeySources) {
-			sources.commandTimeout = 11 * time.Minute
+			sources.commandTimeout = changedCommandTimeout
 		}},
 		{name: "the target timeout", want: true, change: func(sources *targetKeySources) {
-			sources.targetTimeout = 13 * time.Minute
+			sources.targetTimeout = changedTargetTimeout
 		}},
 		{name: "the goatest version", want: true, change: func(sources *targetKeySources) {
 			sources.inputs.GoatestVersion = "v9.9.9"
+		}},
+		{name: "the goatest build", want: true, change: func(sources *targetKeySources) {
+			sources.inputs.GoatestBuild = digestText("changed build")
 		}},
 		{name: "the go-mutants version", want: true, change: func(sources *targetKeySources) {
 			sources.inputs.GoMutantsVersion = "v9.9.9"
@@ -774,10 +800,77 @@ func TestTargetBehaviorKeyReadsEveryInputOfTheTestBinaryAndNothingElse(t *testin
 	}
 }
 
-// TestTargetBehaviorKeyIgnoresTheDiagnosticsAndTheParallelism holds the key to
-// the same rule the cache identity lives under: asking for a trace, keeping the
-// temporary directories, or running more mutants at once changes how a run is
-// observed and how long it takes, never what a target does.
+func TestTargetBehaviorKeyIncludesTheExactExecutionEnvironment(t *testing.T) {
+	t.Parallel()
+	sources := targetKeyFixture()
+	target := evidenceTarget("TestValue", goanalysis.KindTest, time.Millisecond)
+	base := sources.targetKey(target.Target, []string{"RESOURCE=first"}, false)
+	changedBase := targetKeyFixture()
+	changedBase.inputs.Environment = append(changedBase.inputs.Environment, "BASE=changed")
+	changedResource := sources.targetKey(target.Target, []string{"RESOURCE=second"}, false)
+	if base == changedBase.targetKey(target.Target, []string{"RESOURCE=first"}, false) || base == changedResource {
+		t.Fatal("a base or resource environment change retained the behaviour key")
+	}
+
+	ordered := targetKeyFixture()
+	ordered.inputs.Environment = []string{"ALPHA=one", "BETA=two"}
+	reordered := targetKeyFixture()
+	reordered.inputs.Environment = []string{"BETA=two", "ALPHA=one"}
+	if ordered.targetKey(target.Target, nil, false) != reordered.targetKey(target.Target, nil, false) {
+		t.Fatal("equivalent base environment order changed the behaviour key")
+	}
+
+	overridden := targetKeyFixture()
+	overridden.inputs.Environment = []string{"MODE=base", "OTHER=value", "MODE=last-base"}
+	canonical := targetKeyFixture()
+	canonical.inputs.Environment = []string{"MODE=resource", "OTHER=value"}
+	if overridden.targetKey(target.Target, []string{"MODE=resource"}, false) != canonical.targetKey(target.Target, nil, false) {
+		t.Fatal("last-wins resource overlay was not canonical")
+	}
+	caseVariant := targetKeyFixture()
+	caseVariant.inputs.Environment = []string{"MODE=base"}
+	windowsResult := targetKeyFixture()
+	windowsResult.inputs.Environment = []string{"MODE=resource"}
+	unixResult := targetKeyFixture()
+	unixResult.inputs.Environment = []string{"MODE=base", "mode=resource"}
+	wantCaseKey := unixResult.targetKey(target.Target, nil, false)
+	if runtime.GOOS == "windows" {
+		wantCaseKey = windowsResult.targetKey(target.Target, nil, false)
+	}
+	if caseVariant.targetKey(target.Target, []string{"mode=resource"}, false) != wantCaseKey {
+		t.Fatal("environment key case handling differs from the process environment")
+	}
+	if overridden.suiteKey(evidenceModule, nil, nil, false) == canonical.suiteKey(evidenceModule, nil, nil, false) {
+		t.Fatal("suite behaviour key ignored its base environment")
+	}
+	if ordered.suiteKey(evidenceModule, nil, []string{"RESOURCE=first"}, false) == ordered.suiteKey(evidenceModule, nil, []string{"RESOURCE=second"}, false) {
+		t.Fatal("suite behaviour key ignored its resource environment")
+	}
+	reorderedSuite := targetKeyFixture()
+	reorderedSuite.inputs.Environment = slices.Clone(ordered.inputs.Environment)
+	slices.Reverse(reorderedSuite.inputs.Environment)
+	if ordered.suiteKey(evidenceModule, nil, nil, false) != reorderedSuite.suiteKey(evidenceModule, nil, nil, false) {
+		t.Fatal("suite behaviour key was not environment-order independent")
+	}
+}
+
+func TestRunMutationEvidenceIncludesTheSuiteResourceEnvironment(t *testing.T) {
+	t.Parallel()
+	sources := targetKeyFixture()
+	target := evidenceTarget("TestValue", goanalysis.KindTest, time.Millisecond)
+	inventory := []report.TargetDisposition{{
+		Name: target.Target.Name, Kind: string(target.Target.Kind), Package: target.Target.Package, Status: "passed",
+	}}
+	key := func(resource string) string {
+		collected := newRunMutationEvidence(evidence.MutationStore{}, sources,
+			[]TargetEvidence{target}, inventory, []string{"RESOURCE=" + resource}, digestText("snapshot"))
+		return collected.suites[evidenceModule]
+	}
+	if key("first") == key("second") {
+		t.Fatal("suite resource environment change retained the evidence key")
+	}
+}
+
 func TestTargetBehaviorKeyIgnoresTheDiagnosticsAndTheParallelism(t *testing.T) {
 	t.Parallel()
 	target := goanalysis.Target{
@@ -791,17 +884,11 @@ func TestTargetBehaviorKeyIgnoresTheDiagnosticsAndTheParallelism(t *testing.T) {
 	loud := Options{CommandTimeout: 7 * time.Minute, MutationJobs: 9, Trace: recorder, KeepTemp: true}
 	quiet := newTargetKeySources(inputs, model, "standard-v1", plain, nil)
 	noisy := newTargetKeySources(inputs, model, "standard-v1", loud, nil)
-	if evidence.TargetBehaviorKey(quiet.inputsFor(target)) != evidence.TargetBehaviorKey(noisy.inputsFor(target)) {
+	if evidence.TargetBehaviorKey(quiet.narrowInputsFor(target)) != evidence.TargetBehaviorKey(noisy.narrowInputsFor(target)) {
 		t.Fatal("a diagnostic or the parallelism entered a behaviour key")
 	}
 }
 
-// TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree pins the one
-// target whose closure is not the answer. A test that reads the repository as
-// data can change its verdict when a file no closure of its own names changes,
-// and no key built from a closure would notice; the key of such a target is
-// therefore built from the whole snapshot, so that it survives only an
-// identical tree. Every other target keys its closure exactly as before.
 func TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree(t *testing.T) {
 	t.Parallel()
 	target := goanalysis.Target{
@@ -809,7 +896,9 @@ func TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree(t *testing.T) {
 		RelativeDir: ".", Path: "value_test.go", Line: 5,
 		Dependencies: []string{evidenceModule + "/internal/helper", "fmt"},
 	}
-	key := func(sources targetKeySources) string { return evidence.TargetBehaviorKey(sources.inputsFor(target)) }
+	key := func(sources targetKeySources) string {
+		return evidence.TargetBehaviorKey(sources.wholeTreeInputsFor(target))
+	}
 	readers := map[string]bool{evidenceModule: true}
 
 	for _, test := range []struct {
@@ -854,9 +943,6 @@ func TestTargetBehaviorKeyOfARepositoryReaderCoversTheWholeTree(t *testing.T) {
 	}
 }
 
-// targetKeyFixture is a module with one package that depends on another, a
-// testdata file, an embedded template, a fuzz corpus, and files outside every
-// closure, so that a key can be asked about each of them.
 func targetKeyFixture() targetKeySources {
 	inputs := evidence.Inputs{
 		Files: map[string]string{
@@ -877,6 +963,7 @@ func targetKeyFixture() targetKeySources {
 		Platform:         "linux/amd64",
 		Environment:      []string{"GOTOOLCHAIN=local"},
 		GoatestVersion:   "v0.1.0-dev",
+		GoatestBuild:     digestText("goatest build"),
 		GoMutantsVersion: "v0.0.1",
 	}
 	model := goanalysis.Model{ModulePath: evidenceModule, Packages: []goanalysis.Package{
@@ -890,8 +977,6 @@ func targetKeyFixture() targetKeySources {
 	return newTargetKeySources(inputs, model, "standard-v1", Options{CommandTimeout: 7 * time.Minute, TargetTimeout: 3 * time.Minute}, nil)
 }
 
-// repositoryReaderKeyFixture is that same module read by a run that found the
-// named packages reading directories they compute rather than files they name.
 func repositoryReaderKeyFixture(readers map[string]bool) targetKeySources {
 	sources := targetKeyFixture()
 	return newTargetKeySources(sources.inputs, sources.model, sources.contract,

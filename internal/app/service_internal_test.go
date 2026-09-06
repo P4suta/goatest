@@ -36,7 +36,7 @@ func TestFinalizeReportMarksUnreadableConfigurationMetadata(t *testing.T) {
 	result := finalizeReportKind(t.Context(), t.TempDir(), cli.Request{}, report.Report{
 		Verdict: report.VerdictCompleted,
 	}, report.RunOperation, now, now)
-	if len(result.Configuration.Digest) != 64 {
+	if len(result.Configuration.Digest) != len(appTestDigest("a")) {
 		t.Fatalf("configuration digest = %q", result.Configuration.Digest)
 	}
 	found := false

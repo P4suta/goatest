@@ -21,15 +21,24 @@ import (
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
+)
+
+const (
+	packageInspectionDeadline = 17 * time.Second
+	progressFixtureTotal      = progressDivisions + 1
+	progressFixtureStep       = (progressFixtureTotal + progressDivisions - 1) / progressDivisions
+	testGoMutantsVersion      = "v1.2.3-test"
+	testGoatestBuildIdentity  = "test-goatest-executable-digest"
 )
 
 func TestCommandFreezesArgvAndSetsSafetyLimits(t *testing.T) {
 	argv := []string{"go", "test", "./..."}
 	got := command(argv, 7*time.Second)
 	argv[0] = "mutated"
-	if !slices.Equal(got.Argv, []string{"go", "test", "./..."}) || got.Timeout != 7*time.Second || got.OutputLimit != 32<<20 {
+	if !slices.Equal(got.Argv, []string{"go", "test", "./..."}) || got.Timeout != 7*time.Second || got.OutputLimit != commandOutputLimit {
 		t.Fatalf("command = %+v", got)
 	}
 }
@@ -68,11 +77,10 @@ func TestInspectWorkspaceReturnsCompleteMetadataAndExactCommands(t *testing.T) {
 		listedModule{Path: "example.com/dependency", Version: "v1.2.3", Sum: "h1:sum", GoModSum: "h1:mod"},
 	)
 	workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{
-		{Output: []byte("go version go1.26.6 windows/amd64\n")},
 		{Output: listed},
 		{Output: modules},
 	}}
-	metadata, err := inspectWorkspace(t.Context(), workspace)
+	metadata, err := inspectWorkspace(t.Context(), workspace, "go version go1.26.6 windows/amd64\n", nil, nil, workspaceInspectionTimeout)
 	if err != nil || metadata.toolchain != "go version go1.26.6 windows/amd64" || metadata.model.ModulePath != "fixture.example/module" || len(metadata.dependencies) != 2 {
 		t.Fatalf("inspectWorkspace = (%+v, %v)", metadata, err)
 	}
@@ -80,23 +88,31 @@ func TestInspectWorkspaceReturnsCompleteMetadataAndExactCommands(t *testing.T) {
 		argv    []string
 		timeout time.Duration
 	}{
-		{[]string{"go", "version"}, 30 * time.Second},
 		{[]string{"go", "list", "-json", "./..."}, 5 * time.Minute},
 		{[]string{"go", "list", "-m", "-json", "all"}, 5 * time.Minute},
 	}
-	if len(workspace.commands) != len(want) {
-		t.Fatalf("commands = %+v", workspace.commands)
+	commands := workspace.commands
+	if len(commands) != len(want) {
+		t.Fatalf("commands = %+v", commands)
 	}
-	for index, command := range workspace.commands {
-		if !slices.Equal(command.Argv, want[index].argv) || command.Timeout != want[index].timeout || command.OutputLimit != 32<<20 {
+	for index, command := range commands {
+		if !slices.Equal(command.Argv, want[index].argv) || command.Timeout != want[index].timeout || command.OutputLimit != commandOutputLimit {
 			t.Errorf("command %d = %+v", index, command)
 		}
 	}
 }
 
-func TestInspectSelectedPackagesUsesConfiguredCommandTimeout(t *testing.T) {
+func TestInspectWorkspaceRejectsAnEmptyResolvedToolchainWithoutCommands(t *testing.T) {
+	workspace := &scriptedValidationWorkspace{}
+	metadata, err := inspectWorkspace(t.Context(), workspace, " \n", nil, nil, workspaceInspectionTimeout)
+	if err == nil || !reflect.DeepEqual(metadata, roundMetadata{}) || len(workspace.commands) != 0 || !strings.Contains(err.Error(), "toolchain version is empty") {
+		t.Fatalf("inspectWorkspace = (%+v, %v), commands=%v", metadata, err, workspace.commands)
+	}
+}
+
+func TestInspectWorkspaceUsesSelectedPackagesAndConfiguredCommandTimeout(t *testing.T) {
 	t.Parallel()
-	timeout := 17 * time.Second
+	timeout := packageInspectionDeadline
 	for _, test := range []struct {
 		name     string
 		patterns []string
@@ -107,15 +123,18 @@ func TestInspectSelectedPackagesUsesConfiguredCommandTimeout(t *testing.T) {
 		{name: "build tags default to all packages", tags: []string{"integration"}, wantArgv: []string{"go", "list", "-json", "-tags=integration", "./..."}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{{
-				Output: listedPackageJSON(t, t.TempDir()),
-			}}}
-			model, err := inspectSelectedPackages(t.Context(), workspace, test.patterns, test.tags, timeout)
-			if err != nil || model.ModulePath != "fixture.example/module" || len(workspace.commands) != 1 {
-				t.Fatalf("inspectSelectedPackages = (%+v, %v), commands=%+v", model, err, workspace.commands)
+			moduleRoot := t.TempDir()
+			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{
+				{Output: listedPackageJSON(t, moduleRoot)},
+				{Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module", Main: true})},
+			}}
+			metadata, err := inspectWorkspace(t.Context(), workspace, "go version go1.26.6 linux/amd64", test.patterns, test.tags, timeout)
+			commands := workspace.commands
+			if err != nil || metadata.model.ModulePath != "fixture.example/module" || len(commands) != len(workspace.results) {
+				t.Fatalf("inspectWorkspace = (%+v, %v), commands=%+v", metadata, err, commands)
 			}
-			command := workspace.commands[0]
-			if !slices.Equal(command.Argv, test.wantArgv) || command.Timeout != timeout || command.OutputLimit != 32<<20 {
+			command := commands[0]
+			if !slices.Equal(command.Argv, test.wantArgv) || command.Timeout != timeout || command.OutputLimit != commandOutputLimit {
 				t.Fatalf("selected package command = %+v, want argv=%v timeout=%s", command, test.wantArgv, timeout)
 			}
 		})
@@ -131,33 +150,30 @@ func TestInspectWorkspaceRejectsEveryCommandFailureAndMalformedOutput(t *testing
 		name       string
 		results    []gomutants.CommandResult
 		errors     []error
-		wantCalls  int
 		wantCause  bool
 		wantDetail string
 	}{
-		{name: "version infrastructure", results: []gomutants.CommandResult{{}}, errors: []error{cause}, wantCalls: 1, wantCause: true},
-		{name: "version exit", results: []gomutants.CommandResult{{ExitCode: 1}}, wantCalls: 1, wantDetail: "go version failed"},
-		{name: "version timeout", results: []gomutants.CommandResult{{TimedOut: true}}, wantCalls: 1, wantDetail: "go version failed"},
-		{name: "list infrastructure", results: []gomutants.CommandResult{{Output: []byte("version")}, {}}, errors: []error{nil, cause}, wantCalls: 2, wantCause: true},
-		{name: "list exit", results: []gomutants.CommandResult{{Output: []byte("version")}, {ExitCode: 1}}, wantCalls: 2, wantDetail: "go list failed"},
-		{name: "list timeout", results: []gomutants.CommandResult{{Output: []byte("version")}, {TimedOut: true}}, wantCalls: 2, wantDetail: "go list failed"},
-		{name: "malformed packages", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: []byte("{")}}, wantCalls: 2, wantDetail: "decode go list package"},
-		{name: "modules infrastructure", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {}}, errors: []error{nil, nil, cause}, wantCalls: 3, wantCause: true},
-		{name: "modules exit", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {ExitCode: 1}}, wantCalls: 3, wantDetail: "go list -m failed"},
-		{name: "modules timeout", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {TimedOut: true}}, wantCalls: 3, wantDetail: "go list -m failed"},
-		{name: "malformed modules", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: []byte("{")}}, wantCalls: 3, wantDetail: "decode module graph"},
-		{name: "empty module path", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{})}}, wantCalls: 3, wantDetail: "empty path"},
-		{name: "no main module", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module"})}}, wantCalls: 3, wantDetail: "no main module"},
-		{name: "different main module", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "other.example/module", Main: true})}}, wantCalls: 3, wantDetail: "does not match main module"},
-		{name: "multiple main modules", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module", Main: true}, listedModule{Path: "other.example/module", Main: true})}}, wantCalls: 3, wantDetail: "refusing partial assurance"},
-		{name: "valid control", results: []gomutants.CommandResult{{Output: []byte("version")}, {Output: validList}, {Output: validModules}}, wantCalls: 3},
+		{name: "list infrastructure", results: []gomutants.CommandResult{{}}, errors: []error{cause}, wantCause: true},
+		{name: "list exit", results: []gomutants.CommandResult{{ExitCode: 1}}, wantDetail: "go list failed"},
+		{name: "list timeout", results: []gomutants.CommandResult{{TimedOut: true}}, wantDetail: "go list failed"},
+		{name: "malformed packages", results: []gomutants.CommandResult{{Output: []byte("{")}}, wantDetail: "decode go list package"},
+		{name: "modules infrastructure", results: []gomutants.CommandResult{{Output: validList}, {}}, errors: []error{nil, cause}, wantCause: true},
+		{name: "modules exit", results: []gomutants.CommandResult{{Output: validList}, {ExitCode: 1}}, wantDetail: "go list -m failed"},
+		{name: "modules timeout", results: []gomutants.CommandResult{{Output: validList}, {TimedOut: true}}, wantDetail: "go list -m failed"},
+		{name: "malformed modules", results: []gomutants.CommandResult{{Output: validList}, {Output: []byte("{")}}, wantDetail: "decode module graph"},
+		{name: "empty module path", results: []gomutants.CommandResult{{Output: validList}, {Output: moduleGraphJSON(t, listedModule{})}}, wantDetail: "empty path"},
+		{name: "no main module", results: []gomutants.CommandResult{{Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module"})}}, wantDetail: "no main module"},
+		{name: "different main module", results: []gomutants.CommandResult{{Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "other.example/module", Main: true})}}, wantDetail: "does not match main module"},
+		{name: "multiple main modules", results: []gomutants.CommandResult{{Output: validList}, {Output: moduleGraphJSON(t, listedModule{Path: "fixture.example/module", Main: true}, listedModule{Path: "other.example/module", Main: true})}}, wantDetail: "refusing partial assurance"},
+		{name: "valid control", results: []gomutants.CommandResult{{Output: validList}, {Output: validModules}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := &scriptedValidationWorkspace{results: test.results, errors: test.errors}
-			metadata, err := inspectWorkspace(t.Context(), workspace)
+			metadata, err := inspectWorkspace(t.Context(), workspace, "go version go1.26.6 linux/amd64", nil, nil, workspaceInspectionTimeout)
 			wantErr := test.wantCause || test.wantDetail != ""
-			if (err != nil) != wantErr || len(workspace.commands) != test.wantCalls {
-				t.Fatalf("inspectWorkspace = (%+v, %v), calls=%d", metadata, err, len(workspace.commands))
+			commands := workspace.commands
+			if (err != nil) != wantErr || len(commands) != len(test.results) {
+				t.Fatalf("inspectWorkspace = (%+v, %v), calls=%d", metadata, err, len(commands))
 			}
 			if test.wantCause && !errors.Is(err, cause) {
 				t.Fatalf("error = %v, want cause %v", err, cause)
@@ -243,13 +259,9 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 	metadata := roundMetadata{
 		toolchain: "go version go1.26.6", dependencies: map[string]string{"dependency": "digest"},
 	}
-	linkedGoMutants, err := GoMutantsVersion()
-	if err != nil {
-		t.Fatal(err)
-	}
-	inputs, digest, err := assuranceInputs(root, "deep-v1", options, loaded, metadata)
+	inputs, digest, err := testAssuranceInputs(root, "deep-v1", options, loaded, metadata)
 	if err != nil || digest != evidence.Digest(inputs) || inputs.Toolchain != metadata.toolchain || inputs.Platform != runtime.GOOS+"/"+runtime.GOARCH ||
-		inputs.Contract != "deep-v1;apply=false;changed=true;ref=HEAD~1" || inputs.GoatestVersion != GoatestVersion || inputs.GoMutantsVersion != linkedGoMutants ||
+		inputs.Contract != "deep-v1;apply=false;changed=true;ref=HEAD~1" || inputs.GoatestVersion != GoatestVersion || inputs.GoatestBuild != testGoatestBuildIdentity || inputs.GoMutantsVersion != testGoMutantsVersion ||
 		inputs.Dependencies["dependency"] != "digest" || inputs.Resources["postgres"] == "" || len(inputs.Files) == 0 || len(inputs.Corpus) == 0 {
 		t.Fatalf("assuranceInputs = (%+v, %q, %v)", inputs, digest, err)
 	}
@@ -263,7 +275,7 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 			t.Fatalf("unstable environment retained: %v", inputs.Environment)
 		}
 	}
-	second, secondDigest, err := assuranceInputs(root, "deep-v1", options, loaded, metadata)
+	second, secondDigest, err := testAssuranceInputs(root, "deep-v1", options, loaded, metadata)
 	if err != nil || secondDigest != digest || !reflect.DeepEqual(second, inputs) {
 		t.Fatalf("nondeterministic assurance inputs = (%+v, %q, %v)", second, secondDigest, err)
 	}
@@ -277,12 +289,12 @@ func TestAssuranceInputsCapturesEveryIdentityDimensionDeterministically(t *testi
 	}
 	for _, variant := range variants {
 		changed := config.Config{Resources: map[string]config.Resource{"postgres": variant}}
-		_, changedDigest, err := assuranceInputs(root, "deep-v1", options, changed, metadata)
+		_, changedDigest, err := testAssuranceInputs(root, "deep-v1", options, changed, metadata)
 		if err != nil || changedDigest == digest {
 			t.Errorf("resource variant did not invalidate digest: %+v %v", variant, err)
 		}
 	}
-	if _, _, err := assuranceInputs(filepath.Join(root, "missing"), "deep-v1", options, loaded, metadata); err == nil {
+	if _, _, err := testAssuranceInputs(filepath.Join(root, "missing"), "deep-v1", options, loaded, metadata); err == nil {
 		t.Fatal("missing repository scan succeeded")
 	}
 }
@@ -309,21 +321,17 @@ func TestTraceTakesNoPartInCacheIdentity(t *testing.T) {
 	if modeIdentity(Options{Trace: recorder}) != modeIdentity(Options{}) {
 		t.Fatalf("traced default mode identity = %q", modeIdentity(Options{Trace: recorder}))
 	}
-	untracedInputs, untracedDigest, err := assuranceInputs(root, "deep-v1", untraced, loaded, metadata)
+	untracedInputs, untracedDigest, err := testAssuranceInputs(root, "deep-v1", untraced, loaded, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tracedInputs, tracedDigest, err := assuranceInputs(root, "deep-v1", traced, loaded, metadata)
+	tracedInputs, tracedDigest, err := testAssuranceInputs(root, "deep-v1", traced, loaded, metadata)
 	if err != nil || tracedDigest != untracedDigest || !reflect.DeepEqual(tracedInputs, untracedInputs) {
 		t.Fatalf("traced assurance inputs = (%+v, %q, %v), want (%+v, %q)",
 			tracedInputs, tracedDigest, err, untracedInputs, untracedDigest)
 	}
 }
 
-// Keeping the temporary directories of a run is a debugging aid, exactly as a
-// trace is. It changes nothing a run decides, so it changes nothing a cached
-// result is keyed on: a kept run and a removed run answer from the same cache
-// entry, and neither poisons the other's.
 func TestKeepTempTakesNoPartInCacheIdentity(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -345,11 +353,11 @@ func TestKeepTempTakesNoPartInCacheIdentity(t *testing.T) {
 	if modeIdentity(Options{KeepTemp: true}) != modeIdentity(Options{}) {
 		t.Fatalf("keeping default mode identity = %q", modeIdentity(Options{KeepTemp: true}))
 	}
-	removingInputs, removingDigest, err := assuranceInputs(root, "deep-v1", removing, loaded, metadata)
+	removingInputs, removingDigest, err := testAssuranceInputs(root, "deep-v1", removing, loaded, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keepingInputs, keepingDigest, err := assuranceInputs(root, "deep-v1", keeping, loaded, metadata)
+	keepingInputs, keepingDigest, err := testAssuranceInputs(root, "deep-v1", keeping, loaded, metadata)
 	if err != nil || keepingDigest != removingDigest || !reflect.DeepEqual(keepingInputs, removingInputs) {
 		t.Fatalf("keeping assurance inputs = (%+v, %q, %v), want (%+v, %q)",
 			keepingInputs, keepingDigest, err, removingInputs, removingDigest)
@@ -359,7 +367,7 @@ func TestKeepTempTakesNoPartInCacheIdentity(t *testing.T) {
 	}
 }
 
-func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
+func TestModeIdentityEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	if got := modeIdentity(Options{}); got != ";apply=true;changed=false;ref=" {
 		t.Fatalf("default mode identity = %q", got)
 	}
@@ -371,13 +379,6 @@ func TestModeIdentityStableEnvironmentAndAcceptanceBoundaries(t *testing.T) {
 	}
 	if got := modeIdentity(Options{NoApply: true, ReplayFindingID: "finding-a"}); got != ";apply=false;changed=false;ref=;replay-finding=finding-a" {
 		t.Fatalf("finding replay mode identity = %q", got)
-	}
-	environment := stableEnvironment([]string{
-		"B=2", "a=1", "bad", "TMP=x", "temp=y", "TmpDir=z", "go_mutants_x=1", "A=2",
-		"STARSHIP_SESSION_KEY=volatile", "__mise_session=volatile",
-	})
-	if !slices.Equal(environment, []string{"A=2", "B=2", "a=1"}) {
-		t.Fatalf("stableEnvironment = %v", environment)
 	}
 	selected := selectedEnvironment([]string{"B=2", "A=1", "SECRET=hidden", "GOFLAGS=-trimpath"}, []string{"B"})
 	if !slices.Equal(selected, []string{"B=2", "GOFLAGS=-trimpath"}) {
@@ -429,7 +430,6 @@ func TestModeIdentityInvalidatesEveryCheckpointExecutionDimension(t *testing.T) 
 		{name: "test arguments", options: Options{TestArgs: []string{"-test.short=true"}}},
 		{name: "build tags", options: Options{BuildTags: []string{"integration"}}},
 		{name: "mutation operators", options: Options{MutationOperators: []string{"conditional-boundary"}}},
-		{name: "fuzz executions", options: Options{FuzzExecutions: 10}},
 		{name: "mutation jobs", options: Options{MutationJobs: 2}},
 		{name: "command timeout", options: Options{CommandTimeout: time.Minute}},
 		{name: "target timeout", options: Options{TargetTimeout: time.Second}},
@@ -484,19 +484,39 @@ func TestMutationJobLimitAndProgressCoverEveryBoundary(t *testing.T) {
 	}
 	var events []Event
 	progress := mutationProgress(Options{Progress: func(event Event) { events = append(events, event) }})
-	for completed := 1; completed <= 101; completed++ {
-		progress(completed, 101)
+	for completed := 1; completed <= progressFixtureTotal; completed++ {
+		progress(completed, progressFixtureTotal)
 	}
 	var want []Event
-	for completed := 1; completed <= 101; completed++ {
-		if completed == 1 || completed == 101 || completed%2 == 0 {
-			want = append(want, Event{Kind: "mutation-progress", Detail: strconv.Itoa(completed) + "/101"})
+	for completed := 1; completed <= progressFixtureTotal; completed++ {
+		if completed == 1 || completed == progressFixtureTotal || completed%progressFixtureStep == 0 {
+			want = append(want, Event{Kind: "mutation-progress", Detail: strconv.Itoa(completed) + "/" + strconv.Itoa(progressFixtureTotal)})
 		}
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("progress events = %v, want %v", events, want)
 	}
 	mutationProgress(Options{})(1, 1)
+}
+
+func TestBoundedProgressPublishesInitialMilestonesOnce(t *testing.T) {
+	var events []Event
+	progress := baselineProgress(Options{Progress: func(event Event) { events = append(events, event) }})
+	total := progressFixtureTotal
+	progress(0, total)
+	progress(0, total)
+	for completed := 1; completed <= total; completed++ {
+		progress(completed, total)
+	}
+	want := []Event{{Kind: "baseline-progress", Detail: "0/" + strconv.Itoa(total)}}
+	for completed := 1; completed <= total; completed++ {
+		if completed == 1 || completed == total || completed%progressFixtureStep == 0 {
+			want = append(want, Event{Kind: "baseline-progress", Detail: strconv.Itoa(completed) + "/" + strconv.Itoa(total)})
+		}
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("progress events = %v, want %v", events, want)
+	}
 }
 
 func TestMergeAndValidationEnvironmentHandleCaseConflictsAndOverlay(t *testing.T) {
@@ -572,10 +592,7 @@ func TestBaselineVerdictRepositoryRootExecutionEnvironmentAndEmit(t *testing.T) 
 		slices.Contains(environment, "invalid=") || slices.Contains(environment, "=empty") {
 		t.Fatalf("executionEnvironment = %v", environment)
 	}
-	// Snapshots exclude every .git by design and their identity is goatest's
-	// own digest, so VCS stamping has nothing to stamp — and a stray .git
-	// above the temporary root (a real /tmp/.git broke two dogfood runs)
-	// otherwise fails every go command in the snapshot.
+
 	if !containsEnvironment(environment, "GOFLAGS", "-buildvcs=false") {
 		t.Fatalf("executionEnvironment did not disable VCS stamping: %v", environment)
 	}
@@ -636,10 +653,10 @@ func digestText(input string) string {
 func writeRunHelperFile(t *testing.T, root, relative, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -654,11 +671,6 @@ func containsEnvironment(environment []string, key, value string) bool {
 	return false
 }
 
-// Where a run put its temporary directories, and what its sweep found there,
-// are facts about the machine and never about the code under test. A run on a
-// full disk that collected a gigabyte of somebody else's leftovers has to
-// answer from the same cache entry as a run on a clean one: ADR 0002 keeps
-// diagnostics out of identity, and housekeeping is diagnostics.
 func TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -671,22 +683,31 @@ func TestTheRunScratchAndItsSweepTakeNoPartInCacheIdentity(t *testing.T) {
 	if modeIdentity(elsewhere) != modeIdentity(here) {
 		t.Fatalf("mode identity = %q, want %q", modeIdentity(elsewhere), modeIdentity(here))
 	}
-	hereInputs, hereDigest, err := assuranceInputs(root, "standard-v1", here, loaded, metadata)
+	hereInputs, hereDigest, err := testAssuranceInputs(root, "standard-v1", here, loaded, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
-	elsewhereInputs, elsewhereDigest, err := assuranceInputs(root, "standard-v1", elsewhere, loaded, metadata)
+	elsewhereInputs, elsewhereDigest, err := testAssuranceInputs(root, "standard-v1", elsewhere, loaded, metadata)
 	if err != nil || elsewhereDigest != hereDigest || !reflect.DeepEqual(elsewhereInputs, hereInputs) {
 		t.Fatalf("assurance inputs elsewhere = (%+v, %q, %v), want (%+v, %q)",
 			elsewhereInputs, elsewhereDigest, err, hereInputs, hereDigest)
 	}
-	// The behaviour key of a target is the second identity a run reuses
-	// evidence through, and it reads the same options.
+
 	target := goanalysis.Target{ID: "target-a", Name: "TestValue", Kind: goanalysis.KindTest, Package: "fixture.example/module"}
 	model := goanalysis.Model{ModulePath: "fixture.example/module"}
-	hereKey := newTargetKeySources(hereInputs, model, "standard-v1", here, nil).inputsFor(target)
-	elsewhereKey := newTargetKeySources(elsewhereInputs, model, "standard-v1", elsewhere, nil).inputsFor(target)
+	hereKey := newTargetKeySources(hereInputs, model, "standard-v1", here, nil).narrowInputsFor(target)
+	elsewhereKey := newTargetKeySources(elsewhereInputs, model, "standard-v1", elsewhere, nil).narrowInputsFor(target)
 	if !reflect.DeepEqual(elsewhereKey, hereKey) {
 		t.Fatalf("target key inputs elsewhere = %+v, want %+v", elsewhereKey, hereKey)
 	}
+}
+
+func testAssuranceInputs(
+	root, contract string,
+	options Options,
+	loaded config.Config,
+	metadata roundMetadata,
+) (evidence.Inputs, string, error) {
+	return assuranceInputsWithBuildIdentity(
+		root, contract, options, loaded, metadata, testGoMutantsVersion, testGoatestBuildIdentity)
 }

@@ -5,14 +5,6 @@ package evidence
 
 import "encoding/json"
 
-// MutationJSONSchema returns the self-contained mutation-evidence-v1 JSON
-// Schema. It is the structural contract a consumer outside this module can
-// hold the store to: every object is closed, every key is a sha256 digest, and
-// every outcome is one of the four a later run can reuse.
-//
-// The per-outcome shape rules stay in validate rather than in the schema. A
-// schema that also encoded them would state the same rule twice, in two
-// languages, and the copy that drifted would be the one nobody ran.
 func MutationJSONSchema() []byte {
 	nonEmpty := map[string]any{"type": "string", "minLength": 1}
 	digest := map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"}
@@ -27,33 +19,57 @@ func MutationJSONSchema() []byte {
 			"records": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/record"}},
 		},
 		"$defs": map[string]any{
-			"targetKey": mutationObject([]string{"package", "name", "kind", "key"}, map[string]any{
+			"targetKey": mutationObject([]string{"package", "name", "kind", "key", "whole_tree"}, map[string]any{
 				"package": nonEmpty, "name": nonEmpty, "kind": nonEmpty, "key": digest,
 				"whole_tree": map[string]any{"type": "boolean"},
 			}),
-			"suiteKey": mutationObject([]string{"package", "key"}, map[string]any{
+			"suiteKey": mutationObject([]string{"package", "key", "whole_tree"}, map[string]any{
 				"package": nonEmpty, "key": digest, "whole_tree": map[string]any{"type": "boolean"},
 			}),
 			"findingSeed": mutationObject([]string{"kind", "summary"}, map[string]any{
 				"kind": nonEmpty, "summary": nonEmpty,
 			}),
-			"record": mutationObject([]string{"mutant_id", "path", "package", "outcome", "provenance"}, map[string]any{
-				"mutant_id": digest, "path": nonEmpty, "package": nonEmpty,
-				"outcome": map[string]any{"enum": []string{
-					MutationOutcomeKilled, MutationOutcomeSurvived,
-					MutationOutcomeUnreached, MutationOutcomeTimedOut,
-				}},
-				"provenance": map[string]any{"type": "string", "pattern": "^snapshot=[0-9a-f]{64}$"},
-				"killed_by":  map[string]any{"$ref": "#/$defs/targetKey"},
-				"exhausted": map[string]any{
-					"type": "array", "items": map[string]any{"$ref": "#/$defs/targetKey"}, "uniqueItems": true,
-				},
-				"suite": map[string]any{"$ref": "#/$defs/suiteKey"}, "finding": map[string]any{"$ref": "#/$defs/findingSeed"},
-			}),
+			"record": mutationRecordSchema(nonEmpty, digest),
 		},
 	}
 	data, _ := json.MarshalIndent(document, "", "  ")
 	return append(data, '\n')
+}
+
+func mutationRecordSchema(nonEmpty, digest map[string]any) map[string]any {
+	record := mutationObject([]string{"mutant_id", "path", "package", "outcome", "provenance"}, map[string]any{
+		"mutant_id": digest, "path": nonEmpty, "package": nonEmpty,
+		"outcome": map[string]any{"enum": []string{
+			MutationOutcomeKilled, MutationOutcomeSurvived,
+			MutationOutcomeUnreached,
+		}},
+		"provenance": map[string]any{"type": "string", "pattern": "^snapshot=[0-9a-f]{64}$"},
+		"killed_by": map[string]any{
+			"type": "array", "minItems": 1, "items": map[string]any{"$ref": "#/$defs/targetKey"}, "uniqueItems": true,
+		},
+		"exhausted": map[string]any{
+			"type": "array", "minItems": 1, "items": map[string]any{"$ref": "#/$defs/targetKey"}, "uniqueItems": true,
+		},
+		"suite": map[string]any{"$ref": "#/$defs/suiteKey"}, "finding": map[string]any{"$ref": "#/$defs/findingSeed"},
+	})
+	record["oneOf"] = []any{
+		mutationOutcomeShape(MutationOutcomeKilled, []string{"killed_by"}, []string{"exhausted", "suite", "finding"}),
+		mutationOutcomeShape(MutationOutcomeSurvived, []string{"exhausted", "finding"}, []string{"killed_by", "suite"}),
+		mutationOutcomeShape(MutationOutcomeUnreached, []string{"suite", "finding"}, []string{"killed_by", "exhausted"}),
+	}
+	return record
+}
+
+func mutationOutcomeShape(outcome string, required, forbidden []string) map[string]any {
+	prohibited := make([]any, len(forbidden))
+	for index, name := range forbidden {
+		prohibited[index] = map[string]any{"required": []string{name}}
+	}
+	return map[string]any{
+		"properties": map[string]any{"outcome": map[string]any{"const": outcome}},
+		"required":   required,
+		"not":        map[string]any{"anyOf": prohibited},
+	}
 }
 
 func mutationObject(required []string, properties map[string]any) map[string]any {

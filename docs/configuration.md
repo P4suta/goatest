@@ -5,9 +5,9 @@
 5 GiB and 30 days. Unknown keys, malformed values, and any `version` other than
 `1` are errors.
 
-`goatest init` writes an annotated skeleton: the two active defaults, and every
-section below as commented guidance, so turning a setting on is uncommenting a
-line. Loading the untouched skeleton yields exactly the defaults.
+`goatest init` writes only the required version and the selected contract.
+Loading that minimal file yields exactly the defaults; add the settings below
+when the project needs them.
 
 ## Sections
 
@@ -16,10 +16,10 @@ line. Loading the untouched skeleton yields exactly the defaults.
 - `[execution]`: `build_tags`, `test_binary_args`, environment-name allowlist,
   positive `timeout`, and non-negative `jobs`. `timeout` is the upper bound for
   one executed command. Mutation and probe commands normally get a smaller,
-  control-relative comparative deadline calibrated from durations measured in
-  the same run; the configured value is their final safety ceiling, not their routine
-  wait. A remaining whole-package fallback first runs one exact original
-  preflight whose result is shared by every mutant using that command. See the
+  data-derived budget from distinct positive durations measured in the same
+  run; the configured value is their final containment ceiling, not their
+  routine wait. Every mutant command first requires an exact original preflight
+  whose result is shared by every mutant using that command. See the
   [assurance contract](assurance-contract.md#a-timeout). An explicit `jobs`
   value bounds baseline target, probe, and mutation measurements and is used as
   written; when it is absent the run uses the logical CPU count capped at four,
@@ -96,13 +96,15 @@ Protocol details are in [protocols](protocols.md).
 `goatest cache status` reports the exact-input cache, its reusable mutation
 evidence (including validity and outcome counts), `.goatest/trace`,
 `.goatest/diagnostics`, `reports/runs`, `.goatest/candidates`,
-`.goatest/patches`, the build cache, and the temporary directory: the leftovers
-of runs that were killed, and each directory a `--keep-temp` run kept.
+`.goatest/patches`, the build cache, its base-local native projections, and the
+temporary directory: the leftovers of runs that were killed, and each directory
+a `--keep-temp` run kept.
 `goatest cache gc` removes expired entries first and then the oldest entries
 until each store meets its bound — `max_bytes` for the cache, the recordings,
 the diagnostics and the two repair stores, `keep` for the run history,
-`build_max_bytes` for the build cache — and then collects those leftovers and
-the keeps `ttl` has expired. Both commands report the temporary directory as
+`build_max_bytes` for the build cache — and then collects abandoned native
+projections, the other leftovers, and the keeps `ttl` has expired. Both commands
+report the temporary directory as
 `skipped` when the process running them named none, which is every process that
 is not the goatest CLI. The candidate store is reported as `skipped` while a
 checkpoint exists: an interrupted run re-validates the candidates it recorded by
@@ -137,6 +139,34 @@ go command opens a cached file after the response that named it and a
 continuously read entry's file time is refreshed only once per interval; the
 bound is therefore soft by at most that window of writes.
 
+Baseline, race, probe, and mutant executions use a run-owned native projection
+of the persistent build layer so child Go commands take the toolchain's direct
+cache path. It lives beside `build_dir` because its output objects are hard
+links. Mutation preparation persists its compile/list products, but overrides
+the cache for its instrumented test run; candidate validation and fallback work
+stay on the continuously bounded external scratch. Once a collection is due, admission
+of new native commands stops until the active finite batch drains, then the
+projection is collected at zero active. It is forced inside `build_max_bytes`
+before a deliberate keep and otherwise removed at run end. A projection or
+collection failure switches later work to external scratch. `cache status` and
+`cache gc` inspect the same base parent and use owner locks to spare live
+projections.
+
+An owned-cache miss may import exactly one verified entry from the host native
+Go cache. The last case-insensitive `GOCACHE` declaration selects an absolute
+source; `off` or a relative value disables import. Without an explicit value,
+the source is `go-build` below the user cache directory. goatest resolves the
+source and refuses either owned destination, validates the requested native
+index and the complete content hash, and copies accepted bytes into its own
+layer. Missing or invalid entries simply compile. This is automatic and has no
+configuration surface because it cannot alter evidence or a verdict.
+
+Race verification first performs a compile-only `-race` pass to the host null
+device when the owned cache is available. Those reusable link products enter
+the persistent layer; a generation marker makes the next project execution
+refresh its native projection exactly once. With no owned cache, goatest keeps
+the original one-command race path.
+
 The base layer is per machine, not per repository, because a compiled standard
 library is the same for every repository on it. Two projects that configure
 different `build_max_bytes` therefore share one directory and the smaller cap
@@ -153,9 +183,9 @@ current catalogue still names, and never expires, so `cache gc` reports it as
 retained and neither counts nor removes it. `cache status` strictly decodes and
 validates it and reports the record and outcome counts; a corrupt or irregular
 store is `invalid`, not silently empty and not a reason to hide the status of
-the other stores. It holds the kills, survivals, unreached verdicts and timeouts
-a run could state a checkable claim for; nothing in it expires, and a record is
-replaced when a later run contradicts it. `cache flush` removes the file, which
+the other stores. It holds only kills, survivals, and unreached verdicts a run
+could state as a checkable claim; timeout findings are never stored. Nothing in
+it expires, and a record is replaced when a later run contradicts it. `cache flush` removes the file, which
 only makes the next run execute every mutant; see
 [the assurance contract](assurance-contract.md) for what a run reuses from it
 and under which conditions.

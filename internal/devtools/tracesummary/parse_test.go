@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,16 +14,12 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// runStart is the line every well formed stream opens with, so a case can name
-// the one line it is actually about.
 const runStart = `{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0}`
 
-// stream joins lines into the JSON Lines text a reader is handed.
 func stream(lines ...string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// readFixture reads one testdata stream.
 func readFixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
@@ -38,7 +35,7 @@ func TestReadEventsKeepsTheStreamInOrderWithItsPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the sample trace: %v", err)
 	}
-	if len(events) != 30 {
+	if len(events) != sampleTraceEventCount {
 		t.Fatalf("read %d events, want 30", len(events))
 	}
 	if events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
@@ -51,8 +48,7 @@ func TestReadEventsKeepsTheStreamInOrderWithItsPayloads(t *testing.T) {
 	if last.Run != nil && last.Run.EventsDropped != 1 {
 		t.Errorf("run-end reports %d dropped events, want 1", last.Run.EventsDropped)
 	}
-	// The recording numbers every event it attempted, so the event a sink
-	// dropped leaves a gap the reader accepts rather than an error.
+
 	if events[17].Seq != 18 || events[18].Seq != 20 {
 		t.Errorf("sequence numbers %d and %d around the drop, want 18 and 20", events[17].Seq, events[18].Seq)
 	}
@@ -66,12 +62,12 @@ func TestReadEventsKeepsTheStreamInOrderWithItsPayloads(t *testing.T) {
 			}
 		case trace.TypeProbeExec:
 			probes++
-			if event.Probe == nil || len(event.Probe.Infected) != 2 {
+			if event.Probe == nil || len(event.Probe.Infected) != sampleProbeInfectionCount {
 				t.Fatalf("probe event %d = %+v, want the two mutants the probe pass infected", event.Seq, event.Probe)
 			}
 		}
 	}
-	if execs != 6 {
+	if execs != sampleTraceExecCount {
 		t.Errorf("read %d exec events, want 6", execs)
 	}
 	if probes != 1 {
@@ -85,11 +81,97 @@ func TestReadEventsAcceptsATruncatedRecording(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the incomplete trace: %v", err)
 	}
-	if len(events) != 5 {
+	if len(events) != incompleteTraceEventCount {
 		t.Fatalf("read %d events, want 5", len(events))
 	}
 	if events[len(events)-1].Type == trace.TypeRunEnd {
 		t.Error("the incomplete trace ends with a run-end event; the fixture is meant to be truncated")
+	}
+}
+
+func TestReadEventsKeepsStartedAndFinishedPrepareEvents(t *testing.T) {
+	t.Parallel()
+	events, err := readEvents(strings.NewReader(readFixture(t, "prepare-trace.jsonl")))
+	if err != nil {
+		t.Fatalf("read the prepare trace: %v", err)
+	}
+	if len(events) != prepareTraceEventCount {
+		t.Fatalf("read %d events, want %d", len(events), prepareTraceEventCount)
+	}
+	states := make(map[string]int)
+	results := make(map[string]int)
+	for _, event := range events {
+		if event.Type != trace.TypePrepare || event.Prepare == nil {
+			continue
+		}
+		states[event.Prepare.State]++
+		if event.Prepare.Result != "" {
+			results[event.Prepare.Result]++
+		}
+	}
+	if states[trace.PrepareStateStarted] != states[trace.PrepareStateFinished] {
+		t.Fatalf("prepare states = %+v, want every start finished", states)
+	}
+	for _, result := range []string{
+		trace.PrepareResultSucceeded,
+		trace.PrepareResultFailed,
+		trace.PrepareResultSkipped,
+	} {
+		if results[result] != 1 {
+			t.Errorf("prepare result %q occurred %d times, want once", result, results[result])
+		}
+	}
+}
+
+func TestReadEventsAcceptsEveryPreparePhase(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{
+		trace.PreparePhaseDiscovery,
+		trace.PreparePhaseProbeSnapshot,
+		trace.PreparePhaseMainValidation,
+		trace.PreparePhaseMainRestoration,
+		trace.PreparePhaseVerification,
+		trace.PreparePhaseBinaryBuild,
+		trace.PreparePhaseProbeValidation,
+		trace.PreparePhaseProbeCoverageBuild,
+		trace.PreparePhaseProbeRestoration,
+	} {
+		line := `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"` + phase + `","state":"started"}}`
+		if _, err := readEvents(strings.NewReader(stream(runStart, line))); err != nil {
+			t.Errorf("prepare phase %q was rejected: %v", phase, err)
+		}
+	}
+}
+
+func TestReadEventsRejectsMalformedPrepareEvents(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"missing payload", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1}`, "prepare"},
+		{"null payload", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":null}`, "null"},
+		{"missing phase", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"state":"started"}}`, "prepare.phase"},
+		{"unknown phase", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"guessed","state":"started"}}`, "prepare phase"},
+		{"missing state", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery"}}`, "prepare.state"},
+		{"unknown state", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"waiting"}}`, "prepare state"},
+		{"started with result", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"started","result":"succeeded"}}`, "result"},
+		{"started with duration", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"started","duration_ms":0}}`, "duration_ms"},
+		{"finished without result", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"finished","duration_ms":0}}`, "prepare.result"},
+		{"finished without duration", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"finished","result":"succeeded"}}`, "prepare.duration_ms"},
+		{"unknown result", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"finished","result":"guessed","duration_ms":0}}`, "prepare result"},
+		{"null duration", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"finished","result":"succeeded","duration_ms":null}}`, "duration_ms"},
+		{"negative duration", `{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"finished","result":"succeeded","duration_ms":-1}}`, "duration_ms"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := readEvents(strings.NewReader(stream(runStart, testCase.line)))
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("error = %v, want one containing %q", err, testCase.want)
+			}
+		})
 	}
 }
 
@@ -187,7 +269,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		},
 		{
 			name:   "unknown route reason",
-			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"guess"}}`),
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"guess","granularity":"block"}}`),
 			want:   []string{"line 2", `route reason "guess"`},
 		},
 		{
@@ -350,7 +432,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		},
 		{
 			name:   "output digest of the right length with the wrong alphabet",
-			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"output_sha256":"`+strings.Repeat("Z", 64)+`"}}`),
+			stream: stream(runStart, `{"seq":2,"type":"exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"exec":{"argv":["go"],"exit_code":0,"output_sha256":"`+traceTestDigest("Z")+`"}}`),
 			want:   []string{"line 2", "output_sha256"},
 		},
 		{
@@ -375,7 +457,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		},
 		{
 			name:   "route with a negative line",
-			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","line":-1}}`),
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","line":-1}}`),
 			want:   []string{"line 2", "route.line"},
 		},
 		{
@@ -385,7 +467,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		},
 		{
 			name:   "route with an unknown fallback",
-			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","fallback":"guess"}}`),
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"file","fallback":"guess"}}`),
 			want:   []string{"line 2", `route fallback "guess"`},
 		},
 		{
@@ -396,17 +478,17 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		{
 			name:   "route with a fallback and no granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","fallback":"position-unknown"}}`),
-			want:   []string{"line 2", `route fallback "position-unknown"`, "granularity"},
+			want:   []string{"line 2", "route.granularity"},
 		},
 		{
 			name:   "route with a column and no granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":9}}`),
-			want:   []string{"line 2", "route column", "granularity"},
+			want:   []string{"line 2", "route.granularity"},
 		},
 		{
 			name:   "route with a file candidate count and no granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":0}}`),
-			want:   []string{"line 2", "route file_candidates", "granularity"},
+			want:   []string{"line 2", "route.granularity"},
 		},
 		{
 			name:   "route with an unknown discharge reason",
@@ -422,7 +504,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		{
 			name:   "route with a discharge and no granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","discharged":[{"target":"TestSkipped","reason":"branch-never-taken"}]}}`),
-			want:   []string{"line 2", "route discharged", "granularity"},
+			want:   []string{"line 2", "route.granularity"},
 		},
 		{
 			name:   "route with a discharge on a decision the file carried",
@@ -435,9 +517,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
 		},
 		{
-			// An absent marker and a recorded false are the same claim: the
-			// pass measured nothing about this mutant, so nothing it measured
-			// removed a target from the reaching set.
+
 			name:   "route with an infection discharge on a mutant it recorded no probe of",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","discharged":[{"target":"TestNeverInfects","reason":"never-infected"}],"probed":false}}`),
 			want:   []string{"line 2", `discharged "TestNeverInfects" as never-infected`, "probe marker"},
@@ -454,18 +534,18 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 		},
 		{
 			name:   "route with a negative column",
-			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","column":-1}}`),
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","column":-1}}`),
 			want:   []string{"line 2", "route.column"},
 		},
 		{
 			name:   "route with a negative file candidate count",
-			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","file_candidates":-1}}`),
+			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","file_candidates":-1}}`),
 			want:   []string{"line 2", "route.file_candidates"},
 		},
 		{
 			name:   "route probed without a granularity",
 			stream: stream(runStart, `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","probed":true}}`),
-			want:   []string{"line 2", "route probed", "granularity"},
+			want:   []string{"line 2", "route.granularity"},
 		},
 		{
 			name:   "probe-reaching route without recovered targets",
@@ -518,24 +598,24 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", "suite probe target", "exact package"},
 		},
 		{
-			name:   "paired control identity without its marker",
-			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","exit_code":0,"outcome":"measured"}}`),
-			want:   []string{"line 2", "paired-control identity", "control=true"},
+			name:   "mutation control identity without its marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"mutation-control:example.com/app","package":"example.com/app","exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "mutation-control identity", "control=true"},
 		},
 		{
-			name:   "paired control names another package",
-			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/other","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured"}}`),
-			want:   []string{"line 2", "paired control target", "exact package"},
+			name:   "exact original preflight names another package",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"mutation-control:example.com/other","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "exact original preflight target", "exact package"},
 		},
 		{
-			name:   "paired control carries infection facts",
-			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured","infected":[]}}`),
-			want:   []string{"line 2", "paired control carries suite or infected"},
+			name:   "exact original preflight carries infection facts",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"mutation-control:example.com/app","package":"example.com/app","control":true,"exit_code":0,"outcome":"measured","infected":[]}}`),
+			want:   []string{"line 2", "exact original preflight carries suite or infected"},
 		},
 		{
-			name:   "paired control carries a false suite marker",
-			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"paired-control:example.com/app","package":"example.com/app","control":true,"suite":false,"exit_code":0,"outcome":"measured"}}`),
-			want:   []string{"line 2", "paired control carries suite or infected"},
+			name:   "exact original preflight carries a false suite marker",
+			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"mutation-control:example.com/app","package":"example.com/app","control":true,"suite":false,"exit_code":0,"outcome":"measured"}}`),
+			want:   []string{"line 2", "exact original preflight carries suite or infected"},
 		},
 		{
 			name:   "probe with a negative timeout",
@@ -568,10 +648,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
 		},
 		{
-			// An empty list is the claim that the execution measured and found
-			// nothing, which an execution that measured none cannot make; the
-			// schema rejects the field wherever it appears beside another
-			// outcome, and so does the reader.
+
 			name:   "probe with an empty infection list beside an execution that measured none",
 			stream: stream(runStart, `{"seq":2,"type":"probe-exec","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"probe":{"target":"TestRun","exit_code":1,"outcome":"test-failed","infected":[]}}`),
 			want:   []string{"line 2", `outcome "test-failed"`, "measured"},
@@ -660,9 +737,7 @@ func TestReadEventsRejectsDeviationsNamingTheLine(t *testing.T) {
 
 func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
 	t.Parallel()
-	// A fallback is what dropped a route to the file, so it belongs on a
-	// route decided by file and nowhere else. Every other combination of the
-	// two labels is a route the routing could have taken.
+
 	cases := []struct {
 		name  string
 		route string
@@ -686,10 +761,6 @@ func TestReadEventsAcceptsAFallbackOnTheRouteItDroppedToTheFile(t *testing.T) {
 		{
 			name:  "a file route that found no candidate",
 			route: `{"path":"a.go","reason":"coverage-reaching","granularity":"file","fallback":"outside-blocks","column":9}`,
-		},
-		{
-			name:  "a route from a recording made before the labels existed",
-			route: `{"path":"a.go","reason":"coverage-reaching"}`,
 		},
 	}
 	for _, testCase := range cases {
@@ -719,9 +790,7 @@ func TestReadEventsAcceptsProbeRecoveredAndSuiteControlledRoutes(t *testing.T) {
 
 func TestReadEventsAcceptsARouteDischargedByEitherProof(t *testing.T) {
 	t.Parallel()
-	// Two proofs remove targets from a reaching set, and one route may carry
-	// both: the reason is read per entry, so a route mixing them is a route the
-	// routing takes.
+
 	line := `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":` +
 		`{"path":"a.go","reason":"coverage-reaching","granularity":"block","reaching_targets":["TestRun"],` +
 		`"discharged":[{"target":"TestSkipped","reason":"branch-never-taken"},` +
@@ -737,8 +806,6 @@ func TestReadEventsAcceptsARouteDischargedByEitherProof(t *testing.T) {
 	}
 }
 
-// failingReader hands out its content and then fails, the way a disk that
-// died mid-read does.
 type failingReader struct {
 	content string
 	served  bool
@@ -777,13 +844,13 @@ func TestReadEventsRejectsAStreamWithoutEvents(t *testing.T) {
 
 func TestReadEventsAcceptsALineLongerThanAScannerBuffer(t *testing.T) {
 	t.Parallel()
-	targets := make([]string, 0, 4096)
-	for index := range 4096 {
-		targets = append(targets, `"github.com/P4suta/goatest/internal/package`+strings.Repeat("x", index%17)+`"`)
+	targets := make([]string, 0, longTraceTargetCount)
+	for index := range longTraceTargetCount {
+		targets = append(targets, `"github.com/P4suta/goatest/internal/package`+strings.Repeat("x", index%longTraceNameVariantCount)+`"`)
 	}
-	long := `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","reaching_targets":[` +
+	long := `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:01Z","elapsed_ms":1,"route":{"path":"a.go","reason":"unreached","granularity":"block","reaching_targets":[` +
 		strings.Join(targets, ",") + `]}}`
-	if len(long) < 64*1024 {
+	if len(long) < bufio.MaxScanTokenSize {
 		t.Fatalf("the fixture line is %d bytes, which does not exceed a default scanner buffer", len(long))
 	}
 	events, err := readEvents(strings.NewReader(stream(runStart, long)))
@@ -795,11 +862,6 @@ func TestReadEventsAcceptsALineLongerThanAScannerBuffer(t *testing.T) {
 	}
 }
 
-// TestCheckRouteHoldsTheReuseAndItsPlanToEachOther pins the biconditional the
-// contract states: nothing ran for a reused mutant, so the plan of a reused
-// route is the reuse and nothing else, and a plan that is the reuse belongs to
-// a route that says so. A reader told by one field and not the other is
-// reading a recording that contradicts itself.
 func TestCheckRouteHoldsTheReuseAndItsPlanToEachOther(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -810,18 +872,18 @@ func TestCheckRouteHoldsTheReuseAndItsPlanToEachOther(t *testing.T) {
 		{
 			name: "a reused route whose plan is the reuse",
 			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
-				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["reused"],"reused":true}}`,
+				`"route":{"path":"value.go","reason":"coverage-reaching","granularity":"block","plan":["reused"],"reused":true}}`,
 		},
 		{
 			name: "a reused route that also planned an execution",
 			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
-				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["individual:TestValue"],"reused":true}}`,
+				`"route":{"path":"value.go","reason":"coverage-reaching","granularity":"block","plan":["individual:TestValue"],"reused":true}}`,
 			want: "reused",
 		},
 		{
 			name: "a route planning the reuse without saying it was reused",
 			line: `{"seq":2,"type":"route","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,` +
-				`"route":{"path":"value.go","reason":"coverage-reaching","plan":["reused"]}}`,
+				`"route":{"path":"value.go","reason":"coverage-reaching","granularity":"block","plan":["reused"]}}`,
 			want: "reused",
 		},
 	} {

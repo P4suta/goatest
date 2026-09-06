@@ -8,6 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
+)
+
+const (
+	initialConfigRename = 1
+	backupConfigRename  = 2
+	retryConfigRename   = 3
+	restoreConfigRename = 4
 )
 
 type stubConfigFile struct {
@@ -157,22 +166,22 @@ func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
 				rename: func(oldPath, newPath string) error {
 					renames++
 					switch renames {
-					case 1:
+					case initialConfigRename:
 						if oldPath != temporary || newPath != destination {
 							t.Fatalf("initial rename(%q, %q)", oldPath, newPath)
 						}
 						return firstRename
-					case 2:
+					case backupConfigRename:
 						if oldPath != destination || newPath != backup {
 							t.Fatalf("backup rename(%q, %q)", oldPath, newPath)
 						}
 						return testCase.backupErr
-					case 3:
+					case retryConfigRename:
 						if oldPath != temporary || newPath != destination {
 							t.Fatalf("retry rename(%q, %q)", oldPath, newPath)
 						}
 						return testCase.retryErr
-					case 4:
+					case restoreConfigRename:
 						if oldPath != backup || newPath != destination {
 							t.Fatalf("restore rename(%q, %q)", oldPath, newPath)
 						}
@@ -203,7 +212,7 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, FileName)
 	original := []byte("original configuration\n")
-	if err := os.WriteFile(path, original, 0o644); err != nil {
+	if err := os.WriteFile(path, original, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	firstFailure := errors.New("platform refused replacement")
@@ -212,9 +221,9 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 	installConfigIO(t, configIOHooks{rename: func(oldPath, newPath string) error {
 		renames++
 		switch renames {
-		case 1:
+		case initialConfigRename:
 			return firstFailure
-		case 3:
+		case retryConfigRename:
 			return retryFailure
 		default:
 			return os.Rename(oldPath, newPath)
@@ -222,7 +231,7 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 	}})
 	err := save(root, minimalConfig())
 	contents, readErr := os.ReadFile(path)
-	if !errors.Is(err, firstFailure) || !errors.Is(err, retryFailure) || readErr != nil || string(contents) != string(original) || renames != 4 {
+	if !errors.Is(err, firstFailure) || !errors.Is(err, retryFailure) || readErr != nil || string(contents) != string(original) || renames != restoreConfigRename {
 		t.Fatalf("save = %v, config=%q read=%v renames=%d", err, contents, readErr, renames)
 	}
 }
@@ -245,7 +254,7 @@ func TestSaveSuccessWritesSyncsModesClosesAndRenames(t *testing.T) {
 	if err := save(root, minimalConfig()); err != nil {
 		t.Fatal(err)
 	}
-	if file.writes != 1 || file.syncs != 1 || file.chmods != 1 || file.closes != 1 || file.writtenMode != 0o644 || renames != 1 {
+	if file.writes != 1 || file.syncs != 1 || file.chmods != 1 || file.closes != 1 || file.writtenMode != filemode.ReadableFile || renames != 1 {
 		t.Fatalf("file = %+v, renames = %d", file, renames)
 	}
 	if len(file.written) == 0 {

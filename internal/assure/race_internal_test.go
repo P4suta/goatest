@@ -5,10 +5,12 @@ package assure
 
 import (
 	"errors"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
@@ -132,6 +134,63 @@ func TestCollectRaceCommandIsDeterministicClonedAndDeepIncludesEveryPackage(t *t
 			environment[0] = "MUTATED=yes"
 			if workspace.commands[0].Env[0] != "DB=ready" {
 				t.Fatal("race command aliases environment")
+			}
+		})
+	}
+}
+
+func TestCollectRacePersistsItsCompileBeforeProjectExecution(t *testing.T) {
+	t.Parallel()
+	environment := []string{"DB=ready"}
+	workspace := &baselineFakeWorkspace{exec: func(gomutants.Command) (gomutants.CommandResult, error) {
+		return gomutants.CommandResult{}, nil
+	}}
+	result, err := CollectRaceWithOptions(
+		t.Context(), workspace, goanalysis.Model{}, []string{"fixture/z", "fixture/a"}, "standard-v1",
+		RaceOptions{
+			Environment: environment, BuildTags: []string{"integration"}, TestArgs: []string{"-test.short=true"},
+			PersistCompile: true, Timeout: 17 * time.Second,
+		},
+	)
+	if err != nil || len(result.Evidence) != 1 || len(workspace.commands) != 2 {
+		t.Fatalf("CollectRaceWithOptions = (%+v, %v), commands %+v", result, err, workspace.commands)
+	}
+	compile := workspace.commands[0]
+	wantCompile := []string{"go", "test", "-race", "-c", "-o", os.DevNull, "-tags=integration", "fixture/a", "fixture/z"}
+	if !slices.Equal(compile.Argv, wantCompile) || !slices.Equal(compile.Env, environment) || compile.Timeout != 17*time.Second {
+		t.Fatalf("race compile = %+v, want argv %q and the configured build timeout", compile, wantCompile)
+	}
+	execute := workspace.commands[1]
+	wantExecute := []string{"go", "test", "-race", "-count=1", "-tags=integration", "fixture/a", "fixture/z", "-args", "-test.short=true"}
+	if !slices.Equal(execute.Argv, wantExecute) || execute.Timeout != 17*time.Second {
+		t.Fatalf("race execution = %+v, want argv %q", execute, wantExecute)
+	}
+	environment[0] = "MUTATED=yes"
+	if workspace.commands[0].Env[0] != "DB=ready" || workspace.commands[1].Env[0] != "DB=ready" {
+		t.Fatal("race compile or execution aliases its environment")
+	}
+}
+
+func TestCollectRaceReportsPersistentCompileFailuresBeforeExecution(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		result gomutants.CommandResult
+		err    error
+		want   string
+	}{
+		{name: "execution", err: errors.New("start failed"), want: "goatest: compile race test binaries: start failed"},
+		{name: "timeout", result: gomutants.CommandResult{TimedOut: true}, want: "goatest: compile race test binaries timed out"},
+		{name: "exit", result: gomutants.CommandResult{ExitCode: 2, Output: []byte("compile failed")}, want: "goatest: compile race test binaries failed (exit=2): compile failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := &baselineFakeWorkspace{exec: func(gomutants.Command) (gomutants.CommandResult, error) {
+				return test.result, test.err
+			}}
+			result, err := CollectRaceWithOptions(t.Context(), workspace, goanalysis.Model{}, []string{"fixture/a"}, "standard-v1", RaceOptions{PersistCompile: true})
+			if !reflect.DeepEqual(result, RaceResult{}) || err == nil || err.Error() != test.want || len(workspace.commands) != 1 {
+				t.Fatalf("persistent compile failure = (%+v, %v), commands %+v", result, err, workspace.commands)
 			}
 		})
 	}

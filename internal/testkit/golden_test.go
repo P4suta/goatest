@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/testkit"
 )
@@ -31,8 +32,7 @@ func TestGoldenPathResolvesUnderTestdata(t *testing.T) {
 
 func TestUpdateReportsTheRegisteredFlag(t *testing.T) {
 	t.Parallel()
-	// testkit registers -update exactly once for every test binary that links
-	// it; a duplicate registration would panic before this test could run.
+
 	registered := flag.Lookup("update")
 	if registered == nil {
 		t.Fatal("testkit does not register the -update flag")
@@ -77,7 +77,7 @@ func TestGoldenAcceptsMatchingBytesAndReportsMismatches(t *testing.T) {
 func TestCompareGoldenMatchesAndReportsMismatch(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "report.json")
-	if err := os.WriteFile(path, goldenSampleContents, 0o644); err != nil {
+	if err := os.WriteFile(path, goldenSampleContents, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,9 +231,6 @@ func TestNormalizeReportKeepsEmptyIdentityFieldsEmptyAndDoesNotMutateItsInput(t 
 	}
 }
 
-// recordingTB captures the failures a testkit helper reports without failing
-// the enclosing test. Embedding testing.TB satisfies the interface while
-// leaving every method the helpers must not call unimplemented.
 type recordingTB struct {
 	testing.TB
 	errors []string
@@ -268,8 +265,6 @@ func (recorder *recordingTB) Fatalf(format string, arguments ...any) {
 	panic(errRecordedTestStopped)
 }
 
-// recordFailures runs call against a recording testing.TB, translating a fatal
-// report into the early return that testing.T would perform.
 func recordFailures(t *testing.T, call func(testing.TB)) (recorder *recordingTB) {
 	t.Helper()
 	recorder = &recordingTB{}

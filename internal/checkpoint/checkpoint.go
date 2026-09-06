@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package checkpoint defines the strict, exact-input interrupted-run state.
-// A checkpoint is scheduling state, never a completed assurance claim.
 package checkpoint
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,24 +27,24 @@ type Target struct {
 	RelativeDir  string   `json:"relative_dir"`
 	Path         string   `json:"path"`
 	Line         int      `json:"line"`
-	Capability   string   `json:"capability"`
 	Capabilities []string `json:"capabilities"`
 	Dependencies []string `json:"dependencies"`
 }
 
 type TargetEvidence struct {
-	Target             Target    `json:"target"`
-	CoveredFiles       []string  `json:"covered_files"`
-	Environment        []string  `json:"environment"`
-	DurationNS         int64     `json:"duration_ns"`
-	WholeTree          bool      `json:"whole_tree,omitempty"`
-	RepositoryObserved bool      `json:"repository_observed,omitempty"`
-	Coverage           *Coverage `json:"coverage,omitempty"`
+	Target          Target    `json:"target"`
+	CoveredFiles    []string  `json:"covered_files"`
+	Environment     []string  `json:"environment"`
+	DurationNS      int64     `json:"duration_ns"`
+	WholeTree       bool      `json:"whole_tree,omitempty"`
+	Coverage        *Coverage `json:"coverage,omitempty"`
+	Probed          bool      `json:"probed"`
+	ProbeDurationNS int64     `json:"probe_duration_ns"`
+	Infected        []uint32  `json:"infected"`
+
+	Instrumented *Coverage `json:"instrumented,omitempty"`
 }
 
-// Coverage is the exact positive block set a completed baseline target
-// measured. A nil pointer means a legacy checkpoint did not preserve blocks;
-// a non-nil Coverage with no files is an exact empty measurement.
 type Coverage struct {
 	Files []FileCoverage `json:"files"`
 }
@@ -77,12 +77,20 @@ type Baseline struct {
 	Evidence         []report.Evidence `json:"evidence"`
 	Findings         []report.Finding  `json:"findings"`
 	Targets          []BaselineTarget  `json:"targets"`
-	Routing          *BaselineRouting  `json:"routing,omitempty"`
+
+	Suites  []BaselineSuite  `json:"suites,omitempty"`
+	Routing *BaselineRouting `json:"routing,omitempty"`
 }
 
-// BaselineRouting is the package-level coverage state produced only after the
-// baseline completes. Its absence identifies an unfinished or legacy baseline
-// and makes the next attempt rebuild the optional controls conservatively.
+type BaselineSuite struct {
+	Package      string    `json:"package"`
+	Measured     bool      `json:"measured"`
+	Covered      *Coverage `json:"covered,omitempty"`
+	Instrumented *Coverage `json:"instrumented,omitempty"`
+	DurationNS   int64     `json:"duration_ns"`
+	WholeTree    bool      `json:"whole_tree,omitempty"`
+}
+
 type BaselineRouting struct {
 	Instrumented Coverage        `json:"instrumented"`
 	Suites       []SuiteCoverage `json:"suites"`
@@ -107,14 +115,7 @@ type MutationResult struct {
 	ID       string            `json:"id"`
 	Evidence []report.Evidence `json:"evidence"`
 	Findings []report.Finding  `json:"findings"`
-	Repairs  []report.Repair   `json:"repairs"`
-	Applied  bool              `json:"applied"`
-	// Provenance names the run that observed this mutant's verdict, when the
-	// interrupted run resolved it from that run's evidence instead of
-	// executing anything. A run resuming the unit did not observe the verdict
-	// either, so it reports the reuse the interrupted run reported. It is
-	// absent on every mutant a run executed and on every checkpoint written
-	// before evidence was reused.
+
 	Provenance string `json:"provenance,omitempty"`
 }
 
@@ -125,14 +126,7 @@ type Mutation struct {
 	Results            []MutationResult `json:"results"`
 }
 
-// MutationProbe is one complete semantic-original probe phase. Partial probe
-// work is never stored: presence means every target and requested suite has a
-// terminal measured-or-unmeasured result for this exact catalog fingerprint.
 type MutationProbe struct {
-	// IndexFingerprint binds the numeric infection indices below to the exact
-	// index -> mutant/probe-capability mapping of the prepared session. The
-	// mutation fingerprint identifies source edits, but intentionally ignores
-	// catalogue order and therefore cannot safely bind these compact indices.
 	IndexFingerprint string        `json:"index_fingerprint"`
 	Targets          []TargetProbe `json:"targets"`
 	Suites           []SuiteProbe  `json:"suites"`
@@ -162,8 +156,6 @@ type State struct {
 	Mutation    *Mutation `json:"mutation,omitempty"`
 }
 
-// Decode reads one strict checkpoint. Unknown fields, trailing values and
-// semantically incomplete completed units are refused.
 func Decode(data []byte) (State, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -180,8 +172,6 @@ func Decode(data []byte) (State, error) {
 	return state, nil
 }
 
-// Validate checks the checkpoint identity and the completeness of every unit
-// that a later attempt is allowed to skip.
 func Validate(state State) error {
 	if state.Schema != SchemaV1 {
 		return fmt.Errorf("goatest: checkpoint schema %q: expected %s", state.Schema, SchemaV1)
@@ -193,6 +183,7 @@ func Validate(state State) error {
 		return errors.New("goatest: checkpoint attempts must be positive")
 	}
 	seenTargets := make(map[string]struct{}, len(state.Baseline.Targets))
+	instrumentationAnchors := make(map[string]string)
 	for _, unit := range state.Baseline.Targets {
 		if unit.ID == "" || unit.Inventory.ID != unit.ID || unit.Inventory.Name == "" || unit.Inventory.Status == "" || unit.Inventory.DurationMS < 0 {
 			return errors.New("goatest: checkpoint baseline target has an invalid identity")
@@ -205,18 +196,57 @@ func Validate(state State) error {
 		}
 		seenTargets[unit.ID] = struct{}{}
 		if unit.Target != nil {
-			if unit.Target.Target.ID != unit.ID || unit.Target.DurationNS < 0 {
+			if unit.Target.Target.ID != unit.ID || unit.Target.DurationNS < 0 || unit.Target.ProbeDurationNS < 0 ||
+				!unit.Target.Probed && (unit.Target.ProbeDurationNS != 0 || len(unit.Target.Infected) != 0) ||
+				!strictlyIncreasing(unit.Target.Infected) {
 				return fmt.Errorf("goatest: checkpoint target evidence %s has an invalid identity", unit.ID)
+			}
+			if unit.Target.Coverage == nil {
+				return fmt.Errorf("goatest: checkpoint target evidence %s has no exact coverage", unit.ID)
 			}
 			if err := validateCoverage(unit.Target.Coverage); err != nil {
 				return fmt.Errorf("goatest: checkpoint target evidence %s has invalid coverage: %w", unit.ID, err)
 			}
+			if err := validateCoverage(unit.Target.Instrumented); err != nil {
+				return fmt.Errorf("goatest: checkpoint target evidence %s has invalid instrumentation: %w", unit.ID, err)
+			}
+			if unit.Target.Instrumented != nil {
+				if state.Baseline.Complete {
+					return fmt.Errorf("goatest: completed checkpoint target %s duplicates routing instrumentation", unit.ID)
+				}
+				pkg := unit.Target.Target.Package
+				if first := instrumentationAnchors[pkg]; first != "" {
+					return fmt.Errorf("goatest: partial checkpoint package %s has instrumentation anchors %s and %s", pkg, first, unit.ID)
+				}
+				instrumentationAnchors[pkg] = unit.ID
+			}
 		}
 	}
-	if state.Baseline.Routing != nil {
-		if !state.Baseline.Complete {
-			return errors.New("goatest: checkpoint has baseline routing before baseline completion")
+	seenBaselineSuites := make(map[string]struct{}, len(state.Baseline.Suites))
+	for _, suite := range state.Baseline.Suites {
+		if suite.Package == "" || suite.DurationNS < 0 ||
+			!suite.Measured && (suite.Covered != nil || suite.Instrumented != nil || suite.DurationNS != 0 || suite.WholeTree) ||
+			suite.Measured && (suite.Covered == nil || suite.Instrumented == nil) {
+			return errors.New("goatest: checkpoint baseline suite has an invalid measurement")
 		}
+		if _, duplicate := seenBaselineSuites[suite.Package]; duplicate {
+			return fmt.Errorf("goatest: checkpoint contains duplicate partial baseline suite %s", suite.Package)
+		}
+		seenBaselineSuites[suite.Package] = struct{}{}
+		if err := validateCoverage(suite.Covered); err != nil {
+			return fmt.Errorf("goatest: checkpoint partial baseline suite %s has invalid covered blocks: %w", suite.Package, err)
+		}
+		if err := validateCoverage(suite.Instrumented); err != nil {
+			return fmt.Errorf("goatest: checkpoint partial baseline suite %s has invalid instrumentation: %w", suite.Package, err)
+		}
+	}
+	if state.Baseline.Complete && len(state.Baseline.Suites) != 0 {
+		return errors.New("goatest: completed checkpoint retains partial baseline suites")
+	}
+	if state.Baseline.Complete != (state.Baseline.Routing != nil) {
+		return errors.New("goatest: checkpoint baseline completion and routing disagree")
+	}
+	if state.Baseline.Routing != nil {
 		if err := validateCoverage(&state.Baseline.Routing.Instrumented); err != nil {
 			return fmt.Errorf("goatest: checkpoint baseline instrumentation is invalid: %w", err)
 		}
@@ -349,11 +379,11 @@ func terminalMutation(unit MutationResult) bool {
 			return true
 		}
 	}
-	return unit.Applied
+	return false
 }
 
 func validSHA256(value string) bool {
-	if len(value) != 64 {
+	if len(value) != hex.EncodedLen(sha256.Size) {
 		return false
 	}
 	for _, character := range value {
@@ -366,7 +396,6 @@ func validSHA256(value string) bool {
 	return true
 }
 
-// JSON returns deterministic, indented checkpoint bytes with one newline.
 func JSON(input State) []byte {
 	state := canonical(input)
 	data, _ := json.MarshalIndent(state, "", "  ")
@@ -378,6 +407,7 @@ func canonical(input State) State {
 	result.Baseline.Evidence = slices.Clone(input.Baseline.Evidence)
 	result.Baseline.Findings = slices.Clone(input.Baseline.Findings)
 	result.Baseline.Targets = slices.Clone(input.Baseline.Targets)
+	result.Baseline.Suites = slices.Clone(input.Baseline.Suites)
 	if result.Baseline.Evidence == nil {
 		result.Baseline.Evidence = []report.Evidence{}
 	}
@@ -386,6 +416,9 @@ func canonical(input State) State {
 	}
 	if result.Baseline.Targets == nil {
 		result.Baseline.Targets = []BaselineTarget{}
+	}
+	if result.Baseline.Suites == nil {
+		result.Baseline.Suites = []BaselineSuite{}
 	}
 	slices.SortFunc(result.Baseline.Targets, func(a, b BaselineTarget) int { return strings.Compare(a.ID, b.ID) })
 	for index := range result.Baseline.Targets {
@@ -402,10 +435,13 @@ func canonical(input State) State {
 			target := *unit.Target
 			target.CoveredFiles = slices.Clone(target.CoveredFiles)
 			target.Environment = slices.Clone(target.Environment)
+			target.Infected = slices.Clone(target.Infected)
 			target.Target.Capabilities = slices.Clone(target.Target.Capabilities)
 			target.Target.Dependencies = slices.Clone(target.Target.Dependencies)
 			slices.Sort(target.CoveredFiles)
 			slices.Sort(target.Environment)
+			slices.Sort(target.Infected)
+			target.Infected = slices.Compact(target.Infected)
 			slices.Sort(target.Target.Capabilities)
 			slices.Sort(target.Target.Dependencies)
 			if target.CoveredFiles == nil {
@@ -413,6 +449,9 @@ func canonical(input State) State {
 			}
 			if target.Environment == nil {
 				target.Environment = []string{}
+			}
+			if target.Infected == nil {
+				target.Infected = []uint32{}
 			}
 			if target.Target.Capabilities == nil {
 				target.Target.Capabilities = []string{}
@@ -424,9 +463,27 @@ func canonical(input State) State {
 				coverage := canonicalCoverage(*target.Coverage)
 				target.Coverage = &coverage
 			}
+			if target.Instrumented != nil {
+				instrumented := canonicalCoverage(*target.Instrumented)
+				target.Instrumented = &instrumented
+			}
 			unit.Target = &target
 		}
 	}
+	for index := range result.Baseline.Suites {
+		suite := &result.Baseline.Suites[index]
+		if suite.Covered != nil {
+			covered := canonicalCoverage(*suite.Covered)
+			suite.Covered = &covered
+		}
+		if suite.Instrumented != nil {
+			instrumented := canonicalCoverage(*suite.Instrumented)
+			suite.Instrumented = &instrumented
+		}
+	}
+	slices.SortFunc(result.Baseline.Suites, func(left, right BaselineSuite) int {
+		return strings.Compare(left.Package, right.Package)
+	})
 	if input.Baseline.Routing != nil {
 		routing := *input.Baseline.Routing
 		routing.Instrumented = canonicalCoverage(routing.Instrumented)
@@ -498,15 +555,11 @@ func canonical(input State) State {
 		for index := range mutation.Results {
 			mutation.Results[index].Evidence = slices.Clone(mutation.Results[index].Evidence)
 			mutation.Results[index].Findings = slices.Clone(mutation.Results[index].Findings)
-			mutation.Results[index].Repairs = slices.Clone(mutation.Results[index].Repairs)
 			if mutation.Results[index].Evidence == nil {
 				mutation.Results[index].Evidence = []report.Evidence{}
 			}
 			if mutation.Results[index].Findings == nil {
 				mutation.Results[index].Findings = []report.Finding{}
-			}
-			if mutation.Results[index].Repairs == nil {
-				mutation.Results[index].Repairs = []report.Repair{}
 			}
 		}
 		result.Mutation = &mutation

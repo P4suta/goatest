@@ -17,10 +17,13 @@ import (
 	"github.com/P4suta/goatest/internal/buildcache"
 )
 
-// protocolRequest and protocolResponse mirror the messages
-// cmd/go/internal/cacheprog defines. The test writes and reads the wire format
-// itself, so that a change to what goatest serves has to keep answering the go
-// command the go command actually is.
+const (
+	getPutGetResponseCount    = 4
+	continuingResponseCount   = 3
+	closedStreamResponseCount = 2
+	largeProtocolBodyLines    = 8192
+)
+
 type protocolRequest struct {
 	ID       int64
 	Command  string
@@ -40,11 +43,20 @@ type protocolResponse struct {
 	DiskPath      string     `json:",omitempty"`
 }
 
-// requestStream builds the byte stream the go command writes: each request as
-// one encoded JSON value, a newline of its own after it, and a put body as a
-// base64 JSON string on the line that follows. cmd/go/internal/cache/prog.go
-// writes exactly this, and a server that only parses what a test invented
-// would not be a server for it.
+type terminalReader struct {
+	reader   io.Reader
+	terminal bool
+}
+
+func (reader *terminalReader) Read(destination []byte) (int, error) {
+	if reader.terminal {
+		panic("read after terminal stream result")
+	}
+	read, err := reader.reader.Read(destination)
+	reader.terminal = read == 0 && err != nil
+	return read, err
+}
+
 func requestStream(t *testing.T, messages ...any) io.Reader {
 	t.Helper()
 	var stream bytes.Buffer
@@ -69,7 +81,6 @@ func requestStream(t *testing.T, messages ...any) io.Reader {
 	return bytes.NewReader(stream.Bytes())
 }
 
-// responses decodes everything the program wrote, in order.
 func responses(t *testing.T, stream []byte) []protocolResponse {
 	t.Helper()
 	decoder := json.NewDecoder(bytes.NewReader(stream))
@@ -87,12 +98,11 @@ func responses(t *testing.T, stream []byte) []protocolResponse {
 	}
 }
 
-// served runs the protocol loop over one request stream.
 func served(t *testing.T, layers buildcache.Layers, stream io.Reader) ([]protocolResponse, buildcache.Stats, error) {
 	t.Helper()
 	var written bytes.Buffer
 	var stats buildcache.Stats
-	err := buildcache.Serve(t.Context(), stream, &written, layers, &stats)
+	err := buildcache.Serve(t.Context(), &terminalReader{reader: stream}, &written, layers, &stats)
 	return responses(t, written.Bytes()), stats, err
 }
 
@@ -125,7 +135,7 @@ func TestServeAnswersAMissAndThenAHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if len(decoded) != 4 {
+	if len(decoded) != getPutGetResponseCount {
 		t.Fatalf("responses = %+v, want the opening message and three answers", decoded)
 	}
 	if miss := decoded[1]; miss.ID != 1 || !miss.Miss || miss.Err != "" {
@@ -152,10 +162,34 @@ func TestServeAnswersAMissAndThenAHit(t *testing.T) {
 	}
 }
 
+func TestServeMeasuresVerifiedNativeImports(t *testing.T) {
+	t.Parallel()
+	layers := twoLayers(t, false)
+	native := t.TempDir()
+	action := identifier(7)
+	body := "native compiled bytes"
+	output := storeNativeCacheEntry(t, native, action, body)
+	layers.NativeSource = native
+	decoded, stats, err := served(t, layers, requestStream(t,
+		protocolRequest{ID: 1, Command: "get", ActionID: action},
+	))
+	if err != nil || len(decoded) != closedStreamResponseCount {
+		t.Fatalf("Serve = (%+v, %+v, %v)", decoded, stats, err)
+	}
+	hit := decoded[1]
+	if hit.Miss || !bytes.Equal(hit.OutputID, output) || hit.Size != int64(len(body)) {
+		t.Fatalf("native hit = %+v", hit)
+	}
+	want := buildcache.Stats{Gets: 1, HitsNative: 1, NativeBytes: int64(len(body))}
+	if stats != want {
+		t.Fatalf("stats = %+v, want %+v", stats, want)
+	}
+}
+
 func TestServeStreamsALargeBodyThroughTheQuotedValue(t *testing.T) {
 	t.Parallel()
 	layers := twoLayers(t, false)
-	content := strings.Repeat("compiled package bytes\n", 8192)
+	content := strings.Repeat("compiled package bytes\n", largeProtocolBodyLines)
 	stream := requestStream(t,
 		protocolRequest{ID: 1, Command: "put", ActionID: identifier(1), OutputID: identifier(2), BodySize: int64(len(content))},
 		content,
@@ -205,7 +239,7 @@ func TestServeRefusesABodyThatIsNotTheDeclaredLength(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if len(decoded) != 3 {
+	if len(decoded) != continuingResponseCount {
 		t.Fatalf("responses = %+v, want the loop to have carried on", decoded)
 	}
 	if decoded[1].Err == "" || !strings.Contains(decoded[1].Err, "declared") {
@@ -230,7 +264,7 @@ func TestServeReportsAnUnsupportedCommandAndKeepsServing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if len(decoded) != 3 {
+	if len(decoded) != continuingResponseCount {
 		t.Fatalf("responses = %+v, want the loop to have carried on", decoded)
 	}
 	if decoded[1].ID != 1 || !strings.Contains(decoded[1].Err, "get2") {
@@ -281,7 +315,7 @@ func TestServeDrivesTheLoopToTheEndOfTheStreamAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if len(decoded) != 2 {
+	if len(decoded) != closedStreamResponseCount {
 		t.Fatalf("responses = %+v, want the opening message and the answer to close alone", decoded)
 	}
 }
@@ -348,15 +382,15 @@ func TestSummarizeSumsEveryServedProcessAndForgivesAnAbsentLayer(t *testing.T) {
 
 func TestStatsDetailNamesEveryCounter(t *testing.T) {
 	t.Parallel()
-	stats := buildcache.Stats{Gets: 1, HitsScratch: 2, HitsBase: 3, Misses: 4, Puts: 5, PutBytes: 6, PrunedBytes: 7}
-	want := "gets=1 hits-scratch=2 hits-base=3 misses=4 puts=5 put-bytes=6 pruned-bytes=7"
+	stats := buildcache.Stats{Gets: 1, HitsScratch: 2, HitsBase: 3, HitsNative: 4, NativeBytes: 5, Misses: 6, Puts: 7, PutBytes: 8, PrunedBytes: 9}
+	want := "gets=1 hits-scratch=2 hits-base=3 hits-native=4 native-bytes=5 misses=6 puts=7 put-bytes=8 pruned-bytes=9"
 	if got := stats.Detail(); got != want {
 		t.Fatalf("Detail = %q, want %q", got, want)
 	}
 	var total buildcache.Stats
 	total.Add(stats)
 	total.Add(stats)
-	if total.Gets != 2 || total.PrunedBytes != 14 {
+	if total.Gets != 2 || total.PrunedBytes != 18 {
 		t.Fatalf("Add = %+v, want both processes counted", total)
 	}
 }

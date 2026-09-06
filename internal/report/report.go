@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package report owns goatest's deterministic assurance result model and
-// projections.
 package report
 
 import (
@@ -19,11 +17,8 @@ import (
 	"unicode"
 )
 
-// SchemaV1 is the first public report contract. Pre-release report shapes are
-// intentionally replaced in place instead of consuming a public version.
 const SchemaV1 = "assurance-report-v1"
 
-// Verdict is the primary result, deliberately not a mutation percentage.
 type Verdict string
 
 const (
@@ -38,9 +33,6 @@ const (
 	VerdictCompleted     Verdict = "COMPLETED"
 )
 
-// RunKind records what the operator requested. Scope.Resolved separately
-// records what was actually verified (for example, a changeset run may safely
-// broaden to the full project when impact information is unavailable).
 type RunKind string
 
 const (
@@ -83,6 +75,15 @@ type Configuration struct {
 	Digest string `json:"digest"`
 }
 
+type Execution struct {
+	TestArgs          []string `json:"test_args"`
+	BuildTags         []string `json:"build_tags"`
+	MutationOperators []string `json:"mutation_operators"`
+	MutationJobs      int      `json:"mutation_jobs"`
+	CommandTimeoutNS  int64    `json:"command_timeout_ns"`
+	TargetTimeoutNS   int64    `json:"target_timeout_ns"`
+}
+
 type Toolchain struct {
 	Go        string `json:"go"`
 	Goatest   string `json:"goatest"`
@@ -102,9 +103,6 @@ type Cache struct {
 	SourceRunID string `json:"source_run_id,omitempty"`
 }
 
-// CountAccounting describes discovery and execution for targets and race
-// package checks. Discovered = Selected + Excluded and Selected = Executed +
-// Skipped are the complete-accounting invariants when the counts are known.
 type CountAccounting struct {
 	Discovered int `json:"discovered"`
 	Selected   int `json:"selected"`
@@ -113,17 +111,6 @@ type CountAccounting struct {
 	Excluded   int `json:"excluded"`
 }
 
-// MutantAccounting is deliberately redundant so a reader can audit both the
-// disposition of every discovered mutant and the outcome of every execution.
-// Discovered must equal Executed + CompileRejected + Accepted + OutOfScope +
-// Unknown;
-// Executed must equal Killed + Survived + Inconclusive.
-//
-// ReusedKilled and ReusedSurvived count the mutants inside Killed and Survived
-// whose verdict this run resolved from evidence an earlier run recorded rather
-// than by executing anything. Executed counts a mutant that reached a terminal
-// execution disposition, however it reached one, so the two are a partition of
-// it rather than something beside it and their sum never exceeds it.
 type MutantAccounting struct {
 	Discovered      int `json:"discovered"`
 	Selected        int `json:"selected"`
@@ -135,8 +122,41 @@ type MutantAccounting struct {
 	Accepted        int `json:"accepted"`
 	OutOfScope      int `json:"out_of_scope"`
 	Unknown         int `json:"unknown"`
-	ReusedKilled    int `json:"reused_killed,omitempty"`
-	ReusedSurvived  int `json:"reused_survived,omitempty"`
+	ReusedKilled    int `json:"reused_killed"`
+	ReusedSurvived  int `json:"reused_survived"`
+}
+
+func (accounting *MutantAccounting) UnmarshalJSON(data []byte) error {
+	type wire MutantAccounting
+	required := []string{
+		"discovered", "selected", "executed", "killed", "survived", "inconclusive",
+		"compile_rejected", "accepted", "out_of_scope", "unknown", "reused_killed", "reused_survived",
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, name := range required {
+		value, exists := fields[name]
+		if !exists || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("goatest: mutant accounting is missing %s", name)
+		}
+		delete(fields, name)
+	}
+	if len(fields) != 0 {
+		names := make([]string, 0, len(fields))
+		for name := range fields {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		return fmt.Errorf("goatest: mutant accounting contains unknown field %s", names[0])
+	}
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*accounting = MutantAccounting(decoded)
+	return nil
 }
 
 type MutantStatus string
@@ -151,17 +171,6 @@ const (
 	MutantUnknown         MutantStatus = "unknown"
 )
 
-// MutantDisposition is the one-and-only terminal classification for a
-// discovered mutant. The redundant Accounting aggregate is validated against
-// this inventory before a report can be persisted or reused from cache.
-//
-// Reused says this run resolved the disposition from evidence an earlier run
-// recorded instead of executing the mutant, and Provenance names that run by
-// the snapshot it verified, in the "snapshot=<digest>" form a Repair carries.
-// The two are one fact stated twice and are audited against each other: a
-// verdict this run did not observe is only worth reading beside the run that
-// did. Both are additive, so a report written before evidence was ever reused
-// carries neither.
 type MutantDisposition struct {
 	ID         string       `json:"id"`
 	Status     MutantStatus `json:"status"`
@@ -180,9 +189,6 @@ type Accounting struct {
 	Race    CountAccounting  `json:"race"`
 }
 
-// TargetDisposition is the durable inventory entry for one selected baseline
-// target. DurationMS is the measured baseline runtime and is zero when the
-// target was not executed.
 type TargetDisposition struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -195,8 +201,6 @@ type TargetDisposition struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
-// Resume records how much exact-input checkpoint work contributed to a
-// completed report. Attempts includes the current attempt.
 type Resume struct {
 	Attempts           int `json:"attempts"`
 	ReusedTargets      int `json:"reused_targets"`
@@ -210,8 +214,6 @@ type Limitation struct {
 	Estimated bool   `json:"estimated,omitempty"`
 }
 
-// Acceptance records the human authorization behind an accepted finding.
-// Expires is an RFC3339 timestamp evaluated before the acceptance is used.
 type Acceptance struct {
 	ID      string `json:"id"`
 	Reason  string `json:"reason"`
@@ -259,6 +261,7 @@ type Report struct {
 	Scope         Scope               `json:"scope"`
 	Repository    Repository          `json:"repository"`
 	Configuration Configuration       `json:"configuration"`
+	Execution     Execution           `json:"execution"`
 	Toolchain     Toolchain           `json:"toolchain"`
 	Timing        Timing              `json:"timing"`
 	Cache         Cache               `json:"cache"`
@@ -275,13 +278,13 @@ type Report struct {
 
 func canonical(input Report) Report {
 	result := input
-	if result.Schema == "" {
-		result.Schema = SchemaV1
-	}
 	result.Scope.Requested = canonicalScope(result.Scope.Requested)
 	result.Scope.Resolved = canonicalScope(result.Scope.Resolved)
 	result.Repository.Packages = canonicalStrings(result.Repository.Packages)
 	result.Repository.Git.ChangedFiles = canonicalStrings(result.Repository.Git.ChangedFiles)
+	result.Execution.TestArgs = canonicalSequence(input.Execution.TestArgs)
+	result.Execution.BuildTags = canonicalSequence(input.Execution.BuildTags)
+	result.Execution.MutationOperators = canonicalSequence(input.Execution.MutationOperators)
 	result.Targets = slices.Clone(input.Targets)
 	result.Mutants = slices.Clone(input.Mutants)
 	if input.Resume != nil {
@@ -357,14 +360,19 @@ func canonicalStrings(input []string) []string {
 	return result
 }
 
-// JSON returns canonical indented assurance-report-v1 bytes with one newline.
-// Report contains only JSON-native fields, so encoding cannot fail.
+func canonicalSequence(input []string) []string {
+	result := slices.Clone(input)
+	if result == nil {
+		return []string{}
+	}
+	return result
+}
+
 func JSON(input Report) []byte {
 	data, _ := json.MarshalIndent(canonical(input), "", "  ")
 	return append(data, '\n')
 }
 
-// Lines is the deterministic renderer used by terminals, pipes, and CI.
 func Lines(input Report) string {
 	report := canonical(input)
 	var output strings.Builder
@@ -419,8 +427,6 @@ func Lines(input Report) string {
 	return output.String()
 }
 
-// LineText escapes terminal control characters without changing printable
-// Unicode, keeping every diagnostic or report field on one physical line.
 func LineText(input string) string {
 	var output strings.Builder
 	for _, character := range input {
@@ -452,7 +458,9 @@ var page = template.Must(template.New("report").Parse(`<!doctype html>
 {{if .RunID}}<section><h2>Audit identity</h2><div class="audit"><table><tbody>
 <tr><th>Repository module</th><td><code>{{.Repository.Module}}</code></td></tr><tr><th>Packages</th><td>{{range .Repository.Packages}}<code>{{.}}</code><br>{{end}}</td></tr>
 <tr><th>Git</th><td>available={{.Repository.Git.Available}} · commit <code>{{.Repository.Git.Commit}}</code> · dirty={{.Repository.Git.Dirty}} · merge-base <code>{{.Repository.Git.MergeBase}}</code>{{range .Repository.Git.ChangedFiles}}<br><code>{{.}}</code>{{end}}</td></tr>
-<tr><th>Configuration</th><td><code>{{.Configuration.Digest}}</code></td></tr><tr><th>Toolchain</th><td>{{.Toolchain.Go}} · goatest {{.Toolchain.Goatest}} · go-mutants {{.Toolchain.GoMutants}} · {{.Toolchain.OS}}/{{.Toolchain.Arch}}</td></tr>
+<tr><th>Configuration</th><td><code>{{.Configuration.Digest}}</code></td></tr>
+<tr><th>Execution</th><td>test args: {{range .Execution.TestArgs}}<code>{{.}}</code> {{else}}none{{end}}<br>build tags: {{range .Execution.BuildTags}}<code>{{.}}</code> {{else}}none{{end}}<br>mutation operators: {{range .Execution.MutationOperators}}<code>{{.}}</code> {{else}}none{{end}}<br>mutation jobs: {{.Execution.MutationJobs}} · command timeout: {{.Execution.CommandTimeoutNS}} ns · target timeout: {{.Execution.TargetTimeoutNS}} ns</td></tr>
+<tr><th>Toolchain</th><td>{{.Toolchain.Go}} · goatest {{.Toolchain.Goatest}} · go-mutants {{.Toolchain.GoMutants}} · {{.Toolchain.OS}}/{{.Toolchain.Arch}}</td></tr>
 <tr><th>Timing</th><td>{{.Timing.StartedAt}} → {{.Timing.FinishedAt}} · {{.Timing.DurationMS}} ms</td></tr><tr><th>Cache</th><td>derived={{.Cache.Derived}}{{if .Cache.SourceRunID}} · source <code>{{.Cache.SourceRunID}}</code>{{end}}</td></tr>
 {{if .Resume}}<tr><th>Resume</th><td>attempt {{.Resume.Attempts}} · reused {{.Resume.ReusedTargets}} targets, {{.Resume.ReusedRacePackages}} race packages, {{.Resume.ReusedMutants}} mutants</td></tr>{{end}}
 </tbody></table></div></section>
@@ -472,16 +480,12 @@ var page = template.Must(template.New("report").Parse(`<!doctype html>
 <script>(()=>{const q=document.getElementById('report-search'),s=document.getElementById('report-section'),sections=[...document.querySelectorAll('[data-filterable]')];function apply(){const term=q.value.toLocaleLowerCase(),chosen=s.value;for(const section of sections){const sectionMatch=chosen==='all'||section.dataset.section===chosen;let shown=0;for(const row of section.querySelectorAll('[data-row]')){const match=sectionMatch&&row.textContent.toLocaleLowerCase().includes(term);row.hidden=!match;if(match)shown++}section.hidden=!sectionMatch;const empty=section.querySelector('[data-empty]');if(empty)empty.hidden=shown!==0}}q.addEventListener('input',apply);s.addEventListener('change',apply)})();</script>
 </body></html>`))
 
-// HTML renders one self-contained offline document. The template is parsed at
-// initialization and bytes.Buffer writes cannot fail.
 func HTML(input Report) []byte {
 	var output bytes.Buffer
 	_ = page.Execute(&output, canonical(input))
 	return output.Bytes()
 }
 
-// FindingID returns a stable 16-hex display identity over length-prefixed
-// fields. The full source facts remain in the finding itself.
 func FindingID(fields ...string) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte("goatest-finding-v1\x00"))

@@ -24,9 +24,10 @@ an index if catalog order or probe capability changes.
 
 1. The checkpoint writes probe state once, only after every requested target
    and package-suite control has reached a measured-or-unmeasured result.
-2. Every target is present. Fuzz targets and failed or unavailable controls are
-   explicitly unmeasured and carry no duration or infection set. Only measured
-   controls may carry those facts.
+2. Every target is present. Failed or unavailable controls are explicitly
+   unmeasured and carry no duration or infection set. Fuzz seed targets are
+   measured like other deterministic targets. Only measured controls may carry
+   those facts.
 3. Infection sets remain compact ascending `uint32` indices. A second SHA-256
    fingerprint binds them to the ordered index-to-mutant mapping and each
    mutant's executable and probe-capability flags.
@@ -61,11 +62,10 @@ repeating work and discarding dependent results.
 ## Consequences
 
 - A mutation continuation avoids about 25.9 seconds of repeated dogfood probe
-  executions while still preparing the probe binaries used by paired original
-  controls.
+  executions while still preparing the probe binaries used by exact-original
+  preflights.
 - The checkpoint grows with one compact infection set per measured control.
-- Legacy checkpoints remain safe: absence of the optional phase triggers a
-  fresh complete pass.
+- Absence of the phase triggers a fresh complete pass.
 - A resumed trace is explicit about reuse but is not a self-contained
   infection-layer audit; the interrupted attempt retains the physical probe
   records.

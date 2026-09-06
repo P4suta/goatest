@@ -15,7 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/resource"
+)
+
+const (
+	resourceStartDecodeExitCode = 20
+	resourceStopDecodeExitCode  = 21
+	resourceLogExitCode         = 22
+	resourceProviderDeadline    = 5 * time.Second
+	resourceFailureDeadline     = 150 * time.Millisecond
+	resourceAcquireDeadline     = 3 * time.Second
+	oversizedResourcePayload    = resource.ProtocolOutputLimit * 2
 )
 
 func TestProviderHelper(t *testing.T) {
@@ -26,38 +37,38 @@ func TestProviderHelper(t *testing.T) {
 	encoder := json.NewEncoder(os.Stdout)
 	var start resource.Request
 	if err := decoder.Decode(&start); err != nil {
-		os.Exit(20)
+		os.Exit(resourceStartDecodeExitCode)
 	}
 	appendLog(os.Getenv("GOATEST_RESOURCE_LOG"), start.Action)
 	switch os.Getenv("GOATEST_RESOURCE_MODE") {
 	case "slow":
 		time.Sleep(resourceHelperDelay())
 	case "invalid":
-		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
+		_ = encoder.Encode(resource.Response{Version: resource.ProtocolVersion + 1, Status: "ready"})
 		return
 	case "oversized-ready":
 		_ = encoder.Encode(resource.Response{
-			Version: 1, Status: "ready", Instance: "postgres-1",
-			Environment: map[string]string{"DATABASE_URL": strings.Repeat("x", 2<<20)},
+			Version: resource.ProtocolVersion, Status: "ready", Instance: "postgres-1",
+			Environment: map[string]string{"DATABASE_URL": strings.Repeat("x", oversizedResourcePayload)},
 		})
 		return
 	case "oversized-stderr":
-		_, _ = fmt.Fprint(os.Stderr, strings.Repeat("diagnostic", 256<<10))
-		_ = encoder.Encode(resource.Response{Version: 2, Status: "ready"})
+		_, _ = fmt.Fprint(os.Stderr, strings.Repeat("diagnostic", oversizedResourcePayload/len("diagnostic")))
+		_ = encoder.Encode(resource.Response{Version: resource.ProtocolVersion + 1, Status: "ready"})
 		return
 	case "reserved-environment":
 		_ = encoder.Encode(resource.Response{
-			Version: 1, Status: "ready", Instance: "postgres-1",
+			Version: resource.ProtocolVersion, Status: "ready", Instance: "postgres-1",
 			Environment: map[string]string{"GOPROXY": "https://example.invalid"},
 		})
 		var stop resource.Request
 		if decoder.Decode(&stop) == nil {
-			_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-1"})
+			_ = encoder.Encode(resource.Response{Version: resource.ProtocolVersion, Status: "stopped", Instance: "postgres-1"})
 		}
 		return
 	}
 	_ = encoder.Encode(resource.Response{
-		Version:  1,
+		Version:  resource.ProtocolVersion,
 		Status:   "ready",
 		Instance: "postgres-1",
 		Environment: map[string]string{
@@ -67,13 +78,10 @@ func TestProviderHelper(t *testing.T) {
 	})
 	var stop resource.Request
 	if err := decoder.Decode(&stop); err != nil {
-		os.Exit(21)
+		os.Exit(resourceStopDecodeExitCode)
 	}
 	appendLog(os.Getenv("GOATEST_RESOURCE_LOG"), stop.Action)
-	if os.Getenv("GOATEST_RESOURCE_MODE") == "delay-stop" {
-		time.Sleep(500 * time.Millisecond)
-	}
-	_ = encoder.Encode(resource.Response{Version: 1, Status: "stopped", Instance: "postgres-1"})
+	_ = encoder.Encode(resource.Response{Version: resource.ProtocolVersion, Status: "stopped", Instance: "postgres-1"})
 }
 
 func resourceHelperDelay() time.Duration {
@@ -84,9 +92,9 @@ func resourceHelperDelay() time.Duration {
 }
 
 func appendLog(path, value string) {
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, filemode.PrivateFile)
 	if err != nil {
-		os.Exit(22)
+		os.Exit(resourceLogExitCode)
 	}
 	_, _ = fmt.Fprintln(file, value)
 	_ = file.Close()
@@ -97,7 +105,7 @@ func TestSharedProviderUsesReferenceCountingAndSortedEnvironment(t *testing.T) {
 	t.Setenv("GOATEST_RESOURCE_HELPER", "1")
 	t.Setenv("GOATEST_RESOURCE_LOG", log)
 	manager := resource.New(map[string]resource.Spec{
-		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Shared: true},
+		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: resourceProviderDeadline, Shared: true},
 	})
 	t.Cleanup(func() { _ = manager.Close() })
 
@@ -137,9 +145,9 @@ func TestInvalidAndSlowProvidersFailClosedAndAreCleanedUp(t *testing.T) {
 			t.Setenv("GOATEST_RESOURCE_HELPER", "1")
 			t.Setenv("GOATEST_RESOURCE_LOG", log)
 			t.Setenv("GOATEST_RESOURCE_MODE", mode)
-			timeout := 5 * time.Second
+			timeout := resourceProviderDeadline
 			if mode == "slow" {
-				timeout = 150 * time.Millisecond
+				timeout = resourceFailureDeadline
 				t.Setenv("GOATEST_RESOURCE_DELAY", "1s")
 			}
 			manager := resource.New(map[string]resource.Spec{
@@ -149,7 +157,7 @@ func TestInvalidAndSlowProvidersFailClosedAndAreCleanedUp(t *testing.T) {
 			if _, err := acquireResource(t, manager, "postgres"); err == nil {
 				t.Fatal("Acquire succeeded")
 			}
-			if elapsed := time.Since(started); elapsed > 5*time.Second {
+			if elapsed := time.Since(started); elapsed > resourceProviderDeadline {
 				t.Errorf("Acquire returned after %s", elapsed)
 			}
 			if err := manager.Close(); err != nil && !strings.Contains(err.Error(), "already") {
@@ -218,99 +226,6 @@ func TestProviderUsesDefaultTimeoutForNonPositiveValues(t *testing.T) {
 	}
 }
 
-func TestExclusiveProviderSerializesLeases(t *testing.T) {
-	log := filepath.Join(t.TempDir(), "provider.log")
-	t.Setenv("GOATEST_RESOURCE_HELPER", "1")
-	t.Setenv("GOATEST_RESOURCE_LOG", log)
-	manager := resource.New(map[string]resource.Spec{
-		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
-	})
-	t.Cleanup(func() { _ = manager.Close() })
-	first, err := acquireResource(t, manager, "postgres")
-	if err != nil {
-		t.Fatal(err)
-	}
-	type acquired struct {
-		lease *resource.Lease
-		err   error
-	}
-	secondResult := make(chan acquired, 1)
-	go func() {
-		lease, acquireErr := acquireResource(t, manager, "postgres")
-		secondResult <- acquired{lease: lease, err: acquireErr}
-	}()
-	select {
-	case result := <-secondResult:
-		if result.lease != nil {
-			_ = result.lease.Release()
-		}
-		t.Fatalf("exclusive second lease did not wait: %v", result.err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	if err := first.Release(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case result := <-secondResult:
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if err := result.lease.Release(); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("exclusive second lease was not awakened")
-	}
-}
-
-func TestExclusiveProviderWaitsUntilPreviousProviderHasStopped(t *testing.T) {
-	log := filepath.Join(t.TempDir(), "provider.log")
-	t.Setenv("GOATEST_RESOURCE_HELPER", "1")
-	t.Setenv("GOATEST_RESOURCE_LOG", log)
-	t.Setenv("GOATEST_RESOURCE_MODE", "delay-stop")
-	manager := resource.New(map[string]resource.Spec{
-		"postgres": {Command: []string{os.Args[0], "-test.run=^TestProviderHelper$"}, Timeout: 5 * time.Second, Exclusive: true},
-	})
-	t.Cleanup(func() { _ = manager.Close() })
-	first, err := acquireResource(t, manager, "postgres")
-	if err != nil {
-		t.Fatal(err)
-	}
-	type acquired struct {
-		lease *resource.Lease
-		err   error
-	}
-	secondResult := make(chan acquired, 1)
-	go func() {
-		lease, acquireErr := acquireResource(t, manager, "postgres")
-		secondResult <- acquired{lease: lease, err: acquireErr}
-	}()
-	releaseResult := make(chan error, 1)
-	go func() { releaseResult <- first.Release() }()
-	select {
-	case result := <-secondResult:
-		if result.lease != nil {
-			_ = result.lease.Release()
-		}
-		t.Fatalf("second provider started while the first was stopping: %v", result.err)
-	case <-time.After(200 * time.Millisecond):
-	}
-	if err := <-releaseResult; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case result := <-secondResult:
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if err := result.lease.Release(); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("second provider was not started after the first stopped")
-	}
-}
-
 func readLog(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)
@@ -331,7 +246,7 @@ func readLog(t *testing.T, path string) []string {
 
 func acquireResource(t *testing.T, manager *resource.Manager, capability string) (*resource.Lease, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), resourceAcquireDeadline)
 	defer cancel()
 	return manager.Acquire(ctx, capability)
 }

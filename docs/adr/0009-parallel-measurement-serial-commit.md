@@ -3,8 +3,9 @@
 ## Status
 
 Accepted, 2026-09-05. Implemented by the bounded baseline target and package
-suite schedulers in `internal/assure`, concurrent paired-original controls over
-prepared sessions, and concurrent pre-preparation execution in go-mutants.
+suite schedulers in `internal/assure`, concurrent exact-original preflights over
+prepared sessions, concurrent pre-preparation execution in go-mutants, and
+overlapped session preparation and structural baseline checks.
 
 ## Context
 
@@ -33,10 +34,13 @@ must not silently change the program mutation discovery measures.
    package, at most `[execution].jobs` workers execute target controls. A worker
    owns only its target's command, coverage profile, repository log, and result
    slot. It never appends to the report or writes a checkpoint.
-2. **Input order is the commit order.** The coordinator retains out-of-order
-   completions and commits only the longest completed prefix of the package's
-   target list. Evidence, findings, inventory, coverage merging, and checkpoint
-   updates therefore have exactly the serial order.
+2. **Publication order is canonical, not completion order.** The coordinator
+   durably checkpoints every out-of-order completion immediately, keyed by
+   target identity. It reconstructs report evidence, findings, and inventory in
+   input order and sorts checkpoint sets by identity. Scheduler order therefore
+   changes neither durable bytes nor report semantics, while an interruption
+   loses no completed suffix behind a still-running earlier target. The revision
+   is specified by [ADR 0016](0016-publish-every-baseline-control.md).
 3. **The earliest target owns an error.** All already-started workers are
    joined, then the error belonging to the earliest target in input order is
    returned. Scheduler timing cannot decide which failure the user sees.
@@ -54,10 +58,17 @@ must not silently change the program mutation discovery measures.
    in deterministic import-path slots after target controls have supplied their
    duration references. Full-run original controls reuse the prepared probe
    session's semantic-original binaries, whose calls are independently
-   scratch-isolated and concurrency-safe. Replay retains a lazy second frozen
-   workspace because it deliberately skips probe preparation. Command results
-   are memoized by package, arguments, and environment, so concurrent mutants
-   never duplicate the same original preflight.
+   scratch-isolated and concurrency-safe. Replay uses the same pristine control
+   workspace but deliberately skips probe preparation. Command results are
+   memoized by package, arguments, and environment, so concurrent mutants never
+   duplicate the same original preflight.
+7. **Preparation overlaps only an independent pristine control.** The mutation
+   workspace starts preparation while a second frozen workspace runs the
+   baseline `go vet` and `go build`. The coordinator never calls `Exec` and
+   `Prepare` concurrently on one workspace. It joins preparation before probe,
+   race, or mutation work. A structural baseline finding or error cancels and
+   joins preparation but remains the published outcome; preparation errors are
+   returned only after structural checks pass.
 
 ## Consequences
 
@@ -65,11 +76,13 @@ must not silently change the program mutation discovery measures.
   process wall time overlaps.
 - Report bytes, completed checkpoint bytes, and error selection are independent
   of completion order. Diagnostic trace execution events remain in completion
-  order, as they already are for probe and mutation workers.
-- A crash may leave the same kind of fully classified prefix checkpoint as a
-  serial run. No partially measured target is ever resumable.
+  order, as they already are for probe and mutation workers. Preparation is
+  represented by its stage spans rather than a fictitious linear phase.
+- A crash may leave any set of fully classified target and package-suite units;
+  no partially measured unit is ever resumable, and canonical publication makes
+  the completed document identical to the corresponding serial result.
 - CPU and I/O contention can reduce the ideal eightfold gain. A timeout under
-  that contention is still inconclusive, and the control-relative timeout rule
+  that contention is still inconclusive, and the data-derived timeout rule
   remains fail-closed.
 - A suite that depends on undeclared shared external state may expose its own
   nondeterminism sooner. Such state belongs in a configured resource; an

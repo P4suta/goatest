@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -116,20 +117,20 @@ func TestEmptyResults(t *tst.T) () {}
 	}
 }
 
-func TestCapabilityRecognizesOnlyWellFormedIntegrationScopes(t *testing.T) {
+func TestTargetCapabilitiesRecognizesOnlyWellFormedIntegrationScopes(t *testing.T) {
 	t.Parallel()
 	aliases := map[string]bool{"gt": true}
 	for _, test := range []struct {
 		name string
 		body string
-		want string
+		want []string
 	}{
-		{name: "run", body: `gt.Run(t, gt.Integration("postgres"), callback)`, want: "postgres"},
+		{name: "run", body: `gt.Run(t, gt.Integration("postgres"), callback)`, want: []string{"postgres"}},
 		{name: "removed check API", body: `gt.Check(f, gt.Integration("redis"), callback)`},
-		{name: "first", body: `gt.Run(t, gt.Integration("first"), callback); gt.Run(t, gt.Integration("second"), callback)`, want: "first"},
-		{name: "nested", body: `wrap(gt.Run(t, gt.Integration("nested"), callback))`, want: "nested"},
-		{name: "nested in invalid scope", body: `gt.Run(t, wrap(gt.Run(t, gt.Integration("nested-scope"), callback)), callback)`, want: "nested-scope"},
-		{name: "nested in nonliteral", body: `gt.Run(t, gt.Integration(gt.Run(t, gt.Integration("nested-literal"), callback)), callback)`, want: "nested-literal"},
+		{name: "multiple", body: `gt.Run(t, gt.Integration("first"), callback); gt.Run(t, gt.Integration("second"), callback)`, want: []string{"first", "second"}},
+		{name: "nested", body: `wrap(gt.Run(t, gt.Integration("nested"), callback))`, want: []string{"nested"}},
+		{name: "nested in invalid scope", body: `gt.Run(t, wrap(gt.Run(t, gt.Integration("nested-scope"), callback)), callback)`, want: []string{"nested-scope"}},
+		{name: "nested in nonliteral", body: `gt.Run(t, gt.Integration(gt.Run(t, gt.Integration("nested-literal"), callback)), callback)`, want: []string{"nested-literal"}},
 		{name: "wrong alias", body: `other.Run(t, gt.Integration("db"), callback)`},
 		{name: "wrong call", body: `gt.Other(t, gt.Integration("db"), callback)`},
 		{name: "not selector", body: `Run(t, gt.Integration("db"), callback)`},
@@ -138,21 +139,21 @@ func TestCapabilityRecognizesOnlyWellFormedIntegrationScopes(t *testing.T) {
 		{name: "scope is not call", body: `gt.Run(t, scope, callback)`},
 		{name: "wrong scope", body: `gt.Run(t, gt.Unit(), callback)`},
 		{name: "scope has no argument", body: `gt.Run(t, gt.Integration(), callback)`},
-		{name: "scope has two arguments", body: `gt.Run(t, gt.Integration("a", "b"), callback)`, want: "a"},
+		{name: "scope has two arguments", body: `gt.Run(t, gt.Integration("a", "b"), callback)`, want: []string{"a", "b"}},
 		{name: "scope argument is identifier", body: `gt.Run(t, gt.Integration(name), callback)`},
 		{name: "scope argument is rune", body: `gt.Run(t, gt.Integration('x'), callback)`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := parseTargetSource(t, "package sample\nfunc target() { "+test.body+" }\n")
-			got := capability(findTargetFunction(t, file, "target").Body, aliases)
-			if got != test.want {
-				t.Fatalf("capability = %q, want %q", got, test.want)
+			got := targetCapabilities(findTargetFunction(t, file, "target"), aliases)
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("capabilities = %q, want %q", got, test.want)
 			}
 		})
 	}
 }
 
-func TestCapabilityIgnoresMalformedStringLiteral(t *testing.T) {
+func TestTargetCapabilitiesIgnoresMalformedStringLiteral(t *testing.T) {
 	call := &ast.CallExpr{
 		Fun: selector("gt", "Run"),
 		Args: []ast.Expr{
@@ -161,9 +162,9 @@ func TestCapabilityIgnoresMalformedStringLiteral(t *testing.T) {
 			ast.NewIdent("callback"),
 		},
 	}
-	body := &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: call}}}
-	if got := capability(body, map[string]bool{"gt": true}); got != "" {
-		t.Fatalf("capability = %q", got)
+	function := &ast.FuncDecl{Body: &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: call}}}}
+	if got := targetCapabilities(function, map[string]bool{"gt": true}); len(got) != 0 {
+		t.Fatalf("capabilities = %q", got)
 	}
 }
 

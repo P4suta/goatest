@@ -16,9 +16,11 @@ import (
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
 
-// controlRecorder answers every original control with one scripted result and
-// remembers each distinct control command it was asked to run, so a test can
-// state exactly how many controls a run of kills is allowed to cost.
+const (
+	controlObservationDuration = time.Millisecond
+	controlContainmentTimeout  = time.Second
+)
+
 type controlRecorder struct {
 	mu     sync.Mutex
 	calls  map[string]int
@@ -46,13 +48,10 @@ func (recorder *controlRecorder) total() int {
 	return total
 }
 
-// killingSession kills every mutant on its first and confirming execution.
 type killingSession struct{ catalog gomutants.Catalog }
 
 func (session *killingSession) Catalog() gomutants.Catalog { return session.catalog }
 
-// Probe reports no facts: these tests are about confirming kills, which happens
-// long after the probe pass has ended.
 func (session *killingSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
 }
@@ -65,6 +64,8 @@ type suiteControlSession struct {
 	catalog  gomutants.Catalog
 	mu       sync.Mutex
 	requests []gomutants.ExecRequest
+	outcomes []gomutants.Outcome
+	exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
 }
 
 func (session *suiteControlSession) Catalog() gomutants.Catalog { return session.catalog }
@@ -76,8 +77,16 @@ func (session *suiteControlSession) Probe(context.Context, gomutants.ProbeReques
 func (session *suiteControlSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.mu.Lock()
 	session.requests = append(session.requests, request)
+	index := len(session.requests) - 1
 	session.mu.Unlock()
-	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeSurvived}, nil
+	if session.exec != nil {
+		return session.exec(request)
+	}
+	outcome := gomutants.OutcomeSurvived
+	if index < len(session.outcomes) {
+		outcome = session.outcomes[index]
+	}
+	return gomutants.MutantResult{ID: request.Mutant, Outcome: outcome}, nil
 }
 
 func (session *suiteControlSession) recordedRequests() []gomutants.ExecRequest {
@@ -97,22 +106,18 @@ func controlMutants() []gomutants.Mutant {
 
 func controlTargets() []assure.TargetEvidence {
 	return []assure.TargetEvidence{
-		{Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}},
-		{Target: target("TestOther", goanalysis.KindTest), CoveredFiles: []string{"other.go"}},
+		{Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"}, Duration: time.Millisecond},
+		{Target: target("TestOther", goanalysis.KindTest), CoveredFiles: []string{"other.go"}, Duration: time.Millisecond},
 	}
 }
 
-// Three kills confirmed by one target must cost one original control, not
-// three: within a run the snapshot is frozen, so a control command's verdict
-// cannot change between the kills that share it. A kill in another file goes
-// through its own target and pays for its own control.
 func TestEvaluateRunsOneOriginalControlForEachDistinctControlCommand(t *testing.T) {
 	t.Parallel()
 	session := &killingSession{catalog: gomutants.Catalog{Mutants: controlMutants()}}
-	recorder := &controlRecorder{result: gomutants.CommandResult{ExitCode: 0}}
+	recorder := &controlRecorder{result: gomutants.CommandResult{ExitCode: 0, Duration: controlObservationDuration}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, controlTargets(), assure.MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
-		OriginalControl: recorder.run,
+		Jobs:    1,
+		Timeout: controlContainmentTimeout, OriginalControl: recorder.run,
 	})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -124,7 +129,7 @@ func TestEvaluateRunsOneOriginalControlForEachDistinctControlCommand(t *testing.
 		}
 	}
 	if kills != 4 || len(evaluation.Findings) != 0 {
-		t.Fatalf("kills = %d, findings = %+v, want 4 confirmed kills", kills, evaluation.Findings)
+		t.Fatalf("kills = %d, findings = %+v, want 4 comparative kills", kills, evaluation.Findings)
 	}
 	if len(recorder.calls) != 2 || recorder.total() != 2 {
 		t.Fatalf("original controls = %d across %d commands, want exactly one per distinct control command (2)",
@@ -132,29 +137,26 @@ func TestEvaluateRunsOneOriginalControlForEachDistinctControlCommand(t *testing.
 	}
 }
 
-// A control that fails is as memoizable as one that passes: every kill that
-// shares the command becomes the same flaky-mutation-control finding without
-// paying to watch the control fail again.
 func TestEvaluateMemoizesAFailedControlWithoutRerunningIt(t *testing.T) {
 	t.Parallel()
 	mutants := controlMutants()[:3]
 	session := &killingSession{catalog: gomutants.Catalog{Mutants: mutants}}
 	recorder := &controlRecorder{result: gomutants.CommandResult{ExitCode: 1, Output: []byte("boundary regressed")}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, controlTargets()[:1], assure.MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", Jobs: 1,
-		OriginalControl: recorder.run,
+		Jobs:    1,
+		Timeout: controlContainmentTimeout, OriginalControl: recorder.run,
 	})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	flaky := 0
+	unavailable := 0
 	for _, finding := range evaluation.Findings {
-		if finding.Kind == "flaky-mutation-control" {
-			flaky++
+		if finding.Kind == "mutation-control-failure" {
+			unavailable++
 		}
 	}
-	if flaky != 3 {
-		t.Fatalf("findings = %+v, want 3 flaky-mutation-control", evaluation.Findings)
+	if unavailable != len(mutants) {
+		t.Fatalf("findings = %+v, want 3 mutation-control-failure", evaluation.Findings)
 	}
 	if recorder.total() != 1 {
 		t.Fatalf("original controls = %d, want the failure observed once and remembered", recorder.total())
@@ -177,8 +179,9 @@ func TestEvaluateChecksAnUnreachedPackageControlOnceBeforeAnyMutant(t *testing.T
 			session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: mutants}}
 			recorder := &controlRecorder{result: test.control}
 			evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
-				Root: t.TempDir(), Contract: "standard-v1", Jobs: len(mutants),
-				OriginalControl: recorder.run,
+				Jobs:    len(mutants),
+				Timeout: time.Second, OriginalControl: recorder.run,
+				SuiteCoverage: map[string]assure.PackageSuiteCoverage{mutants[0].Package: {Duration: controlObservationDuration}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -202,18 +205,188 @@ func TestPassingUnreachedPackageControlCalibratesTheMutantWatchdog(t *testing.T)
 	session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
 	recorder := &controlRecorder{result: gomutants.CommandResult{Duration: 250 * time.Millisecond}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
-		Root: t.TempDir(), Contract: "standard-v1", OriginalControl: recorder.run,
+		Timeout: time.Second, OriginalControl: recorder.run,
 		SuiteEnvironment: []string{"DB=ready"},
+		SuiteCoverage:    map[string]assure.PackageSuiteCoverage{mutant.Package: {Duration: controlObservationDuration}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	requests := session.recordedRequests()
-	if recorder.total() != 1 || len(requests) != 1 || requests[0].Timeout != 1250*time.Millisecond ||
+	if recorder.total() != 1 || len(requests) != 1 || requests[0].Timeout != 250*time.Millisecond+controlObservationDuration ||
 		!slices.Equal(requests[0].Env, []string{"DB=ready"}) {
 		t.Fatalf("control calls = %d, mutant requests = %+v", recorder.total(), requests)
 	}
 	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "unreached-mutant" {
 		t.Fatalf("evaluation = %+v", evaluation)
+	}
+}
+
+func TestTimeoutRunsAgainOnlyWhenTheMachineMeasurablySlowed(t *testing.T) {
+	t.Parallel()
+	const (
+		controlDuration = time.Millisecond
+		slowedDuration  = 4 * controlDuration
+	)
+	for _, test := range []struct {
+		name         string
+		controls     []gomutants.CommandResult
+		outcomes     []gomutants.Outcome
+		wantKind     string
+		wantControls int
+	}{
+		{
+			name: "steady machine", controls: []gomutants.CommandResult{{Duration: controlDuration}},
+			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut},
+			wantKind: "mutation-timeout", wantControls: 2,
+		},
+		{
+			name: "measurably slower machine",
+			controls: []gomutants.CommandResult{
+				{Duration: controlDuration}, {Duration: slowedDuration},
+			},
+			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
+			wantKind: "unreached-mutant", wantControls: 2,
+		},
+		{
+			name: "original timed out", controls: []gomutants.CommandResult{{TimedOut: true}},
+			wantKind: "mutation-control-timeout", wantControls: 1,
+		},
+		{
+			name: "original failed", controls: []gomutants.CommandResult{{ExitCode: 1, Output: []byte("control failed")}},
+			wantKind: "mutation-control-failure", wantControls: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mutant := controlMutants()[0]
+			session := &suiteControlSession{
+				catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, outcomes: test.outcomes,
+			}
+			controlCalls := 0
+			control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+				result := test.controls[min(controlCalls, len(test.controls)-1)]
+				controlCalls++
+				return result, nil
+			}
+			evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
+				Timeout: time.Second, OriginalControl: control,
+				SuiteCoverage: map[string]assure.PackageSuiteCoverage{mutant.Package: {Duration: controlObservationDuration}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != test.wantKind {
+				t.Fatalf("findings = %+v, want %q", evaluation.Findings, test.wantKind)
+			}
+			if controlCalls != test.wantControls || len(session.recordedRequests()) != len(test.outcomes) {
+				t.Fatalf("control calls = %d, mutant requests = %+v", controlCalls, session.recordedRequests())
+			}
+		})
+	}
+}
+
+func TestKilledMutationRunsOnceAfterItsExactOriginalControl(t *testing.T) {
+	t.Parallel()
+	mutant := controlMutants()[0]
+	session := &suiteControlSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		outcomes: []gomutants.Outcome{
+			gomutants.OutcomeKilled,
+			gomutants.OutcomeTimedOut,
+		},
+	}
+	controlCalls := 0
+	control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		controlCalls++
+		return gomutants.CommandResult{Duration: time.Millisecond}, nil
+	}
+	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
+		Timeout: time.Second, OriginalControl: control,
+		SuiteCoverage: map[string]assure.PackageSuiteCoverage{mutant.Package: {Duration: controlObservationDuration}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if controlCalls != 1 || len(session.recordedRequests()) != 1 {
+		t.Fatalf("control calls = %d, mutant requests = %+v", controlCalls, session.recordedRequests())
+	}
+	if len(evaluation.Findings) != 0 || evaluation.Accounting.Killed != 1 {
+		t.Fatalf("evaluation = %+v", evaluation)
+	}
+}
+
+func TestExactOriginalAndMutantUseCompletedCleanDurations(t *testing.T) {
+	t.Parallel()
+	const (
+		targetDuration        = 3 * time.Millisecond
+		probeDuration         = 2 * time.Millisecond
+		suiteDuration         = 5 * time.Millisecond
+		controlDuration       = 7 * time.Millisecond
+		cleanDurationSum      = targetDuration + probeDuration + suiteDuration
+		expectedMutantTimeout = cleanDurationSum + controlDuration
+	)
+	mutant := controlMutants()[0]
+	session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
+	session.exec = func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
+		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
+	}
+	var controlRequest gomutants.ExecRequest
+	control := func(_ context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		controlRequest = request
+		return gomutants.CommandResult{Duration: controlDuration}, nil
+	}
+	evaluation, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
+		Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"},
+		Duration: targetDuration, ProbeDuration: probeDuration,
+	}}, assure.MutationOptions{
+		Timeout: time.Second, OriginalControl: control,
+		SuiteCoverage: map[string]assure.PackageSuiteCoverage{mutant.Package: {Duration: suiteDuration}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := session.recordedRequests()
+	if controlRequest.Timeout != time.Second || len(requests) != 1 || requests[0].Timeout != expectedMutantTimeout {
+		t.Fatalf("control request = %+v, mutation requests = %+v", controlRequest, requests)
+	}
+	if evaluation.Accounting.Killed != 1 || len(evaluation.Findings) != 0 {
+		t.Fatalf("evaluation = %+v", evaluation)
+	}
+}
+
+func TestMutationWithoutAnObservationOrControlIsNotStarted(t *testing.T) {
+	t.Parallel()
+	mutant := controlMutants()[0]
+	session := &suiteControlSession{
+		catalog:  gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut},
+	}
+	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-control-unavailable" ||
+		len(session.recordedRequests()) != 0 {
+		t.Fatalf("evaluation = %+v, mutant requests = %+v", evaluation, session.recordedRequests())
+	}
+}
+
+func TestMutationWithoutAnExactControlIsNotStarted(t *testing.T) {
+	t.Parallel()
+	mutant := controlMutants()[0]
+	session := &suiteControlSession{
+		catalog:  gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}},
+		outcomes: []gomutants.Outcome{gomutants.OutcomeKilled},
+	}
+	evaluation, err := assure.EvaluateMutations(t.Context(), session, controlTargets()[:1], assure.MutationOptions{
+		Timeout: controlContainmentTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluation.Findings) != 1 || evaluation.Findings[0].Kind != "mutation-control-unavailable" ||
+		len(session.recordedRequests()) != 0 {
+		t.Fatalf("evaluation = %+v, mutant requests = %+v", evaluation, session.recordedRequests())
 	}
 }

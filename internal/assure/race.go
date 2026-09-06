@@ -6,6 +6,7 @@ package assure
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -21,16 +22,16 @@ type RaceResult struct {
 }
 
 type RaceOptions struct {
-	Environment []string
-	TestArgs    []string
-	BuildTags   []string
+	Environment    []string
+	TestArgs       []string
+	BuildTags      []string
+	PersistCompile bool
+
+	Timeout time.Duration
 }
 
 const raceVerificationTimeout = 30 * time.Minute
 
-// RelevantRacePackages returns the packages whose top-level tests exercise a
-// package containing concurrency. Running the concurrent dependency's own
-// tests alone can miss a race that is only driven through a caller.
 func RelevantRacePackages(model goanalysis.Model, concurrentPackages []string, targets []TargetEvidence) []string {
 	concurrent := make(map[string]struct{}, len(concurrentPackages))
 	for _, importPath := range concurrentPackages {
@@ -106,6 +107,29 @@ func CollectRaceWithOptions(ctx context.Context, workspace CommandWorkspace, mod
 	if workspace == nil {
 		return RaceResult{}, fmt.Errorf("goatest: nil race workspace")
 	}
+	timeout := options.Timeout
+	if timeout <= 0 {
+		timeout = raceVerificationTimeout
+	}
+	if options.PersistCompile {
+		compileArgv := []string{"go", "test", "-race", "-c", "-o", os.DevNull}
+		if len(options.BuildTags) != 0 {
+			compileArgv = append(compileArgv, "-tags="+strings.Join(options.BuildTags, ","))
+		}
+		compileArgv = append(compileArgv, packages...)
+		compiled, err := workspace.Exec(ctx, gomutants.Command{
+			Argv: compileArgv, Env: slices.Clone(options.Environment), Timeout: timeout,
+		})
+		if err != nil {
+			return RaceResult{}, fmt.Errorf("goatest: compile race test binaries: %w", err)
+		}
+		if compiled.TimedOut {
+			return RaceResult{}, fmt.Errorf("goatest: compile race test binaries timed out")
+		}
+		if compiled.ExitCode != 0 {
+			return RaceResult{}, fmt.Errorf("goatest: compile race test binaries failed (exit=%d): %s", compiled.ExitCode, summarize(compiled.Output))
+		}
+	}
 	argv := []string{"go", "test", "-race", "-count=1"}
 	if len(options.BuildTags) != 0 {
 		argv = append(argv, "-tags="+strings.Join(options.BuildTags, ","))
@@ -117,7 +141,7 @@ func CollectRaceWithOptions(ctx context.Context, workspace CommandWorkspace, mod
 	}
 	replay := strings.Join(argv, " ")
 	run, err := workspace.Exec(ctx, gomutants.Command{
-		Argv: argv, Env: slices.Clone(options.Environment), Timeout: raceVerificationTimeout,
+		Argv: argv, Env: slices.Clone(options.Environment), Timeout: timeout,
 	})
 	if err != nil {
 		return RaceResult{}, fmt.Errorf("goatest: race verification: %w", err)

@@ -11,9 +11,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/evidence"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
 
@@ -23,7 +25,7 @@ func TestCollectBaselineRecordsTheObservedRepositoryBoundary(t *testing.T) {
 	writeObservationFile(t, root, "value.go", "package fixture\n")
 	writeObservationFile(t, root, "docs/notes.md", "notes\n")
 	outside := filepath.Join(t.TempDir(), "outside.txt")
-	if err := os.WriteFile(outside, []byte("outside\n"), 0o600); err != nil {
+	if err := os.WriteFile(outside, []byte("outside\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	const pkg = "fixture.example/module"
@@ -47,11 +49,11 @@ func TestCollectBaselineRecordsTheObservedRepositoryBoundary(t *testing.T) {
 			workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
 				for _, argument := range command.Argv {
 					if log, found := strings.CutPrefix(argument, "-test.testlogfile="); found {
-						if err := os.WriteFile(log, []byte("# test log\nopen "+test.path+"\n"), 0o600); err != nil {
+						if err := os.WriteFile(log, []byte("# test log\nopen "+test.path+"\n"), filemode.PrivateFile); err != nil {
 							return gomutants.CommandResult{}, err
 						}
 						profile := coverageProfileArgument(command)
-						if err := os.WriteFile(profile, []byte("mode: set\n"+pkg+"/value.go:1.1,1.16 1 1\n"), 0o600); err != nil {
+						if err := os.WriteFile(profile, []byte("mode: set\n"+pkg+"/value.go:1.1,1.16 1 1\n"), filemode.PrivateFile); err != nil {
 							return gomutants.CommandResult{}, err
 						}
 					}
@@ -77,7 +79,7 @@ func TestRepositoryObservationWidensOnlyForUnaccountedRepositoryInputs(t *testin
 	writeObservationFile(t, root, "pkg/value.go", "package pkg\n")
 	writeObservationFile(t, root, "docs/notes.md", "notes\n")
 	outside := filepath.Join(t.TempDir(), "outside.txt")
-	if err := os.WriteFile(outside, []byte("outside\n"), 0o600); err != nil {
+	if err := os.WriteFile(outside, []byte("outside\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,6 +123,55 @@ func TestRepositoryObservationWidensOnlyForUnaccountedRepositoryInputs(t *testin
 	}
 }
 
+func TestRepositoryObserverMeasuresPackagesOutsideTheStaticReadScan(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeObservationFile(t, root, "pkg/value.go", "package pkg\n")
+	writeObservationFile(t, root, "pkg/value_test.go", `package pkg
+
+import external "fixture.example/helper"
+
+func TestValue() { external.Read() }
+`)
+	writeObservationFile(t, root, "docs/notes.md", "notes\n")
+	const pkg = "fixture.example/module/pkg"
+	packages := []goanalysis.Package{{ImportPath: pkg, RelativeDir: "pkg"}}
+	candidates, readers := repositoryObservationScope(root, packages)
+	if static := goanalysis.RepositoryReadCandidates(root, packages); len(static) != 0 {
+		t.Fatalf("static candidates = %+v, want none", static)
+	}
+	if _, selected := candidates[pkg]; !selected || !readers[pkg] {
+		t.Fatalf("observation scope = (%+v, %+v), want package selected", candidates, readers)
+	}
+	inputs := evidence.Inputs{Files: map[string]string{
+		"pkg/value.go": "value", "pkg/value_test.go": "test", "docs/notes.md": "notes",
+	}}
+	model := goanalysis.Model{ModuleDir: root, Packages: packages}
+	sources := newTargetKeySources(inputs, model, "standard-v1", Options{}, readers)
+	observer := newRepositoryObserver(root, t.TempDir(), candidates, sources)
+	target := goanalysis.Target{Package: pkg, RelativeDir: "pkg"}
+
+	for _, test := range []struct {
+		name     string
+		contents string
+		want     bool
+	}{
+		{name: "no repository access", contents: "# test log\n"},
+		{name: "external helper access", contents: "# test log\nopen " + filepath.Join(root, "docs", "notes.md") + "\n", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			arguments, finish := observer.instrumentPackage(pkg, nil)
+			log := testLogArgument(t, arguments)
+			if err := os.WriteFile(log, []byte(test.contents), filemode.PrivateFile); err != nil {
+				t.Fatal(err)
+			}
+			if got := observer.wholeTree(target, finish()); got != test.want {
+				t.Fatalf("whole tree = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRepositoryObserverRefusesToNarrowPathsTheTestLogCannotEncode(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -155,13 +206,13 @@ func TestRepositoryObserverUsesPrivateUniqueLogsAndCleansThem(t *testing.T) {
 	if firstPath == secondPath {
 		t.Fatalf("two executions shared test log %q", firstPath)
 	}
-	if err := os.WriteFile(firstPath, []byte("# test log\nopen value.go\n"), 0o600); err != nil {
+	if err := os.WriteFile(firstPath, []byte("# test log\nopen value.go\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(secondPath, []byte("# test log\n"), 0o600); err != nil {
+	if err := os.WriteFile(secondPath, []byte("# test log\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
-	if firstFinish().unknown || secondFinish().unknown {
+	if firstFinish().reason != wholeTreeObserved || secondFinish().reason != wholeTreeObserved {
 		t.Fatal("valid action logs were rejected")
 	}
 	for _, name := range []string{firstPath, secondPath} {
@@ -205,7 +256,7 @@ func TestRepositoryTestLogFailureRecognizesRawAndTest2JSONPaths(t *testing.T) {
 	}
 }
 
-func TestMutationObservationFailureRetriesWithoutChangingTheOutcome(t *testing.T) {
+func TestMutationObservationFailureStopsWithoutRetry(t *testing.T) {
 	t.Parallel()
 	const pkg = "fixture.example/module/pkg"
 	root := t.TempDir()
@@ -217,17 +268,25 @@ func TestMutationObservationFailureRetriesWithoutChangingTheOutcome(t *testing.T
 		}
 		return gomutants.MutantResult{Outcome: gomutants.OutcomeSurvived}, nil
 	}}
+	sink, recorder := newTraceRecording()
 	request := gomutants.ExecRequest{Mutant: "mutant", Package: pkg, Args: []string{"-test.run=^TestValue$"}}
-	result, observation, err := executeMutation(t.Context(), session, request, MutationOptions{RepositoryObserver: observer})
-	if err != nil || result.Outcome != gomutants.OutcomeSurvived || !observation.unknown {
-		t.Fatalf("execution = (%+v, %+v, %v), want the unobserved survivor", result, observation, err)
+	result, observation, err := executeMutation(t.Context(), session, request, MutationOptions{RepositoryObserver: observer, Trace: recorder})
+	if err == nil || result.Outcome != gomutants.OutcomeKilled || observation.reason != wholeTreeLogUnavailable {
+		t.Fatalf("execution = (%+v, %+v, %v), want the observation failure", result, observation, err)
 	}
-	if len(session.requests) != 2 || !slices.Equal(session.requests[1].Args, request.Args) {
-		t.Fatalf("requests = %+v, want one observed attempt then the original request", session.requests)
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("observation error exposed the private temporary path: %v", err)
+	}
+	if len(session.requests) != 1 {
+		t.Fatalf("requests = %+v, want one observed attempt", session.requests)
+	}
+	records := recordedMutants(sink)
+	if len(records) != 1 || records[0].Error == "" {
+		t.Fatalf("trace records = %+v, want the observation error", records)
 	}
 }
 
-func TestBaselineObservationFailureRetriesWithoutChangingTheOutcome(t *testing.T) {
+func TestBaselineObservationFailureStopsWithoutRetry(t *testing.T) {
 	t.Parallel()
 	const pkg = "fixture.example/module"
 	root := t.TempDir()
@@ -246,15 +305,48 @@ func TestBaselineObservationFailureRetriesWithoutChangingTheOutcome(t *testing.T
 		if log, found := repositoryTestLogPath(command.Argv); found {
 			return gomutants.CommandResult{ExitCode: 2, Output: []byte("testing: open " + log + ": access denied")}, nil
 		}
-		if err := os.WriteFile(coverageProfileArgument(command), []byte("mode: set\n"+pkg+"/value.go:1.1,1.16 1 1\n"), 0o600); err != nil {
+		if err := os.WriteFile(coverageProfileArgument(command), []byte("mode: set\n"+pkg+"/value.go:1.1,1.16 1 1\n"), filemode.PrivateFile); err != nil {
 			return gomutants.CommandResult{}, err
 		}
 		return gomutants.CommandResult{}, nil
 	}}
-	result, err := CollectBaseline(t.Context(), workspace, model, []BaselineTarget{{Target: baselineTestTarget("TestValue")}},
+	_, err := CollectBaseline(t.Context(), workspace, model, []BaselineTarget{{Target: baselineTestTarget("TestValue")}},
 		BaselineOptions{ArtifactDirectory: t.TempDir(), RepositoryObserver: observer})
-	if err != nil || executions != 2 || len(result.Targets) != 1 || !result.Targets[0].WholeTree || !result.Targets[0].RepositoryObserved {
-		t.Fatalf("baseline = (%+v, %v), executions=%d; want a conservative passing retry", result, err, executions)
+	if err == nil || executions != 1 {
+		t.Fatalf("baseline error = %v, executions=%d; want one failed observation", err, executions)
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("observation error exposed the private temporary path: %v", err)
+	}
+}
+
+func TestProbeObservationFailureStopsWithoutRetry(t *testing.T) {
+	t.Parallel()
+	const pkg = "fixture.example/module/pkg"
+	root := t.TempDir()
+	sources := targetKeySources{model: goanalysis.Model{Packages: []goanalysis.Package{{ImportPath: pkg, RelativeDir: "."}}}}
+	observer := newRepositoryObserver(root, t.TempDir(), map[string]goanalysis.RepositoryReadCandidate{pkg: {}}, sources)
+	session := &mutationUnitSession{
+		catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant", Package: pkg, Accepted: true}}},
+		probe: func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+			log, _ := repositoryTestLogPath(request.Args)
+			return gomutants.ProbeResult{Output: []byte("testing: open " + log + ": access denied")}, nil
+		},
+	}
+	sink, recorder := newTraceRecording()
+	_, err := ProbeTargets(t.Context(), session, nil, ProbeOptions{
+		PackageSuites: true, Jobs: 1, Timeout: time.Second, RepositoryObserver: observer, Trace: recorder,
+	})
+	if err == nil || len(session.probeRequests()) != 1 {
+		t.Fatalf("probe error = %v, requests=%d; want one failed observation", err, len(session.probeRequests()))
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("observation error exposed the private temporary path: %v", err)
+	}
+	for _, event := range sink.Events() {
+		if event.Probe != nil && strings.Contains(event.Probe.Error, root) {
+			t.Fatalf("trace exposed the private temporary path: %+v", event.Probe)
+		}
 	}
 }
 
@@ -272,10 +364,10 @@ func testLogArgument(t *testing.T, arguments []string) string {
 func writeObservationFile(t *testing.T, root, relative, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 }

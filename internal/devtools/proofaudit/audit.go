@@ -21,35 +21,19 @@ import (
 )
 
 const (
-	// readBufferSize is the buffer one line is assembled in. A line is not
-	// bounded by it: a route event naming every target that reaches a mutant
-	// can be far larger than any fixed buffer, so lines are read whole rather
-	// than through a scanner that would refuse the long ones.
 	readBufferSize = 1 << 16
-	// outcomeKilled is the recorded outcome of an execution that killed its
-	// mutant. It is the only outcome that proves a target reaches one: a
-	// survived execution proves the target ran the mutant and nothing more.
+
 	outcomeKilled = "killed"
-	// runArgument is the flag a mutant execution selects its tests with. An
-	// execution without one is the package suite.
+
 	runArgument = "-test.run="
-	// coverageArgument is the flag a baseline measurement writes its target's
-	// coverage profile with, and packageArgument the flag that names the
-	// package the measured binary belongs to. A measurement's arguments are the
-	// only place in a recording where a target's identity, the test it runs and
-	// its package meet, which is what a kill is attributed through and what the
-	// savings measurement reads.
+
 	coverageArgument = "-test.coverprofile="
-	packageArgument  = "-p"
-	// fuzzPrefix is how Go names a fuzz target, and the whole of the rule that
-	// says one is never discharged: fuzzing explores past the coverage its seed
-	// corpus measured, so a body its profile never entered may still be entered.
-	fuzzPrefix = "Fuzz"
+
+	minimumCompiledTestCommandArguments = 5
+	goTestSubcommandIndex               = 1
+	goTestFirstFlagIndex                = 2
 )
 
-// The layers and the reasons they give. A why is written from the point of
-// view of the evidence, because that is what a developer has to go and look at
-// when the audit refuses a change.
 const (
 	reachLayerName          = "reach"
 	whyNoProfile            = "the killer target left no coverage profile"
@@ -70,29 +54,14 @@ const (
 	whyNoSuiteRoute            = "the package-suite kill has no preceding mutant route"
 )
 
-// probeFacts is what the probe pass measured of one target: the outcome it
-// recorded, and, when it measured, the mutants it saw infect. A record that
-// measured nothing carries no set at all rather than an empty one, so that
-// "measured and infected nothing" and "never measured" cannot be confused.
-//
-// A target the recording holds two records for is marked conflicting instead:
-// the two runs say different things about one target, and believing whichever
-// arrived first would decide a pair on the order a run happened to write.
 type probeFacts struct {
 	outcome     string
 	infected    map[string]struct{}
 	conflicting bool
 }
 
-// measured reports whether the probe run of this target produced facts. Only a
-// measured run does; every other outcome, and a run that errored before
-// reaching one, says nothing about any mutant.
 func (facts *probeFacts) measured() bool { return facts.outcome == trace.ProbeOutcomeMeasured }
 
-// killPair is one kill a run recorded: the mutant, where the catalog placed
-// it, and the target whose test killed it. It is the unit this tool preserves.
-// A layer that would stop routing this mutant to this target would lose a kill
-// the run proved, and no layer is allowed to do that.
 type killPair struct {
 	mutant  string
 	display string
@@ -102,30 +71,20 @@ type killPair struct {
 	column  int
 	target  string
 	killer  string
-	// granularity is the routing boundary on which a target could be
-	// discharged. The production infection layer narrows exact block routes;
-	// a file fallback is deliberately left conservative.
+
 	granularity string
-	// evidenceTarget is the profile this pair is decided against when target is
-	// a human-facing synthetic identity. Ordinary target pairs leave it empty.
+
 	evidenceTarget string
-	// probed is what the route in force said: the mutant carries a probe site,
-	// so the probe pass could have measured it. probe is what that pass
-	// recorded of the killer target, and is nil when it recorded nothing for
-	// it. The two carry the whole of the infection facts, so that layer stays a
-	// pure function of the pair like every other one.
+
 	probed bool
 	probe  *probeFacts
 }
 
-// pairKey identifies a kill pair. A run confirms a kill by repeating it, so
-// one pair reaches the audit more than once and is audited once.
 type pairKey struct {
 	mutant string
 	target string
 }
 
-// key is the identity of a pair.
 func (pair killPair) key() pairKey { return pairKey{mutant: pair.mutant, target: pair.target} }
 
 func (pair killPair) coverageTarget() string {
@@ -135,56 +94,28 @@ func (pair killPair) coverageTarget() string {
 	return pair.target
 }
 
-// conclusion is what a layer decided about one kill pair.
 type conclusion int
 
 const (
-	// kept: the layer still routes the mutant to the target that killed it,
-	// which is the only conclusion a sound layer reaches.
 	kept conclusion = iota
-	// discharged: the layer would drop the killer. The soundness invariant is
-	// that this never happens, so it is reported as a violation.
+
 	discharged
-	// unverifiable: the recording does not carry the evidence the layer needs
-	// to decide. It is listed rather than counted against the layer, because
-	// an audit that guessed would be worth less than one that says it cannot
-	// tell.
+
 	unverifiable
-	// inapplicable: the layer has no proof about this mutant at all, so it
-	// changes nothing about the pair. It is counted apart from kept because a
-	// layer that proves almost nothing would otherwise report almost every
-	// pair as one it keeps.
+
 	inapplicable
 )
 
-// finding is what a layer concluded about one kill pair, and why.
 type finding struct {
 	conclusion conclusion
 	why        string
 }
 
-// layer is one proof layer under audit: a name, and the rule it decides kill
-// pairs by. Every layer that narrows what a mutant is run against has to keep
-// every recorded killer, so every layer is audited the same way and reported
-// in the same table.
 type layer struct {
 	name   string
 	decide func(pair killPair, recorded evidence) finding
 }
 
-// auditLayers are the layers this tool audits, in the order the engine applies
-// them and therefore the order it reports them.
-//
-// The branch layer decides by a proof only a catalog carries, so a run audited
-// without one is a run that layer was never held to and it is left out of the
-// audit entirely. Adding a row of zeroes instead would be worse than adding
-// nothing: a reader skimming the table would take "not checked" for "checked
-// and clean", which is the one misreading a soundness report may not invite.
-//
-// The infection layer decides by facts the recording itself carries, so there
-// is no third input to gate it on and it is always appended. Whether the
-// recording holds a probe pass to hold it to is only known once the whole
-// recording was read, so that half of the same rule is applied in finish.
 func auditLayers(catalog *mutantCatalog) []layer {
 	layers := []layer{reachLayer()}
 	if catalog != nil {
@@ -193,27 +124,8 @@ func auditLayers(catalog *mutantCatalog) []layer {
 	return append(layers, infectionLayer())
 }
 
-// reachLayer is the block routing of a mutation run: a mutant is run against
-// the targets whose covered blocks contain its position, with the file as the
-// fallback whenever the blocks cannot decide.
-//
-// The rule is reimplemented here from the recording and the profiles rather
-// than called out of internal/assure. An audit that asked the code under audit
-// whether it was right would prove only that the code agrees with itself; two
-// independent implementations disagreeing is exactly the signal this tool
-// exists to raise.
 func reachLayer() layer { return layer{name: reachLayerName, decide: decideReach} }
 
-// decideReach answers whether block routing keeps one recorded killer.
-//
-// The ladder is the routing ladder. A target that ran no block of the file is
-// no candidate under any rule. A mutant the engine could not place cannot be
-// narrowed to a block, so the file decides. A position inside a block the
-// killer ran is reached. A position no instrumented block contains is a gap
-// between the blocks cmd/cover cut rather than proof that nothing runs it, so
-// the file decides again. What is left is a position the toolchain measured,
-// inside the file the killer ran, and outside every block the killer executed:
-// the killer would be dropped.
 func decideReach(pair killPair, recorded evidence) finding {
 	target := pair.coverageTarget()
 	if !recorded.measured(target) {
@@ -235,11 +147,6 @@ func decideReach(pair killPair, recorded evidence) finding {
 	return finding{conclusion: discharged, why: whyOutsideCoveredBlocks}
 }
 
-// decideSuiteReach independently states the narrower whole-suite rule. Unlike
-// target routing it never falls back through "the suite covered some of this
-// file": production discharges only when this exact suite profile instrumented
-// the mutant position and did not cover it. Instrumentation from another
-// profile is deliberately irrelevant.
 func decideSuiteReach(pair killPair, recorded evidence) finding {
 	target := pair.coverageTarget()
 	if !recorded.measured(target) {
@@ -258,14 +165,6 @@ func decideSuiteReach(pair killPair, recorded evidence) finding {
 	return finding{conclusion: discharged, why: whyOutsideCoveredBlocks}
 }
 
-// branchLayer is the branch-never-taken discharge: go-mutants proves of some
-// mutants that the mutated condition implies the original one, which makes the
-// condition inert, so a test during which no statement of the body that
-// condition gates ran cannot observe the mutation and never has to run it.
-//
-// The rule is reimplemented here from the catalog and the profiles for the
-// reason the reach layer is: an audit that asked the code under audit whether
-// it was right would prove only that the code agrees with itself.
 func branchLayer(catalog *mutantCatalog) layer {
 	return layer{
 		name:   branchLayerName,
@@ -273,29 +172,6 @@ func branchLayer(catalog *mutantCatalog) layer {
 	}
 }
 
-// decideBranch answers whether the branch proof keeps one recorded killer.
-//
-// The ladder is the rule, and every rung of it that is not the last one keeps
-// the killer. A mutant the catalog does not list is one the audit has no proof
-// to apply; a mutant listed without a proof is one this layer changes nothing
-// about; a proof whose span is not a body, or a body no profile instrumented,
-// is a state the audit does not know the meaning of, and nothing is discharged
-// from any of them. What is left is a killer whose profile says it ran the file
-// and started no block inside the body the mutation gates, which is the target
-// the layer would drop.
-//
-// The body is found by where a block starts and never by what it contains:
-// cmd/cover records the body's first block starting at the opening brace on one
-// toolchain and at the first statement on another, and only the start is inside
-// the span under both.
-//
-// A fuzz target is held to the proof like any other killer, although the engine
-// never discharges one. The exemption guards the fuzzing pass, which explores
-// past the coverage the seed corpus measured — and that pass selects no test,
-// so its kills are never a pair. A kill attributed to a fuzz target is its seed
-// corpus killing the mutant, and a seed corpus that never entered the body
-// under measurement cannot have entered it under an inert condition either: if
-// it killed anyway, the proof was wrong, and that is the violation to print.
 func decideBranch(catalog *mutantCatalog, pair killPair, recorded evidence) finding {
 	listed, known := catalog.lookup(pair.mutant)
 	if !known {
@@ -321,10 +197,6 @@ func decideBranch(catalog *mutantCatalog, pair killPair, recorded evidence) find
 	return finding{conclusion: discharged, why: whyBodyNeverTaken}
 }
 
-// startsInBody reports whether any block of one file starts inside the body.
-// The blocks are walked here rather than asked of internal/golang, because
-// containment is the question the reach layer asks and this layer asks a
-// different one of the same evidence.
 func startsInBody(file goanalysis.FileCoverage, body branchProof) bool {
 	for _, block := range file.Blocks {
 		if body.holds(block.StartLine, block.StartColumn) {
@@ -334,39 +206,8 @@ func startsInBody(file goanalysis.FileCoverage, body branchProof) bool {
 	return false
 }
 
-// infectionLayer is the infection discharge: a probe pass runs every target
-// once against a tree in which each eligible mutant site records whether the
-// value the original computed ever differed from the constant the mutant would
-// put there. A target whose probe run was measured and never saw a mutant's
-// site differ cannot observe that mutation by running the same test, so routing
-// may drop that target for that mutant.
-//
-// The rule is reimplemented here from the recording for the reason the other
-// two layers are: an audit that asked the code under audit whether it was right
-// would prove only that the code agrees with itself.
 func infectionLayer() layer { return layer{name: infectionLayerName, decide: decideInfection} }
 
-// decideInfection answers whether the infection facts keep one recorded killer.
-//
-// The ladder is the rule, and every rung of it but the last keeps the killer. A
-// mutant no probe site was compiled for is one this layer has nothing to say
-// about; a killer the pass recorded nothing for, and a record that measured
-// nothing — its test failed, it timed out, the tree was unavailable, or it
-// errored before any outcome — are all recordings with no facts in them; a
-// killer with two records is a recording whose meaning the audit does not know.
-// What is left is a probed mutant whose killer was measured and whose measured
-// killer did not name it, which is the target the layer would drop.
-// A file-granularity route is deliberately inapplicable: production preserves
-// the conservative fallback when coverage could not place the position.
-//
-// There is no fuzz exemption here, unlike the branch layer. The probe pass
-// records nothing for a fuzz target, because fuzzing explores past the seed
-// corpus the coverage was measured from, so a fuzz killer lands on the rung
-// that keeps every killer with no record at all. A record that does exist is
-// held to whatever it says.
-//
-// The coverage profiles are not read: the pair carries the route granularity
-// and every infection fact this rule decides by.
 func decideInfection(pair killPair, _ evidence) finding {
 	if pair.granularity != "" && pair.granularity != trace.GranularityBlock {
 		return finding{conclusion: inapplicable}
@@ -389,7 +230,6 @@ func decideInfection(pair killPair, _ evidence) finding {
 	return finding{conclusion: discharged, why: whyNeverInfected}
 }
 
-// layerResult is what one layer concluded across the whole recording.
 type layerResult struct {
 	name         string
 	audited      int
@@ -399,54 +239,27 @@ type layerResult struct {
 	violations   int
 }
 
-// dischargeSavings is what a layer would have bought on the recording, which is
-// the other half of the question this tool answers: soundness says the layer
-// may be used, and this says whether it is worth using.
-//
-// It is measured from the routes and the recorded evidence rather than read off
-// the discharged targets of the trace, because the recordings worth auditing
-// are the ones made by runs that discharged nothing — a run that already
-// applied the layer cannot say what applying it would have saved.
 type dischargeSavings struct {
-	// routes is how many routed mutants carry evidence the rule may act on.
 	routes int
-	// reaching and discharged are the targets those routes reach, and the ones
-	// the rule would have dropped.
+
 	reaching   int
 	discharged int
-	// emptied is the routes the rule would leave with no reaching target at
-	// all, which is a mutant that would stop being executed rather than one
-	// executed less.
+
 	emptied int
-	// executions is the recorded mutant executions that would not have
-	// happened.
+
 	executions int
 }
 
-// auditRow is one kill pair a layer had something to say about.
 type auditRow struct {
 	pair  killPair
 	layer string
 	why   string
 }
 
-// auditResult is the whole audit of one recording: what the recording held,
-// what each layer concluded, and the pairs worth naming one by one.
-//
-// The kills that name no single target are counted rather than dropped. A
-// package suite settles a mutant no target reaches, a batch proves one of
-// several targets killed a mutant without saying which, and a killer no route
-// names is a recording whose halves disagree. None of the three is a pair to
-// preserve, and all three are things a reader must be able to see the audit
-// did not look at.
 type auditResult struct {
 	targets int
 	routes  int
-	// reusedRoutes counts the routes whose verdict the run took from an
-	// earlier run's evidence. Nothing was executed for one, so it is neither a
-	// kill this audit can hold to a layer nor a mutant the recording lost: it
-	// is a class of its own, and the audited share of a run is read against
-	// the part of the run that ran.
+
 	reusedRoutes      int
 	killedExecutions  int
 	pairs             int
@@ -454,15 +267,10 @@ type auditResult struct {
 	batchKills        int
 	unattributedKills int
 	truncatedLines    int
-	// probeExecutions is how many targets the probe pass executed, and
-	// probeMeasured how many distinct targets it got facts out of. The two say
-	// how much of the run the infection facts cover, which is what the layer's
-	// numbers have to be read against.
+
 	probeExecutions int
 	probeMeasured   int
-	// Suite probes are controls for the conservative package-suite route, not
-	// measurements of one killer target. They are counted separately and never
-	// entered into the per-target facts the infection layer audits.
+
 	suiteProbeExecutions  int
 	suiteProbeMeasured    int
 	suiteCoverageProfiles int
@@ -471,55 +279,18 @@ type auditResult struct {
 	layers                []layerResult
 	unverifiable          []auditRow
 	violations            []auditRow
-	// branchAudited says whether a catalog was given, and infectionAudited
-	// whether the recording held a probe pass, with branch and infection what
-	// each layer would have bought when it was audited. A layer nobody held the
-	// run to measures nothing, and says so rather than printing zeroes.
+
 	branchAudited    bool
 	infectionAudited bool
 	branch           dischargeSavings
 	infection        dischargeSavings
 }
 
-// targetIdentity is a test and the package it runs in. It is what a baseline
-// measurement says about a target, and equally what a recorded mutant execution
-// that selected a single test says about itself — which is exactly why the two
-// can be matched: an execution would not have happened when the target it names
-// is one the rule discharges, and a test name is only unique within a package.
 type targetIdentity struct {
 	test        string
 	packagePath string
 }
 
-// auditTrace replays one recording against the coverage a run left beside it
-// and holds every layer to the kills the run proved.
-//
-// The stream is read in order, so the route in force for an execution is the
-// last one recorded for its mutant: a run emits a mutant's route before it
-// executes the mutant, and nothing else about the ordering is assumed. The
-// probe facts in force are read the same way: a run records its whole probe
-// pass, which is one phase of its own, before it routes or executes any mutant,
-// so every probe record is in hand by the time a kill is decided. A record that
-// arrived after a kill of its target is simply not seen by that pair, which is
-// the rung of the ladder that keeps the killer and never a false violation.
-//
-// A last line the recording was cut in the middle of is tolerated and counted:
-// that is what an interrupted run leaves, and refusing to audit the run that
-// was interrupted would refuse the recordings most worth auditing. A broken
-// line with a whole recording behind it is refused instead, because an audit
-// that skipped an event it did not understand would be auditing less than it
-// says it did.
-//
-// A line is decoded into the events this audit reads rather than validated
-// against the whole trace contract, which internal/devtools/tracesummary
-// exists to do. An audit is run against recordings older and newer than
-// itself — that is what makes it an audit rather than a self-check — and a
-// field a later version added is not a reason to refuse the kills the
-// recording proves.
-// The catalog is given beside the layers because the audit reads it twice
-// over: once per kill pair, through the layer that decides by it, and once over
-// the whole recording, to measure what that layer would have saved. The layers
-// alone would answer the first question and not the second.
 func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, layers []layer) (auditResult, error) {
 	audit := newAuditor(recorded, catalog, layers)
 	buffered := bufio.NewReaderSize(source, readBufferSize)
@@ -537,12 +308,17 @@ func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, lay
 			continue
 		}
 		var event trace.Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			if ended {
+		decoder := json.NewDecoder(bytes.NewReader(line))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&event); err != nil {
+			if ended && errors.Is(err, io.ErrUnexpectedEOF) {
 				audit.result.truncatedLines++
 				break
 			}
 			return auditResult{}, fmt.Errorf("line %d: %w", number, err)
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return auditResult{}, fmt.Errorf("line %d has trailing data", number)
 		}
 		audit.read(event)
 		if ended {
@@ -552,15 +328,6 @@ func auditTrace(source io.Reader, recorded evidence, catalog *mutantCatalog, lay
 	return audit.finish(), nil
 }
 
-// auditor is one audit in progress: the evidence, the catalog and the layers it
-// holds the recording to, what it has read of the recording so far, and the
-// pairs it has already decided.
-//
-// The targets are read from the baseline measurements two ways round, because
-// the audit asks both questions: which test a target ran, and which target ran
-// a test. The probes are what the probe pass recorded of each target. The
-// executions are collected for the savings measurements alone, and both of them
-// read them, so they are collected whatever inputs the audit was given.
 type auditor struct {
 	recorded              evidence
 	catalog               *mutantCatalog
@@ -603,10 +370,6 @@ func newAuditor(recorded evidence, catalog *mutantCatalog, layers []layer) *audi
 	}
 }
 
-// read takes one event of the recording: a route is remembered, a baseline
-// measurement names a target, a probe execution says what the pass measured of
-// one, an execution is collected and a kill among them audited, and everything
-// else is a part of the run this tool does not read.
 func (audit *auditor) read(event trace.Event) {
 	switch {
 	case event.Type == trace.TypeExec && event.Exec != nil:
@@ -624,20 +387,7 @@ func (audit *auditor) read(event trace.Event) {
 	}
 }
 
-// probe takes one probe execution: what the pass measured of one target. The
-// infections are read into a set because the recorded list is in catalogue
-// order, which is not the order the identities sort in, so it can only be
-// searched by looking at all of it.
-//
-// A target the recording names twice is a target the audit does not know the
-// facts of: two runs of one target say different things, and believing
-// whichever came first would decide every pair of that killer on the order a
-// run happened to write. Both records are dropped for a mark that says so.
 func (audit *auditor) probe(record trace.ProbeRecord) {
-	// A paired control uses the probe tree only as an already-built semantic
-	// original. It is evidence that a kill was confirmed, never infection
-	// evidence used to route a target, so it cannot conflict with that target's
-	// one routing measurement.
 	if record.Control {
 		return
 	}
@@ -666,16 +416,6 @@ func (audit *auditor) probe(record trace.ProbeRecord) {
 	audit.probes[record.Target] = facts
 }
 
-// measurement reads a target's identity out of recorded commands. A current
-// run first records `go test -c -o binary package`, then executes that binary
-// directly with a target selector and coverage profile. Legacy recordings put
-// the package in test2json's -p argument instead. Reading both shapes keeps the
-// independent audit useful across the process-startup optimisation.
-//
-// Two targets claiming one identity would identify neither, so a name a second
-// target claims is unclaimed rather than given to whichever measurement came
-// first: a kill the audit cannot place is worth more than a kill it places
-// wrongly.
 func (audit *auditor) measurement(argv []string) {
 	if binary, packagePath, compiled := compiledTestBinary(argv); compiled {
 		if previous, exists := audit.testBinaries[binary]; exists && previous != packagePath {
@@ -687,12 +427,10 @@ func (audit *auditor) measurement(argv []string) {
 		return
 	}
 	target, identity := "", targetIdentity{}
-	for index, argument := range argv {
+	for _, argument := range argv {
 		switch {
 		case strings.HasPrefix(argument, coverageArgument):
 			target = profileTarget(strings.TrimPrefix(argument, coverageArgument))
-		case argument == packageArgument && index+1 < len(argv):
-			identity.packagePath = argv[index+1]
 		}
 	}
 	if identity.packagePath == "" && len(argv) != 0 && !audit.testBinaryConflicts[argv[0]] {
@@ -723,23 +461,25 @@ func (audit *auditor) measurement(argv []string) {
 	audit.measuredBy[identity] = target
 }
 
-// compiledTestBinary recognises the exact compile boundary recorded before a
-// direct baseline execution. The output path is the stable join key; the
-// import path is the final operand emitted by baselineCompileCommand.
 func compiledTestBinary(argv []string) (string, string, bool) {
-	if len(argv) < 5 || !goCommandName(argv[0]) || argv[1] != "test" {
+	if len(argv) < minimumCompiledTestCommandArguments || !goCommandName(argv[0]) || argv[goTestSubcommandIndex] != "test" {
 		return "", "", false
 	}
-	compiled, output := false, ""
-	for index := 2; index < len(argv)-1; index++ {
+	compiled, output, outputNext := false, "", false
+	for _, argument := range argv[goTestFirstFlagIndex : len(argv)-1] {
+		if outputNext {
+			output = argument
+			outputNext = false
+			continue
+		}
 		switch {
-		case argv[index] == "-c":
+		case argument == "-c":
 			compiled = true
-		case argv[index] == "-o" && index+1 < len(argv)-1:
-			output = argv[index+1]
-			index++
-		case strings.HasPrefix(argv[index], "-o="):
-			output = strings.TrimPrefix(argv[index], "-o=")
+		case argument == "-o":
+			output = ""
+			outputNext = true
+		case strings.HasPrefix(argument, "-o="):
+			output = strings.TrimPrefix(argument, "-o=")
 		}
 	}
 	packagePath := argv[len(argv)-1]
@@ -758,16 +498,11 @@ func goCommandName(name string) bool {
 	return name == "go" || name == "go.exe"
 }
 
-// measuredTarget is the target whose baseline measurement ran one test in one
-// package, and whether the recording named exactly one.
 func (audit *auditor) measuredTarget(packagePath, test string) (string, bool) {
 	target, measured := audit.measuredBy[targetIdentity{test: test, packagePath: packagePath}]
 	return target, measured && target != ""
 }
 
-// execution takes one recorded mutant execution: it is collected for the
-// savings measurements, which both read the executions a layer would have
-// removed, and audited when it killed.
 func (audit *auditor) execution(record trace.MutantRecord) {
 	if selected, selective := killerTests(record.Args); selective && len(selected) == 1 {
 		audit.executions[record.ID] = append(audit.executions[record.ID],
@@ -780,9 +515,6 @@ func (audit *auditor) execution(record trace.MutantRecord) {
 	audit.kill(record)
 }
 
-// profileTarget is the target a coverage profile path names. A run writes one
-// profile per target under the target's identity, and a recording made on
-// another operating system names it with that system's separator.
 func profileTarget(path string) string {
 	if cut := strings.LastIndexAny(path, `/\`); cut >= 0 {
 		path = path[cut+1:]
@@ -794,21 +526,6 @@ func profileTarget(path string) string {
 	return target
 }
 
-// kill attributes one recorded kill to the target that ran it and holds every
-// layer to the pair. A kill no single target can be attributed to is counted
-// and left alone.
-//
-// The target is the one whose baseline measurement ran the killer test in the
-// package the execution ran in, and not the target sitting at the position of
-// the matching plan entry. A plan holds one entry per execution rather than one
-// per reaching target: the targets a run executes one at a time come first, the
-// rest are batched, and a batch of a single target is rendered exactly like an
-// individual run. Past the individual prefix the two lists no longer line up,
-// so a plan position is a coincidence and never an identity. A measurement is,
-// because it is the run saying which target ran which test where.
-//
-// The route is still what says where the mutant is and which rule made it,
-// which is why a kill recorded before any route is one the audit cannot place.
 func (audit *auditor) kill(record trace.MutantRecord) {
 	killers, selective := killerTests(record.Args)
 	switch {
@@ -840,12 +557,6 @@ func (audit *auditor) kill(record trace.MutantRecord) {
 	})
 }
 
-// suiteKill holds the whole-package reach proof to a package-suite kill. The
-// profile identity is reconstructed from the baseline command rather than
-// trusted from the route, and block containment is decided by decideSuiteReach,
-// the audit's independent implementation of the exact negative-coverage rule. A
-// recording made with suite profiles but before suite discharge was enabled is
-// therefore a valid shadow run for the proof.
 func (audit *auditor) suiteKill(record trace.MutantRecord) {
 	target, profiled := audit.suiteProfiles[record.Package]
 	conflicting := audit.suiteProfileConflicts[record.Package]
@@ -891,9 +602,6 @@ func (audit *auditor) suiteKill(record trace.MutantRecord) {
 	}
 }
 
-// decide holds every layer to one kill pair, once. A run confirms a kill by
-// repeating it, so the same pair arrives more than once and is decided the
-// first time it does.
 func (audit *auditor) decide(pair killPair) {
 	if _, repeated := audit.decided[pair.key()]; repeated {
 		return
@@ -919,16 +627,6 @@ func (audit *auditor) decide(pair killPair) {
 	}
 }
 
-// finish measures what each layer would have saved and orders what the audit
-// found, so that one recording reports the same bytes however the run that made
-// it was scheduled.
-//
-// A recording holding no probe pass is a recording the infection layer was
-// never held to, and only the whole of it says so, so the row that would have
-// read as a clean one is removed here rather than never added. Nothing is lost
-// with it: without a single probe record every pair reached a rung of the
-// ladder that keeps the killer or does not apply to it, so neither list of
-// named pairs carries a row of that layer's.
 func (audit *auditor) finish() auditResult {
 	for _, facts := range audit.probes {
 		if facts.measured() {
@@ -951,14 +649,6 @@ func (audit *auditor) finish() auditResult {
 	return audit.result
 }
 
-// measureBranchSavings counts what the branch layer would have removed from the
-// run that was recorded.
-//
-// Only a route decided by block and not fallen back to the file is counted:
-// those are the routes the layer would have narrowed, and a route the engine
-// decided by the file is one whose reaching set the proof was never asked
-// about. The mutants are walked in identity order so the totals are read off
-// the recording rather than off the order a map happened to be built in.
 func (audit *auditor) measureBranchSavings() dischargeSavings {
 	if audit.catalog == nil {
 		return dischargeSavings{}
@@ -998,23 +688,6 @@ func (audit *auditor) measureBranchSavings() dischargeSavings {
 	return measured
 }
 
-// measureInfectionSavings counts what the infection layer would have removed
-// from the run that was recorded.
-//
-// Only an exact block route is counted. A file route is the conservative
-// answer used when coverage cannot place the position and production does not
-// narrow it from a negative probe fact, so an audit of that implementation
-// must leave it alone as well.
-//
-// The mutants are walked in identity order so the totals are read off the
-// recording rather than off the order a map happened to be built in.
-//
-// A run that already applied the layer measures nothing here, by construction:
-// the targets it discharged left reaching_targets, so what is counted is what
-// the rule would still drop, which on such a route is nothing. That is the
-// measurement working, not failing — the number to read on those recordings is
-// the discharged targets of the trace, and the number this reports is what a
-// recording made without the layer would have bought.
 func (audit *auditor) measureInfectionSavings() dischargeSavings {
 	if !audit.result.infectionAudited {
 		return dischargeSavings{}
@@ -1049,11 +722,6 @@ func (audit *auditor) measureInfectionSavings() dischargeSavings {
 	return measured
 }
 
-// neverInfected reports whether the rule would drop one reaching target of a
-// probed mutant. A target the pass recorded nothing for, one it recorded twice,
-// and one whose run measured nothing are all targets with no facts against
-// them, so what is left is dropped exactly when the measured run did not name
-// the mutant.
 func (audit *auditor) neverInfected(mutant, target string) bool {
 	facts, recorded := audit.probes[target]
 	if !recorded || facts.conflicting || !facts.measured() {
@@ -1063,14 +731,7 @@ func (audit *auditor) neverInfected(mutant, target string) bool {
 	return !infected
 }
 
-// discharges reports whether the rule would drop one reaching target of a
-// proved mutant. A fuzz target is never dropped, a target the run left no
-// profile for is never dropped, and what is left is dropped exactly when it
-// started no block inside the body the mutation gates.
 func (audit *auditor) discharges(path string, body branchProof, target string) bool {
-	if strings.HasPrefix(audit.targets[target].test, fuzzPrefix) {
-		return false
-	}
 	if !audit.recorded.measured(target) {
 		return false
 	}
@@ -1078,10 +739,6 @@ func (audit *auditor) discharges(path string, body branchProof, target string) b
 	return !startsInBody(covered, body)
 }
 
-// killerTests reads the tests one mutant execution ran, and reports whether it
-// selected any tests at all. An execution that selected none is the package
-// suite; one that selected several is a batch, which proves that one of them
-// killed the mutant without saying which.
 func killerTests(arguments []string) ([]string, bool) {
 	for _, argument := range arguments {
 		pattern, selective := strings.CutPrefix(argument, runArgument)
@@ -1100,9 +757,6 @@ func killerTests(arguments []string) ([]string, bool) {
 	return nil, false
 }
 
-// compareRows orders the reported pairs by where their mutants are, so a
-// report reads as a list of places to look at and renders the same bytes
-// however the run was scheduled.
 func compareRows(first, second auditRow) int {
 	if order := strings.Compare(first.pair.path, second.pair.path); order != 0 {
 		return order

@@ -21,9 +21,6 @@ import (
 	"github.com/P4suta/goatest/internal/ui"
 )
 
-// The variables an environment that cannot pass a flag asks with, such as a job
-// wrapping an existing command line. They are read here and nowhere else: every
-// layer below the command line is configured through options alone.
 const (
 	traceEnvironmentVariable    = "GOATEST_TRACE"
 	keepTempEnvironmentVariable = "GOATEST_KEEP_TEMP"
@@ -37,18 +34,6 @@ func realMain(arguments []string) int {
 	return realMainStreams(arguments, os.Stdin, os.Stdout, os.Stderr, cliService())
 }
 
-// cliService is the service the goatest CLI runs on. It is the one layer that
-// may name what belongs to the machine this process runs on: the binary a go
-// command re-executes to reach the build cache, the per-machine directory that
-// cache lives in, and where the machine keeps its temporary files. Below it all
-// three are options, and all three are left empty by every process that is not
-// this CLI.
-//
-// The temporary directory is named here rather than resolved below because a
-// value nobody set must never become the machine's own: a run makes its scratch
-// under it, and `cache gc` collects there. An embedded service or a test that
-// names none therefore gets a run that still works and a maintenance command
-// that sweeps nothing, instead of a sweep of everybody's temporary files.
 func cliService() app.Service {
 	return app.Service{
 		Root: ".", Progress: os.Stderr, Output: os.Stdout, Interactive: interactiveTerminal,
@@ -56,12 +41,6 @@ func cliService() app.Service {
 	}
 }
 
-// goatestExecutable names this binary so that a go command started by a run can
-// re-execute it as the build cache program. It is resolved here and nowhere
-// else: this is the one place that knows the running process is a goatest
-// binary and not a test binary or an application that embedded the service. A
-// process that cannot name itself gets no build cache, which costs time and
-// decides nothing.
 func goatestExecutable() string {
 	path, err := os.Executable()
 	if err != nil {
@@ -70,11 +49,6 @@ func goatestExecutable() string {
 	return path
 }
 
-// interactiveTerminal reports whether the progress stream can carry the
-// in-place dashboard. The environment is read here and nowhere else: TERM=dumb
-// and NO_COLOR both ask for deterministic plain lines, a writer that is no
-// terminal cannot render in place, and a console that refuses ANSI escape
-// processing would show litter instead of a dashboard.
 func interactiveTerminal(writer io.Writer) bool {
 	if os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != "" {
 		return false
@@ -86,12 +60,6 @@ func realMainWith(arguments []string, stdout, stderr io.Writer, service cli.Serv
 	return realMainStreams(arguments, strings.NewReader(""), stdout, stderr, service)
 }
 
-// cacheProgramCommand is the hidden subcommand a go command starts to reach
-// goatest's build cache. It is dispatched here, ahead of everything: it speaks
-// a binary protocol on stdin and stdout, so it must not pass through the flag
-// parsing, the environment-to-flag rendering, or the progress rendering that
-// every command a person types goes through. It is not in the help text
-// because nobody types it.
 const cacheProgramCommand = "cacheprog"
 
 func realMainStreams(arguments []string, stdin io.Reader, stdout, stderr io.Writer, service cli.Service) int {
@@ -107,28 +75,16 @@ func realMainStreams(arguments []string, stdin io.Reader, stdout, stderr io.Writ
 	return runWithServiceWriters(arguments, service, stdout, stderr)
 }
 
-// withTraceEnvironment renders a trace asked for by the environment as the flag
-// the command layer parses.
 func withTraceEnvironment(arguments []string, value string) []string {
 	flag, requested := traceFlag(value)
 	return withEnvironmentFlag(arguments, flag, requested)
 }
 
-// withKeepTempEnvironment renders temporary directories asked for by the
-// environment as the flag the command layer parses.
 func withKeepTempEnvironment(arguments []string, value string) []string {
 	flag, requested := keepTempFlag(value)
 	return withEnvironmentFlag(arguments, flag, requested)
 }
 
-// withEnvironmentFlag inserts the flag an environment variable asked for, which
-// is what keeps the environment out of every layer below this one.
-//
-// An explicit flag always wins, an argument list that only asks for the help
-// text or the version is left exactly as it is, and the flag is inserted ahead
-// of the test-binary separator so that it reaches goatest rather than a test
-// binary. An empty argument list asks for the help text, so it stays empty
-// rather than becoming a run nobody asked for.
 func withEnvironmentFlag(arguments []string, flag string, requested bool) []string {
 	if !requested || len(arguments) == 0 {
 		return arguments
@@ -150,10 +106,6 @@ func withEnvironmentFlag(arguments []string, flag string, requested bool) []stri
 	return append(slices.Clone(arguments), flag)
 }
 
-// traceFlag is the flag a GOATEST_TRACE value asks for: the default trace
-// location for the enabled forms, a named directory for anything else, and no
-// trace at all when the variable is unset, empty, or explicitly disabled, so
-// that a job can neutralize a setting it inherited.
 func traceFlag(value string) (string, bool) {
 	switch value {
 	case "", "0", "false":
@@ -165,11 +117,6 @@ func traceFlag(value string) (string, bool) {
 	}
 }
 
-// keepTempFlag is the flag a GOATEST_KEEP_TEMP value asks for. Keeping
-// temporary directories is asked for and never configured, so an unrecognized
-// value becomes a flag carrying it: the command layer is the one authority on
-// what a flag may say, and it refuses that one rather than guessing which of
-// keeping and removing a job meant.
 func keepTempFlag(value string) (string, bool) {
 	switch value {
 	case "", "0", "false":

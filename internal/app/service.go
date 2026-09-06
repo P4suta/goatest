@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package app connects the deterministic CLI command layer to repository
-// assurance and durable report/config artifacts.
 package app
 
 import (
@@ -42,65 +40,40 @@ type Service struct {
 	GoBinary      string
 	TempDirectory string
 	Environment   []string
-	// Executable is the goatest binary a go command started by a run
-	// re-executes to reach goatest's build cache. Only a composition root that
-	// knows this process is goatest may fill it in: the value is handed to the
-	// go command, which will wait on whatever it names, so a process that is
-	// not a goatest binary — a test binary running this service in-process,
-	// an application embedding it — must leave it empty and gets the
-	// toolchain's own cache.
+
 	Executable string
-	// UserCacheDir names the per-machine cache root goatest's build cache lives
-	// below unless a project configured another. Only a composition root that
-	// knows this process is the goatest CLI on a real machine may fill it in:
-	// the directory it names is inspected by `cache status` and collected by
-	// `cache gc` and by every run that ends, so a process that is not that CLI
-	// — a test binary running this service in-process, an application
-	// embedding it — must leave it nil and then never touches the machine's
-	// cache directory. Its zero value is a process with no per-machine cache
-	// root: the build cache is the one the project configured, or none.
+
 	UserCacheDir func() (string, error)
 	Progress     io.Writer
-	// Output is the stream the final report is rendered to. A jsonl UI streams
-	// its progress events there so that one pipe carries the whole stream; a
-	// service without one falls back to the plain progress stream.
+
 	Output io.Writer
-	// Interactive reports whether the progress stream reaches a terminal that
-	// can render an in-place dashboard. Its zero value is not interactive, so
-	// that only a composition root that probed a real terminal turns the
-	// dashboard on.
+
 	Interactive  func(io.Writer) bool
 	Run          RunFunc
 	Plan         RunFunc
 	FixValidator repair.Validator
 	Now          func() time.Time
-	// ProcessID identifies the process a default trace directory is named
-	// after, so that two goatest processes tracing one repository never write
-	// into the same recording. A nil value is the running process.
+
 	ProcessID func() int
-	// TraceFilesystem is the filesystem a recording is written through. Its
-	// zero value is the os package, which is what a traced run records into.
-	// A caller fills in the one operation it wants to answer for, because the
-	// failures a recording must survive are not failures a disk produces on
-	// demand.
+
 	TraceFilesystem trace.Filesystem
-	// DiagnosticsFilesystem is the filesystem a failure bundle is written
-	// through, filled in the same way and for the same reason.
+
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
-	// notes is the renderer the current run reports its progress through,
-	// selected per request by runAndWrite; every note of a run funnels through
-	// it. Its zero value renders plain lines to Progress, which is what every
-	// path outside a verify or replay reports through.
+
 	notes ui.Notes
-	// doctorFilesystem is the filesystem the doctor's writability probe runs
-	// through; its zero value is the os package.
+
 	doctorFilesystem doctorProbeFilesystem
 }
 
 var (
 	reportRunSequence     atomic.Uint64
 	readConfigurationFile = os.ReadFile
+)
+
+const (
+	goCacheEnvironmentVariable = "GOCACHE"
+	nativeGoCacheDirectoryName = "go-build"
 )
 
 func (service Service) Execute(ctx context.Context, command cli.Command, request cli.Request, id string) (report.Report, error) {
@@ -142,9 +115,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 			Schema: report.SchemaV1, RunKind: report.RunOperation, Verdict: report.VerdictCompleted,
 			Evidence: []report.Evidence{
 				{Kind: "configuration", ID: config.FileName, Status: "initialized"},
-				// The next steps a fresh project takes, in the report itself so
-				// that every UI renders them: runs write caches under .goatest/
-				// and reports under reports/, and nothing else says so first.
+
 				{Kind: "next-step", ID: "gitignore", Status: "suggested", Detail: "add .goatest/ and reports/ to .gitignore; verifications write caches and reports there"},
 				{Kind: "next-step", ID: "doctor", Status: "suggested", Detail: "run 'goatest doctor' to check everything a verification needs"},
 				{Kind: "next-step", ID: "verify", Status: "suggested", Detail: "run 'goatest verify ./...' for a first full assurance"},
@@ -222,6 +193,10 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 		if finding.MutantID == "" {
 			return report.Report{}, fmt.Errorf("goatest: finding %q is not replayable because it has no mutant identity", id)
 		}
+		request, err = replayRequest(request, latest)
+		if err != nil {
+			return report.Report{}, err
+		}
 		request.ReplayFindingID = finding.ID
 		request.ReplayMutantID = finding.MutantID
 		return service.runAndWrite(ctx, absolute, request)
@@ -232,18 +207,32 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 	}
 }
 
+func replayRequest(request cli.Request, latest report.Report) (cli.Request, error) {
+	execution := latest.Execution
+	if execution.MutationJobs <= 0 ||
+		execution.CommandTimeoutNS <= 0 || execution.TargetTimeoutNS <= 0 {
+		return cli.Request{}, errors.New("goatest: selected report has incomplete execution metadata")
+	}
+	request.Contract = latest.Contract
+	if len(latest.Scope.Requested.Packages) != 0 {
+		request.Packages = slices.Clone(latest.Scope.Requested.Packages)
+	}
+	execution.TestArgs = slices.Clone(execution.TestArgs)
+	execution.BuildTags = slices.Clone(execution.BuildTags)
+	execution.MutationOperators = slices.Clone(execution.MutationOperators)
+	request.TestArgs = slices.Clone(execution.TestArgs)
+	request.ReplayExecution = &execution
+	return request, nil
+}
+
 func (service Service) runAndWrite(ctx context.Context, root string, request cli.Request) (report.Report, error) {
 	clock := service.clock()
 	started := clock().UTC()
-	// The renderer the request asked for reports everything below: the run's
-	// own progress, and what the recording and the diagnostics bundle note on
-	// the way out. The service is a value, so the selection lives exactly as
-	// long as this run.
+
 	notes := service.selectNotes(request)
 	defer notes.Close()
 	service.notes = notes
-	// The recording outlives the run it records, because what a run left
-	// behind is read after it ended and, on the paths below, after it failed.
+
 	recording, finishRecording := service.startTrace(root, request)
 	cacheRoot := filepath.Join(root, ".goatest", "cache")
 	lease, err := cache.Acquire(ctx, cacheRoot, func() {
@@ -261,9 +250,6 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 	if err == nil {
 		result, err = service.run(ctx, root, request, recording.recorder)
 	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		// If the cache root itself is unusable, no checkpoint/cache writer can
-		// race through it. Let the run produce its ordinary infrastructure
-		// report and join the lock failure to whatever it observes.
 		runResult, runErr := service.run(ctx, root, request, recording.recorder)
 		result = runResult
 		err = errors.Join(err, runErr)
@@ -308,7 +294,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 }
 
 func checkpointDigest(value string) bool {
-	if len(value) != 64 {
+	if len(value) != hex.EncodedLen(sha256.Size) {
 		return false
 	}
 	for _, character := range value {
@@ -370,8 +356,6 @@ func (service Service) run(ctx context.Context, root string, request cli.Request
 	return result, err
 }
 
-// clock is the time source the service measures with, which is the wall clock
-// unless a caller injected one.
 func (service Service) clock() func() time.Time {
 	if service.Now != nil {
 		return service.Now
@@ -379,9 +363,6 @@ func (service Service) clock() func() time.Time {
 	return time.Now
 }
 
-// note reports one progress note through the renderer of the current run, and
-// through a deterministic plain line on the progress stream wherever no run
-// selected one. A service without a progress stream reports nothing.
 func (service Service) note(kind, detail string) {
 	if service.notes != nil {
 		service.notes.Note(kind, detail)
@@ -390,11 +371,6 @@ func (service Service) note(kind, detail string) {
 	ui.NewPlain(service.Progress).Note(kind, detail)
 }
 
-// selectNotes picks the renderer a request's --ui asks for. A jsonl stream
-// belongs on the output stream its final report event will follow; a service
-// without one falls back to plain rather than guessing where the stream went.
-// The dashboard renders only where a composition root probed an interactive
-// terminal, so that every test and every pipe keeps deterministic lines.
 func (service Service) selectNotes(request cli.Request) ui.Notes {
 	switch {
 	case request.UI == cli.UIJSONL && service.Output != nil:
@@ -408,7 +384,7 @@ func (service Service) selectNotes(request cli.Request) ui.Notes {
 
 func (service Service) assureOptions(root string, request cli.Request) assure.Options {
 	program, base := service.buildCacheLocation(root)
-	return assure.Options{
+	options := assure.Options{
 		Root: root, Contract: request.Contract, NoApply: true,
 		Changed: request.Changed, ChangedRef: request.ChangedRef,
 		ReplayFindingID: request.ReplayFindingID, ReplayMutantID: request.ReplayMutantID,
@@ -416,37 +392,53 @@ func (service Service) assureOptions(root string, request cli.Request) assure.Op
 		TestArgs: slices.Clone(request.TestArgs),
 		GoBinary: service.GoBinary, TempDirectory: service.TempDirectory, Environment: service.Environment, Now: service.Now,
 		KeepTemp:          request.KeepTemp,
-		BuildCacheProgram: program, BuildCacheDir: base,
+		BuildCacheProgram: program, BuildCacheDir: base, BuildCacheNativeSource: service.nativeBuildCacheDirectory(),
 	}
+	if request.ReplayExecution != nil {
+		execution := request.ReplayExecution
+		options.TestArgs = slices.Clone(execution.TestArgs)
+		options.BuildTags = slices.Clone(execution.BuildTags)
+		options.MutationOperators = slices.Clone(execution.MutationOperators)
+		options.MutationJobs = execution.MutationJobs
+		options.CommandTimeout = time.Duration(execution.CommandTimeoutNS)
+		options.TargetTimeout = time.Duration(execution.TargetTimeoutNS)
+		options.ExecutionPinned = true
+	}
+	return options
 }
 
-// buildCacheLocation resolves the executable a go command reaches goatest's
-// build cache through and the directory that cache lives in. This is the only
-// layer that may answer either question: below it, both are options.
-//
-// The two are resolved separately and on purpose. Where the cache lives is a
-// property of the machine and the project, and maintenance needs it whether or
-// not this process could serve the cache; what program serves it is a property
-// of this process. Tying the first to the second made `goatest cache status`
-// and `goatest cache gc` silently report an empty cache whenever nothing had
-// named an executable. Both halves are still named by a composition root, and
-// only there: see Executable and UserCacheDir.
+func (service Service) nativeBuildCacheDirectory() string {
+	environment := service.Environment
+	if environment == nil {
+		environment = os.Environ()
+	}
+	var configured string
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, goCacheEnvironmentVariable) {
+			configured = value
+		}
+	}
+	if configured != "" {
+		if strings.EqualFold(configured, "off") || !filepath.IsAbs(configured) {
+			return ""
+		}
+		return filepath.Clean(configured)
+	}
+	if service.UserCacheDir == nil {
+		return ""
+	}
+	userCache, err := service.UserCacheDir()
+	if err != nil || userCache == "" {
+		return ""
+	}
+	return filepath.Join(userCache, nativeGoCacheDirectoryName)
+}
+
 func (service Service) buildCacheLocation(root string) (string, string) {
 	return service.Executable, service.buildCacheDirectory(root)
 }
 
-// buildCacheDirectory resolves where the build cache lives, whether or not this
-// process can serve it.
-//
-// The per-machine default is only ever the one UserCacheDir names, and this
-// layer will not go looking: a service nobody handed a resolver is not the
-// goatest CLI, and inspecting or collecting the running developer's own cache
-// on its behalf is the one thing no embedded service may do.
-//
-// An empty answer is nowhere to keep a layer rather than a failure: no
-// per-machine cache root and none configured, or a configuration that will not
-// load — and that last one is reported by the run that loads the same file a
-// moment later, which is the layer that owns the failure.
 func (service Service) buildCacheDirectory(root string) string {
 	var fallback string
 	if service.UserCacheDir != nil {
@@ -745,10 +737,7 @@ func loadSelected(root string, request cli.Request) (report.Report, error) {
 			return report.Report{}, fmt.Errorf("goatest: unsafe report run ID %q", request.ReportRunID)
 		}
 		path := filepath.Join(reportsRoot(root), request.ReportRunID, "assurance-report-v1.json")
-		// The history is bounded, so a run that is not there is an ordinary
-		// answer rather than a filesystem fault. Saying which of the two things
-		// happened is the whole difference between "this tool is broken" and
-		// "that run is old"; every other read failure keeps its cause.
+
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			return report.Report{}, fmt.Errorf("goatest: report run %q is not in reports/runs: it was collected or never written", request.ReportRunID)
 		}

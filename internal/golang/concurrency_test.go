@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 )
 
@@ -113,10 +114,10 @@ func TestConcurrencyPackagesReportsDirectoryFailure(t *testing.T) {
 func writeGo(t *testing.T, root, relative, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(contents), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 }

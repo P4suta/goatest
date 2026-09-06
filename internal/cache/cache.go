@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package cache stores exact-input assurance evidence.
 package cache
 
 import (
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -38,9 +38,6 @@ type cacheWritableFile interface {
 
 func New(root string) *Store { return &Store{root: root} }
 
-// NewWithPolicy enables bounded automatic collection after successful
-// completed-report writes. Checkpoint writes defer collection to avoid a full
-// cache walk at every durable scheduling boundary.
 func NewWithPolicy(root string, maxBytes int64, ttl time.Duration) *Store {
 	return &Store{root: root, maxBytes: maxBytes, ttl: ttl, now: time.Now}
 }
@@ -49,7 +46,6 @@ func (store *Store) Get(digest string) (report.Report, bool, error) {
 	return store.getWithHooks(digest, storeHooks{})
 }
 
-// getWithHooks is Get against a filesystem the caller supplies.
 func (store *Store) getWithHooks(digest string, hooks storeHooks) (report.Report, bool, error) {
 	hooks = hooks.resolved()
 	cacheOperationMutex.RLock()
@@ -87,23 +83,22 @@ func (store *Store) Put(digest string, result report.Report) error {
 	return store.putWithHooks(digest, result, storeHooks{})
 }
 
-// putWithHooks is Put against a filesystem and a collector the caller supplies.
 func (store *Store) putWithHooks(digest string, result report.Report, hooks storeHooks) error {
 	hooks = hooks.resolved()
 	cacheOperationMutex.Lock()
 	defer cacheOperationMutex.Unlock()
+	path, err := store.path(digest)
+	if err != nil {
+		return err
+	}
 	if result.Snapshot != digest {
 		return errors.New("goatest: cache snapshot does not match its digest")
 	}
 	if err := report.Validate(result); err != nil {
 		return fmt.Errorf("goatest: invalid cache report: %w", err)
 	}
-	path, err := store.path(digest)
-	if err != nil {
-		return err
-	}
 	data := report.JSON(result)
-	if err := hooks.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := hooks.mkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
 	temporary, err := hooks.createTemporary(filepath.Dir(path), ".report-*.tmp")

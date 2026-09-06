@@ -12,12 +12,6 @@ import (
 	"time"
 )
 
-// Recorder turns the events of a run into a stream a sink can keep.
-//
-// Every method is safe on a nil receiver and on a Recorder used from several
-// goroutines. Sequencing and emission happen under one lock, so events reach
-// the sink in strictly increasing sequence order however many goroutines record
-// at once.
 type Recorder struct {
 	sink    Sink
 	now     func() time.Time
@@ -30,11 +24,6 @@ type Recorder struct {
 	ended    bool
 }
 
-// New starts a recording and emits its run-start event.
-//
-// A nil sink returns a nil *Recorder, which is the disabled trace: callers keep
-// recording unconditionally and pay nothing for it. A nil clock is the wall
-// clock.
 func New(sink Sink, now func() time.Time) *Recorder {
 	if sink == nil {
 		return nil
@@ -50,10 +39,6 @@ func New(sink Sink, now func() time.Time) *Recorder {
 	return recorder
 }
 
-// PhaseStart records the beginning of a phase and returns the closer that ends
-// it. The closer is never nil, so callers may defer it unconditionally, and it
-// emits the phase-end event once however often it runs. Phases may nest: each
-// closer times its own phase.
 func (recorder *Recorder) PhaseStart(name string) func() {
 	if recorder == nil {
 		return func() {}
@@ -77,10 +62,18 @@ func (recorder *Recorder) PhaseStart(name string) func() {
 	}
 }
 
-// Exec records one executed command. Environment names are sorted and stripped
-// of any value the caller passed along, and captured output is digested rather
-// than serialised, so the event carries the shape of the execution and none of
-// its secrets.
+func (recorder *Recorder) Prepare(phase, state, result string, duration time.Duration) {
+	if recorder == nil {
+		return
+	}
+	record := PrepareRecord{Phase: phase, State: state, Result: result}
+	if state == PrepareStateFinished {
+		durationMS := duration.Milliseconds()
+		record.DurationMS = &durationMS
+	}
+	recorder.emit(Event{Type: TypePrepare, Prepare: &record})
+}
+
 func (recorder *Recorder) Exec(record ExecRecord) {
 	if recorder == nil {
 		return
@@ -94,7 +87,6 @@ func (recorder *Recorder) Exec(record ExecRecord) {
 	recorder.emit(Event{Type: TypeExec, Exec: &record})
 }
 
-// MutantExec records one mutant execution and its outcome.
 func (recorder *Recorder) MutantExec(record MutantRecord) {
 	if recorder == nil {
 		return
@@ -102,7 +94,6 @@ func (recorder *Recorder) MutantExec(record MutantRecord) {
 	recorder.emit(Event{Type: TypeMutantExec, Mutant: &record})
 }
 
-// Route records how a mutant was routed to the tests that run it.
 func (recorder *Recorder) Route(record RouteRecord) {
 	if recorder == nil {
 		return
@@ -110,9 +101,6 @@ func (recorder *Recorder) Route(record RouteRecord) {
 	recorder.emit(Event{Type: TypeRoute, Route: &record})
 }
 
-// ProbeExec records one infection probe or paired semantic-original control:
-// how it ran, what became of it, and, for a routing probe, the mutants it
-// infected.
 func (recorder *Recorder) ProbeExec(record ProbeRecord) {
 	if recorder == nil {
 		return
@@ -120,7 +108,6 @@ func (recorder *Recorder) ProbeExec(record ProbeRecord) {
 	recorder.emit(Event{Type: TypeProbeExec, Probe: &record})
 }
 
-// Progress records a progress note forwarded from the run.
 func (recorder *Recorder) Progress(kind, detail string) {
 	if recorder == nil {
 		return
@@ -128,7 +115,6 @@ func (recorder *Recorder) Progress(kind, detail string) {
 	recorder.emit(Event{Type: TypeProgress, Progress: &ProgressRecord{Kind: kind, Detail: detail}})
 }
 
-// Artifact records a file the run wrote.
 func (recorder *Recorder) Artifact(kind, path string) {
 	if recorder == nil {
 		return
@@ -136,13 +122,6 @@ func (recorder *Recorder) Artifact(kind, path string) {
 	recorder.emit(Event{Type: TypeArtifact, Artifact: &ArtifactRecord{Kind: kind, Path: path}})
 }
 
-// RunEnd closes the recording with the verdict, the error that ended the run if
-// there was one, and the event accounting.
-//
-// The accounting is the honesty of a best effort trace: emitted counts the
-// events the sink kept, dropped the ones it could not. A sink that reports its
-// own drops is authoritative; otherwise the recorder counts the emissions that
-// failed. A recording ends once, and events recorded afterwards are dropped.
 func (recorder *Recorder) RunEnd(verdict string, err error) {
 	if recorder == nil {
 		return
@@ -162,8 +141,6 @@ func (recorder *Recorder) RunEnd(verdict string, err error) {
 	recorder.ended = true
 }
 
-// droppedLocked reports how many events the sink did not keep, preferring the
-// sink's own count over the failures the recorder observed.
 func (recorder *Recorder) droppedLocked() int64 {
 	if dropper, ok := recorder.sink.(Dropper); ok {
 		return dropper.Dropped()
@@ -171,16 +148,12 @@ func (recorder *Recorder) droppedLocked() int64 {
 	return recorder.failures
 }
 
-// emit stamps and delivers one event.
 func (recorder *Recorder) emit(event Event) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
 	recorder.emitLocked(recorder.now(), event)
 }
 
-// emitLocked stamps an event with the next sequence number and the moment it
-// was recorded, then hands it to the sink. The caller holds the lock, which is
-// what keeps sequence order and delivery order the same order.
 func (recorder *Recorder) emitLocked(moment time.Time, event Event) {
 	if recorder.ended {
 		return
@@ -195,9 +168,6 @@ func (recorder *Recorder) emitLocked(moment time.Time, event Event) {
 	}
 }
 
-// environmentNames returns the sorted, deduplicated variable names of an
-// environment description. Entries arriving as name=value are reduced to their
-// name, which is the only half a trace is allowed to keep.
 func environmentNames(entries []string) []string {
 	if len(entries) == 0 {
 		return nil

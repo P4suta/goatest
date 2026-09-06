@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 const GraphSchemaV1 = "evidence-graph-v1"
@@ -32,7 +34,6 @@ func LoadGraph(path string) (GraphRecord, bool, error) {
 	return loadGraphWithHooks(path, graphHooks{})
 }
 
-// loadGraphWithHooks is LoadGraph against a filesystem the caller supplies.
 func loadGraphWithHooks(path string, hooks graphHooks) (GraphRecord, bool, error) {
 	data, err := hooks.resolved().readGraph(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -60,7 +61,6 @@ func SaveGraph(path string, record GraphRecord) error {
 	return saveGraphWithHooks(path, record, graphHooks{})
 }
 
-// saveGraphWithHooks is SaveGraph against a filesystem the caller supplies.
 func saveGraphWithHooks(path string, record GraphRecord, hooks graphHooks) error {
 	hooks = hooks.resolved()
 	if record.ModulePath == "" {
@@ -81,7 +81,7 @@ func saveGraphWithHooks(path string, record GraphRecord, hooks graphHooks) error
 		return err
 	}
 	data = append(data, '\n')
-	if err := hooks.mkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := hooks.mkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
 	temporary, err := hooks.createTemporary(filepath.Dir(path), ".graph-*.tmp")

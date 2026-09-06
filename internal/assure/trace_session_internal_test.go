@@ -5,7 +5,6 @@ package assure
 
 import (
 	"errors"
-	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -15,21 +14,13 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// The scripted mutation session of the internal tests stands in for a prepared
-// go-mutants session here as well: testkit's scripted session cannot serve an
-// internal test of this package, because testkit imports it.
-
-// traceSessionOrigin fixes the clock of a recording, so that nothing these
-// tests assert depends on when they ran.
 var traceSessionOrigin = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 
-// newTraceRecording returns a recording kept in memory.
 func newTraceRecording() (*trace.MemorySink, *trace.Recorder) {
 	sink := trace.NewMemorySink(0)
 	return sink, trace.New(sink, func() time.Time { return traceSessionOrigin })
 }
 
-// recordedMutants returns the mutant records of a recording in emission order.
 func recordedMutants(sink *trace.MemorySink) []trace.MutantRecord {
 	var records []trace.MutantRecord
 	for _, event := range sink.Events() {
@@ -40,7 +31,7 @@ func recordedMutants(sink *trace.MemorySink) []trace.MutantRecord {
 	return records
 }
 
-func TestTracedSessionRecordsEveryMutantExecution(t *testing.T) {
+func TestMutationExecutionRecordsTheSemanticAttempt(t *testing.T) {
 	t.Parallel()
 	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-1", Accepted: true}}}
 	session := &mutationUnitSession{catalog: catalog, exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -50,14 +41,10 @@ func TestTracedSessionRecordsEveryMutantExecution(t *testing.T) {
 		}, nil
 	}}
 	sink, recorder := newTraceRecording()
-	traced := newTracedSession(session, recorder)
-	if got := traced.Catalog(); !reflect.DeepEqual(got, catalog) {
-		t.Fatalf("Catalog = %+v", got)
-	}
 	args := []string{"-test.run=^TestBoundary$", "-test.testlogfile=/tmp/private-action.log"}
-	result, err := traced.Exec(t.Context(), gomutants.ExecRequest{
+	result, _, err := executeMutation(t.Context(), session, gomutants.ExecRequest{
 		Mutant: "mutant", Package: "fixture.example/module/pkg", Args: args, Timeout: 30 * time.Second,
-	})
+	}, MutationOptions{Trace: recorder})
 	if err != nil || result.Outcome != gomutants.OutcomeKilled || result.KilledBy != "TestBoundary" {
 		t.Fatalf("Exec = (%+v, %v)", result, err)
 	}
@@ -81,15 +68,14 @@ func TestTracedSessionRecordsEveryMutantExecution(t *testing.T) {
 	}
 }
 
-func TestTracedSessionRecordsAnExecutionThatProducedNoOutcome(t *testing.T) {
+func TestMutationExecutionRecordsAnExecutionThatProducedNoOutcome(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("mutant execution failed")
 	session := &mutationUnitSession{exec: func(gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		return gomutants.MutantResult{}, cause
 	}}
 	sink, recorder := newTraceRecording()
-	traced := newTracedSession(session, recorder)
-	if _, err := traced.Exec(t.Context(), gomutants.ExecRequest{Mutant: "mutant-1", Timeout: -time.Second}); !errors.Is(err, cause) {
+	if _, _, err := executeMutation(t.Context(), session, gomutants.ExecRequest{Mutant: "mutant-1", Timeout: -time.Second}, MutationOptions{Trace: recorder}); !errors.Is(err, cause) {
 		t.Fatalf("Exec error = %v", err)
 	}
 	records := recordedMutants(sink)
@@ -105,15 +91,10 @@ func TestTracedSessionRecordsAnExecutionThatProducedNoOutcome(t *testing.T) {
 	}
 }
 
-func TestTracedSessionWithoutRecorderStaysTransparent(t *testing.T) {
+func TestMutationExecutionWithoutRecorderStaysTransparent(t *testing.T) {
 	t.Parallel()
-	catalog := gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-1", Accepted: true}}}
-	session := &mutationUnitSession{catalog: catalog}
-	traced := newTracedSession(session, nil)
-	if got := traced.Catalog(); !reflect.DeepEqual(got, catalog) {
-		t.Fatalf("Catalog = %+v", got)
-	}
-	result, err := traced.Exec(t.Context(), gomutants.ExecRequest{Mutant: "mutant-1"})
+	session := &mutationUnitSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{{ID: "mutant-1", Accepted: true}}}}
+	result, _, err := executeMutation(t.Context(), session, gomutants.ExecRequest{Mutant: "mutant-1"}, MutationOptions{})
 	if err != nil || result.Outcome != gomutants.OutcomeSurvived {
 		t.Fatalf("Exec = (%+v, %v)", result, err)
 	}
@@ -122,11 +103,11 @@ func TestTracedSessionWithoutRecorderStaysTransparent(t *testing.T) {
 	}
 }
 
-func TestPrepareTracedSessionReportsTheWorkspaceFailure(t *testing.T) {
+func TestPrepareMutationSessionReportsTheWorkspaceFailure(t *testing.T) {
 	t.Parallel()
-	session, err := prepareTracedSession(t.Context(), nil, mutationbridge.PrepareOptions{Contract: "standard-v1"})
+	session, err := prepareMutationSession(t.Context(), nil, mutationbridge.PrepareOptions{Contract: "standard-v1"})
 	if session != nil || err == nil || err.Error() != "goatest: nil mutation workspace" {
-		t.Fatalf("prepareTracedSession = (%+v, %v)", session, err)
+		t.Fatalf("prepareMutationSession = (%+v, %v)", session, err)
 	}
 	if session, err := productionRunDependencies().prepareSession(t.Context(), nil, mutationbridge.PrepareOptions{Contract: "standard-v1"}); session != nil || err == nil {
 		t.Fatalf("production prepareSession = (%+v, %v)", session, err)

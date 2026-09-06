@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
+
+const traceDiffRunCount = 2
 
 func (service Service) readTrace(root, action string, runs []string) (report.Report, error) {
 	traceRoot := filepath.Join(root, ".goatest", "trace")
@@ -34,7 +38,7 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 		result.Evidence = traceSummaryEvidence(id, summary)
 		return result, nil
 	case "diff":
-		if len(runs) != 2 {
+		if len(runs) != traceDiffRunCount {
 			return report.Report{}, errors.New("goatest: trace diff requires two runs")
 		}
 		before, beforeID, err := readNamedTrace(traceRoot, runs[0])
@@ -50,7 +54,8 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 		difference := trace.Diff(before, after)
 		status := "changed"
 		if difference.EventsDelta == 0 && difference.MissingSequencesDelta == 0 && difference.EventsDroppedDelta == 0 &&
-			difference.BeforeVerdict == difference.AfterVerdict && difference.BeforeRunEnd == difference.AfterRunEnd && allZero(difference.CountDelta) && allZero(difference.PhaseDurationDeltaMS) {
+			difference.BeforeVerdict == difference.AfterVerdict && difference.BeforeRunEnd == difference.AfterRunEnd && allZero(difference.CountDelta) &&
+			allZero(difference.PhaseDurationDeltaMS) && allZero(difference.PrepareDurationDeltaMS) {
 			status = "unchanged"
 		}
 		result.Evidence = append(result.Evidence, report.Evidence{
@@ -75,6 +80,14 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 		for _, phase := range phases {
 			result.Evidence = append(result.Evidence, report.Evidence{Kind: "trace-diff-phase", ID: phase, Status: "compared", Detail: fmt.Sprintf("duration-ms-delta=%+d", difference.PhaseDurationDeltaMS[phase])})
 		}
+		preparePhases := make([]string, 0, len(difference.PrepareDurationDeltaMS))
+		for phase := range difference.PrepareDurationDeltaMS {
+			preparePhases = append(preparePhases, phase)
+		}
+		slices.Sort(preparePhases)
+		for _, phase := range preparePhases {
+			result.Evidence = append(result.Evidence, report.Evidence{Kind: "trace-diff-prepare", ID: phase, Status: "compared", Detail: fmt.Sprintf("duration-ms-delta=%+d", difference.PrepareDurationDeltaMS[phase])})
+		}
 		return result, nil
 	default:
 		return report.Report{}, fmt.Errorf("goatest: trace action %q is unsupported", action)
@@ -85,26 +98,25 @@ func readNamedTrace(root, name string) (trace.Summary, string, error) {
 	if name == "" {
 		entries, err := os.ReadDir(root)
 		if errors.Is(err, os.ErrNotExist) {
-			return readLatestTrace(root)
+			summary, readErr := trace.ReadSummary(filepath.Join(root, trace.FileName))
+			return summary, "", readErr
 		}
 		if err != nil {
 			return trace.Summary{}, "", fmt.Errorf("goatest: read trace root: %w", err)
 		}
 		var names []string
 		for _, entry := range entries {
-			if entry.Name() == "latest" || !safeTraceName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+			if !safeTraceName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
 				continue
 			}
 			names = append(names, entry.Name())
 		}
 		slices.Sort(names)
 		if len(names) == 0 {
-			return readLatestTrace(root)
+			summary, readErr := trace.ReadSummary(filepath.Join(root, trace.FileName))
+			return summary, "", readErr
 		}
 		name = names[len(names)-1]
-	}
-	if name == "latest" {
-		return readLatestTrace(root)
 	}
 	if !safeTraceName(name) {
 		return trace.Summary{}, "", fmt.Errorf("goatest: invalid trace run %q", name)
@@ -117,26 +129,6 @@ func readNamedTrace(root, name string) (trace.Summary, string, error) {
 	}
 	summary, err := trace.ReadSummary(path)
 	return summary, name, err
-}
-
-func readLatestTrace(root string) (trace.Summary, string, error) {
-	path := filepath.Join(root, "latest")
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		summary, readErr := trace.ReadSummary(filepath.Join(path, trace.FileName))
-		return summary, "latest", readErr
-	}
-	if err != nil {
-		return trace.Summary{}, "", fmt.Errorf("goatest: inspect latest trace: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return trace.Summary{}, "", errors.New("goatest: latest trace is a symbolic link")
-	}
-	if !info.IsDir() {
-		return trace.Summary{}, "", errors.New("goatest: latest trace is not a confined directory")
-	}
-	summary, err := trace.ReadSummary(filepath.Join(path, trace.FileName))
-	return summary, "latest", err
 }
 
 func traceSummaryEvidence(id string, summary trace.Summary) []report.Evidence {
@@ -171,11 +163,30 @@ func traceSummaryEvidence(id string, summary trace.Summary) []report.Evidence {
 	for _, phase := range phases {
 		result = append(result, report.Evidence{Kind: "trace-phase", ID: id + ":" + phase, Status: "observed", Detail: fmt.Sprintf("duration-ms=%d", summary.PhaseDurationMS[phase])})
 	}
+	preparePhases := make([]string, 0, len(summary.PrepareDurationMS))
+	for phase := range summary.PrepareDurationMS {
+		preparePhases = append(preparePhases, phase)
+	}
+	slices.Sort(preparePhases)
+	for _, phase := range preparePhases {
+		result = append(result, report.Evidence{Kind: "trace-prepare", ID: id + ":" + phase, Status: "observed", Detail: fmt.Sprintf("duration-ms=%d", summary.PrepareDurationMS[phase])})
+	}
 	return result
 }
 
 func safeTraceName(name string) bool {
-	return name != "" && name != "." && name != ".." && filepath.Base(name) == name && !strings.ContainsAny(name, `/\\`)
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
+		return false
+	}
+	timestamp, process, found := strings.Cut(name, "-")
+	if !found {
+		return false
+	}
+	if _, err := time.Parse(traceDirectoryTimeFormat, timestamp); err != nil {
+		return false
+	}
+	processID, err := strconv.Atoi(process)
+	return err == nil && processID > 0 && strconv.Itoa(processID) == process
 }
 
 func allZero[T comparable](values map[string]T) bool {

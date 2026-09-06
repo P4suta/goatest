@@ -11,7 +11,6 @@ import (
 	"github.com/P4suta/goatest/internal/buildcache"
 )
 
-// twoLayers is a scratch layer over a base layer, both ready to store entries.
 func twoLayers(t *testing.T, persist bool) buildcache.Layers {
 	t.Helper()
 	root := t.TempDir()
@@ -137,8 +136,7 @@ func TestLayersKeepBaseSelfContained(t *testing.T) {
 	if objects := files(t, layers.Base, "objects"); len(objects) != 1 {
 		t.Fatalf("base objects = %v, want its own copy: the scratch layer is removed with the run", objects)
 	}
-	// Read through a store that has only the base layer, which is what every
-	// later run of this machine sees once this run's scratch is gone.
+
 	entry, source, err := (buildcache.Layers{Base: layers.Base}).Get(identifier(9), reference)
 	if err != nil || source != buildcache.SourceBase || !strings.HasPrefix(entry.DiskPath, layers.Base.Dir) {
 		t.Fatalf("base Get = (%+v, %s, %v), want an object inside base", entry, source, err)
@@ -151,6 +149,7 @@ func TestSourceNamesTheLayerItReadFrom(t *testing.T) {
 		buildcache.SourceNone:    "none",
 		buildcache.SourceScratch: "scratch",
 		buildcache.SourceBase:    "base",
+		buildcache.SourceNative:  "native",
 	} {
 		if got := source.String(); got != want {
 			t.Fatalf("Source(%d).String() = %q, want %q", source, got, want)

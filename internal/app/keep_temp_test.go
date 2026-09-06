@@ -20,14 +20,10 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// A request to keep the temporary directories of a run reaches the run itself,
-// and the paths it then keeps reach the developer: the recording names each of
-// them, and the bundle of a run that failed lists them among the paths it left
-// behind, which is the file a developer reads before going looking on the disk.
 func TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	scratch := filepath.Join(t.TempDir(), "goatest-baseline-kept")
+	scratch := filepath.Join(t.TempDir(), "goatest-run-kept", "baseline-kept")
 	sentinel := errors.New("mutation workspace failed")
 	var kept bool
 	service := app.Service{
@@ -51,11 +47,6 @@ func TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle(t *testing.T) {
 	}
 }
 
-// The directories a run keeps are the ones a stubbed runner never makes, so
-// what keeping them is worth is only visible from a real run: the scratch
-// directory of a real baseline is still on the disk when the run has ended, at
-// the path the recording names, and a run that was asked for nothing leaves
-// neither the directory nor a claim to have kept one.
 func TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -72,8 +63,7 @@ func TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid(t *testing.T
 			directory := filepath.Join(t.TempDir(), "trace")
 			service := app.Service{
 				Root: repository.Root(), GoBinary: testkit.GoBinary(t),
-				// The parent of every temporary directory of the run, so that
-				// what the run keeps the test framework still removes.
+
 				TempDirectory: t.TempDir(), Environment: os.Environ(),
 			}
 			var stdout, stderr bytes.Buffer
@@ -103,7 +93,6 @@ func TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid(t *testing.T
 	}
 }
 
-// A run that was not asked to keep anything is not told to.
 func TestARunKeepsNothingUnlessItWasAsked(t *testing.T) {
 	t.Parallel()
 	var kept bool

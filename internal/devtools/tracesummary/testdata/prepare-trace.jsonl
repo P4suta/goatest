@@ -1,0 +1,8 @@
+{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0}
+{"seq":2,"type":"prepare","timestamp":"2026-01-01T00:00:00.001Z","elapsed_ms":1,"prepare":{"phase":"discovery","state":"started"}}
+{"seq":3,"type":"prepare","timestamp":"2026-01-01T00:00:01.201Z","elapsed_ms":1201,"prepare":{"phase":"discovery","state":"finished","result":"succeeded","duration_ms":1200}}
+{"seq":4,"type":"prepare","timestamp":"2026-01-01T00:00:01.202Z","elapsed_ms":1202,"prepare":{"phase":"binary_build","state":"started"}}
+{"seq":5,"type":"prepare","timestamp":"2026-01-01T00:00:01.202Z","elapsed_ms":1202,"prepare":{"phase":"binary_build","state":"finished","result":"skipped","duration_ms":0}}
+{"seq":6,"type":"prepare","timestamp":"2026-01-01T00:00:01.203Z","elapsed_ms":1203,"prepare":{"phase":"verification","state":"started"}}
+{"seq":7,"type":"prepare","timestamp":"2026-01-01T00:00:01.503Z","elapsed_ms":1503,"prepare":{"phase":"verification","state":"finished","result":"failed","duration_ms":300}}
+{"seq":8,"type":"run-end","timestamp":"2026-01-01T00:00:01.504Z","elapsed_ms":1504,"run":{"verdict":"ERROR","error":"verification failed","events_emitted":7,"events_dropped":0}}

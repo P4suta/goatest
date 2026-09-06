@@ -72,14 +72,14 @@ source position on the original program?
    identity. If the original fails or reaches its safety ceiling, every mutant
    waiting on that command is inconclusive without executing another copy. If
    it passes, its duration is a same-run control sample for the mutant's
-   comparative deadline and the same result can serve later paired kill
-   confirmations. Replay skips the probe tree and uses a pristine fallback.
+   comparative deadline. Replay skips the probe tree and uses a pristine
+   fallback.
 6. **Record and audit the proof independently.** A route names its passing
    control as `suite_coverage`; `suite_reached` is present only when a covered
    block contained the exact position. `proofaudit` reconstructs package-suite
    profiles from recorded baseline commands, independently reimplements block
-   containment, deduplicates paired kill confirmations, and requires that every
-   attributable package-suite kill be kept. Missing, conflicting, or
+   containment, deduplicates identical execution records, and requires that
+   every attributable package-suite kill be kept. Missing, conflicting, or
    unattributable evidence is reported as unverifiable, never as a clean pass.
 
 ## Soundness boundary

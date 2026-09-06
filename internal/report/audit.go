@@ -4,18 +4,17 @@
 package report
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
 
-// Validate checks the fail-closed invariants of the public report contract.
-// It intentionally does not require invocation metadata; use
-// ValidateForPersistence at the durable report boundary.
 func Validate(input Report) error {
-	if input.Schema != "" && input.Schema != SchemaV1 {
-		return fmt.Errorf("goatest: report schema %q is unsupported", input.Schema)
+	if input.Schema != SchemaV1 {
+		return fmt.Errorf("goatest: report schema %q: expected %s", input.Schema, SchemaV1)
 	}
 	if !knownVerdict(input.Verdict) {
 		return fmt.Errorf("goatest: report verdict %q is unknown", input.Verdict)
@@ -104,14 +103,9 @@ func validateAcceptances(input Report) error {
 	return nil
 }
 
-// ValidateForPersistence requires the audit metadata that every completed run
-// must carry before it can replace a latest index.
 func ValidateForPersistence(input Report) error {
 	if err := Validate(input); err != nil {
 		return err
-	}
-	if input.Schema != SchemaV1 {
-		return fmt.Errorf("goatest: persisted report schema %q: expected %s", input.Schema, SchemaV1)
 	}
 	if input.RunID == "" {
 		return errors.New("goatest: persisted report is missing run_id")
@@ -142,6 +136,10 @@ func ValidateForPersistence(input Report) error {
 	}
 	if !validSHA256(input.Configuration.Digest) {
 		return errors.New("goatest: persisted report configuration digest is not a lowercase SHA-256")
+	}
+	if input.Execution.MutationJobs < 0 ||
+		input.Execution.CommandTimeoutNS < 0 || input.Execution.TargetTimeoutNS < 0 {
+		return errors.New("goatest: persisted report execution metadata contains a negative value")
 	}
 	if input.Toolchain.Go == "" || input.Toolchain.Goatest == "" || input.Toolchain.GoMutants == "" || input.Toolchain.OS == "" || input.Toolchain.Arch == "" {
 		return errors.New("goatest: persisted report is missing toolchain or platform identity")
@@ -195,7 +193,7 @@ func knownRunKind(kind RunKind) bool {
 }
 
 func validSHA256(input string) bool {
-	if len(input) != 64 {
+	if len(input) != hex.EncodedLen(sha256.Size) {
 		return false
 	}
 	for _, character := range input {
@@ -256,8 +254,7 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 			return errors.New("goatest: mutant accounting contains a negative count")
 		}
 	}
-	// A reused verdict is one of the executions, not an extra one: it is a
-	// mutant that reached a terminal disposition without this run executing it.
+
 	if count.ReusedKilled+count.ReusedSurvived > count.Executed {
 		return fmt.Errorf("goatest: mutant accounting reused %d of %d executions",
 			count.ReusedKilled+count.ReusedSurvived, count.Executed)
@@ -335,23 +332,6 @@ func validateMutants(count MutantAccounting, dispositions []MutantDisposition, v
 	return nil
 }
 
-// validateReuse holds one disposition to the two things a reused verdict has
-// to be: traceable and possible.
-//
-// Traceable, because a verdict this run did not observe is only auditable
-// beside the run that did observe it, so the flag and the provenance are
-// required of each other in both directions. Possible, because evidence is
-// only ever recorded about a mutant that reached a terminal execution
-// disposition: nothing was ever executed for a compile rejection or for a
-// mutant outside the scope, so there is nothing about one of those that could
-// have been reused.
-//
-// An acceptance is the one disposition beside the three executed ones a reuse
-// reaches. A reused verdict raises its finding again rather than carrying the
-// recording run's answer to it, so the acceptances of the run reading the
-// record decide it, and one that still holds leaves a mutant that was reused
-// and reports as accepted. It is outside the executed counts, which is why no
-// reuse counter moves for it while the flag and its provenance stay.
 func validateReuse(disposition MutantDisposition) error {
 	if disposition.Reused != (disposition.Provenance != "") {
 		return fmt.Errorf("goatest: mutant %s reuse and provenance disagree: reused=%t provenance=%q",

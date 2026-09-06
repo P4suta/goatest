@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package mutationbridge is goatest's one-way adapter to go-mutants.
 package mutationbridge
 
 import (
@@ -20,45 +19,37 @@ type Options struct {
 	GoBinary        string
 	TempDirectory   string
 	ReportDirectory string
+	SnapshotExclude []string
 	Environment     []string
-	// Trace records the commands the workspace runs. A nil recorder is a
-	// workspace that runs untraced, which is what every caller that does not
-	// ask for a trace gets.
+
 	Trace *trace.Recorder
-	// KeepTemp asks the engine to keep the snapshot, the probe tree and the
-	// scratch directory it would otherwise remove when the workspace closes.
-	// The tree a mutant actually ran in is the one place the question of what
-	// it looked like can be answered, and a run asked to keep its temporary
-	// directories has to be able to keep that one too.
-	//
-	// Each kept directory is marked kept, so the sweep of the next Open leaves
-	// it where it is rather than collecting it as an orphan.
+
 	KeepTemp bool
 }
 
 type PrepareOptions struct {
-	Contract      string
-	Operators     []string
-	Include       []string
-	Exclude       []string
-	Packages      []string
-	Jobs          int
-	BuildTimeout  time.Duration
-	MutantTimeout time.Duration
-	VerifyArgv    []string
-	VerifyEnv     []string
-	VerifyTimeout time.Duration
-	// Probe also builds the probe tree the infection pass measures against: the
-	// same source with no mutant ever active, in which each site the engine has
-	// a probe form for records whether the mutated value would have differed. It
-	// costs a second instrumentation and a second set of test binaries, so a
-	// caller that never asks the infection question does not pay for it.
+	Contract           string
+	Operators          []string
+	Include            []string
+	Exclude            []string
+	DiscoveryPackages  []string
+	Packages           []string
+	ProbeCoverPackages []string
+	Jobs               int
+	BuildTimeout       time.Duration
+	MutantTimeout      time.Duration
+	VerifyArgv         []string
+	VerifyEnv          []string
+	VerifyTimeout      time.Duration
+	SkipVerify         bool
+
 	Probe bool
 }
 
 type mutationWorkspace interface {
 	Exec(context.Context, gomutants.Command) (gomutants.CommandResult, error)
 	Prepare(context.Context, gomutants.PrepareOptions) (*gomutants.Session, error)
+	ToolchainVersion() string
 	Close() error
 	Swept() gomutants.SweepResult
 	Preserved() []string
@@ -67,11 +58,7 @@ type mutationWorkspace interface {
 type Workspace struct {
 	inner mutationWorkspace
 	trace *trace.Recorder
-	// swept and preserved are what the engine reported, read from it as the
-	// workspace closes and answered from here afterwards. Close is where the
-	// engine fills the second one in and also where this workspace lets go of
-	// the engine, so without this copy the one answer a run needs would be
-	// gone in the same call that produced it.
+
 	swept     gomutants.SweepResult
 	preserved []string
 }
@@ -96,6 +83,7 @@ func Open(ctx context.Context, root string, options Options) (*Workspace, error)
 		GoBinary:        options.GoBinary,
 		TempDirectory:   options.TempDirectory,
 		ReportDirectory: options.ReportDirectory,
+		SnapshotExclude: slices.Clone(options.SnapshotExclude),
 		KeepTemp:        options.KeepTemp,
 		Env:             append([]string(nil), options.Environment...),
 	})
@@ -105,9 +93,6 @@ func Open(ctx context.Context, root string, options Options) (*Workspace, error)
 	return &Workspace{inner: inner, trace: options.Trace}, nil
 }
 
-// Trace reports the recording the workspace runs under. It is how a caller
-// that wraps what the workspace produced, such as a mutation session, records
-// into the same trace the workspace's own commands reach.
 func (workspace *Workspace) Trace() *trace.Recorder {
 	if workspace == nil {
 		return nil
@@ -115,10 +100,6 @@ func (workspace *Workspace) Trace() *trace.Recorder {
 	return workspace.trace
 }
 
-// Exec runs one command and records it. Recording happens after the engine
-// answers, because what a trace reader wants is the execution and its result
-// as one line; a command that never returns leaves the phase it ran in open
-// instead, which says the same thing.
 func (workspace *Workspace) Exec(ctx context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
 	if workspace == nil || workspace.inner == nil {
 		return gomutants.CommandResult{}, errors.New("goatest: nil mutation workspace")
@@ -128,12 +109,6 @@ func (workspace *Workspace) Exec(ctx context.Context, command gomutants.Command)
 	return result, err
 }
 
-// executionRecord describes one executed command for the trace.
-//
-// The environment is handed over whole because the recorder is what reduces it
-// to names; the captured output is handed over for the same reason, digested
-// into the event by the recorder and preserved beside the stream by a sink
-// that can store it. The bridge writes neither.
 func executionRecord(command gomutants.Command, result gomutants.CommandResult, err error) trace.ExecRecord {
 	record := trace.ExecRecord{
 		Argv:       diagnosticCommandArguments(command.Argv),
@@ -151,9 +126,6 @@ func executionRecord(command gomutants.Command, result gomutants.CommandResult, 
 	return record
 }
 
-// diagnosticCommandArguments keeps execution-only action-log paths out of a
-// durable trace. They are random scratch names rather than part of the command
-// a user asked goatest to run, and the log itself is deliberately transient.
 func diagnosticCommandArguments(arguments []string) []string {
 	result := slices.Clone(arguments)
 	return slices.DeleteFunc(result, func(argument string) bool {
@@ -161,9 +133,6 @@ func diagnosticCommandArguments(arguments []string) []string {
 	})
 }
 
-// traceMilliseconds is the millisecond count a trace records for a duration. A
-// negative duration, which the engine contract forbids, is recorded as none
-// rather than as a nonsense measurement.
 func traceMilliseconds(duration time.Duration) int64 {
 	return max(duration.Milliseconds(), 0)
 }
@@ -176,21 +145,31 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 	if err != nil {
 		return nil, err
 	}
+	var prepareTrace func(gomutants.PrepareEvent)
+	if workspace.trace != nil {
+		prepareTrace = func(event gomutants.PrepareEvent) {
+			workspace.trace.Prepare(string(event.Phase), string(event.State), string(event.Result), event.Duration)
+		}
+	}
 	session, err := workspace.inner.Prepare(ctx, gomutants.PrepareOptions{
-		Profile:       profile,
-		Operators:     append([]string(nil), options.Operators...),
-		Include:       append([]string(nil), options.Include...),
-		Exclude:       append([]string(nil), options.Exclude...),
-		Packages:      append([]string(nil), options.Packages...),
-		Jobs:          options.Jobs,
-		BuildTimeout:  options.BuildTimeout,
-		MutantTimeout: options.MutantTimeout,
+		Profile:            profile,
+		Operators:          append([]string(nil), options.Operators...),
+		Include:            append([]string(nil), options.Include...),
+		Exclude:            append([]string(nil), options.Exclude...),
+		DiscoveryPackages:  append([]string(nil), options.DiscoveryPackages...),
+		Packages:           append([]string(nil), options.Packages...),
+		ProbeCoverPackages: append([]string(nil), options.ProbeCoverPackages...),
+		Jobs:               options.Jobs,
+		BuildTimeout:       options.BuildTimeout,
+		MutantTimeout:      options.MutantTimeout,
 		Verify: gomutants.Command{
 			Argv:    append([]string(nil), options.VerifyArgv...),
 			Env:     append([]string(nil), options.VerifyEnv...),
 			Timeout: options.VerifyTimeout,
 		},
-		Probe: options.Probe,
+		SkipVerify: options.SkipVerify,
+		Probe:      options.Probe,
+		Trace:      prepareTrace,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("goatest: prepare mutation session: %w", err)
@@ -198,11 +177,6 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 	return session, nil
 }
 
-// Swept is what the engine collected before it copied anything: the temporary
-// directories of go-mutants runs that were killed before they could remove
-// their own. It is a fact about the machine rather than about this workspace,
-// which is why it is passed through for the run to report and never folded
-// into anything the run decides.
 func (workspace *Workspace) Swept() gomutants.SweepResult {
 	if workspace == nil {
 		return gomutants.SweepResult{}
@@ -213,9 +187,6 @@ func (workspace *Workspace) Swept() gomutants.SweepResult {
 	return workspace.inner.Swept()
 }
 
-// Preserved names the directories a KeepTemp workspace left on disk. The engine
-// fills it in as it closes, so a caller reads it after Close and gets nothing
-// from a workspace that kept nothing.
 func (workspace *Workspace) Preserved() []string {
 	if workspace == nil {
 		return nil
@@ -224,6 +195,13 @@ func (workspace *Workspace) Preserved() []string {
 		return slices.Clone(workspace.preserved)
 	}
 	return workspace.inner.Preserved()
+}
+
+func (workspace *Workspace) ToolchainVersion() string {
+	if workspace == nil || workspace.inner == nil {
+		return ""
+	}
+	return workspace.inner.ToolchainVersion()
 }
 
 func (workspace *Workspace) Close() error {

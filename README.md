@@ -2,7 +2,7 @@
 
 `goatest` is an audit-oriented assurance runner for Go 1.26 and newer. It
 connects native Go tests and fuzz targets with coverage routing, mutation
-testing, targeted native fuzzing, race checks, explicit integration resources,
+testing, deterministic fuzz-seed execution, race checks, explicit integration resources,
 and reviewable repair candidates.
 
 The current release line is a pre-release alpha; `v1` is the first intended
@@ -20,7 +20,7 @@ For `standard-v1`, goatest:
 1. freezes an exact input identity covering source, tests, corpus, dependencies,
    toolchain, platform, declared environment, configuration, and tool versions;
 2. classifies native `TestX`, `FuzzX`, and `ExampleX` results through
-   `test2json`, including skips and setup failures;
+   `test2json`, including fuzz seed corpora, skips, and setup failures;
 3. routes tests by coverage blocks and mutant spans, recovers coverage-blind
    targets from positive infection probes, discharges targets proved unable to
    observe the mutation, and uses one exact package-suite coverage control plus
@@ -28,10 +28,10 @@ For `standard-v1`, goatest:
    mutants;
 4. runs relevant race checks (reported as a static estimate in
    `standard-v1`; `deep-v1` races every package);
-5. evaluates every selected `go-mutants` mutant with control-relative
-   comparative deadlines, memoizing an exact original package preflight before
-   remaining suite fallbacks and requiring a passing original control before a
-   repeated kill confirmation;
+5. evaluates every selected `go-mutants` mutant once under a budget derived
+   from distinct positive same-run controls, memoizing an exact original
+   preflight and treating every budget expiration as non-durable inconclusive
+   evidence;
 6. records survivors, inconclusive/flaky outcomes, compile rejections,
    acceptances, and out-of-scope mutants as a complete ID-level inventory; and
 7. stores any killing corpus or generated test as a candidate. `verify` never
@@ -68,8 +68,7 @@ goatest verify --changed=origin/main ./... -- -short
 goatest verify --contract=deep-v1 ./...
 ```
 
-`goatest init` writes an
-annotated `.goatest.toml` and suggests the next steps, including adding
+`goatest init` writes a minimal `.goatest.toml` and suggests the next steps, including adding
 `.goatest/` and `reports/` - the directories every verification writes - to
 `.gitignore`. A bare `goatest` prints the help text; `goatest help COMMAND` or
 `goatest COMMAND --help` explains one command.
@@ -118,10 +117,13 @@ Verification holds an OS advisory lock on `.goatest/cache/` for the whole run.
 A second process reports `cache-wait` and waits interruptibly. If a run stops
 before producing its durable report, a strict exact-input base checkpoint and
 checksummed append-only journal remain under `.goatest/cache/v1/<digest>/`;
-the next identical run automatically reuses completed baseline targets, the
-complete race phase, and terminal mutant results. Phase boundaries atomically
-compact the journal into `checkpoint-v1.json`; per-target and per-mutant appends
-retain crash durability without repeatedly rewriting the growing document.
+the next identical run automatically reuses completed baseline targets and
+package-suite controls, the complete race phase, and terminal mutant results.
+Phase boundaries atomically compact the journal into `checkpoint-v1.json`;
+per-target, per-suite, and per-mutant appends retain crash durability without
+repeatedly rewriting the growing document. Concurrent target completion order
+never changes report or checkpoint bytes: every completed unit is saved
+immediately, then canonicalized by identity for publication.
 There is no resume flag. See
 [checkpoint v1](docs/checkpoint-v1.md) for invalidation and lifecycle rules.
 
@@ -221,8 +223,10 @@ generation providers. Values are not written to reports.
 
 The cache capacity and TTL also bound `.goatest/trace/` and
 `.goatest/diagnostics/`, independently. `goatest cache status` reports those
-stores and the reusable mutation evidence beside the exact-input cache;
-`goatest cache gc` collects the bounded stores while retaining that evidence.
+stores, the reusable mutation evidence beside the exact-input cache, the
+persistent build cache, and abandoned run-local native projections;
+`goatest cache gc` collects the bounded stores and dead projections while
+retaining mutation evidence.
 `goatest cache flush` explicitly forgets only the exact-input cache and
 mutation evidence, preserving diagnostics, reports, repairs, build objects,
 and temporary directories. All three commands hold the same repository lock.
@@ -231,7 +235,7 @@ See [configuration and protocols](docs/configuration.md) for details.
 
 ## Repair boundary
 
-Targeted fuzz corpus and generated tests share one candidate model under
+Generated corpus entries and generated tests share one candidate model under
 `.goatest/candidates/`. Candidates include snapshot provenance, content,
 preimage identity, validation status, and a report diff. Preview with
 `goatest fix`; only `goatest fix --apply` may change the worktree. Application
@@ -269,8 +273,8 @@ request rules, and source conventions.
 Architecture, assurance contracts, protocols, limitations, and CI notes live
 under [`docs/`](docs/).
 
-Development is test-driven. The suite includes the full weak-test → survivor →
-targeted fuzz → corpus promotion → fresh-session kill flow, exact-cache and
+Development is test-driven. The suite includes deterministic fuzz-seed mutation
+proofs, exact-cache and
 impact-graph cases, provider/resource failures and cleanup, deterministic
 renderers, and the external `go-mutants` bridge contract at the commit `go.mod` pins.
 

@@ -18,6 +18,7 @@
         "run-start",
         "phase-start",
         "phase-end",
+        "prepare",
         "exec",
         "mutant-exec",
         "route",
@@ -43,6 +44,7 @@
       "minimum": 0
     },
     "phase": { "$ref": "#/$defs/phase" },
+    "prepare": { "$ref": "#/$defs/prepare" },
     "exec": { "$ref": "#/$defs/exec" },
     "mutant": { "$ref": "#/$defs/mutant" },
     "route": { "$ref": "#/$defs/route" },
@@ -63,6 +65,10 @@
     {
       "if": { "required": ["type"], "properties": { "type": { "const": "phase-end" } } },
       "then": { "required": ["phase"] }
+    },
+    {
+      "if": { "required": ["type"], "properties": { "type": { "const": "prepare" } } },
+      "then": { "required": ["prepare"] }
     },
     {
       "if": { "required": ["type"], "properties": { "type": { "const": "exec" } } },
@@ -99,6 +105,10 @@
     {
       "if": { "required": ["phase"] },
       "then": { "properties": { "type": { "enum": ["phase-start", "phase-end"] } } }
+    },
+    {
+      "if": { "required": ["prepare"] },
+      "then": { "properties": { "type": { "const": "prepare" } } }
     },
     {
       "if": { "required": ["exec"] },
@@ -139,6 +149,42 @@
         "name": { "type": "string", "minLength": 1 },
         "duration_ms": { "type": "integer", "minimum": 0 }
       }
+    },
+    "prepare": {
+      "description": "One timed stage reported by mutation session preparation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "state"],
+      "properties": {
+        "phase": {
+          "enum": [
+            "discovery",
+            "probe_snapshot",
+            "main_validation",
+            "main_restoration",
+            "verification",
+            "binary_build",
+            "probe_validation",
+            "probe_coverage_build",
+            "probe_restoration"
+          ]
+        },
+        "state": { "enum": ["started", "finished"] },
+        "result": { "enum": ["succeeded", "failed", "skipped"] },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["state"], "properties": { "state": { "const": "started" } } },
+          "then": {
+            "not": { "anyOf": [{ "required": ["result"] }, { "required": ["duration_ms"] }] }
+          }
+        },
+        {
+          "if": { "required": ["state"], "properties": { "state": { "const": "finished" } } },
+          "then": { "required": ["result", "duration_ms"] }
+        }
+      ]
     },
     "exec": {
       "description": "One executed command, recorded without its environment values and without its captured output.",
@@ -186,7 +232,7 @@
       "description": "How a mutant was routed to the tests that run it.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "reason"],
+      "required": ["path", "reason", "granularity"],
       "properties": {
         "mutant_id": { "type": "string" },
         "rule": { "type": "string" },
@@ -197,7 +243,7 @@
         "plan": { "type": "array", "items": { "type": "string" } },
         "reason": { "enum": ["coverage-reaching", "probe-reaching", "unreached"] },
         "granularity": {
-          "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone. Absent in a recording made before routing reported it, and present on every route that carries any of the routing metadata beside it.",
+          "description": "Whether the reaching set was decided by the coverage blocks around the mutated position or by the file alone.",
           "enum": ["block", "file"]
         },
         "fallback": {
@@ -246,11 +292,11 @@
           "pattern": "^package-suite:.+"
         },
         "probed": {
-          "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ and is discharged from the reaching set. Absent in a recording made before the probe pass existed and on a mutant the engine has no probe form for.",
+          "description": "Whether the engine compiled a probe of this mutant into the probe tree, so that a measured target which does not name the mutant among its infections never made its site differ and is discharged from the reaching set. Absent on a mutant the engine has no probe form for.",
           "type": "boolean"
         },
         "reused": {
-          "description": "Whether the run resolved this mutant from evidence an earlier run recorded instead of executing it. Nothing ran, so the recording carries no execution of the mutant and the plan is the reuse itself. Absent in a recording made before evidence was reused and on every mutant a run executed.",
+          "description": "Whether the run resolved this mutant from evidence an earlier run recorded instead of executing it. Nothing ran, so the recording carries no execution of the mutant and the plan is the reuse itself. Absent on every mutant a run executed.",
           "type": "boolean"
         }
       },
@@ -331,24 +377,6 @@
           }
         },
         {
-          "if": {
-            "anyOf": [
-              { "required": ["column"] },
-              { "required": ["file_candidates"] },
-              { "required": ["discharged"] },
-              { "required": ["probe_reaching"] },
-              { "required": ["suite_coverage"] },
-              { "required": ["suite_reached"] },
-              { "required": ["suite_probe"] },
-              { "required": ["probed"] }
-            ]
-          },
-          "then": {
-            "description": "The granularity is what marks a route as carrying its routing metadata, so a route carrying any of it names one.",
-            "required": ["granularity"]
-          }
-        },
-        {
           "if": { "required": ["reused"], "properties": { "reused": { "const": true } } },
           "then": {
             "description": "Nothing ran for a reused mutant, so the plan of a reused route is the reuse and nothing else.",
@@ -367,7 +395,7 @@
       ]
     },
     "probe": {
-      "description": "One infection probe or paired semantic-original control against the prepared probe tree, recorded without the environment it ran in and without a path into that tree.",
+      "description": "One infection probe or exact semantic original mutation preflight against the prepared probe tree, recorded without the environment it ran in and without a path into that tree.",
       "type": "object",
       "additionalProperties": false,
       "required": ["target", "exit_code"],
@@ -379,7 +407,7 @@
           "type": "boolean"
         },
         "control": {
-          "description": "Whether this probe-tree execution was used only as the original half of paired mutation confirmation. Its infection log is not routing evidence.",
+          "description": "Whether this probe-tree execution was used as an exact semantic original preflight before mutation execution. Its infection log is not routing evidence.",
           "type": "boolean"
         },
         "args": { "type": "array", "items": { "type": "string" } },
@@ -395,6 +423,14 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
+        },
+        "whole_tree": {
+          "description": "Whether this package-suite execution keys the whole snapshot rather than its ordinary closure. Absent and false mean the observation kept the key narrow.",
+          "type": "boolean"
+        },
+        "whole_tree_reason": {
+          "description": "Why the key was widened, so that a package which never reuses evidence can be traced to the observation that widened it: the package is statically beyond the action log, no log could be created or read back, the completed log was malformed or carried an operation the reader does not model, the execution read a repository directory, or it read a file outside its ordinary input set.",
+          "enum": ["static-unobservable", "log-unavailable", "log-ambiguous", "directory-access", "outside-input"]
         },
         "error": {
           "description": "The error that stopped the execution before it reached an outcome.",
@@ -422,15 +458,15 @@
         {
           "if": { "required": ["control"], "properties": { "control": { "const": true } } },
           "then": {
-            "description": "A paired control has its own synthetic identity and is neither a package-suite routing probe nor a source of infection facts.",
-            "properties": { "target": { "pattern": "^paired-control:.+" } },
+            "description": "An exact original preflight has its own synthetic identity and is neither a package-suite routing probe nor a source of infection facts.",
+            "properties": { "target": { "pattern": "^mutation-control:.+" } },
             "not": { "anyOf": [{ "required": ["suite"] }, { "required": ["infected"] }] }
           }
         },
         {
-          "if": { "properties": { "target": { "pattern": "^paired-control:" } } },
+          "if": { "properties": { "target": { "pattern": "^mutation-control:" } } },
           "then": {
-            "description": "A synthetic paired-control identity belongs only to a control execution.",
+            "description": "A synthetic mutation-control identity belongs only to an exact original preflight.",
             "required": ["control"],
             "properties": { "control": { "const": true } }
           }

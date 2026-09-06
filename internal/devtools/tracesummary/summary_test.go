@@ -12,8 +12,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// summarizeFixture reads a testdata stream and renders it, which is the whole
-// path the command runs.
 func summarizeFixture(t *testing.T, name string) string {
 	t.Helper()
 	events, err := readEvents(strings.NewReader(readFixture(t, name)))
@@ -31,6 +29,11 @@ func TestRenderSummaryBreaksDownACompleteRecording(t *testing.T) {
 func TestRenderSummaryReportsWhatATruncatedRecordingLacks(t *testing.T) {
 	t.Parallel()
 	testkit.Golden(t, "incomplete-summary.txt", []byte(summarizeFixture(t, "incomplete-trace.jsonl")))
+}
+
+func TestRenderSummaryBreaksDownPreparationTiming(t *testing.T) {
+	t.Parallel()
+	testkit.Golden(t, "prepare-summary.txt", []byte(summarizeFixture(t, "prepare-trace.jsonl")))
 }
 
 func TestRenderSummaryDependsOnTheEventsAlone(t *testing.T) {

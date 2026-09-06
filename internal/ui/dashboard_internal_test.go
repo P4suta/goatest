@@ -5,18 +5,24 @@ package ui
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
+)
+
+const (
+	completedMutationFixture = 4
+	dashboardStopDeadline    = 5 * time.Second
 )
 
 func TestDashboardPhaseVocabularyIsExhaustive(t *testing.T) {
 	for _, test := range []struct{ kind, phase string }{
 		{"snapshot", "snapshot"}, {"cache-hit", "snapshot"}, {"cache-wait", "snapshot"},
 		{"impact-broad", "impact"}, {"impact-targeted", "impact"},
-		{"baseline-target", "baseline"}, {"resume-baseline", "baseline"},
+		{"baseline-progress", "baseline"}, {"resume-baseline", "baseline"},
 		{"race", "race"}, {"resume-race", "race"},
-		{"mutation-prepare", "mutation"}, {"mutation-target", "mutation"}, {"mutation-progress", "mutation"},
+		{"mutation-target", "mutation"}, {"mutation-progress", "mutation"},
 		{"probe-target", "probe"}, {"probe-progress", "probe"}, {"probe-summary", "probe"},
 		{"repair-applied", "repair"},
 	} {
@@ -43,7 +49,7 @@ func TestDashboardFormattingAndEstimateBoundaries(t *testing.T) {
 		}
 	}
 	now := time.Date(2026, 9, 1, 12, 0, 10, 0, time.UTC)
-	renderer := &dashboard{now: func() time.Time { return now }, mutationTotal: 4}
+	renderer := &dashboard{now: func() time.Time { return now }, mutationTotal: completedMutationFixture}
 	if _, ok := renderer.estimatedRemainder(); ok {
 		t.Fatal("estimate existed before progress")
 	}
@@ -51,7 +57,7 @@ func TestDashboardFormattingAndEstimateBoundaries(t *testing.T) {
 	if _, ok := renderer.estimatedRemainder(); ok {
 		t.Fatal("estimate existed at zero completed mutants")
 	}
-	renderer.mutationDone = 4
+	renderer.mutationDone = completedMutationFixture
 	renderer.mutationStarted = now.Add(-time.Second)
 	if _, ok := renderer.estimatedRemainder(); ok {
 		t.Fatal("estimate existed after completion")
@@ -103,6 +109,14 @@ func TestDashboardInvalidAndEarlyMutationProgress(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	notes := NewDashboard(&output, DashboardOptions{Now: func() time.Time { return now }, Tick: tick})
 	renderer := notes.(*dashboard)
+	notes.Note("baseline-progress", "not-a-fraction")
+	if renderer.baselineTotal != 0 || renderer.detail != "not-a-fraction" {
+		t.Fatalf("invalid baseline progress state = %+v", renderer)
+	}
+	notes.Note("baseline-progress", "0/3")
+	if renderer.baselineDone != 0 || renderer.baselineTotal != 3 || renderer.detail != "" {
+		t.Fatalf("baseline progress state = %+v", renderer)
+	}
 	notes.Note("mutation-progress", "not-a-fraction")
 	if renderer.mutationTotal != 0 || renderer.detail != "not-a-fraction" || !renderer.mutationStarted.IsZero() {
 		t.Fatalf("invalid progress state = %+v", renderer)
@@ -115,7 +129,23 @@ func TestDashboardInvalidAndEarlyMutationProgress(t *testing.T) {
 	if renderer.mutationDone != 0 || renderer.mutationTotal != 3 || renderer.detail != "" || renderer.mutationStarted != now {
 		t.Fatalf("early progress state = %+v", renderer)
 	}
+	notes.Note("mutation-target", "3 mutants")
+	if renderer.mutationDone != 0 || renderer.mutationTotal != 0 || renderer.mutationStarted != now {
+		t.Fatalf("new mutation phase retained prior progress = %+v", renderer)
+	}
 	notes.Close()
+}
+
+func TestDashboardWatcherStopsWhenTickStreamCloses(t *testing.T) {
+	tick := make(chan time.Time)
+	renderer := NewDashboard(io.Discard, DashboardOptions{Tick: tick}).(*dashboard)
+	close(tick)
+	select {
+	case <-renderer.done:
+	case <-time.After(dashboardStopDeadline):
+		t.Fatal("watcher did not stop")
+	}
+	renderer.Close()
 }
 
 func TestDashboardWatchDoesNotRenderAClosedDashboard(t *testing.T) {

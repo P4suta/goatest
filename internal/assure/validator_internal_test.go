@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestValidateCopyRootsRejectsDestinationInsideSource(t *testing.T) {
 	source := t.TempDir()
 	destination := filepath.Join(source, "scratch", "candidate")
-	if err := os.MkdirAll(destination, 0o755); err != nil {
+	if err := os.MkdirAll(destination, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateCopyRoots(source, destination); err == nil {

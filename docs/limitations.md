@@ -1,7 +1,7 @@
 # Current limitations and deferred work
 
 This is a pre-release alpha. The implementation has strong self-tests, but
-self-dogfood is not external compatibility evidence.
+self-dogfood is not evidence about other repositories.
 
 ## Fail-closed implementation limits
 
@@ -69,11 +69,6 @@ self-dogfood is not external compatibility evidence.
   block of the surrounding code inside the braces — the block after the body
   begins one column past the closing brace or later. A proof whose coordinates
   do not describe a span the edit precedes discharges nothing.
-- A baseline target restored from a checkpoint written before positive blocks
-  were preserved carries only the files it reached. It is routed at file
-  granularity for the rest of the run, so a legacy resume executes at least the
-  work a cold run would, never less. Current checkpoints retain exact block
-  routing. See [checkpoint v1](checkpoint-v1.md).
 - Infection facts are taken from one execution of each eligible target and each
   package suite for which infection can still answer an unresolved mutant. A
   target or suite whose behaviour differs between runs — a clock, a
@@ -91,15 +86,17 @@ self-dogfood is not external compatibility evidence.
   execution take a path its control did not. The pass also sees only
   what its probe tree records: a mutant the engine has no probe form for is
   absent from every measurement there will ever be, and is read as infected by
-  every target rather than as one nothing infected. Fuzz targets are not probed
-  at all, and carry no facts for the same reason. An exact-input continuation
+  every target rather than as one nothing infected. Fuzz seed targets are
+  probed like other deterministic targets. An exact-input continuation
   restores the same complete observation instead of taking a second sample;
   this adds no blind spot beyond uninterrupted execution, but its new trace has
   no physical `probe-exec` records and therefore is not by itself a
   self-contained `proofaudit` input for the infection layer.
-- `replay` currently accepts only mutation-backed findings with a recorded
-  mutant identity. Other finding kinds are rejected instead of executing an
-  unrelated mutation set.
+- `replay` accepts only mutation-backed findings with a recorded mutant
+  identity. It restores the report's requested package scope, contract, test
+  arguments, build tags, mutation operators, parallelism, and
+  timeouts. Other finding kinds and reports without complete execution
+  identity are rejected instead of executing a guessed mutation experiment.
 - Resource providers support start/ready/stop and shared/exclusive instances,
   but not health, reset, per-target scope, or log artifacts.
 - The `--ui=auto` dashboard renders only on an interactive ANSI-capable
@@ -116,12 +113,11 @@ self-dogfood is not external compatibility evidence.
   `fix --apply` validation runs untraced.
 - The `artifact` trace event names the temporary directories `--keep-temp` kept
   and nothing else yet. Nothing else in the schema is unimplemented.
-- `--keep-temp` keeps the run scratch and everything still below it, and asks
-  the mutation engine to keep its snapshot, probe tree and scratch. Like
+- `--keep-temp` keeps the run scratch and everything still below it, keeps the
+  base-local native build-cache projection, and asks the mutation engine to keep
+  its snapshot, probe tree and scratch. Like
   `--trace`, it is accepted by `verify` and `replay` alone, so a `fix --apply`
-  validation removes its candidate trees. The fuzz cache an original-control
-  execution makes for a `-test.fuzz` argument is removed when that command
-  returns regardless.
+  validation removes its candidate trees.
 - A kept directory is named as an `artifact` event of the recording and in
   `.goatest/kept-temp-v1.json`, so a successful untraced run still leaves a
   record of what it left behind. `goatest cache status` lists the entries and
@@ -135,11 +131,17 @@ self-dogfood is not external compatibility evidence.
   a run in progress under a binary from before the marker existed. Such a
   directory therefore survives one day longer than it needs to. The sweep never
   follows a symbolic link and never touches a name goatest did not make.
+- Native build-cache projections live beside the configured persistent build
+  layer, not under the temporary root, because their objects are hard links.
+  `cache status` and `cache gc` inspect that explicitly resolved parent too;
+  a process that resolves no build cache inspects nothing rather than guessing.
 - Trace and diagnostics directories use the cache TTL and byte budget, each as
   an independent retention store. Directories kept with `--keep-temp` are bound
-  by the same TTL through the ledger, but by no byte budget: a keep is a
-  deliberate request, and the only bound on how much disk it may cost is how
-  long it lasts. A preserved command output is capped at 1 MiB per file, so a
+  by the same TTL through the ledger, but generally by no byte budget: a keep is
+  a deliberate request, and the only bound on how much disk it may cost is how
+  long it lasts. The native build projection is the exception and is collected
+  to `build_max_bytes` at its final quiescent boundary before being kept. A
+  preserved command output is capped at 1 MiB per file, so a
   long capture is truncated with a marker even though its event digests the
   whole of it.
 - `reports/runs` is bound by a count and not by age or size: the newest
@@ -160,43 +162,60 @@ self-dogfood is not external compatibility evidence.
   readers, not a query language over individual execution records. See
   [trace v1](trace-v1.md).
 - Reusing a verdict across runs rests on a behaviour key built from what a test
-  binary links and reads. A syntactic list of directory APIs selects candidates;
-  their baseline and evidence-producing mutant runs are narrowed with Go's test
-  action log, and any observed repository input outside the ordinary closure —
-  or any missing/ambiguous log — selects a whole-tree key. The log covers
-  operations made through package `os` after `testing.M.Run` starts. Direct
-  candidate calls in package initialization or `TestMain`, and generic `io/fs`
-  calls with an unknown backing store, therefore remain statically whole-tree.
-  Reads made only through raw syscalls, a subprocess, a helper package the
-  syntactic list does not select, or an uninstrumented pre-`M.Run` helper remain
-  outside the model and can outlive a file they depended on. This is an
+  binary links and reads. A selected target or package suite receives Go's test
+  action log when its package can reach a repository read the log can observe,
+  and any observed repository input outside the ordinary closure — or any
+  missing or ambiguous completed log — selects a whole-tree key. A package
+  whose reads static inspection places beyond the log is widened without an
+  observation. The log covers operations made through package `os` while
+  `testing.M.Run` is active, including calls reached through helpers and
+  dependencies that static inspection does not select. Known reads in package
+  initialization or `TestMain`, generic `io/fs` calls with an unknown backing
+  store, `os.Readlink`, raw `syscall` and `golang.org/x/sys` calls, `cgo`, a
+  subprocess started through `os/exec`, `plugin.Open`, and source parse/list
+  failures remain statically whole-tree: the package is widened without being
+  observed, because the log cannot see what any of them do. Reads made only
+  through an out-of-module package initializer, which runs before the log
+  exists and whose source the scan does not read, or through a custom
+  filesystem that reaches none of those APIs, remain outside the model and can
+  outlive a file they depended on. Closing the initializer case needs the scan
+  to read dependency sources from the module cache, which is a separate piece
+  of machinery and not yet built. This is an
   execution-observation boundary, not an exclusion: every mutant is still
   tested, and uncertain evidence is widened rather than trusted.
+- Comparative mutation evidence assumes that a target's result is deterministic
+  for the frozen snapshot, arguments, environment, and external state. A passing
+  exact original followed by one failing mutant execution is the proof unit. A
+  finite number of repeated mutant failures could only reduce the probability
+  of accepting a spontaneous flaky failure; it could not prove determinism, so
+  goatest does not impose such a repetition count. The same boundary applies to
+  repository-read observation: the baseline and the one evidence-producing
+  mutant execution cannot observe a nondeterministic branch they did not take.
+  Such tests must make their state deterministic for a reusable claim to be
+  reliable.
 - A finite cancellation ceiling remains. Arbitrary mutated code can loop,
   deadlock, recurse without bound, or simply compute for a long time, and no
   finite supervisor can distinguish every slow terminating execution from a
   nonterminating one. Ordinary mutation deadlines are therefore comparative to
-  same-run passing controls rather than project-independent waits, and their
-  expiration is inconclusive rather than a verdict. When a package fallback
-  has no positive duration sample, the legacy 30-second-floor calibration may
-  still be paid once by its memoized prepared original preflight; compilation
-  is outside that deadline and it is not paid independently by every mutant.
-  Replay has no prepared probe tree and can still pay for its pristine fallback
-  compilation. Fuzz campaigns retain a separate fixed safety bound because a
-  seed-corpus duration does not predict the configured search.
-- A reused timeout keeps its finding rather than resolving anything, so it can
-  only ever cost a run work it did not need to do, never assurance. Its
-  condition is existential — the target time ran out under still reaches the
-  mutant unchanged — so a run reuses a timeout even when other targets have
-  since joined the reaching set, and a mutant one of those new targets would
-  now kill keeps its `mutation-timeout` finding until something re-runs it.
-  That is the fail-closed direction, and it is deliberate: nothing is resolved
-  by a reuse that never resolved anything. It is also never re-derived on its
-  own: `goatest replay <finding-id>` bypasses evidence entirely and is the way
-  to run one again.
+  distinct positive same-run controls rather than project-independent waits.
+  The exact original preflight runs under the containment ceiling itself, since
+  a narrower deadline could only lose the observation the mutant budget comes
+  from; if it fails, expires, or leaves no positive duration, no mutant starts
+  for that group. A mutant expiration is answered by measuring that original
+  once more: if the machine measurably slowed while the mutant ran, the budget
+  is scaled by the measured ratio and the mutant runs exactly once more, and
+  otherwise the compatible group is inconclusive. A mutation that never returns
+  leaves its control as fast as before, so it never earns that second run, and
+  no compatible group ever runs a mutant more than twice.
+  Other groups continue because a completed failure in any one is a kill; if
+  none kills, the unknown groups prevent survival. Replay has
+  no prepared probe tree and can still pay for its pristine fallback
+  compilation.
+- Timeout findings are not durable evidence. A later run must execute the
+  request again and either obtain a completed proof or remain inconclusive.
 - Checkpoint I/O, evidence digesting, mutant accounting, and report rendering
   have local Go benchmarks. They establish a self-application baseline, not a
-  cross-repository compatibility or performance contract.
+  performance contract for another repository.
 
 ## Deferred until this repository needs them
 

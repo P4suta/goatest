@@ -21,13 +21,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// traceSchemaURL is the resource identity the trace-event schema is compiled
-// under while a recorded stream is validated against it.
 const traceSchemaURL = "https://goatest.invalid/goatest-trace-v1.schema.json"
 
-// validateTraceStream checks every line of a recorded stream against the
-// schema the trace claims to speak. A trace nothing can validate is a trace
-// nothing can read.
 func validateTraceStream(t *testing.T, directory string) {
 	t.Helper()
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(trace.JSONSchema()))
@@ -60,6 +55,7 @@ func validateTraceStream(t *testing.T, directory string) {
 
 func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().Git()
 	directory := filepath.Join(t.TempDir(), "trace")
 	service := app.Service{
@@ -82,7 +78,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	recording := traceRun(t, directory)
 	validateTraceStream(t, recording)
 	events := readTrace(t, recording)
-	if len(events) < 2 || events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
+	if len(events) < minimumTraceLifecycleEvents || events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
 		t.Fatalf("recorded %d events beginning %+v", len(events), events[0])
 	}
 	last := events[len(events)-1]
@@ -93,8 +89,6 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		t.Fatalf("accounting = %+v of %d events", last.Run, len(events))
 	}
 
-	// Every phase a run begins is answered by the end of that same phase
-	// before the next one begins: the phases of a run are a sequence.
 	var open string
 	var phases []string
 	for _, event := range events {
@@ -115,21 +109,27 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	if open != "" {
 		t.Fatalf("phase %q was never ended", open)
 	}
-	for _, name := range []string{"snapshot", "discover", "baseline", "mutation-prepare", "probe", "mutation", "finalize"} {
+	for _, name := range []string{"snapshot", "discover", "baseline", "probe", "mutation", "finalize"} {
 		if !slices.Contains(phases, name) {
 			t.Errorf("phase %q is absent from %v", name, phases)
 		}
 	}
-	// The round runs one probe pass, between preparing the catalogue and
-	// executing it.
-	if probes := slices.Index(phases, "probe"); probes < 1 || probes+1 >= len(phases) ||
-		phases[probes-1] != "mutation-prepare" || phases[probes+1] != "mutation" {
-		t.Errorf("probe phase sits at %d of %v", probes, phases)
+	if slices.Contains(phases, "mutation-prepare") {
+		t.Errorf("mutation preparation was recorded as a linear phase: %v", phases)
+	}
+	prepares := traceOfType(events, trace.TypePrepare)
+	if len(prepares) == 0 || !slices.ContainsFunc(prepares, func(event trace.Event) bool {
+		return event.Prepare.State == trace.PrepareStateStarted
+	}) || !slices.ContainsFunc(prepares, func(event trace.Event) bool {
+		return event.Prepare.State == trace.PrepareStateFinished
+	}) {
+		t.Errorf("prepare spans = %+v", prepares)
 	}
 
-	// The fixture's boundary returns a value at every return site, so the probe
-	// pass has something to measure and the test that runs both branches
-	// measures it.
+	if probes := slices.Index(phases, "probe"); probes < 1 || probes+1 >= len(phases) ||
+		phases[probes-1] != "race" || phases[probes+1] != "mutation" {
+		t.Errorf("probe phase sits at %d of %v", probes, phases)
+	}
 	var measured int
 	measuredProbes := make(map[string][]string)
 	for _, event := range traceOfType(events, trace.TypeProbeExec) {
@@ -148,9 +148,6 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		t.Error("no target was measured against the probe tree")
 	}
 
-	// The commands that establish the toolchain and the package model are the
-	// ones a reader looks for first, and each preserved output is beside the
-	// stream where the event says it is.
 	var executed [][]string
 	for _, event := range traceOfType(events, trace.TypeExec) {
 		executed = append(executed, event.Exec.Argv)
@@ -162,7 +159,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 			t.Errorf("preserved output %s = %v", event.Exec.OutputPath, err)
 		}
 	}
-	for _, argv := range [][]string{{"go", "version"}, {"go", "list"}} {
+	for _, argv := range [][]string{{"go", "list"}} {
 		if !slices.ContainsFunc(executed, func(candidate []string) bool {
 			return len(candidate) >= len(argv) && slices.Equal(candidate[:len(argv)], argv)
 		}) {
@@ -170,8 +167,6 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		}
 	}
 
-	// One route explains every mutant that ran, recorded before the executions
-	// it explains.
 	routed := map[string]int{}
 	blockRouted := 0
 	for _, event := range traceOfType(events, trace.TypeRoute) {
@@ -179,9 +174,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 			event.Route.Reason != trace.ReasonProbeReaching && event.Route.Reason != trace.ReasonUnreached {
 			t.Errorf("route %+v has no reason", event.Route)
 		}
-		// A route has a plan unless a proof answered for every target that
-		// reached it: the package suite behind an empty plan would run the very
-		// tests the proof just ruled out.
+
 		if !routeHasPlanOrProof(*event.Route, measuredProbes) {
 			t.Errorf("route %+v has no plan", event.Route)
 		}
@@ -193,8 +186,7 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 		}
 		routed[event.Route.MutantID] = int(event.Seq)
 	}
-	// The fixture's test runs every block of the file it guards, so the
-	// mutants inside those blocks are routed by block and not by fallback.
+
 	if blockRouted == 0 {
 		t.Error("no mutant was routed by the coverage blocks that contain it")
 	}
@@ -214,10 +206,6 @@ func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	assertInfectionDischargesAreSelfConsistent(t, result, events)
 }
 
-// routeHasPlanOrProof answers whether one route either schedules an execution
-// or names evidence that settles every execution it removed. Positive suite
-// evidence always wins: a suite that reached or infected the mutant still has
-// to be in the plan even if another observation was silent.
 func routeHasPlanOrProof(record trace.RouteRecord, measuredProbes map[string][]string) bool {
 	if len(record.Plan) != 0 {
 		return true
@@ -280,14 +268,6 @@ func TestRouteHasPlanOrProofRequiresExecutionForPositiveSuiteEvidence(t *testing
 	}
 }
 
-// assertInfectionDischargesAreSelfConsistent holds every never-infected
-// discharge of a real recording to the measurement it was taken on: the route
-// names a probed mutant, the pass measured the target it removed, that
-// measurement left the mutant out, and the run never executed the pair.
-//
-// The fixture returns the value a return-zero mutation puts there for one of
-// its tests, so that test infects nothing and the recording carries at least
-// one such discharge; a recording without one would prove nothing here.
 func assertInfectionDischargesAreSelfConsistent(t *testing.T, result report.Report, events []trace.Event) {
 	t.Helper()
 	measured := make(map[string][]string)
@@ -330,9 +310,6 @@ func assertInfectionDischargesAreSelfConsistent(t *testing.T, result report.Repo
 	}
 }
 
-// selectedTests are the tests one recorded execution selected. A run groups the
-// targets it executes as it pleases, so a discharged target is looked for among
-// the names the selection carries rather than in the string it was rendered as.
 func selectedTests(arguments string) []string {
 	for _, argument := range strings.Fields(arguments) {
 		pattern, selective := strings.CutPrefix(argument, "-test.run=")
@@ -346,9 +323,6 @@ func selectedTests(arguments string) []string {
 	return nil
 }
 
-// oneRoute returns the single route a rule was recorded for, failing the test
-// when the recording holds any other number: an assertion about "the" mutant of
-// a rule is only an assertion when exactly one mutant carries it.
 func oneRoute(t *testing.T, events []trace.Event, rule string) trace.RouteRecord {
 	t.Helper()
 	var found []trace.RouteRecord
@@ -363,8 +337,6 @@ func oneRoute(t *testing.T, events []trace.Event, rule string) trace.RouteRecord
 	return found[0]
 }
 
-// mutantArguments returns the arguments every recorded execution of one mutant
-// ran with, one entry per execution.
 func mutantArguments(events []trace.Event, id string) []string {
 	var arguments []string
 	for _, event := range traceOfType(events, trace.TypeMutantExec) {
@@ -375,13 +347,9 @@ func mutantArguments(events []trace.Event, id string) []string {
 	return arguments
 }
 
-// TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch pins the proof
-// layer against a real run: the tests a branch proof shows cannot observe a
-// mutation are named in the route and never executed, the test that can observe
-// it still is and still kills it, and a mutation every reaching test was
-// discharged for is reported as a survivor without a single execution.
 func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T) {
 	t.Parallel()
+	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).NarrowedBranchFixture().Git()
 	directory := filepath.Join(t.TempDir(), "trace")
 	service := app.Service{
@@ -389,8 +357,7 @@ func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T
 		Environment: os.Environ(),
 	}
 	var stdout, stderr bytes.Buffer
-	// The fixture leaves a mutation no test can observe alive on purpose, so the
-	// run is insufficient rather than assured.
+
 	exit := cli.Run(t.Context(), []string{"verify", "--json", "--trace=" + directory}, &stdout, &stderr, service)
 	if exit != cli.ExitInsufficient {
 		t.Fatalf("verify exit = %d\nstdout: %s\nstderr: %s", exit, stdout.String(), stderr.String())
@@ -408,8 +375,6 @@ func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T
 		identified[target.Name] = target.ID
 	}
 
-	// The clamp's equal case enters the guarded body and the case above the
-	// limit does not, so the proof discharges that one alone.
 	clamp := oneRoute(t, events, "le-to-lt")
 	if clamp.Reason != trace.ReasonCoverageReaching || clamp.Granularity != trace.GranularityBlock {
 		t.Fatalf("clamp route = %+v, want a route decided by coverage blocks", clamp)
@@ -432,8 +397,6 @@ func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T
 		t.Fatalf("clamp mutant %s = %s, want it killed by the test the proof kept", clamp.MutantID, status)
 	}
 
-	// The loader's only test never produces an error, so every test the blocks
-	// route to the guarded body is discharged and nothing is left to run.
 	load := oneRoute(t, events, "nil-error-branch")
 	if load.Reason != trace.ReasonCoverageReaching || load.Granularity != trace.GranularityBlock ||
 		len(load.ReachingTargets) != 0 || len(load.Plan) != 0 {
@@ -452,7 +415,6 @@ func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T
 	}
 }
 
-// mutantStatus is the inventory status one mutant was given.
 func mutantStatus(t *testing.T, result report.Report, id string) report.MutantStatus {
 	t.Helper()
 	for _, mutant := range result.Mutants {
@@ -464,7 +426,6 @@ func mutantStatus(t *testing.T, result report.Report, id string) report.MutantSt
 	return ""
 }
 
-// mutantFinding is the single finding one mutant was reported through.
 func mutantFinding(t *testing.T, result report.Report, id string) report.Finding {
 	t.Helper()
 	var found []report.Finding

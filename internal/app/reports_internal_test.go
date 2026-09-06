@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -98,7 +99,7 @@ func TestAtomicWritePropagatesEveryFilesystemStageAndRenameFallback(t *testing.T
 
 func TestWriteReportsNamesTheArtifactWhoseAtomicWriteFailed(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	err := WriteReports(root, validReportFixture())
@@ -136,7 +137,7 @@ func validReportFixture() report.Report {
 			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
 		},
 		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
-		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
+		Configuration: report.Configuration{Digest: appTestDigest("a")},
 		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
 		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
 	}

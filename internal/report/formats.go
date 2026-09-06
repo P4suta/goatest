@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 type sarifDocument struct {
@@ -68,7 +69,6 @@ type sarifRegion struct {
 	StartLine int `json:"startLine"`
 }
 
-// SARIF projects findings to deterministic SARIF 2.1.0 bytes.
 func SARIF(input Report) []byte {
 	canonical := canonical(input)
 	kinds := make(map[string]struct{})
@@ -103,7 +103,7 @@ func SARIF(input Report) []byte {
 		Schema: "https://json.schemastore.org/sarif-2.1.0.json", Version: "2.1.0",
 		Runs: []sarifRun{{
 			Tool: sarifTool{Driver: sarifDriver{
-				Name: "goatest", InformationURI: "https://github.com/P4suta/goatest", SemanticVersion: "0.1.0", Rules: rules,
+				Name: "goatest", InformationURI: "https://github.com/P4suta/goatest", SemanticVersion: sarifSemanticVersion(canonical.Toolchain.Goatest), Rules: rules,
 			}},
 			Results: results,
 			Properties: map[string]any{
@@ -111,7 +111,7 @@ func SARIF(input Report) []byte {
 				"snapshot": canonical.Snapshot, "verdict": canonical.Verdict,
 				"requestedScope": canonical.Scope.Requested.Kind, "resolvedScope": canonical.Scope.Resolved.Kind,
 				"scope": canonical.Scope, "repository": canonical.Repository, "configuration": canonical.Configuration,
-				"toolchain": canonical.Toolchain, "timing": canonical.Timing, "cache": canonical.Cache,
+				"execution": canonical.Execution, "toolchain": canonical.Toolchain, "timing": canonical.Timing, "cache": canonical.Cache,
 				"accounting": canonical.Accounting, "mutants": canonical.Mutants,
 				"acceptances": canonical.Acceptances, "limitations": canonical.Limitations,
 			},
@@ -119,6 +119,10 @@ func SARIF(input Report) []byte {
 	}
 	data, _ := json.MarshalIndent(document, "", "  ")
 	return append(data, '\n')
+}
+
+func sarifSemanticVersion(version string) string {
+	return strings.TrimPrefix(version, "v")
 }
 
 type junitSuite struct {
@@ -147,9 +151,9 @@ type junitFailure struct {
 	Body    string `xml:",chardata"`
 }
 
-// JUnit projects all evidence as passing cases and findings as failing cases.
 func JUnit(input Report) []byte {
 	canonical := canonical(input)
+	execution, _ := json.Marshal(canonical.Execution)
 	suite := junitSuite{
 		Name: "goatest", Tests: len(canonical.Evidence) + len(canonical.Findings), Failures: len(canonical.Findings),
 		Properties: []junitProperty{
@@ -164,6 +168,7 @@ func JUnit(input Report) []byte {
 			{Name: "git_commit", Value: canonical.Repository.Git.Commit},
 			{Name: "git_dirty", Value: fmt.Sprint(canonical.Repository.Git.Dirty)},
 			{Name: "configuration_digest", Value: canonical.Configuration.Digest},
+			{Name: "execution", Value: string(execution)},
 			{Name: "go_version", Value: canonical.Toolchain.Go},
 			{Name: "goatest_version", Value: canonical.Toolchain.Goatest},
 			{Name: "go_mutants_version", Value: canonical.Toolchain.GoMutants},
@@ -183,7 +188,6 @@ func JUnit(input Report) []byte {
 	return append([]byte(xml.Header), append(data, '\n')...)
 }
 
-// JSONSchema returns the self-contained assurance-report-v1 JSON Schema.
 func JSONSchema() []byte {
 	stringType := map[string]any{"type": "string"}
 	nonEmptyString := map[string]any{"type": "string", "minLength": 1}
@@ -197,7 +201,7 @@ func JSONSchema() []byte {
 		"additionalProperties": false,
 		"required": []string{
 			"schema", "run_id", "run_kind", "verdict", "contract", "snapshot", "scope", "repository",
-			"configuration", "toolchain", "timing", "cache", "accounting", "targets", "mutants", "acceptances", "evidence", "findings",
+			"configuration", "execution", "toolchain", "timing", "cache", "accounting", "targets", "mutants", "acceptances", "evidence", "findings",
 			"repairs", "limitations",
 		},
 		"properties": map[string]any{
@@ -214,6 +218,7 @@ func JSONSchema() []byte {
 			"scope":         map[string]any{"$ref": "#/$defs/scope"},
 			"repository":    map[string]any{"$ref": "#/$defs/repository"},
 			"configuration": map[string]any{"$ref": "#/$defs/configuration"},
+			"execution":     map[string]any{"$ref": "#/$defs/execution"},
 			"toolchain":     map[string]any{"$ref": "#/$defs/toolchain"},
 			"timing":        map[string]any{"$ref": "#/$defs/timing"},
 			"cache":         map[string]any{"$ref": "#/$defs/cache"},
@@ -248,6 +253,15 @@ func JSONSchema() []byte {
 				"module": nonEmptyString, "packages": map[string]any{"type": "array", "items": stringType}, "git": map[string]any{"$ref": "#/$defs/git"},
 			}),
 			"configuration": objectSchema([]string{"digest"}, map[string]any{"digest": digestType}),
+			"execution": objectSchema([]string{
+				"test_args", "build_tags", "mutation_operators", "mutation_jobs", "command_timeout_ns", "target_timeout_ns",
+			}, map[string]any{
+				"test_args":          map[string]any{"type": "array", "items": stringType},
+				"build_tags":         map[string]any{"type": "array", "items": stringType},
+				"mutation_operators": map[string]any{"type": "array", "items": stringType},
+				"mutation_jobs":      integerType,
+				"command_timeout_ns": integerType, "target_timeout_ns": integerType,
+			}),
 			"toolchain": objectSchema([]string{"go", "goatest", "go_mutants", "os", "arch"}, map[string]any{
 				"go": nonEmptyString, "goatest": nonEmptyString, "go_mutants": nonEmptyString, "os": nonEmptyString, "arch": nonEmptyString,
 			}),
@@ -275,13 +289,12 @@ func JSONSchema() []byte {
 			}),
 			"mutantAccounting": objectSchema([]string{
 				"discovered", "selected", "executed", "killed", "survived", "inconclusive",
-				"compile_rejected", "accepted", "out_of_scope", "unknown",
+				"compile_rejected", "accepted", "out_of_scope", "unknown", "reused_killed", "reused_survived",
 			}, map[string]any{
 				"discovered": integerType, "selected": integerType, "executed": integerType,
 				"killed": integerType, "survived": integerType, "inconclusive": integerType,
 				"compile_rejected": integerType, "accepted": integerType, "out_of_scope": integerType, "unknown": integerType,
-				// The reuse counters are optional, so every report written
-				// before evidence was ever reused still validates.
+
 				"reused_killed": integerType, "reused_survived": integerType,
 			}),
 			"mutantDisposition": objectSchema([]string{"id", "status", "path", "line", "package", "rule"}, map[string]any{

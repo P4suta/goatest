@@ -8,6 +8,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,16 +19,13 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// everyRunPhase is the phase sequence of a round that runs to its end.
+const preparedAndPristineWorkspaceCount = 2
+
 var everyRunPhase = []string{
 	"snapshot", "cache-check", "discover", "impact", "resources", "baseline",
-	"graph", "race", "mutation-prepare", "probe", "mutation", "repair", "finalize",
+	"baseline", "graph", "race", "probe", "mutation", "repair", "finalize",
 }
 
-// recordedPhases returns the phases of a recording in order, failing the test
-// unless every phase-start is answered by the phase-end of the same phase. The
-// phases of a run are a sequence and never a nesting: one ends where the next
-// begins, and the last one ends when the run does.
 func recordedPhases(t *testing.T, sink *trace.MemorySink) []string {
 	t.Helper()
 	var names []string
@@ -53,8 +51,6 @@ func recordedPhases(t *testing.T, sink *trace.MemorySink) []string {
 	return names
 }
 
-// recordedProgress returns the progress notes of a recording as the run's own
-// events, so that a trace can be compared with what the caller was told.
 func recordedProgress(sink *trace.MemorySink) []Event {
 	var events []Event
 	for _, event := range sink.Events() {
@@ -98,14 +94,14 @@ func TestRunCoordinatorEndsEveryPhaseItBegins(t *testing.T) {
 			change: func(harness *runCoordinatorHarness) {
 				harness.baseline.Findings = []report.Finding{{ID: "finding-a", Kind: "baseline-failure"}}
 			},
-			want: []string{"snapshot", "cache-check", "discover", "impact", "resources", "baseline"},
+			want: []string{"snapshot", "cache-check", "discover", "impact", "resources", "baseline", "baseline"},
 		},
 		{
 			name: "race findings",
 			change: func(harness *runCoordinatorHarness) {
 				harness.race.Findings = []report.Finding{{ID: "finding-b", Kind: "data-race"}}
 			},
-			want: []string{"snapshot", "cache-check", "discover", "impact", "resources", "baseline", "graph", "race"},
+			want: []string{"snapshot", "cache-check", "discover", "impact", "resources", "baseline", "baseline", "graph", "race"},
 		},
 		{
 			name:   "repaired rounds",
@@ -153,11 +149,89 @@ func TestRunCoordinatorHandsTheRecorderToEveryTracedComponent(t *testing.T) {
 	if harness.workspaceOptions.Trace != harness.recorder {
 		t.Fatalf("workspace recorder = %v, want the run's recorder", harness.workspaceOptions.Trace)
 	}
+	if harness.baselineOptions.Trace != harness.recorder {
+		t.Fatalf("baseline recorder = %v, want the run's recorder", harness.baselineOptions.Trace)
+	}
 	if harness.mutationOptions.Trace != harness.recorder {
 		t.Fatalf("mutation recorder = %v, want the run's recorder", harness.mutationOptions.Trace)
 	}
 	if harness.generationOptions.RepositoryValidator.Trace != harness.recorder {
 		t.Fatalf("validation recorder = %v, want the run's recorder", harness.generationOptions.RepositoryValidator.Trace)
+	}
+}
+
+func TestRunCoordinatorOverlapsPreparationWithPristineBaselineChecks(t *testing.T) {
+	t.Parallel()
+	harness := newRunCoordinatorHarness(t)
+	sink := harness.record()
+	collectBaseline := harness.dependencies.collectBaseline
+	preparationStarted := make(chan struct{})
+	baselineStarted := make(chan struct{})
+	preparationFinished := make(chan struct{})
+	var baselineStart sync.Once
+	var preparationWorkspace *mutationbridge.Workspace
+	var baselineWorkspace CommandWorkspace
+	harness.dependencies.prepareSession = func(ctx context.Context, workspace *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		harness.preparedOptions = options
+		preparationWorkspace = workspace
+		harness.recorder.Prepare(trace.PreparePhaseDiscovery, trace.PrepareStateStarted, "", 0)
+		close(preparationStarted)
+		select {
+		case <-baselineStarted:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		harness.recorder.Prepare(trace.PreparePhaseDiscovery, trace.PrepareStateFinished, trace.PrepareResultSucceeded, time.Millisecond)
+		close(preparationFinished)
+		return &mutationUnitSession{catalog: harness.catalog}, nil
+	}
+	harness.dependencies.collectBaseline = func(ctx context.Context, workspace CommandWorkspace, model goanalysis.Model, targets []BaselineTarget, options BaselineOptions) (BaselineResult, error) {
+		baselineWorkspace = workspace
+		select {
+		case <-preparationStarted:
+		case <-ctx.Done():
+			return BaselineResult{}, ctx.Err()
+		}
+		baselineStart.Do(func() { close(baselineStarted) })
+		select {
+		case <-preparationFinished:
+		case <-ctx.Done():
+			return BaselineResult{}, ctx.Err()
+		}
+		return collectBaseline(ctx, workspace, model, targets, options)
+	}
+	if _, err := harness.run(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if baselineWorkspace == CommandWorkspace(preparationWorkspace) {
+		t.Fatal("mutation preparation and baseline checks shared a workspace")
+	}
+	events := sink.Events()
+	baselineOpen := false
+	prepareStartedDuringBaseline := false
+	prepareFinishedDuringBaseline := false
+	for _, event := range events {
+		switch event.Type {
+		case trace.TypePhaseStart:
+			if event.Phase.Name == phaseBaseline {
+				baselineOpen = true
+			}
+		case trace.TypePhaseEnd:
+			if event.Phase.Name == phaseBaseline {
+				baselineOpen = false
+			}
+		case trace.TypePrepare:
+			if event.Prepare.State == trace.PrepareStateStarted {
+				prepareStartedDuringBaseline = baselineOpen
+			}
+			if event.Prepare.State == trace.PrepareStateFinished {
+				prepareFinishedDuringBaseline = baselineOpen
+			}
+		}
+	}
+	if !prepareStartedDuringBaseline || !prepareFinishedDuringBaseline {
+		t.Fatalf("prepare span did not overlap baseline: %+v", events)
 	}
 }
 
@@ -199,8 +273,8 @@ func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
 	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("prepared control requests = %+v, want %+v", got, want)
 	}
-	if harness.openCalls != 1 {
-		t.Fatalf("workspace opens = %d, want only the primary prepared workspace", harness.openCalls)
+	if harness.openCalls != preparedAndPristineWorkspaceCount {
+		t.Fatalf("workspace opens = %d, want prepared and pristine workspaces", harness.openCalls)
 	}
 	var controls []trace.ProbeRecord
 	for _, event := range sink.Events() {
@@ -208,7 +282,7 @@ func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
 			controls = append(controls, *event.Probe)
 		}
 	}
-	if len(controls) != 1 || controls[0].Target != "paired-control:fixture.example/module" {
+	if len(controls) != 1 || controls[0].Target != trace.MutationControlProbePrefix+"fixture.example/module" {
 		t.Fatalf("recorded controls = %+v", controls)
 	}
 }

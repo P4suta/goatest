@@ -12,15 +12,10 @@ import (
 
 const fixtureSuiteProfile = "0123456789abcdef.test.suite"
 
-// measuredSuite is the baseline package-suite coverage control. It deliberately
-// carries no -test.run selector: the absence is what distinguishes this command
-// from an ordinary target measurement, while -p independently attributes the
-// otherwise hashed profile name to its package.
 func measuredSuite(seq int64, profile, packagePath string) trace.Event {
 	return trace.Event{Seq: seq, Type: trace.TypeExec, Timestamp: fixtureTime, Exec: &trace.ExecRecord{
 		Argv: []string{
-			"go", "tool", "test2json", "-t", "-p", packagePath,
-			"/tmp/goatest-baseline/" + profile + ".test", "-test.v=test2json",
+			fixtureBinary(packagePath),
 			"-test.coverprofile=/tmp/goatest-baseline/" + profile + profileSuffix,
 			"-test.count=1",
 		},
@@ -69,8 +64,7 @@ func TestAuditHoldsSuiteReachToCoveredAndUncoveredPackageSuiteKills(t *testing.T
 					Granularity: trace.GranularityBlock,
 				}),
 				packageSuiteKilled(4, firstMutant, firstDisplay, fixtureModule+"/pkg"),
-				// Kill confirmation repeats the same pair and must not inflate the
-				// soundness sample.
+
 				packageSuiteKilled(5, firstMutant, firstDisplay, fixtureModule+"/pkg"),
 			)
 
@@ -131,10 +125,7 @@ func TestAuditAttributesADirectPackageSuiteThroughItsCompileRecord(t *testing.T)
 
 func TestSuiteReachUsesOnlyTheSuiteProfilesInstrumentation(t *testing.T) {
 	t.Parallel()
-	// Another profile describes the mutant position, but the suite profile does
-	// not. Production cannot derive a negative suite fact from that gap, so the
-	// independent audit must keep the kill rather than borrowing instrumentation
-	// from the other target.
+
 	recorded := recordedEvidence(t, map[string][]string{
 		killerTarget:        {linked(20, 2, 24, 3)},
 		fixtureSuiteProfile: {ran(10, 2, 12, 16)},

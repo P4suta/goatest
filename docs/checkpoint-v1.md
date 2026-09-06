@@ -32,9 +32,10 @@ wait before verification or GC starts.
 
 Every attempt rescans source and corpus content, configuration, dependency
 content and sums, toolchain and platform, selected environment, tool versions,
-contract, package/scope options, build tags, test-binary arguments, timeouts,
-and mutation settings to compute the input digest. There is no CLI resume flag:
-only a checkpoint under the newly computed, identical digest is considered.
+the exact running goatest executable, contract, package/scope options, build
+tags, test-binary arguments, timeouts, and mutation settings to compute the
+input digest. There is no CLI resume flag: only a checkpoint under the newly
+computed, identical digest is considered.
 
 Configured resource providers disable checkpoint reuse because their runtime
 state is not captured. Only repair round zero may reuse a checkpoint. A corpus
@@ -43,6 +44,8 @@ before the next round.
 
 A saved baseline target carries the exact positive coverage blocks it measured,
 so interruption does not widen block routing into a whole-file approximation.
+Its resource requirements exist only as the canonical `capabilities` array;
+the checkpoint schema accepts no singular alias.
 The append-only journal writes each target's blocks once; it does not rewrite
 earlier targets. On this repository's 1,115-target dogfood baseline, 129,595
 positive blocks add 25.8 MB to an 8.7 MB checkpoint and deterministic encoding
@@ -52,18 +55,29 @@ set and keeps exact-block survivor evidence eligible for reuse. The durable
 size is therefore bounded scheduling state with a measured payoff rather than
 repeated profiles.
 
-The `coverage` member is optional for safe compatibility with checkpoints
-written before blocks were preserved. Its absence means unknown, never empty:
-such a legacy target is routed by every mutant in a file it covered. A present
-empty coverage object is an exact empty measurement. This is the conservative
-direction, and [ADR 0013](adr/0013-preserve-block-routing-across-resume.md)
+Instrumentation is package-binary evidence rather than target evidence: every
+isolated target in one package runs the same already-compiled coverage binary.
+An unfinished baseline therefore stores that identical set on at most one
+deterministically selected target anchor per package and omits it from the rest.
+A pending or unmeasured anchor means unknown and can only widen resumed work. A
+433-target interrupted self-run used five anchors and a 10.4 MB journal;
+repeating the package sets on every target would have added about 178.7 MB. At
+baseline completion even those anchors are removed and the deduplicated global
+set lives only in `routing`.
+
+`coverage` is required whenever a saved unit carries target evidence.
+`instrumented` is optional only on an incomplete baseline, where at most one
+completed target per package owns the recovery anchor. Missing instrumentation
+cannot establish that an uncovered position was measurable. A present empty
+coverage object is an exact empty measurement. [ADR 0013](adr/0013-preserve-block-routing-across-resume.md)
 records the decision.
 
 At baseline completion the checkpoint also stores the deduplicated global
 instrumented block set and each successful package-suite coverage control. A
 later exact-input attempt can reconstruct the completed baseline without
-recompiling coverage binaries or rerunning package suites. An unfinished or
-legacy baseline has no `routing` object and repeats those controls; missing
+recompiling coverage binaries or rerunning package suites. While the baseline
+is unfinished, every measured or conservatively unmeasured package-suite control
+is journaled independently and is not repeated by a continuation. Missing
 package-level state is never inferred from target blocks.
 
 A complete target and package-suite probe pass is stored once at its phase
@@ -74,9 +88,9 @@ mapping in the prepared catalog. Restore also requires the exact target and
 requested-suite inventories. A mismatch discards both the probe and every
 mutant result routed with it.
 
-No partial probe is ever stored. Cancellation before the phase boundary, a
-legacy checkpoint without `probe`, or any invalid mapping repeats the complete
-pass; unmeasured entries remain conservative and never become negative facts.
+No partial probe is ever stored. Cancellation before the phase boundary or any
+invalid mapping repeats the complete pass; unmeasured entries remain
+conservative and never become negative facts.
 The fresh attempt emits `probe-exec` records. A restored attempt emits the
 `resume-probe` progress note but no pretend execution record, so trace command
 counts remain physical counts. The decision and its proof are
@@ -84,10 +98,7 @@ counts remain physical counts. The decision and its proof are
 
 Repository-read observation is different because a resumed mutation verdict
 must retain the input boundary established by its baseline. A saved target
-therefore carries whether observation covered its package and whether it
-selected the whole-tree key. An older checkpoint has neither optional field;
-when its package is a current reader candidate, that absence is conservatively
-restored as whole-tree rather than interpreted as a measured narrow result.
+therefore carries whether it selected the whole-tree key.
 
 ## Save boundaries
 
@@ -103,24 +114,29 @@ boundary:
 
 Inside the baseline and mutation phases, each terminal unit is instead one
 append-only journal record. A baseline target is appended after its passed,
-skipped, failed, or not-run classification is complete. A mutant is appended
-the moment nothing more can be learned about it. Each record names the input
-digest and the SHA-256 digest of the base document it extends, contains exactly
-one unit, carries its own checksum, ends in a newline commit marker, and is
-synced before publication returns. This retains per-unit durability without
-rewriting all earlier units after every process.
+skipped, failed, or not-run classification is complete; a package-suite control
+is appended after it is measured or conservatively classified unmeasured. A
+mutant is appended the moment nothing more can be learned about it. Each record
+names the input digest and the SHA-256 digest of the base document it extends,
+contains exactly one unit, carries its own checksum, ends in a newline commit
+marker, and is synced before publication returns. This retains per-unit
+durability without rewriting all earlier units after every process.
 
-Baseline workers may finish out of order, but only the longest fully measured
-prefix is published, in target order. A worker never writes checkpoint state
-itself. The completed base checkpoint is consequently byte-identical to serial
-execution, and interruption can expose only complete target journal records,
-never a partially decoded coverage profile or repository observation.
+Baseline workers may finish out of order. The coordinator publishes every
+complete unit immediately, even when an earlier target is still running or will
+fail, and treats the growing target and suite collections as identity-keyed
+sets. A worker never writes checkpoint state itself. Replay and phase-boundary
+publication sort those sets, while the report is reconstructed in discovery
+order. The completed bytes and selected infrastructure error are consequently
+independent of scheduler order, and interruption can expose only complete
+journal records, never a partially decoded coverage profile or repository
+observation. See [ADR 0016](adr/0016-publish-every-baseline-control.md).
 
 A mutant is terminal the moment nothing more can be learned about it, not when
 the phase around it ends. A mutation every reaching test passed is saved as a
 surviving mutant right there, and so is one whose every reaching test a branch
-proof discharged, which is terminal without having been executed at all; only
-one a fuzz target reaches waits, for the fuzzing that may still kill it.
+proof discharged, which is terminal without having been executed at all. A fuzz
+seed target is an ordinary deterministic reaching target.
 Survivors are the mutants a resumed run pays the most to execute again, so a
 checkpoint written only at the end of the phase would lose exactly them.
 
@@ -131,11 +147,11 @@ either, so it reports the reuse the interrupted run reported; the field is
 optional and absent from every mutant a run executed and from every checkpoint
 written before evidence was reused.
 
-An unfinished target or mutant is absent and therefore implicitly pending. It
-is never converted to report-v1 `unknown`. At completion, mutant accounting and
-the disposition inventory are rebuilt from the current catalog plus all saved
-and newly executed terminal units, then validated by the normal report
-identities.
+An unfinished target, package suite, or mutant is absent and therefore
+implicitly pending. It is never converted to report-v1 `unknown`. At
+completion, mutant accounting and the disposition inventory are rebuilt from
+the current catalog plus all saved and newly executed terminal units, then
+validated by the normal report identities.
 
 ## Validation and safe fallback
 
@@ -160,10 +176,8 @@ baseline, race, and mutation state; a changed race inventory discards race and
 mutation state; a changed probe inventory or mapping discards probe and mutant
 results together.
 
-Saved repair candidates must still load from the candidate store. A missing
-candidate discards mutation state rather than consuming incomplete evidence.
-Malformed or truncated JSON, a leftover temporary file, an unavailable
-artifact, or any checkpoint read/write failure produces a
+Malformed or truncated JSON, a leftover temporary file, or any checkpoint
+read/write failure produces a
 `checkpoint-warning` and a safe cold run. It does not by itself fail the
 verification.
 

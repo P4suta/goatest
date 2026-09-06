@@ -125,6 +125,35 @@ func TestParseCoverageSeparatesCoveredFromInstrumentedBlocks(t *testing.T) {
 	}
 }
 
+func TestRestrictCoverageToPackagesRemovesGeneratedAndUnlistedPackages(t *testing.T) {
+	t.Parallel()
+	block := gotest.CoverageBlock{StartLine: 1, StartColumn: 1, EndLine: 2, EndColumn: 1}
+	coverage := gotest.Coverage{
+		Covered: []gotest.FileCoverage{
+			{Path: "api.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "internal/kept/kept.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "internal/unlisted/unlisted.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "gomutants_rt_1/runtime.go", Blocks: []gotest.CoverageBlock{block}},
+		},
+		Instrumented: []gotest.FileCoverage{
+			{Path: "api.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "internal/kept/kept.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "internal/unlisted/unlisted.go", Blocks: []gotest.CoverageBlock{block}},
+			{Path: "gomutants_rt_1/runtime.go", Blocks: []gotest.CoverageBlock{block}},
+		},
+	}
+	packages := []gotest.Package{{RelativeDir: "."}, {RelativeDir: "internal/kept"}}
+
+	got := gotest.RestrictCoverageToPackages(coverage, packages)
+	want := []gotest.FileCoverage{
+		{Path: "api.go", Blocks: []gotest.CoverageBlock{block}},
+		{Path: "internal/kept/kept.go", Blocks: []gotest.CoverageBlock{block}},
+	}
+	if !reflect.DeepEqual(got.Covered, want) || !reflect.DeepEqual(got.Instrumented, want) {
+		t.Fatalf("RestrictCoverageToPackages() = %+v, want %+v", got, want)
+	}
+}
+
 func TestParseCoverageSortsAndDeduplicatesBlocks(t *testing.T) {
 	t.Parallel()
 	profile := []byte("mode: atomic\n" +
@@ -173,8 +202,7 @@ func TestParseCoverageReturnsEmptyNonNilSlicesForAProfileWithOnlyAHeader(t *test
 
 func TestParseCoverageReportsAMalformedSpan(t *testing.T) {
 	t.Parallel()
-	// Either half of the span may be the malformed one: an end that lacks its
-	// column is caught by the block check as well, a start that lacks it is not.
+
 	for _, span := range []string{"1.1,2", "1,2.2", "a.b,2.2", "1.1;2.2", "1.1,2.2,3.3", "1.1,2.x"} {
 		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
 		coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
@@ -190,14 +218,12 @@ func TestParseCoverageReportsAMalformedSpan(t *testing.T) {
 
 func TestParseCoverageRejectsASpanThatIsNotAHalfOpenBlock(t *testing.T) {
 	t.Parallel()
-	// An overflowing coordinate is placed at the end of the span: strconv
-	// reports the overflow but also returns the largest int, which an end
-	// accepts as a block the start check cannot catch.
+
 	const overflow = "99999999999999999999"
 	for _, span := range []string{
-		"0.1,2.2", "1.0,2.2", "1.1,0.2", "1.1,2.0", "-1.1,2.2", "1.-1,2.2", // coordinates are 1-based
-		"1.1," + overflow + ".2", "1.1,2." + overflow, // and fit an int
-		"3.4,3.3", "3.4,2.9", "4.1,3.9", // the end cannot precede the start
+		"0.1,2.2", "1.0,2.2", "1.1,0.2", "1.1,2.0", "-1.1,2.2", "1.-1,2.2",
+		"1.1," + overflow + ".2", "1.1,2." + overflow,
+		"3.4,3.3", "3.4,2.9", "4.1,3.9",
 	} {
 		profile := []byte("mode: set\nexample.com/sample/a.go:" + span + " 1 1\n")
 		coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
@@ -226,9 +252,7 @@ func TestParseCoverageAcceptsABlockThatEndsOnALaterLineAtAnEarlierColumn(t *test
 
 func TestParseCoverageAcceptsTheEmptyBlockCmdCoverEmitsForAnEmptyClause(t *testing.T) {
 	t.Parallel()
-	// cmd/cover records a case clause with no statements as a block that ends
-	// where it starts: "main.go:161.15,161.15 0 1" in this repository's own
-	// profiles. Such a block contains no position; it is not malformed.
+
 	profile := []byte("mode: set\nexample.com/sample/a.go:161.15,161.15 0 1\n")
 	coverage, err := gotest.ParseCoverage(profile, "example.com/sample")
 	if err != nil {
@@ -379,21 +403,6 @@ func TestCoverageFilesIsTheCoveredPathsOfParseCoverage(t *testing.T) {
 	}
 }
 
-// guardedBodySpan is the span a branch proof reports for the body of
-//
-//	3	func clamp(value, limit int) int {
-//	4		if value <= limit {
-//	5			return value
-//	6		}
-//	7		return limit
-//	8	}
-//
-// which opens at the brace on 4.12 and closes at the brace on 6.2. The blocks
-// the tests below place inside and outside it are the ones cmd/cover records
-// around that body: Go 1.26 begins the body's block at the opening brace and
-// the block after it one column past the closing brace, Go 1.27 begins the
-// body's block at its first statement and the block after it at the statement
-// that follows the body.
 func guardedBodySpan() gotest.CoverageSpan {
 	return gotest.CoverageSpan{StartLine: 4, StartColumn: 12, EndLine: 6, EndColumn: 2}
 }
@@ -448,12 +457,12 @@ func TestFileCoverageStartsWithinReadsEveryBlockAndHoldsNothingWhenEmpty(t *test
 	t.Parallel()
 	span := guardedBodySpan()
 	for _, blocks := range [][]gotest.CoverageBlock{
-		{ // as Go 1.26 records the header, the body, and the statement after it
+		{
 			{StartLine: 3, StartColumn: 34, EndLine: 4, EndColumn: 12},
 			{StartLine: 4, StartColumn: 12, EndLine: 6, EndColumn: 3},
 			{StartLine: 6, StartColumn: 3, EndLine: 7, EndColumn: 14},
 		},
-		{ // and as Go 1.27 records the same three
+		{
 			{StartLine: 4, StartColumn: 2, EndLine: 4, EndColumn: 12},
 			{StartLine: 5, StartColumn: 3, EndLine: 6, EndColumn: 1},
 			{StartLine: 7, StartColumn: 2, EndLine: 7, EndColumn: 14},

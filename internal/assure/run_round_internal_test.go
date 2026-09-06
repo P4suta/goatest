@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/evidence"
@@ -17,6 +18,8 @@ import (
 	"github.com/P4suta/goatest/internal/mutationbridge"
 	"github.com/P4suta/goatest/internal/report"
 )
+
+const combinedBaselineCollectionCount = 2
 
 func TestRunCoordinatorClosesSnapshotOnEveryPreBaselineFailure(t *testing.T) {
 	cause := errors.New("phase failed")
@@ -31,7 +34,9 @@ func TestRunCoordinatorClosesSnapshotOnEveryPreBaselineFailure(t *testing.T) {
 			}
 		}},
 		{name: "inspect", wantCloses: 1, change: func(h *runCoordinatorHarness) {
-			h.dependencies.inspectWorkspace = func(context.Context, CommandWorkspace) (roundMetadata, error) { return roundMetadata{}, cause }
+			h.dependencies.inspectWorkspace = func(context.Context, CommandWorkspace, string, []string, []string, time.Duration) (roundMetadata, error) {
+				return roundMetadata{}, cause
+			}
 		}},
 		{name: "initial inputs", wantCloses: 1, change: func(h *runCoordinatorHarness) {
 			h.dependencies.assuranceInputs = func(string, string, Options, config.Config, roundMetadata) (evidence.Inputs, string, error) {
@@ -60,6 +65,9 @@ func TestRunCoordinatorClosesSnapshotOnEveryPreBaselineFailure(t *testing.T) {
 			if (test.name == "open" || test.name == "inspect" || test.name == "initial inputs") && harness.discoverCalls != 0 {
 				t.Fatalf("targets discovered after %s failure", test.name)
 			}
+			if test.name == "initial inputs" && (len(harness.cache.gets) != 0 || len(harness.cache.puts) != 0) {
+				t.Fatalf("cache used after identity failure: gets=%v puts=%v", harness.cache.gets, harness.cache.puts)
+			}
 		})
 	}
 }
@@ -73,12 +81,12 @@ func TestRunCoordinatorHandlesScratchBaselineAndCleanupFailures(t *testing.T) {
 		removeErr      error
 		wantBaseline   int
 		wantRemove     int
-		wantRoundClose int
+		wantWorkspaces int
 	}{
-		{name: "scratch", scratchErr: cause, wantRoundClose: 1},
-		{name: "baseline", baselineErr: cause, wantBaseline: 1, wantRemove: 1, wantRoundClose: 1},
-		{name: "remove", removeErr: cause, wantBaseline: 1, wantRemove: 1, wantRoundClose: 1},
-		{name: "both", baselineErr: cause, removeErr: errors.New("remove failed"), wantBaseline: 1, wantRemove: 1, wantRoundClose: 1},
+		{name: "scratch", scratchErr: cause, wantWorkspaces: 1},
+		{name: "baseline", baselineErr: cause, wantBaseline: 1, wantRemove: 1, wantWorkspaces: completedRoundWorkspaceCount},
+		{name: "remove", removeErr: cause, wantBaseline: combinedBaselineCollectionCount, wantRemove: 1, wantWorkspaces: completedRoundWorkspaceCount},
+		{name: "both", baselineErr: cause, removeErr: errors.New("remove failed"), wantBaseline: 1, wantRemove: 1, wantWorkspaces: completedRoundWorkspaceCount},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newRunCoordinatorHarness(t)
@@ -91,7 +99,7 @@ func TestRunCoordinatorHandlesScratchBaselineAndCleanupFailures(t *testing.T) {
 			harness.dependencies.removeBaselineScratch = func(string) error { removeCalls++; return test.removeErr }
 			result, err := harness.run(Options{})
 			if err == nil || !reflect.DeepEqual(result, report.Report{}) || harness.baselineCalls != test.wantBaseline || removeCalls != test.wantRemove ||
-				harness.manager.calls != test.wantRoundClose || harness.workspaceCloses != test.wantRoundClose {
+				harness.manager.calls != 1 || harness.workspaceCloses != test.wantWorkspaces {
 				t.Fatalf("run = (%+v, %v), baseline=%d remove=%d manager=%d workspace=%d", result, err, harness.baselineCalls, removeCalls, harness.manager.calls, harness.workspaceCloses)
 			}
 			if test.scratchErr != nil && !strings.Contains(err.Error(), "create baseline scratch") {
@@ -107,7 +115,93 @@ func TestRunCoordinatorHandlesScratchBaselineAndCleanupFailures(t *testing.T) {
 	}
 }
 
-func TestRunCoordinatorReturnsAndCachesEachBaselineFindingVerdict(t *testing.T) {
+func TestRunCoordinatorPrefersBaselineErrorsAndCancelsPreparation(t *testing.T) {
+	baselineCause := errors.New("baseline failed")
+	preparationCause := errors.New("preparation stopped")
+	harness := newRunCoordinatorHarness(t)
+	preparationStopped := make(chan struct{})
+	harness.dependencies.prepareSession = func(ctx context.Context, _ *mutationbridge.Workspace, _ mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		<-ctx.Done()
+		close(preparationStopped)
+		return nil, preparationCause
+	}
+	harness.dependencies.collectBaseline = func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error) {
+		harness.baselineCalls++
+		return BaselineResult{}, baselineCause
+	}
+	result, err := harness.run(Options{})
+	if !errors.Is(err, baselineCause) || errors.Is(err, preparationCause) || !reflect.DeepEqual(result, report.Report{}) ||
+		harness.prepareCalls != 1 || harness.baselineCalls != 1 || harness.workspaceCloses != completedRoundWorkspaceCount {
+		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
+	}
+	select {
+	case <-preparationStopped:
+	default:
+		t.Fatal("mutation preparation was not joined")
+	}
+}
+
+func TestRunCoordinatorPublishesStructuralFindingsAndCancelsPreparation(t *testing.T) {
+	preparationCause := errors.New("preparation stopped")
+	finding := report.Finding{ID: "vet-failure", Kind: "vet-failure", Summary: "go vet rejected the project"}
+	harness := newRunCoordinatorHarness(t)
+	preparationStopped := make(chan struct{})
+	harness.dependencies.prepareSession = func(ctx context.Context, _ *mutationbridge.Workspace, _ mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		<-ctx.Done()
+		close(preparationStopped)
+		return nil, preparationCause
+	}
+	harness.dependencies.collectBaseline = func(context.Context, CommandWorkspace, goanalysis.Model, []BaselineTarget, BaselineOptions) (BaselineResult, error) {
+		harness.baselineCalls++
+		return BaselineResult{Findings: []report.Finding{finding}}, nil
+	}
+	result, err := harness.run(Options{})
+	if err != nil || result.Verdict != report.VerdictDefect || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) ||
+		harness.prepareCalls != 1 || harness.baselineCalls != 1 || harness.raceCalls != 0 || harness.mutationCalls != 0 ||
+		harness.workspaceCloses != completedRoundWorkspaceCount {
+		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
+	}
+	select {
+	case <-preparationStopped:
+	default:
+		t.Fatal("mutation preparation was not joined")
+	}
+}
+
+func TestRunCoordinatorCancelsPreparationWhenThePristineWorkspaceCannotOpen(t *testing.T) {
+	openCause := errors.New("pristine workspace failed")
+	preparationCause := errors.New("preparation stopped")
+	harness := newRunCoordinatorHarness(t)
+	openWorkspace := harness.dependencies.openWorkspace
+	preparationStopped := make(chan struct{})
+	harness.dependencies.openWorkspace = func(ctx context.Context, root string, options mutationbridge.Options) (*mutationbridge.Workspace, error) {
+		if harness.openCalls+1 == preparedAndPristineWorkspaceCount {
+			harness.openCalls++
+			return nil, openCause
+		}
+		return openWorkspace(ctx, root, options)
+	}
+	harness.dependencies.prepareSession = func(ctx context.Context, _ *mutationbridge.Workspace, _ mutationbridge.PrepareOptions) (MutationSession, error) {
+		harness.prepareCalls++
+		<-ctx.Done()
+		close(preparationStopped)
+		return nil, preparationCause
+	}
+	result, err := harness.run(Options{})
+	if !errors.Is(err, openCause) || errors.Is(err, preparationCause) || !reflect.DeepEqual(result, report.Report{}) ||
+		harness.prepareCalls != 1 || harness.baselineCalls != 0 || harness.manager.calls != 1 || harness.workspaceCloses != 1 || harness.scratchRemovals != 1 {
+		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
+	}
+	select {
+	case <-preparationStopped:
+	default:
+		t.Fatal("mutation preparation was not joined")
+	}
+}
+
+func TestRunCoordinatorReturnsEachBaselineFindingVerdictWithoutCachingIt(t *testing.T) {
 	for _, test := range []struct {
 		kind string
 		want report.Verdict
@@ -121,38 +215,22 @@ func TestRunCoordinatorReturnsAndCachesEachBaselineFindingVerdict(t *testing.T) 
 			finding := report.Finding{ID: "finding-a", Kind: test.kind, Summary: "baseline issue"}
 			harness.baseline.Findings = []report.Finding{finding}
 			result, err := harness.run(Options{})
-			if err != nil || result.Verdict != test.want || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) || len(harness.cache.puts) != 1 ||
-				harness.manager.calls != 1 || harness.workspaceCloses != 1 || harness.raceCalls != 0 || harness.prepareCalls != 0 {
+			if err != nil || result.Verdict != test.want || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) || len(harness.cache.puts) != 0 ||
+				harness.cache.checkpointDeletes != 1 || harness.manager.calls != 1 || harness.workspaceCloses != completedRoundWorkspaceCount || harness.raceCalls != 0 || harness.prepareCalls != 1 {
 				t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
 			}
 		})
 	}
-	for _, test := range []struct {
-		name     string
-		closeErr error
-		cacheErr error
-	}{
-		{name: "round close", closeErr: errors.New("round close failed")},
-		{name: "cache write", cacheErr: errors.New("cache write failed")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			harness := newRunCoordinatorHarness(t)
-			harness.baseline.Findings = []report.Finding{{ID: "finding-a", Kind: "baseline-failure"}}
-			harness.manager.err = test.closeErr
-			harness.cache.putErr = test.cacheErr
-			result, err := harness.run(Options{})
-			want := test.closeErr
-			if want == nil {
-				want = test.cacheErr
-			}
-			if !errors.Is(err, want) || !reflect.DeepEqual(result, report.Report{}) {
-				t.Fatalf("run = (%+v, %v), want %v", result, err, want)
-			}
-			if test.closeErr != nil && len(harness.cache.puts) != 0 {
-				t.Fatal("cached report after close failure")
-			}
-		})
-	}
+	t.Run("round close error", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.baseline.Findings = []report.Finding{{ID: "finding-a", Kind: "baseline-failure"}}
+		cause := errors.New("round close failed")
+		harness.manager.err = cause
+		result, err := harness.run(Options{})
+		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || len(harness.cache.puts) != 0 || harness.cache.checkpointDeletes != 1 {
+			t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
+		}
+	})
 }
 
 func TestRunCoordinatorUsesRelevantRaceScopeAndHandlesConcurrencyFailures(t *testing.T) {
@@ -193,7 +271,7 @@ func TestRunCoordinatorUsesRelevantRaceScopeAndHandlesConcurrencyFailures(t *tes
 	harness := newRunCoordinatorHarness(t)
 	harness.dependencies.concurrencyPackages = func(string, []goanalysis.Package) ([]string, error) { return nil, cause }
 	result, err := harness.run(Options{})
-	if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != 1 || harness.raceCalls != 0 {
+	if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != completedRoundWorkspaceCount || harness.raceCalls != 0 {
 		t.Fatalf("concurrency failure = (%+v, %v), harness=%+v", result, err, harness)
 	}
 }
@@ -206,7 +284,7 @@ func TestRunCoordinatorHandlesRaceExecutionAndFindingTerminals(t *testing.T) {
 			return RaceResult{}, cause
 		}
 		result, err := harness.run(Options{})
-		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != 1 {
+		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || harness.manager.calls != 1 || harness.workspaceCloses != completedRoundWorkspaceCount {
 			t.Fatalf("race failure = (%+v, %v), harness=%+v", result, err, harness)
 		}
 	})
@@ -215,35 +293,19 @@ func TestRunCoordinatorHandlesRaceExecutionAndFindingTerminals(t *testing.T) {
 		finding := report.Finding{ID: "race-a", Kind: "race", Summary: "data race"}
 		harness.race.Findings = []report.Finding{finding}
 		result, err := harness.run(Options{})
-		if err != nil || result.Verdict != report.VerdictDefect || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) || len(harness.cache.puts) != 1 ||
-			harness.manager.calls != 1 || harness.workspaceCloses != 1 || harness.prepareCalls != 0 {
+		if err != nil || result.Verdict != report.VerdictDefect || !reflect.DeepEqual(result.Findings, []report.Finding{finding}) || len(harness.cache.puts) != 0 ||
+			harness.cache.checkpointDeletes != 1 || harness.manager.calls != 1 || harness.workspaceCloses != completedRoundWorkspaceCount || harness.prepareCalls != 1 {
 			t.Fatalf("race finding = (%+v, %v), harness=%+v", result, err, harness)
 		}
 	})
-	for _, test := range []struct {
-		name     string
-		closeErr error
-		cacheErr error
-	}{
-		{name: "round close", closeErr: errors.New("round close failed")},
-		{name: "cache write", cacheErr: errors.New("cache write failed")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			harness := newRunCoordinatorHarness(t)
-			harness.race.Findings = []report.Finding{{ID: "race-a", Kind: "race"}}
-			harness.manager.err = test.closeErr
-			harness.cache.putErr = test.cacheErr
-			result, err := harness.run(Options{})
-			want := test.closeErr
-			if want == nil {
-				want = test.cacheErr
-			}
-			if !errors.Is(err, want) || !reflect.DeepEqual(result, report.Report{}) {
-				t.Fatalf("race terminal error = (%+v, %v), want %v", result, err, want)
-			}
-			if test.closeErr != nil && len(harness.cache.puts) != 0 {
-				t.Fatal("cached race result after close failure")
-			}
-		})
-	}
+	t.Run("round close error", func(t *testing.T) {
+		harness := newRunCoordinatorHarness(t)
+		harness.race.Findings = []report.Finding{{ID: "race-a", Kind: "race"}}
+		cause := errors.New("round close failed")
+		harness.manager.err = cause
+		result, err := harness.run(Options{})
+		if !errors.Is(err, cause) || !reflect.DeepEqual(result, report.Report{}) || len(harness.cache.puts) != 0 || harness.cache.checkpointDeletes != 1 {
+			t.Fatalf("race terminal = (%+v, %v), harness=%+v", result, err, harness)
+		}
+	})
 }

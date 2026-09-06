@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package provider invokes external generation providers through versioned
-// one-shot JSON without giving goatest core a network or LLM dependency.
 package provider
 
 import (
@@ -23,9 +21,9 @@ import (
 
 const (
 	ProtocolVersion   = 1
+	MaximumCandidates = 64
 	defaultTimeout    = 5 * time.Minute
 	outputLimit       = 4 << 20
-	maximumCandidates = 64
 )
 
 type Request struct {
@@ -57,6 +55,7 @@ type Client struct {
 
 type generationProcessTree interface {
 	Kill() error
+	Wait() error
 	Close() error
 }
 
@@ -97,7 +96,7 @@ func (client Client) Generate(parent context.Context, request Request) (Response
 		return Response{}, fmt.Errorf("goatest: generation provider start: %w", err)
 	}
 	wait := make(chan error, 1)
-	go func() { wait <- cmd.Wait() }()
+	go func() { wait <- tree.Wait() }()
 	select {
 	case runErr := <-wait:
 		closeErr := tree.Close()
@@ -122,8 +121,8 @@ func (client Client) Generate(parent context.Context, request Request) (Response
 	if response.Version != ProtocolVersion || response.FindingID != request.Finding.ID {
 		return Response{}, fmt.Errorf("goatest: generation response identity mismatch: version=%d finding=%q", response.Version, response.FindingID)
 	}
-	if len(response.Candidates) > maximumCandidates {
-		return Response{}, fmt.Errorf("goatest: generation response has %d candidates, maximum is %d", len(response.Candidates), maximumCandidates)
+	if len(response.Candidates) > MaximumCandidates {
+		return Response{}, fmt.Errorf("goatest: generation response has %d candidates, maximum is %d", len(response.Candidates), MaximumCandidates)
 	}
 	for i := range response.Candidates {
 		response.Candidates[i].Content = slices.Clone(response.Candidates[i].Content)

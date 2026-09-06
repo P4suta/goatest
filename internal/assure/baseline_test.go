@@ -14,6 +14,7 @@ import (
 
 	gomutants "github.com/P4suta/go-mutants"
 	"github.com/P4suta/goatest/internal/assure"
+	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/testkit"
 )
@@ -30,7 +31,7 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 					"fixture.example/module/boundary.go:6.16,8.3 1 1\n" +
 					"fixture.example/module/boundary.go:9.2,9.10 1 1\n" +
 					"fixture.example/module/unused.go:3.14,5.2 1 0\n"
-				if err := os.WriteFile(path, []byte(profile), 0o644); err != nil {
+				if err := os.WriteFile(path, []byte(profile), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -77,6 +78,9 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 	for _, command := range commands {
 		if len(command.Argv) >= 3 && command.Argv[0] == "go" && command.Argv[1] == "test" && command.Argv[2] == "-c" {
 			compileCount++
+			if !slices.Contains(command.Argv, "-coverpkg=fixture.example/module") {
+				t.Fatalf("compile command = %q, want only the test binary's module import closure", command.Argv)
+			}
 		}
 		if len(command.Argv) > 0 && strings.HasSuffix(command.Argv[0], testBinarySuffix()) {
 			invocationCount++
@@ -87,38 +91,23 @@ func TestCollectBaselineBuildsOneBinaryPerPackageAndMapsTopLevelCoverage(t *test
 	}
 }
 
-func TestCollectBaselineClassifiesRepeatableFailureAndFlake(t *testing.T) {
-	for _, testCase := range []struct {
-		name      string
-		exitCodes []int
-		wantKind  string
-	}{
-		{name: "repeatable", exitCodes: []int{1, 1, 1}, wantKind: "baseline-failure"},
-		{name: "flaky", exitCodes: []int{1, 0, 1}, wantKind: "flaky-test"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			index := 0
-			workspace := testkit.NewWorkspace()
-			workspace.On().Do(func(command gomutants.Command) (gomutants.CommandResult, error) {
-				if len(command.Argv) > 0 && strings.HasSuffix(command.Argv[0], testBinarySuffix()) {
-					code := testCase.exitCodes[index]
-					index++
-					return gomutants.CommandResult{ExitCode: code, Output: []byte("boom")}, nil
-				}
-				return gomutants.CommandResult{}, nil
-			})
-			model := goanalysis.Model{ModulePath: "fixture.example/module", Packages: []goanalysis.Package{{ImportPath: "fixture.example/module", RelativeDir: "."}}}
-			result, err := assure.CollectBaseline(t.Context(), workspace, model, []assure.BaselineTarget{{Target: target("TestOne", goanalysis.KindTest)}}, assure.BaselineOptions{ArtifactDirectory: t.TempDir()})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(result.Findings) != 1 || result.Findings[0].Kind != testCase.wantKind {
-				t.Fatalf("findings = %+v", result.Findings)
-			}
-			if index != 3 {
-				t.Fatalf("target attempts = %d, want 3", index)
-			}
-		})
+func TestCollectBaselineReportsTheFirstFailureWithoutRetry(t *testing.T) {
+	invocations := 0
+	workspace := testkit.NewWorkspace()
+	workspace.On().Do(func(command gomutants.Command) (gomutants.CommandResult, error) {
+		if len(command.Argv) > 0 && strings.HasSuffix(command.Argv[0], testBinarySuffix()) {
+			invocations++
+			return gomutants.CommandResult{ExitCode: 1, Output: []byte("boom")}, nil
+		}
+		return gomutants.CommandResult{}, nil
+	})
+	model := goanalysis.Model{ModulePath: "fixture.example/module", Packages: []goanalysis.Package{{ImportPath: "fixture.example/module", RelativeDir: "."}}}
+	result, err := assure.CollectBaseline(t.Context(), workspace, model, []assure.BaselineTarget{{Target: target("TestOne", goanalysis.KindTest)}}, assure.BaselineOptions{ArtifactDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Kind != "baseline-failure" || result.Executed != 1 || result.Skipped != 0 || invocations != 1 {
+		t.Fatalf("baseline = %+v, invocations = %d", result, invocations)
 	}
 }
 

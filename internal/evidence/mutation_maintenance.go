@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// MutationStatus describes the reusable mutation evidence independently of
-// the exact-input cache beside it. Invalid documents remain visible so cache
-// status can diagnose them and cache flush can remove them.
 type MutationStatus struct {
 	Present    bool
 	Valid      bool
@@ -22,29 +19,21 @@ type MutationStatus struct {
 	Killed     int
 	Survived   int
 	Unreached  int
-	TimedOut   int
 	Bytes      int64
 	Modified   time.Time
 	Problem    string
 }
 
-// MutationFlushResult describes the evidence file before and after an
-// explicit flush. Missing evidence is an ordinary, idempotent result.
 type MutationFlushResult struct {
 	Before  MutationStatus
 	After   MutationStatus
 	Removed bool
 }
 
-// InspectMutation reads and validates a mutation evidence file without
-// changing it. Content and read failures are reported in Problem instead of
-// failing the whole cache status operation.
 func InspectMutation(path string) (MutationStatus, error) {
 	return inspectMutationWithHooks(path, mutationHooks{})
 }
 
-// inspectMutationWithHooks is InspectMutation against a filesystem the caller
-// supplies.
 func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus, error) {
 	hooks = hooks.resolved()
 	info, err := hooks.lstat(path)
@@ -94,22 +83,15 @@ func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus,
 			status.Survived++
 		case MutationOutcomeUnreached:
 			status.Unreached++
-		case MutationOutcomeTimedOut:
-			status.TimedOut++
 		}
 	}
 	return status, nil
 }
 
-// FlushMutation removes exactly path without following it. An irregular object
-// is refused; a regular, malformed, or symbolic-link entry can be unlinked so
-// an operator can recover from a broken store safely.
 func FlushMutation(path string) (MutationFlushResult, error) {
 	return flushMutationWithHooks(path, mutationHooks{})
 }
 
-// flushMutationWithHooks is FlushMutation against a filesystem the caller
-// supplies.
 func flushMutationWithHooks(path string, hooks mutationHooks) (MutationFlushResult, error) {
 	hooks = hooks.resolved()
 	before, err := inspectMutationWithHooks(path, hooks)

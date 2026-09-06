@@ -8,6 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
+)
+
+const (
+	readerPrepareDurationMS int64 = 875
+	laterPrepareDurationMS        = 2 * readerPrepareDurationMS
 )
 
 func TestReadSummaryMakesMissingIncompleteGapsAndDropsExplicit(t *testing.T) {
@@ -40,7 +47,7 @@ func TestReadSummaryMakesMissingIncompleteGapsAndDropsExplicit(t *testing.T) {
 
 func TestReadSummaryRejectsUnknownFieldsAndOutOfOrderSequences(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, FileName), []byte(`{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,"unknown":true}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, FileName), []byte(`{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,"unknown":true}`+"\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadSummary(directory); err == nil {
@@ -75,6 +82,75 @@ func TestReadSummaryCountsAProbeExecAndRejectsOneWithoutItsPayload(t *testing.T)
 	}
 }
 
+func TestReadSummaryRejectsARouteWithoutGranularity(t *testing.T) {
+	directory := t.TempDir()
+	writeTraceEvents(t, directory,
+		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+		Event{Seq: 2, Type: TypeRoute, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000,
+			Route: &RouteRecord{Path: "value.go", Reason: ReasonUnreached}},
+	)
+	if _, err := ReadSummary(directory); err == nil {
+		t.Fatal("reader accepted a route without granularity")
+	}
+}
+
+func TestReadSummaryAggregatesFinishedPreparationAndRejectsMalformedEvents(t *testing.T) {
+	directory := t.TempDir()
+	writeTraceEvents(t, directory,
+		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+		Event{Seq: 2, Type: TypePrepare, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000,
+			Prepare: &PrepareRecord{Phase: PreparePhaseDiscovery, State: PrepareStateStarted}},
+		Event{Seq: 3, Type: TypePrepare, Timestamp: "2026-01-01T00:00:02Z", ElapsedMS: 2000,
+			Prepare: &PrepareRecord{
+				Phase: PreparePhaseDiscovery, State: PrepareStateFinished,
+				Result: PrepareResultSucceeded, DurationMS: milliseconds(readerPrepareDurationMS),
+			}},
+	)
+	summary, err := ReadSummary(directory)
+	if err != nil || summary.Counts[TypePrepare] != 2 || summary.PrepareDurationMS[PreparePhaseDiscovery] != readerPrepareDurationMS {
+		t.Fatalf("summary of preparation events = (%+v, %v)", summary, err)
+	}
+	writeTraceEvents(t, directory,
+		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+		Event{Seq: 2, Type: TypePrepare, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000},
+	)
+	if _, err := ReadSummary(directory); err == nil {
+		t.Fatal("reader accepted a prepare event without its payload")
+	}
+
+	cases := []PrepareRecord{
+		{Phase: "unknown", State: PrepareStateStarted},
+		{Phase: PreparePhaseDiscovery, State: "waiting"},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateStarted, Result: PrepareResultSucceeded},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateStarted, DurationMS: milliseconds(0)},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateFinished, DurationMS: milliseconds(0)},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateFinished, Result: "unknown", DurationMS: milliseconds(0)},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateFinished, Result: PrepareResultSucceeded},
+		{Phase: PreparePhaseDiscovery, State: PrepareStateFinished, Result: PrepareResultSucceeded, DurationMS: milliseconds(-readerPrepareDurationMS)},
+	}
+	for _, record := range cases {
+		writeTraceEvents(t, directory,
+			Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
+			Event{Seq: 2, Type: TypePrepare, Timestamp: "2026-01-01T00:00:01Z", ElapsedMS: 1000, Prepare: &record},
+		)
+		if _, err := ReadSummary(directory); err == nil {
+			t.Errorf("reader accepted malformed preparation %+v", record)
+		}
+	}
+}
+
+func TestDiffReportsPreparationDurationChanges(t *testing.T) {
+	difference := Diff(
+		Summary{PrepareDurationMS: map[string]int64{PreparePhaseBinaryBuild: readerPrepareDurationMS}},
+		Summary{PrepareDurationMS: map[string]int64{PreparePhaseBinaryBuild: laterPrepareDurationMS}},
+	)
+	if difference.PrepareDurationDeltaMS[PreparePhaseBinaryBuild] != readerPrepareDurationMS {
+		t.Fatalf("preparation duration delta = %+v", difference.PrepareDurationDeltaMS)
+	}
+}
+
+func milliseconds(value int64) *int64 { return &value }
+
 func writeTraceEvents(t *testing.T, directory string, events ...Event) {
 	t.Helper()
 	var data []byte
@@ -86,7 +162,7 @@ func writeTraceEvents(t *testing.T, directory string, events ...Event) {
 		data = append(data, line...)
 		data = append(data, '\n')
 	}
-	if err := os.WriteFile(filepath.Join(directory, FileName), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, FileName), data, filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 }

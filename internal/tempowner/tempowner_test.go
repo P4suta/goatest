@@ -12,15 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/tempowner"
 )
 
-// claimed makes one directory and claims it, which is the two lines every test
-// below starts with.
 func claimed(t *testing.T, marker tempowner.Marker, now time.Time) (string, *tempowner.Owner) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "goatest-run-fixture")
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := os.Mkdir(dir, filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
 	owner, err := tempowner.Claim(dir, marker, now)
@@ -39,8 +38,7 @@ func TestClaimWritesTheOwnerPairAndSaysWhoMadeTheDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the marker of %s = %v", dir, err)
 	}
-	// The marker is read by a person looking at a full disk, so what it says
-	// has to identify the run rather than merely prove that something wrote it.
+
 	if marker.Schema != tempowner.Schema || marker.RunID != "goatest-run-fixture" || marker.Root != "/repository" {
 		t.Fatalf("marker = %+v, want the schema, the run and the repository it was made for", marker)
 	}
@@ -59,8 +57,7 @@ func TestClaimWritesTheOwnerPairAndSaysWhoMadeTheDirectory(t *testing.T) {
 func TestClaimRefusesADirectorySomebodyElseHolds(t *testing.T) {
 	t.Parallel()
 	dir, _ := claimed(t, tempowner.Marker{RunID: "first"}, time.Now())
-	// The lock is the liveness signal, so a second claim has to be refused as
-	// long as the first holder is alive, whatever the marker says.
+
 	second, err := tempowner.Claim(dir, tempowner.Marker{RunID: "second"}, time.Now())
 	if !errors.Is(err, tempowner.ErrOwned) || second != nil {
 		t.Fatalf("second claim = (%v, %v), want it refused as owned", second, err)
@@ -77,8 +74,7 @@ func TestReleaseFreesTheLockAndRemovesNothing(t *testing.T) {
 	if err := owner.Release(); err != nil {
 		t.Fatalf("release %s = %v", dir, err)
 	}
-	// Releasing twice is what a run does when it keeps a directory and then
-	// unwinds the defer that would have released it.
+
 	if err := owner.Release(); err != nil {
 		t.Fatalf("second release = %v, want it to be idempotent", err)
 	}
@@ -104,8 +100,7 @@ func TestKeepRecordsTheDecisionWhereTheNextRunReadsIt(t *testing.T) {
 	if err != nil || !marker.Kept || marker.RunID != "kept" || marker.Root != "/repository" {
 		t.Fatalf("marker after a keep = (%+v, %v), want the same run, deliberately kept", marker, err)
 	}
-	// Keeping releases the lock too. A kept directory whose lock nobody holds
-	// is exactly what the marker bit exists to protect from the next sweep.
+
 	next, err := tempowner.Claim(dir, tempowner.Marker{RunID: "second"}, time.Now())
 	if err != nil {
 		t.Fatalf("claim after a keep = %v, want the lock free", err)
@@ -125,11 +120,7 @@ func TestKeepingLeavesNothingBesideTheOwnerPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The marker is replaced through a temporary file and a rename, so that a
-	// process killed in the middle of recording a keep leaves the marker it had
-	// rather than half of the new one: a torn marker does not say kept, and the
-	// next sweep would collect the directory somebody asked to keep. What the
-	// rename can be seen to do from outside is leave nothing behind.
+
 	names := []string{entries[0].Name(), entries[len(entries)-1].Name()}
 	if len(entries) != 2 || names[0] != tempowner.MarkerName || names[1] != tempowner.LockName {
 		t.Fatalf("directory after a keep = %v, want the owner pair alone", names)
@@ -147,9 +138,7 @@ func TestReadMarkerReportsADirectoryThatCarriesNone(t *testing.T) {
 
 func TestClaimFailsOnADirectoryThatIsNotThere(t *testing.T) {
 	t.Parallel()
-	// A run whose owner pair cannot be written carries on without one, so the
-	// failure has to arrive as an error the caller can report rather than as a
-	// panic or a half-claimed directory.
+
 	missing := filepath.Join(t.TempDir(), "absent")
 	owner, err := tempowner.Claim(missing, tempowner.Marker{RunID: "run"}, time.Now())
 	if err == nil || owner != nil {
@@ -165,8 +154,7 @@ func TestTheMarkerIsTheDocumentTheSchemaPromises(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A person reading a full disk reads this file with their eyes, so its
-	// field names are part of the convention and not an encoding detail.
+
 	var document map[string]any
 	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatalf("decode %s = %v", tempowner.MarkerPath(dir), err)
@@ -186,24 +174,17 @@ func TestTheMarkerIsTheDocumentTheSchemaPromises(t *testing.T) {
 	}
 }
 
-// writeMarkerDocument puts a marker of somebody's shape into a directory, which
-// is how the markers of another tool are made in these tests: goatest cannot
-// import go-mutants' internal package to write one properly.
 func writeMarkerDocument(t *testing.T, dir, document string) string {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tempowner.MarkerPath(dir), []byte(document), 0o600); err != nil {
+	if err := os.WriteFile(tempowner.MarkerPath(dir), []byte(document), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-// `goatest cache gc` removes the directories a ledger names, and the ledger is
-// a file in the repository that anybody can edit and anything can corrupt. What
-// makes a removal safe is the directory itself saying it was kept on purpose,
-// so this is the question the collector has to ask before it deletes anything.
 func TestKeptByAsksTheDirectoryWhetherSomebodyKeptIt(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -226,18 +207,6 @@ func TestKeptByAsksTheDirectoryWhetherSomebodyKeptIt(t *testing.T) {
 			document: `{"schema":"goatest-temp-owner-v1","run_id":"goatest-run-a","pid":1,"started":"2026-09-04T12:00:00Z","root":"/repository","kept":false}`,
 		},
 		{
-			// The mutation engine keeps its snapshot at a run's request and
-			// records only its own bookkeeping, so its marker names no run of
-			// ours. It is still a directory somebody kept on purpose.
-			name:     "kept by the mutation engine",
-			document: `{"schema":"go-mutants-temp-owner-v1","pid":1,"started":"2026-09-04T12:00:00Z","kept":true}`,
-			want:     true,
-		},
-		{
-			name:     "used by the mutation engine and not kept",
-			document: `{"schema":"go-mutants-temp-owner-v1","pid":1,"started":"2026-09-04T12:00:00Z","kept":false}`,
-		},
-		{
 			name:     "a marker of some other tool",
 			document: `{"schema":"somebody-elses-v1","kept":true}`,
 		},
@@ -255,11 +224,9 @@ func TestKeptByAsksTheDirectoryWhetherSomebodyKeptIt(t *testing.T) {
 
 func TestKeptByRefusesADirectoryThatSaysNothing(t *testing.T) {
 	t.Parallel()
-	// Somebody's home directory, somebody's project: the paths a corrupted or
-	// crafted ledger would name. None of them says it was kept, so none of them
-	// is the collector's to remove.
+
 	unrelated := t.TempDir()
-	if err := os.WriteFile(filepath.Join(unrelated, "notes.txt"), []byte("mine"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(unrelated, "notes.txt"), []byte("mine"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	if kept, err := tempowner.KeptBy(unrelated, "goatest-run-a"); err != nil || kept {
@@ -268,8 +235,7 @@ func TestKeptByRefusesADirectoryThatSaysNothing(t *testing.T) {
 	if kept, err := tempowner.KeptBy(filepath.Join(unrelated, "absent"), "goatest-run-a"); err != nil || kept {
 		t.Fatalf("KeptBy of a missing directory = (%t, %v), want it refused without a failure", kept, err)
 	}
-	// A marker nobody can decode is a question nobody can answer, which is not
-	// the same answer as no.
+
 	torn := writeMarkerDocument(t, filepath.Join(t.TempDir(), "torn"), `{"schema":"goatest-temp-`)
 	if kept, err := tempowner.KeptBy(torn, "goatest-run-a"); err == nil || kept {
 		t.Fatalf("KeptBy of a torn marker = (%t, %v), want the failure reported", kept, err)

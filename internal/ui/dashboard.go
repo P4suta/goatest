@@ -13,27 +13,21 @@ import (
 	"github.com/P4suta/goatest/internal/report"
 )
 
-// DashboardOptions configure the dashboard renderer. Every hook is passed
-// here rather than held in package state, so a test injects its clock and its
-// tick stream through the one seam the renderer owns.
+const defaultDashboardWidth = 100
+
+const (
+	secondsPerMinute = int(time.Minute / time.Second)
+	secondsPerHour   = int(time.Hour / time.Second)
+)
+
 type DashboardOptions struct {
-	// Now is the clock elapsed time is measured with; nil reads the wall clock.
 	Now func() time.Time
-	// Tick delivers the redraws that keep the elapsed time moving between
-	// notes; nil starts a one-second ticker of the renderer's own.
+
 	Tick <-chan time.Time
-	// Width bounds one rendered line in runes; zero uses a conservative
-	// default, because a line longer than the terminal would wrap and leave
-	// rows an in-place erase can no longer reach.
+
 	Width int
 }
 
-// dashboard renders one in-place status line on an interactive terminal: the
-// current phase, the elapsed time, mutation progress with an estimated
-// remainder, and the latest detail. A note whose kind it does not know is
-// printed as a permanent plain line above the status line, so nothing a run
-// reports is lost to the rendering. Everything here is ephemeral terminal
-// output; the deterministic record of a run is its report and its trace.
 type dashboard struct {
 	writer io.Writer
 	now    func() time.Time
@@ -43,6 +37,8 @@ type dashboard struct {
 	started         time.Time
 	phase           string
 	detail          string
+	baselineDone    int
+	baselineTotal   int
 	mutationDone    int
 	mutationTotal   int
 	mutationStarted time.Time
@@ -54,10 +50,6 @@ type dashboard struct {
 	done   chan struct{}
 }
 
-// NewDashboard renders notes in place on writer until Close, which erases the
-// status line and stops the redraws. The caller has already established that
-// the writer is an interactive terminal with ANSI escape processing; nothing
-// here probes one.
 func NewDashboard(writer io.Writer, options DashboardOptions) Notes {
 	now := options.Now
 	if now == nil {
@@ -65,7 +57,7 @@ func NewDashboard(writer io.Writer, options DashboardOptions) Notes {
 	}
 	width := options.Width
 	if width <= 0 {
-		width = 100
+		width = defaultDashboardWidth
 	}
 	renderer := &dashboard{
 		writer: writer, now: now, width: width, started: now(),
@@ -80,19 +72,17 @@ func NewDashboard(writer io.Writer, options DashboardOptions) Notes {
 	return renderer
 }
 
-// dashboardPhase names the phase a progress note reports, and whether the
-// dashboard knows the kind at all.
 func dashboardPhase(kind string) (string, bool) {
 	switch kind {
 	case "snapshot", "cache-hit", "cache-wait":
 		return "snapshot", true
 	case "impact-broad", "impact-targeted":
 		return "impact", true
-	case "baseline-target", "resume-baseline":
+	case "baseline-progress", "resume-baseline":
 		return "baseline", true
 	case "race", "resume-race":
 		return "race", true
-	case "mutation-prepare", "mutation-target", "mutation-progress":
+	case "mutation-target", "mutation-progress":
 		return "mutation", true
 	case "probe-target", "probe-progress", "probe-summary":
 		return "probe", true
@@ -111,8 +101,6 @@ func (renderer *dashboard) Note(kind, detail string) {
 	}
 	phase, known := dashboardPhase(kind)
 	if !known {
-		// A kind this renderer does not know is still worth reading after the
-		// run: it becomes a permanent line above the status line.
 		renderer.eraseLocked()
 		_, _ = fmt.Fprintf(renderer.writer, noteLineFormat, report.LineText(kind), report.LineText(detail))
 		renderer.renderLocked()
@@ -120,12 +108,21 @@ func (renderer *dashboard) Note(kind, detail string) {
 	}
 	renderer.phase = phase
 	renderer.detail = detail
-	if kind == "mutation-prepare" {
+	if kind == "resume-baseline" {
+		renderer.baselineDone, renderer.baselineTotal = 0, 0
+	}
+	if kind == "baseline-progress" {
+		if done, total, ok := progressFraction(detail); ok {
+			renderer.baselineDone, renderer.baselineTotal = done, total
+			renderer.detail = ""
+		}
+	}
+	if kind == "mutation-target" {
+		renderer.mutationDone, renderer.mutationTotal = 0, 0
 		renderer.mutationStarted = renderer.now()
 	}
 	if kind == "mutation-progress" {
-		var done, total int
-		if _, err := fmt.Sscanf(detail, "%d/%d", &done, &total); err == nil && total > 0 && done >= 0 {
+		if done, total, ok := progressFraction(detail); ok {
 			renderer.mutationDone, renderer.mutationTotal = done, total
 			renderer.detail = ""
 			if renderer.mutationStarted.IsZero() {
@@ -154,10 +151,6 @@ func (renderer *dashboard) Close() {
 	renderer.mutex.Unlock()
 }
 
-// watch redraws the status line on every tick, which is what keeps the
-// elapsed time moving through the phases that emit nothing for a while. A tick
-// stream that closes ends the watching, because a closed channel would
-// otherwise be ready forever.
 func (renderer *dashboard) watch(tick <-chan time.Time) {
 	defer close(renderer.done)
 	for {
@@ -177,7 +170,6 @@ func (renderer *dashboard) watch(tick <-chan time.Time) {
 	}
 }
 
-// eraseLocked clears the status line if one occupies the current row.
 func (renderer *dashboard) eraseLocked() {
 	if !renderer.rendered {
 		return
@@ -186,8 +178,6 @@ func (renderer *dashboard) eraseLocked() {
 	renderer.rendered = false
 }
 
-// renderLocked draws the status line in place. Kind and detail come from the
-// run and are escaped; everything else on the line is the renderer's own.
 func (renderer *dashboard) renderLocked() {
 	if renderer.phase == "" {
 		return
@@ -196,7 +186,10 @@ func (renderer *dashboard) renderLocked() {
 		fmt.Sprintf("goatest: %-9s", renderer.phase),
 		formatElapsed(renderer.now().Sub(renderer.started)),
 	}
-	if renderer.mutationTotal > 0 {
+	if renderer.phase == "baseline" && renderer.baselineTotal > 0 {
+		segments = append(segments, fmt.Sprintf("%d/%d", renderer.baselineDone, renderer.baselineTotal))
+	}
+	if renderer.phase == "mutation" && renderer.mutationTotal > 0 {
 		segments = append(segments, fmt.Sprintf("%d/%d", renderer.mutationDone, renderer.mutationTotal))
 		if remaining, ok := renderer.estimatedRemainder(); ok {
 			segments = append(segments, "eta "+formatElapsed(remaining))
@@ -210,9 +203,12 @@ func (renderer *dashboard) renderLocked() {
 	renderer.rendered = true
 }
 
-// estimatedRemainder projects the time the remaining mutants will take from
-// the average the executed ones took. It is a heuristic for a human watching
-// the line, never a contract.
+func progressFraction(detail string) (int, int, bool) {
+	var done, total int
+	_, err := fmt.Sscanf(detail, "%d/%d", &done, &total)
+	return done, total, err == nil && total > 0 && done >= 0
+}
+
 func (renderer *dashboard) estimatedRemainder() (time.Duration, bool) {
 	if renderer.mutationDone <= 0 || renderer.mutationDone >= renderer.mutationTotal || renderer.mutationStarted.IsZero() {
 		return 0, false
@@ -225,18 +221,15 @@ func (renderer *dashboard) estimatedRemainder() (time.Duration, bool) {
 	return perMutant * time.Duration(renderer.mutationTotal-renderer.mutationDone), true
 }
 
-// formatElapsed renders a duration the way a human reads a stopwatch.
 func formatElapsed(elapsed time.Duration) string {
 	elapsed = max(elapsed, 0)
 	total := int(elapsed.Seconds())
-	if total >= 3600 {
-		return fmt.Sprintf("%d:%02d:%02d", total/3600, total%3600/60, total%60)
+	if total >= secondsPerHour {
+		return fmt.Sprintf("%d:%02d:%02d", total/secondsPerHour, total%secondsPerHour/secondsPerMinute, total%secondsPerMinute)
 	}
-	return fmt.Sprintf("%02d:%02d", total/60, total%60)
+	return fmt.Sprintf("%02d:%02d", total/secondsPerMinute, total%secondsPerMinute)
 }
 
-// boundedLine keeps a line inside the terminal row, because a wrapped status
-// line leaves rows behind that an in-place erase can no longer reach.
 func boundedLine(line string, width int) string {
 	runes := []rune(line)
 	if len(runes) <= width {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/P4suta/goatest/internal/cache"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -38,10 +39,10 @@ func TestCorruptOrMismatchedEntriesFailClosed(t *testing.T) {
 		t.Fatal("Put accepted a mismatched snapshot")
 	}
 	directory := filepath.Join(root, "v1", "digest-a")
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	if err := os.MkdirAll(directory, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "report.json"), []byte("not-json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "report.json"), []byte("not-json"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := store.Get("digest-a"); err == nil || ok {
@@ -91,14 +92,14 @@ func TestGetRejectsReadStrictnessAndIdentityFailures(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			path := filepath.Join(root, "v1", "digest-a", "report.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 				t.Fatal(err)
 			}
 			if testCase.directory {
-				if err := os.Mkdir(path, 0o755); err != nil {
+				if err := os.Mkdir(path, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.WriteFile(path, testCase.data, 0o644); err != nil {
+			} else if err := os.WriteFile(path, testCase.data, filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			got, ok, err := cache.New(root).Get("digest-a")
@@ -130,7 +131,7 @@ func TestPutReportsDirectoryFailureAndLeavesNoTemporaryFile(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	blocking := filepath.Join(root, "v1")
-	if err := os.WriteFile(blocking, []byte("not a directory"), 0o644); err != nil {
+	if err := os.WriteFile(blocking, []byte("not a directory"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	err := cache.New(root).Put("digest-a", report.Report{Schema: report.SchemaV1, Snapshot: "digest-a"})

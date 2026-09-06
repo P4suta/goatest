@@ -5,10 +5,12 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,9 +111,83 @@ func TestGenerateReturnsProcessTreeCloseFailure(t *testing.T) {
 	}
 }
 
+func TestGenerateOwnsTheProcessLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cancel    bool
+		wantKills int
+		wantErr   error
+	}{
+		{name: "success"},
+		{name: "canceled", cancel: true, wantKills: 1, wantErr: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := startGenerationProcess
+			t.Cleanup(func() { startGenerationProcess = original })
+			tree := newFakeGenerationTree(test.cancel)
+			startGenerationProcess = func(command *exec.Cmd) (generationProcessTree, error) {
+				if !test.cancel {
+					response := Response{Version: ProtocolVersion, FindingID: "finding-a"}
+					if err := json.NewEncoder(command.Stdout).Encode(response); err != nil {
+						return nil, err
+					}
+				}
+				return tree, nil
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			if test.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			_, err := (Client{Command: []string{"provider"}, Timeout: time.Second}).Generate(ctx,
+				Request{Version: ProtocolVersion, Finding: report.Finding{ID: "finding-a"}})
+			if !errors.Is(err, test.wantErr) || test.wantErr == nil && err != nil {
+				t.Fatalf("Generate error = %v, want %v", err, test.wantErr)
+			}
+			if tree.kills != test.wantKills || tree.waits != 1 || tree.closes != 1 {
+				t.Fatalf("process lifecycle = kills %d waits %d closes %d", tree.kills, tree.waits, tree.closes)
+			}
+		})
+	}
+}
+
 type closeFailureTree struct {
 	generationProcessTree
 	err error
 }
 
 func (tree closeFailureTree) Close() error { return tree.err }
+
+type fakeGenerationTree struct {
+	stopped chan struct{}
+	once    sync.Once
+	kills   int
+	waits   int
+	closes  int
+}
+
+func newFakeGenerationTree(block bool) *fakeGenerationTree {
+	stopped := make(chan struct{})
+	if !block {
+		close(stopped)
+	}
+	return &fakeGenerationTree{stopped: stopped}
+}
+
+func (tree *fakeGenerationTree) Kill() error {
+	tree.kills++
+	tree.once.Do(func() { close(tree.stopped) })
+	return nil
+}
+
+func (tree *fakeGenerationTree) Wait() error {
+	tree.waits++
+	<-tree.stopped
+	return nil
+}
+
+func (tree *fakeGenerationTree) Close() error {
+	tree.closes++
+	return nil
+}

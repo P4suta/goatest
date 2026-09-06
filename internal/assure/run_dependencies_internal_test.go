@@ -51,7 +51,7 @@ func TestProductionRunResourceAdapterPropagatesEnvironmentAcquireAndClose(t *tes
 func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResourceResults(t *testing.T) {
 	dependencies := productionRunDependencies()
 	if dependencies.repositoryRoot == nil || dependencies.loadConfig == nil || dependencies.newCache == nil || dependencies.openWorkspace == nil ||
-		dependencies.closeWorkspace == nil || dependencies.inspectWorkspace == nil || dependencies.assuranceInputs == nil || dependencies.digestInputs == nil ||
+		dependencies.closeWorkspace == nil || dependencies.inspectWorkspace == nil || dependencies.assuranceInputs == nil ||
 		dependencies.discoverTargets == nil || dependencies.selectImpact == nil || dependencies.acquireResources == nil || dependencies.makeBaselineScratch == nil ||
 		dependencies.removeBaselineScratch == nil || dependencies.collectBaseline == nil || dependencies.concurrencyPackages == nil || dependencies.relevantRacePackages == nil ||
 		dependencies.collectRaceWithOptions == nil || dependencies.prepareSession == nil || dependencies.evaluateMutations == nil || dependencies.attemptRepairs == nil ||
@@ -89,7 +89,7 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 	t.Cleanup(func() { newRunResourceManager = previousManager })
 	manager := &scriptedRunResourceManager{environments: map[string][]string{"postgres": {"DB=ready"}}}
 	newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-	closer, baseline, evidenceItems, environment, err := dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{ID: "target", Capability: "postgres"}}, nil)
+	closer, baseline, evidenceItems, environment, err := dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{ID: "target", Capabilities: []string{"postgres"}}}, nil)
 	if err != nil || closer != manager || len(baseline) != 1 || baseline[0].Target.ID != "target" ||
 		!reflect.DeepEqual(evidenceItems, []report.Evidence{{Kind: "resource", ID: "postgres", Status: "ready"}}) || !slices.Equal(environment, []string{"DB=ready"}) {
 		t.Fatalf("resource delegation = (%T, %+v, %+v, %v, %v)", closer, baseline, evidenceItems, environment, err)
@@ -98,7 +98,7 @@ func TestProductionRunDependenciesConstructCacheDelegateCloseAndPreserveResource
 	resourceCause := errors.New("acquire failed")
 	manager = &scriptedRunResourceManager{errors: map[string]error{"postgres": resourceCause}}
 	newRunResourceManager = func(map[string]resource.Spec) runResourceManager { return manager }
-	closer, baseline, evidenceItems, environment, err = dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capability: "postgres"}}, nil)
+	closer, baseline, evidenceItems, environment, err = dependencies.acquireResources(t.Context(), config.Config{}, []goanalysis.Target{{Capabilities: []string{"postgres"}}}, nil)
 	if !errors.Is(err, resourceCause) || closer != nil || baseline != nil || evidenceItems != nil || environment != nil {
 		t.Fatalf("resource error delegation = (%T, %+v, %+v, %v, %v)", closer, baseline, evidenceItems, environment, err)
 	}

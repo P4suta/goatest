@@ -22,9 +22,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// probeCatalog is a catalogue whose indices are the ones a probe result names.
-// The last mutant has no probe form, which is what makes its absence from a
-// measurement say nothing at all.
+const probeRoundTripDuration = 9 * time.Millisecond
+
 func probeCatalog() gomutants.Catalog {
 	return gomutants.Catalog{Mutants: []gomutants.Mutant{
 		{Index: 0, ID: "mutant-a", DisplayID: "a#1", Accepted: true, Probed: true},
@@ -34,7 +33,6 @@ func probeCatalog() gomutants.Catalog {
 	}}
 }
 
-// probeEvidence is one measured baseline target of the kind the pass decides by.
 func probeEvidence(name string, kind goanalysis.TargetKind, duration time.Duration) TargetEvidence {
 	return TargetEvidence{
 		Target: goanalysis.Target{
@@ -44,13 +42,11 @@ func probeEvidence(name string, kind goanalysis.TargetKind, duration time.Durati
 	}
 }
 
-// probeAnswer is what a scripted session says about one target.
 type probeAnswer struct {
 	result gomutants.ProbeResult
 	err    error
 }
 
-// measuredAnswer is a pass that ran and named the mutants it made differ.
 func measuredAnswer(infected ...uint32) probeAnswer {
 	if infected == nil {
 		infected = []uint32{}
@@ -60,8 +56,6 @@ func measuredAnswer(infected ...uint32) probeAnswer {
 	}}
 }
 
-// probeAnswers scripts one answer per target, selected the way the pass selects
-// the target itself: by the -test.run argument it sends.
 func probeAnswers(answers map[string]probeAnswer) func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 	return func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 		for name, answer := range answers {
@@ -73,8 +67,6 @@ func probeAnswers(answers map[string]probeAnswer) func(gomutants.ProbeRequest) (
 	}
 }
 
-// probeRecording keeps a recording as the JSON lines a real trace file holds,
-// so a test reads back exactly the bytes a consumer would.
 type probeRecording struct {
 	mutex sync.Mutex
 	lines []string
@@ -99,15 +91,11 @@ func (recording *probeRecording) Lines() []string {
 	return slices.Clone(recording.lines)
 }
 
-// newProbeRecording returns a recorder writing every event into a buffer of
-// trace lines.
 func newProbeRecording() (*probeRecording, *trace.Recorder) {
 	recording := &probeRecording{}
 	return recording, trace.New(recording, func() time.Time { return traceSessionOrigin })
 }
 
-// validateProbeLines rejects any recorded line the trace schema would reject. A
-// trace nothing can validate is a trace nothing can read.
 func validateProbeLines(t *testing.T, lines []string) {
 	t.Helper()
 	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(trace.JSONSchema()))
@@ -137,11 +125,8 @@ func validateProbeLines(t *testing.T, lines []string) {
 	}
 }
 
-// traceSchemaResource is the identity the trace schema is compiled under.
 const traceSchemaResource = "https://goatest.invalid/goatest-trace-v1.schema.json"
 
-// probeRecords reads the probe records back out of a recording, keyed by the
-// target each one describes.
 func probeRecords(t *testing.T, recording *probeRecording) map[string]trace.ProbeRecord {
 	t.Helper()
 	records := make(map[string]trace.ProbeRecord)
@@ -161,8 +146,6 @@ func probeRecords(t *testing.T, recording *probeRecording) map[string]trace.Prob
 	return records
 }
 
-// probeRecordKeys reads the JSON object one probe record was written as, so a
-// test can assert that a key is absent rather than merely empty.
 func probeRecordKeys(t *testing.T, recording *probeRecording, target string) map[string]any {
 	t.Helper()
 	for _, line := range recording.Lines() {
@@ -181,11 +164,6 @@ func probeRecordKeys(t *testing.T, recording *probeRecording, target string) map
 	return nil
 }
 
-// TestTargetEvidenceInfectsEveryMutantUnlessProbedAndAbsent pins the one reading
-// of an infection fact that is sound: a target the pass measured infects exactly
-// the mutants it named, and a target it did not measure infects everything.
-// Reading an unmeasured target as infecting nothing would drop the executions
-// that find kills.
 func TestTargetEvidenceInfectsEveryMutantUnlessProbedAndAbsent(t *testing.T) {
 	t.Parallel()
 	unmeasured := TargetEvidence{Infected: []uint32{1}}
@@ -205,8 +183,7 @@ func TestTargetEvidenceInfectsEveryMutantUnlessProbedAndAbsent(t *testing.T) {
 			t.Errorf("a measured target infected mutant %d, which it never named", index)
 		}
 	}
-	// A measured target that infected nothing is the strongest fact the pass
-	// produces, and it must not read as one that measured nothing.
+
 	if empty := (TargetEvidence{Probed: true}); empty.infects(0) {
 		t.Error("a target that measured and infected nothing infected a mutant")
 	}
@@ -220,10 +197,10 @@ func TestMutationProbeCheckpointRoundTripBindsCompactIndices(t *testing.T) {
 		probeEvidence("FuzzValue", goanalysis.KindFuzz, 23*time.Millisecond),
 	}
 	targets[0].Probed = true
-	targets[0].ProbeDuration = 9 * time.Millisecond
+	targets[0].ProbeDuration = probeRoundTripDuration
 	targets[0].Infected = []uint32{0, 2}
 	evaluation := ProbeEvaluation{
-		Targets: targets, Measured: 1,
+		Targets: targets, Measured: 1, Unmeasured: 1,
 		Suites: map[string]PackageProbeEvidence{
 			"fixture.example/module": {Measured: true, Duration: 31 * time.Millisecond, Infected: []uint32{1, 2}, WholeTree: true},
 			"fixture.example/other":  {},
@@ -239,9 +216,6 @@ func TestMutationProbeCheckpointRoundTripBindsCompactIndices(t *testing.T) {
 		t.Fatalf("restored probe = (%+v, %t), want %+v", restored, ok, evaluation)
 	}
 
-	// The source-mutant fingerprint is order-independent, while an infection
-	// set is not. Swapping just the runtime indices must therefore reject the
-	// saved compact set even though every source mutant is unchanged.
 	reindexed := catalog
 	reindexed.Mutants = slices.Clone(catalog.Mutants)
 	reindexed.Mutants[0].Index, reindexed.Mutants[1].Index = reindexed.Mutants[1].Index, reindexed.Mutants[0].Index
@@ -253,10 +227,7 @@ func TestMutationProbeCheckpointRoundTripBindsCompactIndices(t *testing.T) {
 	}
 }
 
-// TestProbePassSkipsFuzzTargets pins that a fuzz target is never probed: the
-// mutation phase fuzzes beyond the seed corpus the probe would measure, and a
-// fuzz run on the probe tree would write corpus files into that tree.
-func TestProbePassSkipsFuzzTargets(t *testing.T) {
+func TestProbePassMeasuresFuzzSeedTargets(t *testing.T) {
 	t.Parallel()
 	targets := []TargetEvidence{
 		probeEvidence("TestValue", goanalysis.KindTest, time.Second),
@@ -264,30 +235,34 @@ func TestProbePassSkipsFuzzTargets(t *testing.T) {
 		probeEvidence("ExampleValue", goanalysis.KindExample, 3*time.Second),
 	}
 	session := &mutationUnitSession{catalog: probeCatalog(), probe: probeAnswers(map[string]probeAnswer{
-		"TestValue": measuredAnswer(0), "ExampleValue": measuredAnswer(2),
+		"TestValue": measuredAnswer(0), "FuzzValue": measuredAnswer(1), "ExampleValue": measuredAnswer(2),
 	})}
 	recording, recorder := newProbeRecording()
 	evaluation, err := ProbeTargets(t.Context(), session, targets, ProbeOptions{Contract: "standard-v1", Trace: recorder})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evaluation.Measured != 2 || evaluation.Unmeasured != 0 {
-		t.Fatalf("evaluation = %+v, want two measured targets and no unmeasured one", evaluation)
+	if evaluation.Measured != 3 || evaluation.Unmeasured != 0 {
+		t.Fatalf("evaluation = %+v, want three measured targets and no unmeasured one", evaluation)
 	}
 	fuzz := evaluation.Targets[1]
-	if fuzz.Target.Name != "FuzzValue" || fuzz.Probed || fuzz.Infected != nil {
-		t.Fatalf("fuzz target = %+v, want it left unmeasured and without facts", fuzz)
+	if fuzz.Target.Name != "FuzzValue" || !fuzz.Probed || !slices.Equal(fuzz.Infected, []uint32{1}) {
+		t.Fatalf("fuzz target = %+v, want deterministic seed probe facts", fuzz)
 	}
+	fuzzProbed := false
 	for _, request := range session.probeRequests() {
 		if slices.Contains(request.Args, "-test.run=^FuzzValue$") {
-			t.Fatalf("the fuzz target was probed: %+v", request)
+			fuzzProbed = true
 		}
 	}
-	if len(session.probeRequests()) != 2 {
-		t.Fatalf("probe requests = %+v, want one per non-fuzz target", session.probeRequests())
+	if !fuzzProbed {
+		t.Fatal("the fuzz seed target was not probed")
 	}
-	if records := probeRecords(t, recording); len(records) != 2 || records["target-FuzzValue"].Target != "" {
-		t.Fatalf("records = %+v, want no record for the fuzz target", records)
+	if len(session.probeRequests()) != len(targets) {
+		t.Fatalf("probe requests = %+v, want one per target", session.probeRequests())
+	}
+	if records := probeRecords(t, recording); len(records) != len(targets) || records["target-FuzzValue"].Target != "target-FuzzValue" {
+		t.Fatalf("records = %+v, want a record for every target", records)
 	}
 }
 
@@ -317,7 +292,7 @@ func TestProbePassMeasuresOneWholeSuitePerMutantPackage(t *testing.T) {
 		Contract: "standard-v1", TestArgs: []string{"-test.short=true"}, Jobs: 2,
 		PackageSuites: true, SuiteEnvironment: []string{"DB=ready"}, Trace: recorder,
 		Progress: func(completed, total int) {
-			if total != 3 {
+			if total != len(targets)+1 {
 				t.Errorf("progress total = %d, want two targets and one suite", total)
 			}
 			progress = append(progress, completed)
@@ -352,13 +327,13 @@ func TestProbePassMeasuresOneWholeSuitePerMutantPackage(t *testing.T) {
 	if suiteRequest == nil || suiteRequest.Package != "fixture.example/module" ||
 		!slices.Equal(suiteRequest.Args, []string{"-test.short=true"}) ||
 		!slices.Equal(suiteRequest.Env, []string{"DB=ready"}) ||
-		suiteRequest.Timeout != 10*time.Second {
-		t.Fatalf("suite request = %+v, want the five-second package control with relative headroom", suiteRequest)
+		suiteRequest.Timeout != 5*time.Second {
+		t.Fatalf("suite request = %+v, want the measured five-second package control", suiteRequest)
 	}
 	validateProbeLines(t, recording.Lines())
 	record := probeRecords(t, recording)[packageSuiteProbeTarget("fixture.example/module")]
 	if !record.Suite || record.Package != "fixture.example/module" ||
-		!slices.Equal(record.Args, []string{"-test.short=true"}) || record.TimeoutMS != 10_000 ||
+		!slices.Equal(record.Args, []string{"-test.short=true"}) || record.TimeoutMS != 5_000 ||
 		record.Outcome != trace.ProbeOutcomeMeasured || record.DurationMS != 7_000 ||
 		!slices.Equal(record.Infected, []string{"mutant-a", "mutant-c"}) {
 		t.Fatalf("suite record = %+v", record)
@@ -377,7 +352,7 @@ func TestProbePassLeavesNoPackageFactsWhenTheSuiteIsNotMeasured(t *testing.T) {
 	}
 	session := &mutationUnitSession{catalog: catalog, probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 		return gomutants.ProbeResult{
-			Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: minimumMutationTimeout,
+			Outcome: gomutants.ProbeTimedOut, ExitCode: -1,
 		}, nil
 	}}
 	evaluation, err := ProbeTargets(t.Context(), session, nil, ProbeOptions{
@@ -393,10 +368,6 @@ func TestProbePassLeavesNoPackageFactsWhenTheSuiteIsNotMeasured(t *testing.T) {
 	}
 }
 
-// TestProbePassSendsTheRequestTheMutationPhaseWouldSend pins the pass to the
-// execution it is a measurement of: the same target, selected the same way,
-// under the same environment and a timeout relative to its passing baseline,
-// minus the mutant a probe tree never activates.
 func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -421,7 +392,7 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 				t.Fatal(err)
 			}
 			seed := seedRequest(gomutants.Mutant{ID: "mutant-a"}, target,
-				controlRelativeMutationTimeout(options.Contract, options.Timeout, target.Duration))
+				mutationExecutionTimeout(options.Timeout, target.Duration))
 			seed.Args = append(seed.Args, test.testArgs...)
 			requests := session.probeRequests()
 			if len(requests) != 1 {
@@ -432,8 +403,7 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 				!slices.Equal(got.Env, seed.Env) || got.Timeout != seed.Timeout {
 				t.Fatalf("probe request = %+v, want the mutation request %+v without its mutant", got, seed)
 			}
-			// The request owns its environment: a later edit of the target's
-			// slice cannot rewrite what was executed.
+
 			target.Environment[0] = "DB=mutated"
 			if !slices.Equal(session.probeRequests()[0].Env, []string{"DB=ready"}) {
 				t.Fatalf("probe environment aliases the target: %+v", session.probeRequests()[0].Env)
@@ -442,8 +412,6 @@ func TestProbePassSendsTheRequestTheMutationPhaseWouldSend(t *testing.T) {
 	}
 }
 
-// TestProbePassKeepsTheFactsOfAMeasuredTarget pins what a measurement leaves
-// behind: the catalogue indices the target made differ, ascending and distinct.
 func TestProbePassKeepsTheFactsOfAMeasuredTarget(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -453,9 +421,7 @@ func TestProbePassKeepsTheFactsOfAMeasuredTarget(t *testing.T) {
 	}{
 		{name: "sorted", infected: []uint32{0, 2}, want: []uint32{0, 2}},
 		{name: "empty", infected: []uint32{}, want: []uint32{}},
-		// The engine contract promises the indices sorted and distinct; a set
-		// that arrives otherwise is repaired rather than trusted, because
-		// routing will binary-search it.
+
 		{name: "unsorted and repeated", infected: []uint32{2, 0, 2, 1}, want: []uint32{0, 1, 2}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -475,8 +441,7 @@ func TestProbePassKeepsTheFactsOfAMeasuredTarget(t *testing.T) {
 			if evaluation.Measured != 1 || evaluation.Unmeasured != 0 {
 				t.Fatalf("evaluation = %+v, want one measured target", evaluation)
 			}
-			// The input is never rewritten: the pass answers with evidence of
-			// its own so a caller keeps what it handed over.
+
 			if targets[0].Probed || targets[0].Infected != nil {
 				t.Fatalf("the input target was rewritten: %+v", targets[0])
 			}
@@ -484,9 +449,6 @@ func TestProbePassKeepsTheFactsOfAMeasuredTarget(t *testing.T) {
 	}
 }
 
-// TestProbePassLeavesNoFactsOnATargetThatFailed pins the fail-closed half: a
-// pass that could not be vouched for carries no facts, never "infected
-// nothing", because reading it the other way drops the executions that kill.
 func TestProbePassLeavesNoFactsOnATargetThatFailed(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []gomutants.ProbeOutcome{
@@ -495,7 +457,7 @@ func TestProbePassLeavesNoFactsOnATargetThatFailed(t *testing.T) {
 		t.Run(string(outcome), func(t *testing.T) {
 			t.Parallel()
 			session := &mutationUnitSession{catalog: probeCatalog(), probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
-				return gomutants.ProbeResult{Outcome: outcome, ExitCode: 1, OutputTail: "FAIL"}, nil
+				return gomutants.ProbeResult{Outcome: outcome, ExitCode: 1, Output: []byte("FAIL")}, nil
 			}}
 			recording, recorder := newProbeRecording()
 			evaluation, err := ProbeTargets(t.Context(), session,
@@ -519,9 +481,6 @@ func TestProbePassLeavesNoFactsOnATargetThatFailed(t *testing.T) {
 	}
 }
 
-// TestProbePassKeepsGoingWhenOneTargetErrors pins that a measurement that could
-// not be taken costs its own facts and nothing else: the pass is an
-// optimisation, so one failed measurement must not fail the run.
 func TestProbePassKeepsGoingWhenOneTargetErrors(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("probe scratch could not be made")
@@ -555,9 +514,6 @@ func TestProbePassKeepsGoingWhenOneTargetErrors(t *testing.T) {
 	}
 }
 
-// TestProbePassStopsOnCancellation pins that a cancelled run stops asking for
-// measurements it will never use, and reports the cancellation rather than a
-// pass that measured nothing.
 func TestProbePassStopsOnCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -579,10 +535,6 @@ func TestProbePassStopsOnCancellation(t *testing.T) {
 	}
 }
 
-// TestProbePassRefusesAnUnpreparedSession pins the one probe failure that is a
-// programming error rather than a measurement: a session prepared without a
-// probe tree can never answer, so the run stops instead of recording an error
-// per target.
 func TestProbePassRefusesAnUnpreparedSession(t *testing.T) {
 	t.Parallel()
 	session := &mutationUnitSession{catalog: probeCatalog(), probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
@@ -596,9 +548,6 @@ func TestProbePassRefusesAnUnpreparedSession(t *testing.T) {
 	}
 }
 
-// TestProbePassRefusesANilSession keeps the entry point fail-closed: a pass
-// with nothing to measure against reports that rather than panicking inside a
-// worker.
 func TestProbePassRefusesANilSession(t *testing.T) {
 	t.Parallel()
 	evaluation, err := ProbeTargets(t.Context(), nil, nil, ProbeOptions{})
@@ -607,10 +556,6 @@ func TestProbePassRefusesANilSession(t *testing.T) {
 	}
 }
 
-// TestProbePassIsDeterministicAcrossJobCounts pins that concurrency changes only
-// how long the pass takes: the evidence and the recording of a pass run one
-// target at a time are the evidence and the recording of a pass run four at a
-// time.
 func TestProbePassIsDeterministicAcrossJobCounts(t *testing.T) {
 	t.Parallel()
 	answers := map[string]probeAnswer{
@@ -620,6 +565,7 @@ func TestProbePassIsDeterministicAcrossJobCounts(t *testing.T) {
 		"TestFourth": {err: errors.New("probe failed to start")},
 		"TestFifth":  measuredAnswer(1),
 		"TestSixth":  {result: gomutants.ProbeResult{Outcome: gomutants.ProbeTimedOut, ExitCode: -1}},
+		"FuzzValue":  measuredAnswer(2),
 	}
 	targets := []TargetEvidence{
 		probeEvidence("TestFirst", goanalysis.KindTest, time.Second),
@@ -638,8 +584,8 @@ func TestProbePassIsDeterministicAcrossJobCounts(t *testing.T) {
 		evaluation, err := ProbeTargets(t.Context(), session, targets, ProbeOptions{
 			Contract: "standard-v1", Jobs: jobs, Trace: recorder,
 			Progress: func(completed, total int) {
-				if total != 6 {
-					t.Errorf("progress total = %d, want the six non-fuzz targets", total)
+				if total != len(targets) {
+					t.Errorf("progress total = %d, want all targets", total)
 				}
 				completions = append(completions, completed)
 			},
@@ -647,7 +593,7 @@ func TestProbePassIsDeterministicAcrossJobCounts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		records := make([]trace.ProbeRecord, 0, 6)
+		records := make([]trace.ProbeRecord, 0, len(targets))
 		for _, record := range probeRecords(t, recording) {
 			records = append(records, record)
 		}
@@ -665,17 +611,14 @@ func TestProbePassIsDeterministicAcrossJobCounts(t *testing.T) {
 	if !reflect.DeepEqual(serialRecords, parallelRecords) {
 		t.Fatalf("records of one job = %+v, of four = %+v", serialRecords, parallelRecords)
 	}
-	if want := []int{1, 2, 3, 4, 5, 6}; !slices.Equal(serialProgress, want) || !slices.Equal(parallelProgress, want) {
+	if want := []int{1, 2, 3, 4, 5, 6, 7}; !slices.Equal(serialProgress, want) || !slices.Equal(parallelProgress, want) {
 		t.Fatalf("progress = %v and %v, want %v", serialProgress, parallelProgress, want)
 	}
-	if serial.Measured != 3 || serial.Unmeasured != 3 {
-		t.Fatalf("evaluation = %+v, want three measured targets and three without facts", serial)
+	if serial.Measured != 4 || serial.Unmeasured != 3 {
+		t.Fatalf("evaluation = %+v, want four measured targets and three without facts", serial)
 	}
 }
 
-// TestProbePassRecordsWhatEachTargetMeasured pins the record a developer reads
-// the pass through: what ran, how it ended, and the mutants it named — and
-// nothing where there is nothing to say.
 func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("probe log could not be read")
@@ -689,22 +632,23 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 		"TestUnknown": {result: gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{9}}},
 	})}
 	recording, recorder := newProbeRecording()
-	evaluation, err := ProbeTargets(t.Context(), session, []TargetEvidence{
+	targets := []TargetEvidence{
 		probeEvidence("TestInfecting", goanalysis.KindTest, time.Second),
 		probeEvidence("TestClean", goanalysis.KindTest, time.Second),
 		probeEvidence("TestFailing", goanalysis.KindTest, time.Second),
 		probeEvidence("TestErrored", goanalysis.KindTest, time.Second),
 		probeEvidence("TestUnknown", goanalysis.KindTest, time.Second),
-	}, ProbeOptions{Contract: "standard-v1", TestArgs: []string{"-test.short=true"}, Trace: recorder})
+	}
+	evaluation, err := ProbeTargets(t.Context(), session, targets, ProbeOptions{Contract: "standard-v1", TestArgs: []string{"-test.short=true"}, Trace: recorder})
 	if err != nil {
 		t.Fatal(err)
 	}
 	validateProbeLines(t, recording.Lines())
 	records := probeRecords(t, recording)
-	if len(records) != 5 {
+	if len(records) != len(targets) {
 		t.Fatalf("records = %+v, want one per probed target", records)
 	}
-	timeout := traceMilliseconds(controlRelativeMutationTimeout("standard-v1", 0, time.Second))
+	timeout := traceMilliseconds(mutationExecutionTimeout(0, time.Second))
 	want := trace.ProbeRecord{
 		Target: "target-TestInfecting", Package: "fixture.example/module",
 		Args:      []string{"-test.run=^TestInfecting$", "-test.short=true"},
@@ -714,9 +658,7 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 	if got := records["target-TestInfecting"]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("infecting record = %+v, want %+v", got, want)
 	}
-	// A measured target that infected nothing says so by the outcome alone: the
-	// key is absent rather than an empty list nobody can tell from a missing
-	// measurement.
+
 	clean := records["target-TestClean"]
 	if clean.Outcome != trace.ProbeOutcomeMeasured || clean.Infected != nil || clean.Error != "" {
 		t.Fatalf("clean record = %+v", clean)
@@ -733,8 +675,7 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 	if errored.Error != cause.Error() || errored.Outcome != "" || errored.Infected != nil {
 		t.Fatalf("errored record = %+v", errored)
 	}
-	// An index the catalogue does not know is a contract violation, and a
-	// measurement naming a mutant nobody can identify is no measurement.
+
 	unknown := records["target-TestUnknown"]
 	if unknown.Error != "probe reported an unknown mutant index 9" || unknown.Outcome != "" || unknown.Infected != nil {
 		t.Fatalf("unknown-index record = %+v", unknown)
@@ -752,7 +693,7 @@ func TestPreparedProbeMutationControlRunsTheExactSemanticOriginal(t *testing.T) 
 	session := &mutationUnitSession{probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 		return gomutants.ProbeResult{
 			Outcome: gomutants.ProbeMeasured, ExitCode: 0,
-			Duration: 1250 * time.Millisecond, OutputTail: "passing output",
+			Duration: 1250 * time.Millisecond, Output: []byte("passing output"),
 		}, nil
 	}}
 	recording, recorder := newProbeRecording()
@@ -782,7 +723,7 @@ func TestPreparedProbeMutationControlRunsTheExactSemanticOriginal(t *testing.T) 
 	validateProbeLines(t, recording.Lines())
 	records := probeRecords(t, recording)
 	wantRecord := trace.ProbeRecord{
-		Target: "paired-control:fixture.example/module/pkg", Package: "fixture.example/module/pkg",
+		Target: trace.MutationControlProbePrefix + "fixture.example/module/pkg", Package: "fixture.example/module/pkg",
 		Control: true, Args: wantRequest.Args, TimeoutMS: 7000,
 		Outcome: trace.ProbeOutcomeMeasured, DurationMS: 1250,
 	}
@@ -803,7 +744,7 @@ func TestPreparedProbeMutationControlFailsClosed(t *testing.T) {
 	}{
 		{
 			name: "a timed-out original", result: gomutants.ProbeResult{
-				Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: 3 * time.Second, OutputTail: "stalled",
+				Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: 3 * time.Second, Output: []byte("stalled"),
 			},
 			wantResult: gomutants.CommandResult{
 				ExitCode: -1, TimedOut: true, Duration: 3 * time.Second, Output: []byte("stalled"),
@@ -843,10 +784,84 @@ func TestPreparedProbeMutationControlFailsClosed(t *testing.T) {
 				t.Fatalf("control = (%+v, %v), want zero result and %q", result, err, testCase.wantError)
 			}
 			validateProbeLines(t, recording.Lines())
-			record := probeRecords(t, recording)["paired-control:all"]
+			record := probeRecords(t, recording)[trace.MutationControlProbePrefix+"all"]
 			if !record.Control || (testCase.wantError != "" && record.Error == "") {
 				t.Fatalf("control record = %+v", record)
 			}
 		})
+	}
+}
+
+const (
+	probeTargetControl = 3 * time.Second
+	probeSuiteControl  = 5 * time.Second
+)
+
+func TestProbeDeadlinesSumEveryPositiveControl(t *testing.T) {
+	t.Parallel()
+	target := probeEvidence("TestValue", goanalysis.KindTest, probeTargetControl)
+	measured := map[string]PackageSuiteCoverage{target.Target.Package: {Duration: probeSuiteControl}}
+	unmeasured := map[string]PackageSuiteCoverage{target.Target.Package: {}}
+	for _, test := range []struct {
+		name   string
+		limit  time.Duration
+		suites map[string]PackageSuiteCoverage
+		want   time.Duration
+	}{
+		{name: "the target control alone", want: probeTargetControl},
+		{name: "every measured control", suites: measured, want: probeTargetControl + probeSuiteControl},
+		{name: "an unmeasured suite adds nothing", suites: unmeasured, want: probeTargetControl},
+		{
+			name: "capped by the containment ceiling", limit: probeTargetControl,
+			suites: measured, want: probeTargetControl,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			session := &mutationUnitSession{catalog: probeCatalog(), probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+				return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{}}, nil
+			}}
+			options := ProbeOptions{Timeout: test.limit, SuiteCoverage: test.suites}
+			if _, err := ProbeTargets(t.Context(), session, []TargetEvidence{target}, options); err != nil {
+				t.Fatal(err)
+			}
+			requests := session.probeRequests()
+			if len(requests) != 1 {
+				t.Fatalf("probe requests = %+v, want one", requests)
+			}
+			if requests[0].Timeout != test.want {
+				t.Fatalf("probe deadline = %v; want %v", requests[0].Timeout, test.want)
+			}
+		})
+	}
+}
+
+func TestProbeSuiteDeadlineSumsItsTargetsAndItsOwnControl(t *testing.T) {
+	t.Parallel()
+	target := probeEvidence("TestValue", goanalysis.KindTest, probeTargetControl)
+	pkg := target.Target.Package
+	session := &mutationUnitSession{catalog: probeCatalog(), probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{}}, nil
+	}}
+	options := ProbeOptions{
+		SuitePackages: []string{pkg},
+		SuiteCoverage: map[string]PackageSuiteCoverage{pkg: {Duration: probeSuiteControl}},
+	}
+	if _, err := ProbeTargets(t.Context(), session, []TargetEvidence{target}, options); err != nil {
+		t.Fatal(err)
+	}
+	var suiteRequests []gomutants.ProbeRequest
+	for _, request := range session.probeRequests() {
+		if !slices.ContainsFunc(request.Args, func(argument string) bool {
+			return strings.HasPrefix(argument, "-test.run=")
+		}) {
+			suiteRequests = append(suiteRequests, request)
+		}
+	}
+	if len(suiteRequests) != 1 {
+		t.Fatalf("package suite requests = %+v, want one", suiteRequests)
+	}
+	if want := probeTargetControl + probeSuiteControl; suiteRequests[0].Timeout != want {
+		t.Fatalf("package suite deadline = %v; want %v", suiteRequests[0].Timeout, want)
 	}
 }

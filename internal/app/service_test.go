@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/config"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
@@ -275,21 +277,26 @@ func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
 }
 
 func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
+	const replayTimeout = 2 * time.Minute
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
 	}
 	original := report.Report{
-		Schema: report.SchemaV1, RunID: "identity-fixture", RunKind: report.RunFull,
+		Schema: report.SchemaV1, RunID: "identity-fixture", RunKind: report.RunPackage,
 		Verdict: report.VerdictInsufficient, Contract: "standard-v1", Snapshot: "snapshot-a",
 		Scope: report.Scope{
-			Requested: report.ScopeSpec{Kind: "full", Project: "."},
-			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
+			Requested: report.ScopeSpec{Kind: "package", Project: ".", Packages: []string{"./subject"}},
+			Resolved:  report.ScopeSpec{Kind: "package", Project: ".", Packages: []string{"./subject"}},
 		},
 		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
-		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
-		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
-		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
+		Configuration: report.Configuration{Digest: appTestDigest("a")},
+		Execution: report.Execution{
+			TestArgs: []string{"-test.short=true"}, BuildTags: []string{"integration"}, MutationOperators: []string{"comparison"},
+			MutationJobs: 1, CommandTimeoutNS: int64(replayTimeout), TargetTimeoutNS: int64(replayTimeout),
+		},
+		Toolchain: report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
+		Timing:    report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
 		Findings: []report.Finding{
 			{ID: "finding-a", Kind: "survivor", Summary: "one"},
 			{ID: "finding-b", Kind: "coverage", Summary: "two", MutantID: "mutant-b"},
@@ -304,6 +311,10 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 		Now:  func() time.Time { return time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC) },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 			if !options.NoApply || options.ReplayFindingID != "finding-b" || options.ReplayMutantID != "mutant-b" ||
+				options.Contract != "standard-v1" || !slices.Equal(options.Packages, []string{"./subject"}) || !options.PackageScope ||
+				!slices.Equal(options.TestArgs, []string{"-test.short=true"}) || !slices.Equal(options.BuildTags, []string{"integration"}) ||
+				!slices.Equal(options.MutationOperators, []string{"comparison"}) || options.MutationJobs != 1 ||
+				options.CommandTimeout != replayTimeout || options.TargetTimeout != replayTimeout || !options.ExecutionPinned ||
 				options.Now == nil || !options.Now().Equal(time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)) {
 				t.Fatalf("replay options = %+v", options)
 			}
@@ -352,6 +363,33 @@ func TestReplayRejectsFindingWithoutMutantIdentityBeforeRunner(t *testing.T) {
 	}
 }
 
+func TestReplayRejectsIncompleteExecutionMetadataBeforeRunner(t *testing.T) {
+	root := t.TempDir()
+	writeLatestFixture(t, root)
+	path := filepath.Join(root, ".goatest", "latest-any.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input report.Report
+	if err := json.Unmarshal(data, &input); err != nil {
+		t.Fatal(err)
+	}
+	input.Execution = report.Execution{}
+	if err := os.WriteFile(path, report.JSON(input), filemode.PrivateFile); err != nil {
+		t.Fatal(err)
+	}
+	runnerCalled := false
+	service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
+		runnerCalled = true
+		return report.Report{}, nil
+	}}
+	result, err := service.Execute(t.Context(), cli.CommandReplay, cli.Request{}, "finding-a")
+	if err == nil || !strings.Contains(err.Error(), "incomplete execution metadata") || runnerCalled || result.Verdict != "" {
+		t.Fatalf("incomplete replay = %+v, %v runnerCalled=%t", result, err, runnerCalled)
+	}
+}
+
 func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing.T) {
 	valid := report.JSON(report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured})
 	for _, testCase := range []struct {
@@ -370,10 +408,10 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 			root := t.TempDir()
 			if testCase.write {
 				path := filepath.Join(root, ".goatest", "latest-any.json")
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, testCase.content, 0o644); err != nil {
+				if err := os.WriteFile(path, testCase.content, filemode.ReadableFile); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -386,10 +424,6 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 }
 
 func TestHistoricalReportLoadErrorsIdentifyTheRequestedRun(t *testing.T) {
-	// A run that is not in the history is now the ordinary outcome of asking for
-	// an old one, because the history is bounded. The message has to name the
-	// run and say which of the two things happened, so that a missing directory
-	// does not read as a broken installation.
 	_, err := (app.Service{Root: t.TempDir()}).Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: "missing-run"}, "")
 	want := `goatest: report run "missing-run" is not in reports/runs: it was collected or never written`
 	if err == nil || err.Error() != want {
@@ -426,7 +460,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 
 	t.Run("verify-report-write", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
@@ -439,7 +473,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 
 	t.Run("runner-error-report-write", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
@@ -457,7 +491,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 		if err := os.RemoveAll(filepath.Join(root, "reports")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(root, "reports"), []byte("blocks directory"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "reports"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
@@ -474,7 +508,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 			t.Fatal(err)
 		}
 		writeLatestFixture(t, root)
-		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("unknown = true\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("unknown = true\n"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := (app.Service{Root: root}).Execute(t.Context(), cli.CommandAccept, cli.Request{
@@ -504,10 +538,10 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 		t.Run(string(command), func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, ".goatest", "latest-any.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte("{"), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
 			}
 			_, err := (app.Service{Root: root}).Execute(t.Context(), command, cli.Request{}, "finding-a")
@@ -532,7 +566,8 @@ func writeLatestFixtureWithMutant(t *testing.T, root, mutantID string) {
 			Resolved:  report.ScopeSpec{Kind: "full", Project: "."},
 		},
 		Repository:    report.Repository{Module: "example.test/fixture", Git: report.Git{Available: true, Commit: "commit", MergeBase: "commit"}},
-		Configuration: report.Configuration{Digest: strings.Repeat("a", 64)},
+		Configuration: report.Configuration{Digest: appTestDigest("a")},
+		Execution:     appTestExecution(),
 		Toolchain:     report.Toolchain{Go: "go1.26.6", Goatest: "devel", GoMutants: "v0.1.2", OS: "windows", Arch: "amd64"},
 		Timing:        report.Timing{StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z", DurationMS: 1000},
 		Findings:      []report.Finding{{ID: "finding-a", Kind: "survivor", Summary: "survived", MutantID: mutantID}},
@@ -555,23 +590,20 @@ func TestInitCreatesStrictConfigWithoutRunningAssurance(t *testing.T) {
 	if _, err := config.Load(root); err != nil {
 		t.Fatal(err)
 	}
-	// The report guides a fresh project onward: the directories runs will
-	// create, and the commands that come next.
+
 	steps := make(map[string]string)
 	for _, evidence := range result.Evidence {
 		if evidence.Kind == "next-step" {
 			steps[evidence.ID] = evidence.Detail
 		}
 	}
-	if len(steps) != 3 || !strings.Contains(steps["gitignore"], ".goatest/") || !strings.Contains(steps["gitignore"], "reports/") ||
+	const initializationStepCount = 3
+	if len(steps) != initializationStepCount || !strings.Contains(steps["gitignore"], ".goatest/") || !strings.Contains(steps["gitignore"], "reports/") ||
 		!strings.Contains(steps["doctor"], "goatest doctor") || !strings.Contains(steps["verify"], "goatest verify ./...") {
 		t.Fatalf("next steps = %+v", steps)
 	}
 }
 
-// A jsonl UI streams one progress event per note to the output stream the
-// final report event will follow on, and leaves the plain progress stream
-// silent: one pipe carries the whole stream.
 func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
 	var output, progress bytes.Buffer
 	service := app.Service{
@@ -589,10 +621,11 @@ func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
 		t.Fatalf("jsonl leaked plain progress: %q", progress.String())
 	}
 	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
-	if len(lines) != 2 {
+	wantEvents := []struct{ kind, detail string }{{"snapshot", "captured"}, {"mutation-progress", "3/9"}}
+	if len(lines) != len(wantEvents) {
 		t.Fatalf("stream = %q", output.String())
 	}
-	for index, want := range []struct{ kind, detail string }{{"snapshot", "captured"}, {"mutation-progress", "3/9"}} {
+	for index, want := range wantEvents {
 		var event struct {
 			Type      string `json:"type"`
 			Kind      string `json:"kind"`
@@ -608,8 +641,6 @@ func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
 	}
 }
 
-// A note the trace layer reports before the run - here a trace directory the
-// snapshot would read as source - reaches the renderer the request selected.
 func TestTraceUnavailableReachesTheSelectedUI(t *testing.T) {
 	var output bytes.Buffer
 	service := app.Service{
@@ -627,8 +658,6 @@ func TestTraceUnavailableReachesTheSelectedUI(t *testing.T) {
 	}
 }
 
-// Without an output stream a jsonl request falls back to deterministic plain
-// lines rather than guessing where the stream went.
 func TestJSONLWithoutAnOutputWriterFallsBackToPlain(t *testing.T) {
 	var progress bytes.Buffer
 	service := app.Service{
@@ -646,9 +675,6 @@ func TestJSONLWithoutAnOutputWriterFallsBackToPlain(t *testing.T) {
 	}
 }
 
-// The auto UI renders plain lines wherever no composition root probed an
-// interactive terminal: the zero value of Interactive can never start a
-// dashboard, and neither can a probe that answered no.
 func TestAutoUIWithoutATerminalRendersPlainLines(t *testing.T) {
 	for name, interactive := range map[string]func(io.Writer) bool{
 		"zero-value": nil,
@@ -671,15 +697,13 @@ func TestAutoUIWithoutATerminalRendersPlainLines(t *testing.T) {
 	}
 }
 
-// On an interactive terminal the auto UI renders the in-place dashboard, and
-// closing the run erases the status line.
 func TestAutoUIRendersTheDashboardOnAnInteractiveTerminal(t *testing.T) {
 	var progress lockedProgressBuffer
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress,
 		Interactive: func(io.Writer) bool { return true },
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
-			options.Progress(assure.Event{Kind: "baseline-target", Detail: "internal/report:TestLines"})
+			options.Progress(assure.Event{Kind: "baseline-progress", Detail: "1/2"})
 			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}, nil
 		},
 	}
@@ -687,7 +711,7 @@ func TestAutoUIRendersTheDashboardOnAnInteractiveTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := progress.String()
-	if !strings.Contains(got, "\r\x1b[K") || !strings.Contains(got, "baseline") || !strings.Contains(got, "internal/report:TestLines") {
+	if !strings.Contains(got, "\r\x1b[K") || !strings.Contains(got, "baseline") || !strings.Contains(got, "1/2") {
 		t.Fatalf("dashboard frame missing: %q", got)
 	}
 	if !strings.HasSuffix(got, "\r\x1b[K") {
@@ -695,8 +719,6 @@ func TestAutoUIRendersTheDashboardOnAnInteractiveTerminal(t *testing.T) {
 	}
 }
 
-// lockedProgressBuffer synchronizes writes, because a dashboard redraws from
-// its own tick goroutine.
 type lockedProgressBuffer struct {
 	mutex  sync.Mutex
 	buffer bytes.Buffer

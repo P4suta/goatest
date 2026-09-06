@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package cli implements goatest's deterministic command and exit-code layer.
 package cli
 
 import (
@@ -10,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -17,13 +17,17 @@ import (
 	"github.com/P4suta/goatest/internal/testargs"
 )
 
+var diagnosticPrefix = regexp.MustCompile(`^(?:goatest: )+`)
+
 const (
-	ExitAssured      = 0
-	ExitDefect       = 1
-	ExitInsufficient = 2
-	ExitError        = 3
-	ExitInterrupted  = 130
-	ExitTerminated   = 143
+	ExitAssured                  = 0
+	ExitDefect                   = 1
+	ExitInsufficient             = 2
+	ExitError                    = 3
+	ExitInterrupted              = 130
+	ExitTerminated               = 143
+	traceSummaryMaximumArguments = 2
+	traceDiffArgumentCount       = 3
 )
 
 type Command string
@@ -70,6 +74,7 @@ type Request struct {
 	Ticket           string
 	ReplayFindingID  string
 	ReplayMutantID   string
+	ReplayExecution  *report.Execution
 	KeepTemp         bool
 }
 
@@ -97,9 +102,6 @@ Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by 
 Keeping temporaries: --keep-temp leaves the run's temporary directories on disk and records each kept path in the trace and in .goatest/kept-temp-v1.json; GOATEST_KEEP_TEMP=1 asks for the same. 'cache status' lists them and 'cache gc' removes them once they are older than the [cache] ttl.
 `
 
-// commandHelp is the help text of one command, and the fact that the command
-// has one. The vocabulary lives in a function rather than a table so that no
-// package-level mutable state exists for a test to reach for.
 func commandHelp(command Command) (string, bool) {
 	switch command {
 	case CommandVerify:
@@ -145,7 +147,8 @@ Show one finding from the latest report, with the repairs that answer it.
 		return `Usage:	goatest replay ID [--trace[=DIR]] [--keep-temp]
 
 Re-execute the mutation behind one finding of the latest report and answer
-REPRODUCED or RESOLVED.
+REPRODUCED or RESOLVED. The report's package scope, contract, test arguments,
+build tags, mutation operators, parallelism, and timeouts are used.
 `, true
 	case CommandAccept:
 		return `Usage:	goatest accept ID --reason=TEXT --expires=RFC3339 [--owner=NAME] [--ticket=ID]
@@ -194,8 +197,6 @@ explicit; diff compares event counts and phase durations.
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service Service) int {
-	// A bare invocation asks what the tool can do; nothing as expensive as a
-	// full verification starts without a command asking for it.
 	if len(args) == 0 {
 		_, _ = io.WriteString(stdout, help)
 		return 0
@@ -230,18 +231,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	return exitCode(result.Verdict)
 }
 
-// diagnose writes one diagnostic line under exactly one "goatest: " prefix,
-// escaped onto a single line so that nothing a run reports can forge a line of
-// its own, however many times the layers below labeled their error.
 func diagnose(stderr io.Writer, message string) {
-	for strings.HasPrefix(message, "goatest: ") {
-		message = strings.TrimPrefix(message, "goatest: ")
-	}
+	message = diagnosticPrefix.ReplaceAllString(message, "")
 	_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(message))
 }
 
-// usageError is a parse error raised after the command was recognized, which
-// is what lets the diagnostic point at that command's own help.
 type usageError struct {
 	command Command
 	cause   error
@@ -249,17 +243,13 @@ type usageError struct {
 
 func (err usageError) Error() string { return err.cause.Error() }
 
-// runHelp answers an argument list that asks for help - through --help or -h
-// anywhere ahead of the test-binary separator, or through the help command -
-// and reports whether it did. Arguments behind the separator belong to a test
-// binary and never ask this layer for anything.
 func runHelp(args []string, stdout, stderr io.Writer) (bool, int) {
 	before := args
 	if separator := slices.Index(args, "--"); separator >= 0 {
 		before = args[:separator]
 	}
 	asked := false
-	positionals := make([]string, 0, 2)
+	var positionals []string
 	for _, argument := range before {
 		switch {
 		case argument == "--help" || argument == "-h":
@@ -315,7 +305,7 @@ func parse(args []string) (Command, Request, string, error) {
 			break
 		}
 	}
-	positionals := make([]string, 0, 2)
+	var positionals []string
 	for _, argument := range args {
 		switch {
 		case argument == "--changed":
@@ -414,11 +404,11 @@ func parse(args []string) (Command, Request, string, error) {
 		action := rest[0]
 		switch action {
 		case "summary":
-			if len(rest) > 2 {
+			if len(rest) > traceSummaryMaximumArguments {
 				return "", Request{}, "", usageError{command, errors.New("trace summary accepts at most one run")}
 			}
 		case "diff":
-			if len(rest) != 3 {
+			if len(rest) != traceDiffArgumentCount {
 				return "", Request{}, "", usageError{command, errors.New("trace diff requires exactly two runs")}
 			}
 		default:
@@ -447,8 +437,7 @@ func parsedCommand(command Command, request Request, id string) (Command, Reques
 	if request.Trace && command != CommandVerify && command != CommandReplay {
 		return "", Request{}, "", usageError{command, errors.New("--trace is only valid with verify or replay")}
 	}
-	// A kept directory is accounted for by the recording that names it, so the
-	// commands that keep one are the commands that open a recording.
+
 	if request.KeepTemp && command != CommandVerify && command != CommandReplay {
 		return "", Request{}, "", usageError{command, errors.New("--keep-temp is only valid with verify or replay")}
 	}

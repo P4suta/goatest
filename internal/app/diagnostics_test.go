@@ -21,9 +21,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// diagnosticsBundle returns the one bundle a failed run left under the
-// repository. A bundle belongs to a run, so a repository that saw one failure
-// holds exactly one.
 func diagnosticsBundle(t *testing.T, root string) string {
 	t.Helper()
 	directory := filepath.Join(root, ".goatest", "diagnostics")
@@ -37,8 +34,6 @@ func diagnosticsBundle(t *testing.T, root string) string {
 	return filepath.Join(directory, entries[0].Name())
 }
 
-// bundleFile reads one file of a bundle, failing the test when the bundle does
-// not hold it.
 func bundleFile(t *testing.T, bundle, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(bundle, name))
@@ -64,8 +59,7 @@ func TestAFailedRunLeavesABundleOfWhatItKnew(t *testing.T) {
 		},
 	}
 	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
-	// A bundle is diagnostic exhaust. It answers for nothing the run decided:
-	// the error the run stopped on and the report it wrote are what they were.
+
 	if !errors.Is(err, sentinel) || result.Verdict != report.VerdictError {
 		t.Fatalf("verify = %+v, %v", result, err)
 	}
@@ -78,10 +72,8 @@ func TestAFailedRunLeavesABundleOfWhatItKnew(t *testing.T) {
 		t.Fatalf("bundle %s is not named for run %s", bundle, result.RunID)
 	}
 
-	// The recording of the run that failed, in the shape every recording has:
-	// the first event the run opened with, and the verdict it ended on.
 	events := readTrace(t, bundle)
-	if len(events) < 3 || events[0].Type != trace.TypeRunStart {
+	if len(events) < minimumCompleteTraceEvents || events[0].Type != trace.TypeRunStart {
 		t.Fatalf("bundled recording = %+v", events)
 	}
 	last := events[len(events)-1]
@@ -92,8 +84,6 @@ func TestAFailedRunLeavesABundleOfWhatItKnew(t *testing.T) {
 		t.Fatalf("bundled run-end error = %q, want the error that ended the run", last.Run.Error)
 	}
 
-	// The error, chain and all, because the message a wrapper shows is rarely
-	// the one that explains the failure.
 	failure := bundleFile(t, bundle, "error.txt")
 	if !strings.Contains(failure, sentinel.Error()) || !strings.Contains(failure, "goatest: assurance run") {
 		t.Fatalf("error.txt = %q", failure)
@@ -102,9 +92,6 @@ func TestAFailedRunLeavesABundleOfWhatItKnew(t *testing.T) {
 		t.Fatalf("error.txt names no run: %q", failure)
 	}
 
-	// The environment a run could see, named and never quoted, so that a bundle
-	// is safe to attach to a bug report from a machine holding real
-	// credentials.
 	environment := bundleFile(t, bundle, "environment.txt")
 	if strings.Contains(environment, "super-secret-value") {
 		t.Fatalf("environment.txt holds the value of a variable: %q", environment)
@@ -125,14 +112,11 @@ func TestAFailedRunLeavesABundleOfWhatItKnew(t *testing.T) {
 		}
 	}
 
-	// What the run left on the disk, which is the part of a failure a bundle
-	// cannot hold itself.
 	preserved := bundleFile(t, bundle, "preserved-paths.txt")
 	if !strings.Contains(preserved, scratch) || !strings.Contains(preserved, "baseline-scratch") {
 		t.Fatalf("preserved-paths.txt = %q", preserved)
 	}
 
-	// A bundle nobody is told about is a bundle nobody reads.
 	note := progress.String()
 	if !strings.Contains(note, "diagnostics") || !strings.Contains(note, bundle) {
 		t.Fatalf("progress = %q", note)
@@ -174,9 +158,7 @@ func TestABundleThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 				},
 			}
 			result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
-			// The bundle is the last thing a failed run does and the least of
-			// what it owes: losing it costs the run neither its error nor the
-			// report that records it.
+
 			if !errors.Is(err, sentinel) || result.Verdict != report.VerdictError {
 				t.Fatalf("verify = %+v, %v", result, err)
 			}
@@ -187,7 +169,7 @@ func TestABundleThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 			if !strings.Contains(warning, "diagnostics-unavailable") || !strings.Contains(warning, testCase.want) {
 				t.Fatalf("warning = %q", warning)
 			}
-			// A bundle that was never written is not announced as one that was.
+
 			if strings.Contains(warning, "written to") {
 				t.Fatalf("a bundle nothing was written into was announced: %q", warning)
 			}
@@ -204,10 +186,9 @@ func TestARunThatDidNotFailLeavesNoBundle(t *testing.T) {
 		name   string
 		runErr error
 	}{
-		// Nothing to diagnose.
+
 		{name: "assured"},
-		// A run the developer stopped is not a failure, and a bundle written
-		// while a process is shutting down is litter rather than evidence.
+
 		{name: "interrupted", runErr: context.Canceled},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -251,9 +232,6 @@ func TestABundleOfATracedRunNamesTheRecordingRatherThanCopyingIt(t *testing.T) {
 		t.Fatalf("verify error = %v", err)
 	}
 
-	// A traced run wrote its recording in full, output and all. Copying it into
-	// the bundle would duplicate what the developer already has and truncate
-	// what they asked for; naming it costs nothing and loses nothing.
 	bundle := diagnosticsBundle(t, root)
 	if _, err := os.Stat(filepath.Join(bundle, trace.FileName)); !os.IsNotExist(err) {
 		t.Fatalf("the bundle of a traced run holds a second copy of the recording: %v", err)
@@ -270,8 +248,6 @@ func TestABundleOfATracedRunNamesTheRecordingRatherThanCopyingIt(t *testing.T) {
 	}
 }
 
-// chainOf returns the entries of the error chain in error.txt, in the order the
-// bundle wrote them.
 func chainOf(t *testing.T, failure string) []string {
 	t.Helper()
 	_, chain, found := strings.Cut(failure, "error chain:\n")
@@ -287,8 +263,6 @@ func chainOf(t *testing.T, failure string) []string {
 	return entries
 }
 
-// chainIndent reports how far behind the error the run reported one entry of
-// its chain is.
 func chainIndent(entry string) int { return len(entry) - len(strings.TrimLeft(entry, " ")) }
 
 func TestABundleReportsEveryErrorBehindTheOneThatEndedTheRun(t *testing.T) {
@@ -299,8 +273,6 @@ func TestABundleReportsEveryErrorBehindTheOneThatEndedTheRun(t *testing.T) {
 	service := app.Service{
 		Root: root,
 		Run: func(context.Context, assure.Options) (report.Report, error) {
-			// A run that failed while cleaning up after another failure reports
-			// both, and neither of them explains the other.
 			return report.Report{}, fmt.Errorf("goatest: assurance run: %w", errors.Join(mutation, cleanup))
 		},
 	}
@@ -311,17 +283,15 @@ func TestABundleReportsEveryErrorBehindTheOneThatEndedTheRun(t *testing.T) {
 
 	failure := bundleFile(t, diagnosticsBundle(t, root), "error.txt")
 	entries := chainOf(t, failure)
-	// The message a wrapper shows is rarely the one that explains the failure,
-	// so the bundle writes one entry per error behind it: what the run
-	// reported, what that wrapped, and then each branch of the join.
-	if len(entries) != 4 {
+
+	const joinedErrorChainEntries = 4
+	if len(entries) != joinedErrorChainEntries {
 		t.Fatalf("error chain = %q, want an entry for the wrapper, the join, and both of its branches", entries)
 	}
 	if !strings.HasSuffix(entries[2], mutation.Error()) || !strings.HasSuffix(entries[3], cleanup.Error()) {
 		t.Fatalf("error chain = %q, want every branch of the join followed", entries)
 	}
-	// Each entry is indented by how far behind the first one it is, which is
-	// what lets a reader tell what wrapped what.
+
 	if chainIndent(entries[0]) >= chainIndent(entries[1]) {
 		t.Fatalf("error chain = %q, want what the run reported ahead of what it wrapped", entries)
 	}
@@ -331,7 +301,7 @@ func TestABundleReportsEveryErrorBehindTheOneThatEndedTheRun(t *testing.T) {
 	if chainIndent(entries[3]) != chainIndent(entries[2]) {
 		t.Fatalf("error chain = %q, want the branches of one join beside each other", entries)
 	}
-	// A message carrying more than one line stays one entry a reader can count.
+
 	for _, entry := range entries {
 		if strings.Contains(entry, "\n") {
 			t.Fatalf("chain entry %q spans more than one line", entry)

@@ -9,29 +9,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestInspectMutationReportsEveryReusableOutcome(t *testing.T) {
 	t.Parallel()
-	digest := func(character string) string { return strings.Repeat(character, 64) }
-	target := TargetKey{Package: "example/module/pkg", Name: "TestValue", Kind: "test", Key: digest("1")}
+	target := TargetKey{Package: "example/module/pkg", Name: "TestValue", Kind: "test", Key: evidenceTestDigest("1")}
 	finding := &FindingSeed{Kind: "surviving-mutant", Summary: "mutation was not rejected"}
 	store := mutationFixture()
 	store.Records = append(store.Records,
 		MutationRecord{
-			MutantID: digest("b"), Path: "value.go", Package: target.Package,
-			Outcome: MutationOutcomeSurvived, Provenance: "snapshot=" + digest("f"),
+			MutantID: evidenceTestDigest("b"), Path: "value.go", Package: target.Package,
+			Outcome: MutationOutcomeSurvived, Provenance: "snapshot=" + evidenceTestDigest("f"),
 			Exhausted: []TargetKey{target}, Finding: finding,
 		},
 		MutationRecord{
-			MutantID: digest("c"), Path: "value.go", Package: target.Package,
-			Outcome: MutationOutcomeUnreached, Provenance: "snapshot=" + digest("f"),
-			Suite: &SuiteKey{Package: target.Package, Key: digest("2")}, Finding: finding,
-		},
-		MutationRecord{
-			MutantID: digest("d"), Path: "value.go", Package: target.Package,
-			Outcome: MutationOutcomeTimedOut, Provenance: "snapshot=" + digest("f"),
-			Exhausted: []TargetKey{target}, Finding: finding,
+			MutantID: evidenceTestDigest("c"), Path: "value.go", Package: target.Package,
+			Outcome: MutationOutcomeUnreached, Provenance: "snapshot=" + evidenceTestDigest("f"),
+			Suite: &SuiteKey{Package: target.Package, Key: evidenceTestDigest("2")}, Finding: finding,
 		},
 	)
 	path := filepath.Join(t.TempDir(), MutationFileName)
@@ -44,8 +40,8 @@ func TestInspectMutationReportsEveryReusableOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !status.Present || !status.Valid || !status.Removable || status.ModulePath != store.ModulePath ||
-		status.Records != 4 || status.Killed != 1 || status.Survived != 1 ||
-		status.Unreached != 1 || status.TimedOut != 1 || status.Bytes == 0 || status.Modified.IsZero() || status.Problem != "" {
+		status.Records != 3 || status.Killed != 1 || status.Survived != 1 ||
+		status.Unreached != 1 || status.Bytes == 0 || status.Modified.IsZero() || status.Problem != "" {
 		t.Fatalf("InspectMutation = %+v", status)
 	}
 }
@@ -57,7 +53,7 @@ func TestInspectAndFlushMutationHandleMissingAndMalformedStores(t *testing.T) {
 	if err != nil || missing.Present || missing.Valid || missing.Removable {
 		t.Fatalf("missing InspectMutation = %+v, %v", missing, err)
 	}
-	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("{"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	invalid, err := InspectMutation(path)
@@ -79,7 +75,7 @@ func TestFlushMutationNeverTraversesAStoredSymlink(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
-	if err := os.WriteFile(target, []byte("keep me"), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte("keep me"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, MutationFileName)
@@ -102,7 +98,7 @@ func TestFlushMutationNeverTraversesAStoredSymlink(t *testing.T) {
 func TestFlushMutationRefusesADirectory(t *testing.T) {
 	t.Parallel()
 	directory := filepath.Join(t.TempDir(), "directory-evidence")
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if err := os.Mkdir(directory, filemode.PrivateDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := FlushMutation(directory); err == nil || !strings.Contains(err.Error(), "refusing") {
@@ -137,7 +133,7 @@ func TestMutationMaintenancePropagatesMetadataAndRemovalFailures(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), MutationFileName)
-	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("{"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	readFailure := errors.New("read failure")

@@ -15,15 +15,11 @@ import (
 	"github.com/P4suta/goatest/internal/testkit"
 )
 
-// reexecHelperVariable activates the subprocess half of the os.Args[0]
-// re-execution helper, mirroring the provider helpers in internal/assure.
 const (
 	reexecHelperVariable = "GOATEST_TESTKIT_HELPER"
 	reexecHelperMarker   = "testkit-reexec-helper-ok"
 )
 
-// TestTestkitReexecHelper stays inert unless a parent test activates it
-// through the environment, exactly like TestRunResourceProviderHelper.
 func TestTestkitReexecHelper(t *testing.T) {
 	t.Parallel()
 	if !testkit.HelperEnabled(reexecHelperVariable) {
@@ -120,19 +116,18 @@ func TestRepoGitCommitsTheFixtureDeterministically(t *testing.T) {
 }
 
 func TestRepoGitIgnoresTheOperatorsGitEnvironment(t *testing.T) {
-	// t.Setenv rules this test out of t.Parallel: it rewrites the process
-	// environment the fixture's git commands inherit.
 	gitBinary(t)
 	timestamp := strconv.Itoa(testkit.GitCommitUnixTime)
-	commits := make([]string, 0, 2)
-	for _, operator := range []struct {
+	operators := []struct {
 		name  string
 		email string
 		date  string
 	}{
 		{name: "Operator One", email: "one@operator.invalid", date: "1500000000 +0900"},
 		{name: "Operator Two", email: "two@operator.invalid", date: "1600000000 -0500"},
-	} {
+	}
+	commits := make([]string, 0, len(operators))
+	for _, operator := range operators {
 		t.Setenv("GIT_AUTHOR_NAME", operator.name)
 		t.Setenv("GIT_COMMITTER_NAME", operator.name)
 		t.Setenv("GIT_AUTHOR_EMAIL", operator.email)

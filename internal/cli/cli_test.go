@@ -129,10 +129,6 @@ func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
 	}
 }
 
-// --keep-temp leaves the temporary directories of a run on the disk and names
-// each of them in the recording. Only the commands that open a recording accept
-// it, because a command that keeps a directory it can never name would leave
-// litter nothing accounts for.
 func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -164,8 +160,7 @@ func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testin
 	if exit := cli.Run(t.Context(), []string{"verify", "--", "--keep-temp"}, &bytes.Buffer{}, &bytes.Buffer{}, separated); exit != cli.ExitAssured || separated.request.KeepTemp {
 		t.Fatalf("test-binary --keep-temp = exit %d request %+v", exit, separated.request)
 	}
-	// The flag is a request and never a setting: a value on it is a mistake
-	// worth reporting rather than one worth guessing at.
+
 	for _, args := range [][]string{{"verify", "--keep-temp=1"}, {"verify", "--keep-temp=maybe"}} {
 		refusing := &service{}
 		var stderr bytes.Buffer
@@ -261,9 +256,6 @@ func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 	}
 }
 
-// A diagnostic carries exactly one "goatest: " prefix, however the layer below
-// labeled its error: the service layer wraps most of its errors under the same
-// prefix this layer writes.
 func TestErrorPrefixIsNeverDoubled(t *testing.T) {
 	for _, wrapped := range []string{
 		"goatest: read latest report: file is absent",
@@ -280,8 +272,6 @@ func TestErrorPrefixIsNeverDoubled(t *testing.T) {
 	}
 }
 
-// A bare invocation prints the help text instead of starting a full
-// verification nobody asked for.
 func TestBareInvocationShowsHelpWithoutRunningService(t *testing.T) {
 	for _, args := range [][]string{nil, {}} {
 		fake := &service{}
@@ -326,7 +316,7 @@ func TestCommandHelpIsAvailablePerSubcommand(t *testing.T) {
 	if !strings.Contains(stderr.String(), `unknown command "nope"`) || !strings.Contains(stderr.String(), "goatest --help") {
 		t.Fatalf("help nope stderr = %q", stderr.String())
 	}
-	// --help behind the test-binary separator belongs to a test binary.
+
 	separated := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 	if exit := cli.Run(t.Context(), []string{"verify", "--", "--help"}, &bytes.Buffer{}, &bytes.Buffer{}, separated); exit != cli.ExitAssured || separated.command != cli.CommandVerify {
 		t.Fatalf("separated --help exit = %d command = %q", exit, separated.command)

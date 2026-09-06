@@ -12,18 +12,15 @@ import (
 	"testing"
 )
 
-// mutationFixture is a store that passes every self-consistency rule, so a
-// fault test fails for the fault it installed and nothing else.
 func mutationFixture() MutationStore {
-	digest := func(character string) string { return strings.Repeat(character, 64) }
 	return MutationStore{
 		ModulePath: "example/module",
 		Records: []MutationRecord{{
-			MutantID: digest("a"), Path: "value.go", Package: "example/module/pkg",
-			Outcome: MutationOutcomeKilled, Provenance: "snapshot=" + digest("f"),
-			KilledBy: &TargetKey{
-				Package: "example/module/pkg", Name: "TestKills", Kind: "test", Key: digest("1"),
-			},
+			MutantID: evidenceTestDigest("a"), Path: "value.go", Package: "example/module/pkg",
+			Outcome: MutationOutcomeKilled, Provenance: "snapshot=" + evidenceTestDigest("f"),
+			KilledBy: []TargetKey{{
+				Package: "example/module/pkg", Name: "TestKills", Kind: "test", Key: evidenceTestDigest("1"),
+			}},
 		}},
 	}
 }
@@ -67,9 +64,6 @@ func TestSaveMutationPropagatesEverySerializationAndWriteStage(t *testing.T) {
 			}
 			err := saveMutationWithHooks(filepath.Join(root, "mutation.json"), store, hooks)
 			if stage == "validate" {
-				// An inconsistent store must be refused before anything is
-				// created: a rejected store leaves no half-written file behind
-				// for the next run to trust.
 				if err == nil || !strings.Contains(err.Error(), "is not a reusable outcome") {
 					t.Fatalf("SaveMutation error = %v, want a validation refusal", err)
 				}
@@ -85,9 +79,6 @@ func TestSaveMutationPropagatesEverySerializationAndWriteStage(t *testing.T) {
 	}
 }
 
-// TestSaveMutationSyncsBeforeClosingExactlyOnce keeps the durability order the
-// store depends on: the bytes are flushed to the device before the handle is
-// given up, and the handle is given up once.
 func TestSaveMutationSyncsBeforeClosingExactlyOnce(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -103,8 +94,7 @@ func TestSaveMutationSyncsBeforeClosingExactlyOnce(t *testing.T) {
 	if file.writes != 1 || file.syncs != 1 || file.closes != 1 {
 		t.Fatalf("writes/syncs/closes = %d/%d/%d, want 1/1/1", file.writes, file.syncs, file.closes)
 	}
-	// A close that fails after a successful sync pins the order: the sync
-	// counter is already at one by the time Close is reached.
+
 	closeFailure := errors.New("close failure")
 	failing := &stubEvidenceFile{name: filepath.Join(root, "temporary"), closeErr: closeFailure}
 	hooks.createTemporary = func(string, string) (evidenceWritableFile, error) { return failing, nil }
@@ -174,9 +164,6 @@ func TestSaveMutationRenameFallbackDistinguishesMissingAndRemovalFailures(t *tes
 	}
 }
 
-// TestLoadMutationReportsReadFailuresAndDecodeFailuresDistinctly keeps a
-// failed read from being reported as a corrupt store: the two say different
-// things about the machine the caller is on.
 func TestLoadMutationReportsReadFailuresAndDecodeFailuresDistinctly(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("read failure")

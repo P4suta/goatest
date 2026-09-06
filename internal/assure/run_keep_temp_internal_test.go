@@ -4,16 +4,17 @@
 package assure
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/P4suta/goatest/internal/report"
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// recordedArtifacts returns the artifacts of a recording in emission order,
-// which is what a run says it left on the disk.
 func recordedArtifacts(sink *trace.MemorySink) []trace.ArtifactRecord {
 	var records []trace.ArtifactRecord
 	for _, event := range sink.Events() {
@@ -24,10 +25,6 @@ func recordedArtifacts(sink *trace.MemorySink) []trace.ArtifactRecord {
 	return records
 }
 
-// A round removes the scratch directory it collected its baseline in, unless it
-// was asked to keep it. What it keeps it names in the recording, because a
-// directory a run left behind and never mentioned is litter rather than
-// evidence a developer can find.
 func TestKeepTempPreservesTheBaselineScratchAndSaysWhereItIs(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -45,8 +42,7 @@ func TestKeepTempPreservesTheBaselineScratchAndSaysWhereItIs(t *testing.T) {
 			sink := harness.record()
 			temporary := t.TempDir()
 			result, err := harness.run(Options{KeepTemp: test.keep, TempDirectory: temporary})
-			// Keeping a temporary directory is a debugging aid. It decides
-			// nothing about the run that kept it.
+
 			if err != nil || result.Verdict != report.VerdictAssured {
 				t.Fatalf("run = (%+v, %v)", result, err)
 			}
@@ -55,9 +51,6 @@ func TestKeepTempPreservesTheBaselineScratchAndSaysWhereItIs(t *testing.T) {
 			}
 			var want []trace.ArtifactRecord
 			if test.kept {
-				// The round's scratch is named while the round runs, and the
-				// run scratch it was made below when the run has ended and
-				// there is nothing left to put in it.
 				want = []trace.ArtifactRecord{
 					{Kind: "baseline-scratch", Path: filepath.Join(harness.runScratch, "baseline-scratch")},
 					{Kind: "run-scratch", Path: harness.runScratch},
@@ -67,5 +60,38 @@ func TestKeepTempPreservesTheBaselineScratchAndSaysWhereItIs(t *testing.T) {
 				t.Fatalf("recorded artifacts = %+v, want %+v", got, want)
 			}
 		})
+	}
+}
+
+func TestReleaseBaselineScratchSelectsExactlyKeepOrRemove(t *testing.T) {
+	sentinel := errors.New("remove failed")
+	removed := false
+	remove := func(path string) error {
+		removed = path == "baseline"
+		return sentinel
+	}
+	if err := releaseBaselineScratch(Options{}, remove, "baseline"); !errors.Is(err, sentinel) || !removed {
+		t.Fatalf("removed baseline scratch = (removed=%t, err=%v)", removed, err)
+	}
+
+	sink, recorder := newTraceRecording()
+	removed = false
+	if err := releaseBaselineScratch(Options{KeepTemp: true, Trace: recorder}, remove, "baseline"); err != nil || removed {
+		t.Fatalf("kept baseline scratch = (removed=%t, err=%v)", removed, err)
+	}
+	want := []trace.ArtifactRecord{{Kind: artifactBaselineScratch, Path: "baseline"}}
+	if got := recordedArtifacts(sink); !reflect.DeepEqual(got, want) {
+		t.Fatalf("baseline artifacts = %+v, want %+v", got, want)
+	}
+}
+
+func TestReleaseBuildCacheRemovesAServingCacheScratch(t *testing.T) {
+	directory := t.TempDir()
+	cache := runBuildCache{plain: "program", scratch: directory}
+	if err := releaseBuildCache(Options{}, cache, runScratch{}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("released build cache scratch = %v", err)
 	}
 }

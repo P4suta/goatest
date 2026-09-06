@@ -18,9 +18,6 @@ import (
 	"github.com/P4suta/goatest/internal/testkit"
 )
 
-// Only this external test package may import internal/assure: testkit itself
-// must satisfy CommandWorkspace structurally so that assure can depend on the
-// harness without an import cycle.
 var _ assure.CommandWorkspace = (*testkit.ScriptedWorkspace)(nil)
 
 func TestScriptedWorkspaceDispatchesTheLongestMatchingPrefix(t *testing.T) {
@@ -128,17 +125,18 @@ func TestScriptedWorkspaceRecordsCallsInOrderAsACopy(t *testing.T) {
 	t.Parallel()
 	workspace := testkit.NewWorkspace()
 	workspace.On("go").Return(gomutants.CommandResult{})
-	for _, argument := range []string{"build", "test", "vet"} {
+	arguments := []string{"build", "test", "vet"}
+	for _, argument := range arguments {
 		if _, err := workspace.Exec(t.Context(), gomutants.Command{Argv: []string{"go", argument}, Dir: argument}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	calls := workspace.Calls()
-	if len(calls) != 3 {
+	if len(calls) != len(arguments) {
 		t.Fatalf("calls = %+v, want three", calls)
 	}
-	for index, argument := range []string{"build", "test", "vet"} {
+	for index, argument := range arguments {
 		if !slices.Equal(calls[index].Argv, []string{"go", argument}) || calls[index].Dir != argument {
 			t.Fatalf("call %d = %+v", index, calls[index])
 		}

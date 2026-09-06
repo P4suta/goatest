@@ -15,10 +15,15 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/cli"
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/report"
 )
 
-const signalHelperEnvironment = "GOATEST_SIGNAL_HELPER"
+const (
+	signalHelperEnvironment  = "GOATEST_SIGNAL_HELPER"
+	signalHelperDeadline     = 20 * time.Second
+	signalHelperPollInterval = 10 * time.Millisecond
+)
 
 type processSignalCase struct {
 	name   string
@@ -29,7 +34,7 @@ type processSignalCase struct {
 type signalBlockingService struct{ ready string }
 
 func (service signalBlockingService) Execute(ctx context.Context, _ cli.Command, _ cli.Request, _ string) (report.Report, error) {
-	if err := os.WriteFile(service.ready, []byte("ready"), 0o600); err != nil {
+	if err := os.WriteFile(service.ready, []byte("ready"), filemode.PrivateFile); err != nil {
 		return report.Report{}, err
 	}
 	<-ctx.Done()
@@ -61,7 +66,7 @@ func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {
 				wait <- command.Wait()
 				close(exited)
 			}()
-			if err := waitForReady(ready, exited, 20*time.Second); err != nil {
+			if err := waitForReady(ready, exited, signalHelperDeadline); err != nil {
 				_ = command.Process.Kill()
 				processErr := <-wait
 				t.Fatalf("helper did not become ready: %v (process: %v)\nstdout=%s\nstderr=%s", err, processErr, stdout.String(), stderr.String())
@@ -77,7 +82,7 @@ func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {
 				if !errors.As(err, &exit) || exit.ExitCode() != testCase.want {
 					t.Fatalf("exit = %v, want %d\nstdout=%s\nstderr=%s", err, testCase.want, stdout.String(), stderr.String())
 				}
-			case <-time.After(20 * time.Second):
+			case <-time.After(signalHelperDeadline):
 				_ = command.Process.Kill()
 				t.Fatal("helper did not stop after signal")
 			}
@@ -101,7 +106,7 @@ func TestWaitForReadyStopsWhenTheHelperExits(t *testing.T) {
 func waitForReady(path string, exited <-chan struct{}, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(signalHelperPollInterval)
 	defer ticker.Stop()
 	for {
 		if _, err := os.Stat(path); err == nil {

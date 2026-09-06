@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/filemode"
 )
 
 func TestProgramRendersACommandLineTheGoCommandCanSplit(t *testing.T) {
@@ -21,6 +22,7 @@ func TestProgramRendersACommandLineTheGoCommandCanSplit(t *testing.T) {
 		program  string
 		base     string
 		scratch  string
+		native   string
 		persist  bool
 		maxBytes int64
 		want     string
@@ -35,9 +37,11 @@ func TestProgramRendersACommandLineTheGoCommandCanSplit(t *testing.T) {
 			want: "/usr/bin/goatest cacheprog --base /cache/base --scratch /tmp/scratch --persist",
 		},
 		{
-			// The bound travels on the command line because the served process
-			// reads no configuration: it prunes the run's scratch layer, and
-			// the run is the only thing that knows what the project allowed.
+			name: "native source", program: "/usr/bin/goatest", base: "/cache/base", scratch: "/tmp/scratch", native: "/cache/go-build",
+			want: "/usr/bin/goatest cacheprog --base /cache/base --scratch /tmp/scratch --native-source /cache/go-build",
+		},
+		{
+
 			name: "a bound on the scratch layer", program: "/usr/bin/goatest", base: "/cache/base", scratch: "/tmp/s",
 			maxBytes: 2 << 30,
 			want:     "/usr/bin/goatest cacheprog --base /cache/base --scratch /tmp/s --max-bytes 2147483648",
@@ -65,7 +69,10 @@ func TestProgramRendersACommandLineTheGoCommandCanSplit(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			rendered, err := buildcache.Program(testCase.program, testCase.base, testCase.scratch, testCase.persist, testCase.maxBytes)
+			rendered, err := buildcache.Program(buildcache.ProgramOptions{
+				Executable: testCase.program, Base: testCase.base, Scratch: testCase.scratch,
+				NativeSource: testCase.native, Persist: testCase.persist, MaxBytes: testCase.maxBytes,
+			})
 			if testCase.wantErr {
 				if err == nil {
 					t.Fatalf("Program = %q, want a refusal", rendered)
@@ -95,7 +102,7 @@ func TestMainRefusesAnInvocationItCannotServe(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
 			exit := buildcache.Main(testCase.arguments, strings.NewReader(""), &stdout, &stderr)
-			if exit != 2 {
+			if exit != buildcache.CacheProgramUsageExitCode {
 				t.Fatalf("Main exit = %d, want 2", exit)
 			}
 			if !strings.Contains(stderr.String(), testCase.want) {
@@ -111,7 +118,7 @@ func TestMainRefusesAnInvocationItCannotServe(t *testing.T) {
 func TestMainRefusesALayerItCannotCreate(t *testing.T) {
 	t.Parallel()
 	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
+	if err := os.WriteFile(file, nil, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -153,14 +160,6 @@ func TestMainServesTheProtocolFromTheDirectoriesItWasGiven(t *testing.T) {
 	}
 }
 
-// TestMainLeavesThePreparationToTheRunThatStartedIt holds the split between
-// the two processes.
-//
-// Preparing a layer costs a stat of the directory, a readdir of it, and a
-// written and fsynced marker. A run starts one cacheprog child per go command
-// and issues thousands of them, so preparation belongs to the run, once, and
-// the child creates only the directories its own writes need. The child must
-// therefore never rewrite the marker of a layer that already has one.
 func TestMainLeavesThePreparationToTheRunThatStartedIt(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -205,10 +204,6 @@ func TestMainLeavesThePreparationToTheRunThatStartedIt(t *testing.T) {
 	}
 }
 
-// TestMainServesALayerNothingPrepared holds the other half: the child creates
-// what its own writes need, so a layer nothing prepared still serves. It
-// claims nothing while doing so, because adopting a directory is the run's
-// decision and never a go command's.
 func TestMainServesALayerNothingPrepared(t *testing.T) {
 	t.Parallel()
 	scratch := filepath.Join(t.TempDir(), "never-prepared")
@@ -245,9 +240,7 @@ func TestMainReportsAStreamItCannotRead(t *testing.T) {
 
 func TestBaseDirectoryPrefersWhatTheProjectConfigured(t *testing.T) {
 	t.Parallel()
-	// Every path is below a real temporary directory rather than spelled from
-	// a bare separator: `\elsewhere\build` is not absolute on Windows, where an
-	// absolute path starts with its volume, and it would be joined onto root.
+
 	base := t.TempDir()
 	root := filepath.Join(base, "repo")
 	fallback := filepath.Join(base, "home", "cache", "goatest", "build-v1")

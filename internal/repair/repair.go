@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Package repair validates and atomically applies generated test and corpus
-// candidates.
 package repair
 
 import (
@@ -20,11 +18,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/report"
 )
 
 type Status string
+
+const candidateIDHexCharacters = 16
 
 const (
 	StatusApplied   Status = "applied"
@@ -32,17 +33,19 @@ const (
 	StatusCandidate Status = "candidate"
 )
 
-const CandidateVersion = "repair-candidate-v1"
+const candidateVersion = "repair-candidate-v1"
 
-// CandidateRecord is the provider-neutral, durable hand-off between read-only
-// verification and an explicit fix --apply operation.
 type CandidateRecord struct {
-	Version    string             `json:"version"`
 	ID         string             `json:"id"`
 	Snapshot   string             `json:"snapshot"`
 	Finding    report.Finding     `json:"finding"`
 	Candidate  provider.Candidate `json:"candidate"`
 	Validation string             `json:"validation"`
+}
+
+type candidateDocument struct {
+	Version string `json:"version"`
+	CandidateRecord
 }
 
 type Result struct {
@@ -65,7 +68,7 @@ type applicationState struct {
 }
 
 type Validator interface {
-	OriginalStable(context.Context, provider.Candidate) error
+	OriginalPasses(context.Context, provider.Candidate) error
 	Kills(context.Context, report.Finding, provider.Candidate) error
 	Suite(context.Context, provider.Candidate) error
 }
@@ -119,8 +122,6 @@ func ValidateAndApply(ctx context.Context, root string, finding report.Finding, 
 	return ApplyCandidate(root, finding, validated)
 }
 
-// ValidateCandidate performs every stability, kill, suite, path, and preimage
-// check without changing source or corpus files.
 func ValidateCandidate(ctx context.Context, root string, finding report.Finding, candidate provider.Candidate, validator Validator) (provider.Candidate, error) {
 	normalized, ok := normalize(candidate.Path)
 	if !ok || !AllowedPath(normalized) {
@@ -136,15 +137,11 @@ func ValidateCandidate(ctx context.Context, root string, finding report.Finding,
 	if validator == nil {
 		return provider.Candidate{}, errors.New("goatest: repair validation requires a validator")
 	}
-	for range 3 {
-		if err := validator.OriginalStable(ctx, candidate); err != nil {
-			return provider.Candidate{}, fmt.Errorf("goatest: candidate is unstable on original code: %w", err)
-		}
+	if err := validator.OriginalPasses(ctx, candidate); err != nil {
+		return provider.Candidate{}, fmt.Errorf("goatest: candidate fails on original code: %w", err)
 	}
-	for range 2 {
-		if err := validator.Kills(ctx, finding, candidate); err != nil {
-			return provider.Candidate{}, fmt.Errorf("goatest: candidate does not detect target mutant: %w", err)
-		}
+	if err := validator.Kills(ctx, finding, candidate); err != nil {
+		return provider.Candidate{}, fmt.Errorf("goatest: candidate does not detect target mutant: %w", err)
 	}
 	if err := validator.Suite(ctx, candidate); err != nil {
 		return provider.Candidate{}, fmt.Errorf("goatest: candidate fails related suite: %w", err)
@@ -152,8 +149,6 @@ func ValidateCandidate(ctx context.Context, root string, finding report.Finding,
 	return candidate, nil
 }
 
-// ApplyCandidate rechecks the preimage immediately before one atomic source or
-// corpus update. A changed preimage is preserved and emitted as an artifact.
 func ApplyCandidate(root string, finding report.Finding, candidate provider.Candidate) (Result, error) {
 	results, err := ApplyCandidates(root, []Application{{Finding: finding, Candidate: candidate}})
 	if err != nil {
@@ -162,10 +157,6 @@ func ApplyCandidate(root string, finding report.Finding, candidate provider.Cand
 	return results[0], nil
 }
 
-// ApplyCandidates applies a validated candidate set as one best-effort atomic
-// batch. It checks every preimage before writing, checks each one again at its
-// commit boundary, and rolls already-written files back in reverse order if a
-// later write fails. Concurrent user edits are never overwritten by rollback.
 func ApplyCandidates(root string, applications []Application) ([]Result, error) {
 	applyRepairMutex.Lock()
 	defer applyRepairMutex.Unlock()
@@ -240,7 +231,7 @@ func inspectApplication(root string, application Application) (applicationState,
 	}
 	data, readErr := readRepairFile(target)
 	if errors.Is(readErr, os.ErrNotExist) {
-		return applicationState{application: application, target: target, mode: 0o644}, application.Candidate.PreimageSHA256 == "", nil
+		return applicationState{application: application, target: target, mode: filemode.ReadableFile}, application.Candidate.PreimageSHA256 == "", nil
 	}
 	if readErr != nil {
 		return applicationState{}, false, readErr
@@ -282,16 +273,11 @@ func rollbackApplications(root string, states []applicationState) error {
 	return rollbackErr
 }
 
-// StoreCandidate saves a bounded candidate as an internal artifact. It never
-// writes candidate bytes to their proposed source/corpus path.
 func StoreCandidate(root string, record CandidateRecord) (string, error) {
-	if record.Version == "" {
-		record.Version = CandidateVersion
-	}
-	if record.Version != CandidateVersion || !safeCandidateID(record.ID) || record.Finding.ID == "" || record.Candidate.Path == "" {
+	if !safeCandidateID(record.ID) || record.Finding.ID == "" || record.Candidate.Path == "" {
 		return "", errors.New("goatest: invalid repair candidate record")
 	}
-	payload, err := json.MarshalIndent(record, "", "  ")
+	payload, err := json.MarshalIndent(candidateDocument{Version: candidateVersion, CandidateRecord: record}, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -314,7 +300,7 @@ func StoreCandidate(root string, record CandidateRecord) (string, error) {
 	if !errors.Is(readErr, os.ErrNotExist) {
 		return "", readErr
 	}
-	if err := atomicWrite(root, relative, payload, 0o600); err != nil {
+	if err := atomicWrite(root, relative, payload, filemode.PrivateFile); err != nil {
 		return "", err
 	}
 	return relative, nil
@@ -334,22 +320,21 @@ func LoadCandidate(root, id string) (CandidateRecord, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var record CandidateRecord
-	if err := decoder.Decode(&record); err != nil {
+	var document candidateDocument
+	if err := decoder.Decode(&document); err != nil {
 		return CandidateRecord{}, fmt.Errorf("goatest: decode repair candidate %s: %w", id, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return CandidateRecord{}, errors.New("goatest: repair candidate has trailing data")
 	}
-	if record.Version != CandidateVersion || record.ID != id || record.Finding.ID == "" ||
+	record := document.CandidateRecord
+	if document.Version != candidateVersion || record.ID != id || record.Finding.ID == "" ||
 		record.Candidate.Path == "" || (record.Candidate.Kind != "patch" && record.Candidate.Kind != "corpus") {
 		return CandidateRecord{}, errors.New("goatest: repair candidate identity mismatch")
 	}
 	return record, nil
 }
 
-// ListCandidates returns every valid stored candidate in stable ID order. A
-// malformed record fails the whole operation so fix never silently omits it.
 func ListCandidates(root string) ([]CandidateRecord, error) {
 	directory := filepath.Join(root, ".goatest", "candidates")
 	entries, err := os.ReadDir(directory)
@@ -378,8 +363,6 @@ func ListCandidates(root string) ([]CandidateRecord, error) {
 	return records, nil
 }
 
-// CurrentContent reads the proposed target through the same confinement and
-// symlink checks used for application. exists is false for a missing file.
 func CurrentContent(root, path string) (content []byte, exists bool, resultErr error) {
 	normalized, ok := normalize(path)
 	if !ok || !AllowedPath(normalized) {
@@ -400,7 +383,7 @@ func CurrentContent(root, path string) (content []byte, exists bool, resultErr e
 }
 
 func safeCandidateID(id string) bool {
-	if len(id) != 16 {
+	if len(id) != candidateIDHexCharacters {
 		return false
 	}
 	for _, character := range id {
@@ -465,7 +448,7 @@ func confinedPath(root, normalized string) (string, error) {
 func matchesPreimage(path, expected string) (match bool, mode os.FileMode, resultErr error) {
 	data, readErr := readRepairFile(path)
 	if errors.Is(readErr, os.ErrNotExist) {
-		return expected == "", 0o644, nil
+		return expected == "", filemode.ReadableFile, nil
 	}
 	if readErr != nil {
 		resultErr = readErr
@@ -485,7 +468,7 @@ func atomicWrite(root, relative string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if err := mkdirRepairAll(filepath.Dir(path), 0o755); err != nil {
+	if err := mkdirRepairAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
 	temporary, err := createRepairTemp(filepath.Dir(path), ".goatest-repair-*.tmp")
@@ -524,7 +507,7 @@ func writeArtifact(root string, finding report.Finding, candidate provider.Candi
 		return "", err
 	}
 	payload = append(payload, '\n')
-	if err := atomicWrite(root, relative, payload, 0o600); err != nil {
+	if err := atomicWrite(root, relative, payload, filemode.PrivateFile); err != nil {
 		return "", err
 	}
 	return relative, nil

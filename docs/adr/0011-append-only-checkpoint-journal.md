@@ -26,7 +26,8 @@ the exact interruption guarantee the checkpoint exists to provide.
    schema-validated state at phase boundaries. It is written through a synced
    temporary file and atomic rename, as before.
 2. **Append completed hot-path units.** Between phase boundaries, a production
-   cache appends one JSON object per complete baseline target or mutant to
+   cache appends one JSON object per complete baseline target, package-suite
+   control, or mutant to
    `checkpoint-journal-v1.jsonl`. Each record carries the schema identity,
    input digest, SHA-256 digest of the base document it extends, exactly one
    unit, and a checksum over the record with the checksum field cleared.
@@ -44,8 +45,8 @@ the exact interruption guarantee the checkpoint exists to provide.
    applies any records a later process appended for the current base, and
    rejects another base change after current-base replay has begun.
 5. **Replay in linear time and canonicalise once.** Replay indexes existing
-   target and mutant identities, replaces or appends each unit in one pass, and
-   sorts each completed collection once. Mutation workers likewise append to
+   target, suite, and mutant identities, appends each new unit in one pass,
+   rejects a duplicate identity, and sorts each completed collection once. Mutation workers likewise append to
    in-memory state without sorting the growing slice; compaction performs the
    canonical sort. Completed checkpoint bytes therefore remain deterministic
    without an `O(n log n)` operation at every unit.
@@ -66,8 +67,9 @@ Within one process, cache operations and coordinator state transitions are
 serialised. Across processes, the repository cache advisory lock spans
 checkpoint access through report persistence. No supported execution has two
 writers for the same journal. The journal does not weaken result ordering:
-baseline workers are still committed in target order, while mutation results
-are identity-keyed and sorted when compacted.
+baseline results are reconstructed in target order while every completed
+out-of-order target is journaled immediately; suite and mutation results are
+identity-keyed and sorted when compacted.
 
 ## Consequences
 

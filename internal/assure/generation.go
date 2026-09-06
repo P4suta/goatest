@@ -89,7 +89,7 @@ func AttemptGeneratedRepairs(ctx context.Context, root string, findings []report
 			}
 			if options.NoApply {
 				_, storeErr := repair.StoreCandidate(root, repair.CandidateRecord{
-					Version: repair.CandidateVersion, ID: repairID, Snapshot: options.Snapshot,
+					ID: repairID, Snapshot: options.Snapshot,
 					Finding: finding, Candidate: validated, Validation: "passed",
 				})
 				if storeErr != nil {

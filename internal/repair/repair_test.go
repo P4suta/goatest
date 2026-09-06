@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/provider"
 	"github.com/P4suta/goatest/internal/repair"
 	"github.com/P4suta/goatest/internal/report"
@@ -24,7 +25,7 @@ import (
 
 type validator struct{ calls []string }
 
-func (validator *validator) OriginalStable(context.Context, provider.Candidate) error {
+func (validator *validator) OriginalPasses(context.Context, provider.Candidate) error {
 	validator.calls = append(validator.calls, "stable")
 	return nil
 }
@@ -42,7 +43,7 @@ func TestValidateAndApplyUsesRequiredRunsAndAtomicPreimage(t *testing.T) {
 	path := filepath.Join(root, "roundtrip_test.go")
 	before := []byte("package fixture\n")
 	after := []byte("package fixture\n\nfunc TestRoundTrip() {}\n")
-	if err := os.WriteFile(path, before, 0o644); err != nil {
+	if err := os.WriteFile(path, before, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	checker := &validator{}
@@ -55,7 +56,7 @@ func TestValidateAndApplyUsesRequiredRunsAndAtomicPreimage(t *testing.T) {
 	if result.Status != repair.StatusApplied {
 		t.Errorf("result = %+v", result)
 	}
-	wantCalls := []string{"stable", "stable", "stable", "kill", "kill", "suite"}
+	wantCalls := []string{"stable", "kill", "suite"}
 	if !slices.Equal(checker.calls, wantCalls) {
 		t.Errorf("validation calls = %v, want %v", checker.calls, wantCalls)
 	}
@@ -78,8 +79,8 @@ func TestApplyRefusesProductionPathsAndPreservesDirtyEdits(t *testing.T) {
 	}
 
 	path := filepath.Join(root, "roundtrip_test.go")
-	userEdit := []byte("package fixture // user edit\n")
-	if err := os.WriteFile(path, userEdit, 0o644); err != nil {
+	userEdit := []byte("package fixture\n\nvar userEdit = true\n")
+	if err := os.WriteFile(path, userEdit, filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	checker = &validator{}
@@ -142,11 +143,11 @@ func TestApplyAcceptsRepositoryRootAlias(t *testing.T) {
 func TestDirtyArtifactHashesUntrustedFindingIdentity(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "repository")
-	if err := os.Mkdir(root, 0o755); err != nil {
+	if err := os.Mkdir(root, filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "candidate_test.go")
-	if err := os.WriteFile(path, []byte("user edit"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("user edit"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	result, err := repair.ValidateAndApply(t.Context(), root, report.Finding{ID: "../../../outside"}, provider.Candidate{
@@ -224,12 +225,9 @@ func TestValidateAndApplyRejectsInvalidKindAndEveryValidationFailure(t *testing.
 		wantCalls []string
 		want      string
 	}{
-		{name: "first stable", stage: "stable", at: 1, wantCalls: []string{"stable"}, want: "goatest: candidate is unstable on original code: validation failed"},
-		{name: "second stable", stage: "stable", at: 2, wantCalls: []string{"stable", "stable"}, want: "goatest: candidate is unstable on original code: validation failed"},
-		{name: "third stable", stage: "stable", at: 3, wantCalls: []string{"stable", "stable", "stable"}, want: "goatest: candidate is unstable on original code: validation failed"},
-		{name: "first kill", stage: "kill", at: 1, wantCalls: []string{"stable", "stable", "stable", "kill"}, want: "goatest: candidate does not detect target mutant: validation failed"},
-		{name: "second kill", stage: "kill", at: 2, wantCalls: []string{"stable", "stable", "stable", "kill", "kill"}, want: "goatest: candidate does not detect target mutant: validation failed"},
-		{name: "suite", stage: "suite", at: 1, wantCalls: []string{"stable", "stable", "stable", "kill", "kill", "suite"}, want: "goatest: candidate fails related suite: validation failed"},
+		{name: "original", stage: "stable", at: 1, wantCalls: []string{"stable"}, want: "goatest: candidate fails on original code: validation failed"},
+		{name: "kill", stage: "kill", at: 1, wantCalls: []string{"stable", "kill"}, want: "goatest: candidate does not detect target mutant: validation failed"},
+		{name: "suite", stage: "suite", at: 1, wantCalls: []string{"stable", "kill", "suite"}, want: "goatest: candidate fails related suite: validation failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			checker := &stagedValidator{stage: test.stage, at: test.at}
@@ -256,20 +254,20 @@ func TestValidateAndApplyCreatesNewFileAndPreservesExistingMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && newInfo.Mode().Perm() != 0o644 || runtime.GOOS == "windows" && newInfo.Mode().Perm()&0o200 == 0 {
+	if runtime.GOOS != "windows" && newInfo.Mode().Perm() != filemode.ReadableFile || runtime.GOOS == "windows" && newInfo.Mode().Perm()&filemode.OwnerWrite == 0 {
 		t.Fatalf("new mode = %o", newInfo.Mode().Perm())
 	}
 
 	existingPath := filepath.Join(root, "existing_test.go")
 	before := []byte("package fixture\n")
-	if err := os.WriteFile(existingPath, before, 0o600); err != nil {
+	if err := os.WriteFile(existingPath, before, filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(existingPath, 0o600); err != nil {
+	if err := os.Chmod(existingPath, filemode.PrivateFile); err != nil {
 		t.Fatal(err)
 	}
 	result, err := repair.ValidateAndApply(t.Context(), root, report.Finding{ID: "finding-existing"}, provider.Candidate{
-		Kind: "patch", Path: "existing_test.go", PreimageSHA256: digest(before), Content: []byte("package fixture // changed\n"),
+		Kind: "patch", Path: "existing_test.go", PreimageSHA256: digest(before), Content: []byte("package fixture\n\nvar changed = true\n"),
 	}, &validator{})
 	if err != nil || result != (repair.Result{Status: repair.StatusApplied, Path: "existing_test.go"}) {
 		t.Fatalf("existing result = %+v, %v", result, err)
@@ -278,7 +276,7 @@ func TestValidateAndApplyCreatesNewFileAndPreservesExistingMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 || runtime.GOOS == "windows" && info.Mode().Perm()&0o200 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != filemode.PrivateFile || runtime.GOOS == "windows" && info.Mode().Perm()&filemode.OwnerWrite == 0 {
 		t.Fatalf("existing mode = %o", info.Mode().Perm())
 	}
 }
@@ -286,7 +284,7 @@ func TestValidateAndApplyCreatesNewFileAndPreservesExistingMode(t *testing.T) {
 func TestDirtyArtifactContainsDeterministicReasonAndCandidate(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "candidate_test.go")
-	if err := os.WriteFile(path, []byte("user edit"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("user edit"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)
 	}
 	candidate := provider.Candidate{
@@ -318,7 +316,7 @@ func TestDirtyArtifactContainsDeterministicReasonAndCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 || runtime.GOOS == "windows" && info.Mode().Perm()&0o200 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != filemode.PrivateFile || runtime.GOOS == "windows" && info.Mode().Perm()&filemode.OwnerWrite == 0 {
 		t.Fatalf("artifact mode = %o", info.Mode().Perm())
 	}
 }
@@ -342,7 +340,7 @@ func (validator *stagedValidator) record(stage string) error {
 	return nil
 }
 
-func (validator *stagedValidator) OriginalStable(context.Context, provider.Candidate) error {
+func (validator *stagedValidator) OriginalPasses(context.Context, provider.Candidate) error {
 	return validator.record("stable")
 }
 
@@ -359,19 +357,13 @@ func digest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestACollectedCandidateLeavesTheRestListableAndNamesTheMissingID pins what the
-// callers of this store may assume once a retention policy collects from it.
-//
-// Eviction removes whole files, so a listing never meets a half-written record —
-// which matters, because one malformed record fails the whole listing on purpose
-// so that fix never silently omits a candidate. Loading an ID that is gone is an
-// error naming it, which is what lets a caller treat it as never stored.
 func TestACollectedCandidateLeavesTheRestListableAndNamesTheMissingID(t *testing.T) {
 	root := t.TempDir()
-	stored := make([]string, 0, 2)
-	for _, id := range []string{"0123456789abcdef", "fedcba9876543210"} {
+	ids := []string{"0123456789abcdef", "fedcba9876543210"}
+	stored := make([]string, 0, len(ids))
+	for _, id := range ids {
 		record := repair.CandidateRecord{
-			Version: repair.CandidateVersion, ID: id, Snapshot: "snapshot-a",
+			ID: id, Snapshot: "snapshot-a",
 			Finding:   report.Finding{ID: "finding-" + id, Kind: "surviving-mutant", Summary: "survived"},
 			Candidate: provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")},
 		}
@@ -391,5 +383,56 @@ func TestACollectedCandidateLeavesTheRestListableAndNamesTheMissingID(t *testing
 	_, err = repair.LoadCandidate(root, collected)
 	if err == nil || !strings.Contains(err.Error(), collected) {
 		t.Fatalf("load of a collected candidate = %v, want an error naming %s", err, collected)
+	}
+}
+
+func TestCandidateStoreOwnsAndRequiresTheDocumentVersion(t *testing.T) {
+	record := repair.CandidateRecord{
+		ID: "0123456789abcdef", Snapshot: "snapshot-a",
+		Finding:   report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "survived"},
+		Candidate: provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")},
+	}
+	for _, test := range []struct {
+		name    string
+		version any
+		remove  bool
+	}{
+		{name: "missing", remove: true},
+		{name: "wrong", version: "repair-candidate-v2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			relative, err := repair.StoreCandidate(root, record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, filepath.FromSlash(relative))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			if document["version"] != "repair-candidate-v1" {
+				t.Fatalf("stored candidate version = %v", document["version"])
+			}
+			if test.remove {
+				delete(document, "version")
+			} else {
+				document["version"] = test.version
+			}
+			data, err = json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, filemode.PrivateFile); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repair.LoadCandidate(root, record.ID); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+				t.Fatalf("LoadCandidate version error = %v", err)
+			}
+		})
 	}
 }

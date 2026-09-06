@@ -16,8 +16,6 @@ import (
 	"github.com/P4suta/goatest/internal/testkit"
 )
 
-// Like ScriptedWorkspace, the session fake satisfies the assure contract
-// structurally; only this external test package imports internal/assure.
 var _ assure.MutationSession = (*testkit.ScriptedSession)(nil)
 
 func catalogFixture() gomutants.Catalog {
@@ -165,9 +163,6 @@ func TestScriptedSessionAnswersWithAnIndependentResultCopy(t *testing.T) {
 	}
 }
 
-// TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix pins the probe half
-// of the fake: one answer per target, selected the way the probe pass selects
-// its target, and every request recorded whether or not a rule covered it.
 func TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix(t *testing.T) {
 	t.Parallel()
 	session := testkit.NewSession(catalogFixture())
@@ -176,7 +171,7 @@ func TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix(t *testing.T) {
 	session.OnProbe("fixture.example/assured", "-test.run=^TestBoundary$").
 		Return(gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Infected: []uint32{0, 1}})
 	session.OnProbe("fixture.example/other").Do(func(request gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
-		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, OutputTail: request.Package}, nil
+		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Output: []byte(request.Package)}, nil
 	})
 
 	measured, err := session.Probe(t.Context(), gomutants.ProbeRequest{
@@ -185,7 +180,8 @@ func TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix(t *testing.T) {
 	if err != nil || measured.Outcome != gomutants.ProbeMeasured || !slices.Equal(measured.Infected, []uint32{0, 1}) {
 		t.Fatalf("specific route = %+v, err = %v", measured, err)
 	}
-	measured.Infected[0] = 9
+	const mutatedInfectionIndex = 9
+	measured.Infected[0] = mutatedInfectionIndex
 	if again, _ := session.Probe(t.Context(), gomutants.ProbeRequest{
 		Package: "fixture.example/assured", Args: []string{"-test.run=^TestBoundary$"},
 	}); !slices.Equal(again.Infected, []uint32{0, 1}) {
@@ -198,12 +194,10 @@ func TestScriptedSessionRoutesProbesByPackageAndArgumentPrefix(t *testing.T) {
 		t.Fatalf("general route = %+v, err = %v", failed, err)
 	}
 	handled, err := session.Probe(t.Context(), gomutants.ProbeRequest{Package: "fixture.example/other"})
-	if err != nil || handled.OutputTail != "fixture.example/other" {
+	if err != nil || string(handled.Output) != "fixture.example/other" {
 		t.Fatalf("handler route = %+v, err = %v", handled, err)
 	}
 
-	// A pass nothing scripted is one no probe runtime answered: the outcome
-	// that carries no facts, rather than a measurement of nothing.
 	unscripted, err := session.Probe(t.Context(), gomutants.ProbeRequest{Package: "fixture.example/unscripted"})
 	if err != nil || unscripted.Outcome != gomutants.ProbeUnavailable || unscripted.ExitCode != 0 || unscripted.Infected != nil {
 		t.Fatalf("unscripted probe = %+v, err = %v", unscripted, err)

@@ -14,7 +14,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-// recordedExec returns the single exec event of a recording.
 func recordedExec(t *testing.T, events []trace.Event) trace.ExecRecord {
 	t.Helper()
 	var found []trace.ExecRecord
@@ -42,10 +41,9 @@ func TestARunNobodyAskedToTraceRecordsIntoMemory(t *testing.T) {
 	recording.recorder.Progress("snapshot", "captured")
 	finish(report.Report{Verdict: report.VerdictAssured}, nil)
 
-	// The recording a failure is diagnosed from is the whole run: the event it
-	// opened with, what it recorded, and the verdict it closed on.
 	events := recording.Events()
-	if len(events) != 3 {
+	const inMemoryLifecycleEvents = 3
+	if len(events) != inMemoryLifecycleEvents {
 		t.Fatalf("kept events = %+v, want the run-start, the note, and the run-end", events)
 	}
 	if events[0].Type != trace.TypeRunStart || events[0].Schema != trace.SchemaV1 {
@@ -61,9 +59,7 @@ func TestARunNobodyAskedToTraceRecordsIntoMemory(t *testing.T) {
 	if last.Run.Verdict != string(report.VerdictAssured) || last.Run.EventsDropped != 0 {
 		t.Fatalf("run-end = %+v", last.Run)
 	}
-	// A recording nobody asked for is kept to the process that made it. It
-	// costs a developer no directory, no file, and no repository they have to
-	// clean up afterwards.
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
@@ -80,8 +76,7 @@ func TestARequestedTraceRecordsToItsDirectoryRatherThanMemory(t *testing.T) {
 	if recording.directory == "" {
 		t.Fatal("a requested trace recorded to no directory")
 	}
-	// The events of a requested trace are on disk, in full and beyond the reach
-	// of a ring, so nothing keeps a second copy of them in memory.
+
 	if events := recording.Events(); len(events) != 0 {
 		t.Fatalf("a requested trace kept %d events in memory as well", len(events))
 	}
@@ -91,7 +86,8 @@ func TestARequestedTraceRecordsToItsDirectoryRatherThanMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := bytes.Count(stream, []byte("\n")); lines != 2 {
+	const persistedLifecycleEvents = 2
+	if lines := bytes.Count(stream, []byte("\n")); lines != persistedLifecycleEvents {
 		t.Fatalf("recorded stream holds %d lines, want the run-start and the run-end:\n%s", lines, stream)
 	}
 }
@@ -102,10 +98,6 @@ func TestTheRecordingInMemoryKeepsTheDigestOfACapturedOutputAndNotItsBytes(t *te
 	recording, _ := Service{}.startTrace(t.TempDir(), cli.Request{})
 	recording.recorder.Exec(trace.ExecRecord{Argv: []string{"go", "test"}, Output: output})
 
-	// A recording that outlives every command of a run holds the account of an
-	// output and never the output itself: the bytes are never serialised into
-	// an event, and keeping them would grow with the run rather than with the
-	// ring.
 	exec := recordedExec(t, recording.Events())
 	if exec.Output != nil {
 		t.Fatalf("the recording in memory kept %d bytes of captured output", len(exec.Output))
@@ -131,9 +123,7 @@ func TestTheRecordingInMemoryIsBoundedAndSaysWhatItDropped(t *testing.T) {
 	if last.Type != trace.TypeRunEnd || last.Run == nil {
 		t.Fatalf("last event = %+v, want the run-end the ring reserves its last slot for", last)
 	}
-	// A run longer than the window is the ordinary case, and a window that
-	// silently forgot where a run began would be a recording a reader could
-	// mistake for a whole one.
+
 	if last.Run.EventsDropped == 0 {
 		t.Fatalf("run-end = %+v, want the events the ring could not keep", last.Run)
 	}
@@ -145,10 +135,7 @@ func TestTheRecordingInMemoryIsBoundedAndSaysWhatItDropped(t *testing.T) {
 func TestTheRecordingInMemoryLeavesARecordItHasNothingToShortenAlone(t *testing.T) {
 	t.Parallel()
 	recording, _ := Service{}.startTrace(t.TempDir(), cli.Request{})
-	// A command that printed nothing carries no bytes for the ring to leave
-	// out. Its record reaches the ring as the run described it, which is what
-	// lets a reader tell a command that produced no output from one whose
-	// output the ring dropped.
+
 	recording.recorder.Exec(trace.ExecRecord{Argv: []string{"go", "build", "./..."}, Output: []byte{}})
 
 	exec := recordedExec(t, recording.Events())
@@ -167,10 +154,6 @@ func TestARecordingThatHasEndedKeepsNothingMore(t *testing.T) {
 	finish(report.Report{Verdict: report.VerdictAssured}, nil)
 	ended := recording.Events()
 
-	// The run-end is the last word of a recording, and the accounting it
-	// carries is the accounting of everything before it. A note that arrives
-	// afterwards belongs to nothing a reader could account for, so the closed
-	// recording refuses it rather than growing past the end it reported.
 	late := trace.Event{Type: trace.TypeProgress, Progress: &trace.ProgressRecord{Kind: "late", Detail: "after the run ended"}}
 	if err := recording.sink.Emit(late); err == nil {
 		t.Fatal("a recording that had ended accepted another event")
