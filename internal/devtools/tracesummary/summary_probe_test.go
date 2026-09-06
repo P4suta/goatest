@@ -187,7 +187,7 @@ func TestProbeBlockNamesWhyEachPackageSuiteWidenedItsKey(t *testing.T) {
 		wholeTreeSuiteEvent("example.com/quiet", ""),
 	}), "\n")
 	want := "whole-tree keys: 0 of 0 targets, 3 of 4 package suites; " +
-		"static-unobservable 2, log-unavailable 0, log-ambiguous 0, directory-access 0, outside-input 1"
+		"static-unobservable 2, log-unavailable 0, log-ambiguous 0, directory-access 0, outside-input 1, unstated 0"
 	if !strings.Contains(lines, want) {
 		t.Fatalf("the probe block does not carry %q:\n%s", want, lines)
 	}
@@ -203,7 +203,7 @@ func TestProbeBlockCountsWidenedTargetsBesideWidenedSuites(t *testing.T) {
 		wholeTreeSuiteEvent("example.com/app", trace.WholeTreeStaticUnobservable),
 	}), "\n")
 	want := "whole-tree keys: 1 of 2 targets, 1 of 1 package suites; " +
-		"static-unobservable 1, log-unavailable 0, log-ambiguous 0, directory-access 1, outside-input 0"
+		"static-unobservable 1, log-unavailable 0, log-ambiguous 0, directory-access 1, outside-input 0, unstated 0"
 	if !strings.Contains(lines, want) {
 		t.Fatalf("the probe block does not carry %q:\n%s", want, lines)
 	}
@@ -217,5 +217,21 @@ func TestProbeBlockOmitsWholeTreeKeysWhenEveryObservationStayedNarrow(t *testing
 	}), "\n")
 	if strings.Contains(lines, "whole-tree keys") {
 		t.Fatalf("the probe block carries an empty whole-tree line:\n%s", lines)
+	}
+}
+
+func TestProbeBlockCountsAWideningThatNamedNoReason(t *testing.T) {
+	t.Parallel()
+	silent := probeEvent("package-suite:example.com/app", trace.ProbeOutcomeMeasured)
+	silent.Probe.Package, silent.Probe.Suite = "example.com/app", true
+	silent.Probe.WholeTree = true
+	lines := strings.Join(probeBlock([]trace.Event{
+		silent,
+		wholeTreeSuiteEvent("example.com/lib", trace.WholeTreeOutsideInput),
+	}), "\n")
+	want := "whole-tree keys: 0 of 0 targets, 2 of 2 package suites; " +
+		"static-unobservable 0, log-unavailable 0, log-ambiguous 0, directory-access 0, outside-input 1, unstated 1"
+	if !strings.Contains(lines, want) {
+		t.Fatalf("the probe block does not carry %q:\n%s", want, lines)
 	}
 }

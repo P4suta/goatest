@@ -554,7 +554,10 @@ func probedLines(routes int) []string {
 	return []string{"probed: " + plural(routes, "route", "routes")}
 }
 
-const probeError = "error"
+const (
+	probeError        = "error"
+	wholeTreeUnstated = "unstated"
+)
 
 type probeTotal struct {
 	executions int
@@ -631,7 +634,11 @@ func probeTotals(events []trace.Event) probeTotal {
 				widened = wholeTreeSuites
 			}
 			widened[record.Target] = struct{}{}
-			wholeTreeReasons[record.WholeTreeReason]++
+			reason := record.WholeTreeReason
+			if reason == "" {
+				reason = wholeTreeUnstated
+			}
+			wholeTreeReasons[reason]++
 		}
 		switch {
 		case record.Outcome != "":
@@ -671,7 +678,7 @@ func probeTotals(events []trace.Event) probeTotal {
 	total.wholeTreeTargets = len(wholeTreeTargets)
 	total.wholeTreeReasons = tally(wholeTreeReasons,
 		trace.WholeTreeStaticUnobservable, trace.WholeTreeLogUnavailable, trace.WholeTreeLogAmbiguous,
-		trace.WholeTreeDirectoryAccess, trace.WholeTreeOutsideInput)
+		trace.WholeTreeDirectoryAccess, trace.WholeTreeOutsideInput, wholeTreeUnstated)
 	return total
 }
 
