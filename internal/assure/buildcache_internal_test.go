@@ -299,7 +299,7 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	if !strings.HasPrefix(cache.scratch, temporary) {
 		t.Fatalf("scratch = %q, want it below %q", cache.scratch, temporary)
 	}
-	if filepath.Dir(cache.native) != filepath.Dir(base) || !strings.HasPrefix(filepath.Base(cache.native), buildcache.NativeDirectoryPrefix) || cache.native == cache.scratch {
+	if filepath.Dir(cache.native) != filepath.Dir(base) || !ownedNativeProjection(cache) || cache.native == cache.scratch {
 		t.Fatalf("native cache = %q, want a separate owned directory beside base %q", cache.native, base)
 	}
 	if filepath.Dir(cache.fallback) != cache.scratch || filepath.Base(cache.fallback) != goCacheScratchName {
@@ -322,8 +322,8 @@ func TestOpenRunBuildCacheRendersBothProgramsAndRemovesOnlyItsScratch(t *testing
 	if _, err := os.Stat(cache.scratch); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("scratch after close = %v, want it gone", err)
 	}
-	if _, err := os.Stat(cache.native); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("native cache after close = %v, want it gone", err)
+	if _, err := os.Stat(cache.native); cache.nativeShared == errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native cache after close = %v, shared %t", err, cache.nativeShared)
 	}
 	if _, err := os.Stat(base); err != nil {
 		t.Fatalf("base after close = %v, want the layer the machine keeps left alone", err)
@@ -943,5 +943,56 @@ func TestReleaseBuildCacheBoundsANativeCacheBeforeKeepingIt(t *testing.T) {
 	status, err := buildcache.CollectNative(cache.native, 0)
 	if err != nil || status.BeforeBytes > 10 {
 		t.Fatalf("kept native cache = (%+v, %v), want it inside the configured bound", status, err)
+	}
+}
+
+func ownedNativeProjection(cache runBuildCache) bool {
+	if cache.nativeOwner == nil {
+		return false
+	}
+	name := filepath.Base(cache.native)
+	return strings.HasPrefix(name, buildcache.NativeDirectoryPrefix) ||
+		strings.HasPrefix(name, buildcache.NativeSharedDirectoryPrefix)
+}
+
+func TestASecondRunReusesTheSharedNativeProjectionUnlessItIsHeld(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	base := filepath.Join(parent, "build")
+	first, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil || !first.serves() {
+		t.Fatalf("openRunBuildCache = (%+v, %v)", first, err)
+	}
+	if !first.nativeShared || filepath.Base(first.native) != buildcache.NativeSharedDirectoryName(base) {
+		t.Fatalf("first native cache = %q, shared %t; want the shared projection", first.native, first.nativeShared)
+	}
+
+	concurrent, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil || !concurrent.serves() {
+		t.Fatalf("concurrent openRunBuildCache = (%+v, %v)", concurrent, err)
+	}
+	if concurrent.nativeShared || concurrent.native == first.native {
+		t.Fatalf("concurrent native cache = %q, shared %t; want a private projection", concurrent.native, concurrent.nativeShared)
+	}
+	if err := concurrent.close(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(concurrent.native); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private projection after close = %v, want it gone", err)
+	}
+
+	if err := first.close(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(first.native); err != nil {
+		t.Fatalf("shared projection after close = %v, want it kept for the next run", err)
+	}
+
+	again, err := openRunBuildCache("/opt/goatest", base, "", runScratch{dir: t.TempDir()}, 2<<30)
+	if err != nil || again.native != first.native || !again.nativeShared {
+		t.Fatalf("second run native cache = %q (%v), want the same shared projection", again.native, err)
+	}
+	if err := again.close(false); err != nil {
+		t.Fatal(err)
 	}
 }

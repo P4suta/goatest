@@ -89,7 +89,6 @@ func TestRunGenerationProviderHelper(t *testing.T) {
 
 func TestRunAssuresRepositoryAndWarmCacheStartsNoTestOrMutant(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/assured\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package assured
@@ -150,7 +149,6 @@ func TestAboveBoundary(t *testing.T) { checkBoundary(t, 11, 9) }
 
 func TestPlanEnumeratesTargetsAndMutantsWithoutRunningTestTargets(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	marker := filepath.Join(t.TempDir(), "test-binary-ran")
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/plan\n\ngo 1.26.0\n")).
@@ -203,7 +201,6 @@ func TestValue(t *testing.T) {
 
 func TestRunReturnsDefectForRepeatableBaselineFailureBeforeExecutingMutants(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/defect\n\ngo 1.26.0\n")).
 		File("value.go", crlfFixture("package defect\n\nfunc Value() int { return 1 }\n")).
@@ -234,7 +231,6 @@ func TestValue(t *testing.T) {
 
 func TestRunChangedInvalidatesOnlyImpactedTargetsAndBroadensForUnknownFiles(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/incremental\n\ngo 1.26.0\n")).
 		File(".gitignore", crlfFixture(".goatest/\n")).
@@ -286,7 +282,6 @@ func TestShared(t *testing.T) {
 
 func TestRunUsesFuzzSeedCorpusAsDeterministicMutationEvidence(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/repair\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package repair
@@ -329,7 +324,6 @@ func FuzzBoundary(f *testing.F) {
 
 func TestRunValidatesAppliesGeneratedTestAndReverifiesFreshSnapshot(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/generated\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package generated
@@ -395,7 +389,6 @@ func (stableValidator) Suite(context.Context, provider.Candidate) error         
 
 func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	dependency := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/dependency\n\ngo 1.26.0\n")).
 		File("value.go", crlfFixture("package dependency\n\nfunc Value() int { return 1 }\n"))
@@ -426,7 +419,6 @@ func TestRunCacheInvalidatesWhenLocalReplacementDependencyChanges(t *testing.T) 
 
 func TestRunManagesIntegrationResourceAcrossBaselineAndMutants(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	log := filepath.Join(t.TempDir(), "resource.log")
 	environment := append(os.Environ(),
 		"GOATEST_ASSURE_RESOURCE_HELPER=1",
@@ -519,7 +511,6 @@ func appendFixtureLog(path, action string) {
 
 func TestRunUsesExternalGenerationProtocolAndProductionValidator(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/provider-e2e\n\ngo 1.26.0\n")).
 		File("boundary.go", crlfFixture(`package providere2e
@@ -595,7 +586,6 @@ func tomlArgv(argv []string) string {
 
 func TestRunPackageScopeBoundsTheMutationCatalogToTheResolvedPackages(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).
 		File("go.mod", crlfFixture("module fixture.example/scoped\n\ngo 1.26.0\n")).
 		File("naked.go", crlfFixture("package scoped\n\nfunc Naked(value int) bool { return value < 10 }\n")).

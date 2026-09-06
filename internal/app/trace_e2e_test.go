@@ -55,7 +55,6 @@ func validateTraceStream(t *testing.T, directory string) {
 
 func TestTracedVerifyRecordsThePhasesCommandsAndRoutesOfARealRun(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().Git()
 	directory := filepath.Join(t.TempDir(), "trace")
 	service := app.Service{
@@ -349,7 +348,6 @@ func mutantArguments(events []trace.Event, id string) []string {
 
 func TestTracedVerifyDischargesTheTestsThatNeverTakeANarrowedBranch(t *testing.T) {
 	t.Parallel()
-	testkit.SerializeHeavy(t)
 	repository := testkit.NewRepo(t).NarrowedBranchFixture().Git()
 	directory := filepath.Join(t.TempDir(), "trace")
 	service := app.Service{

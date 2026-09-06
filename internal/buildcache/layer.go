@@ -11,8 +11,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/P4suta/goatest/internal/filemode"
@@ -474,22 +476,57 @@ func (layer Layer) list(hooks layerHooks) ([]storedFile, []storedFile, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	for index := range actions {
-		data, err := hooks.readFile(actions[index].path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, nil, fmt.Errorf("goatest: read build cache action: %w", err)
-		}
-		var parsed actionRecord
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			continue
-		}
-		actions[index].output = parsed.Output
-		actions[index].size = parsed.Size
+	if err := readStoredActions(actions, hooks); err != nil {
+		return nil, nil, err
 	}
 	return actions, objects, nil
+}
+
+func readStoredActions(actions []storedFile, hooks layerHooks) error {
+	if len(actions) == 0 {
+		return nil
+	}
+	failures := make([]error, len(actions))
+	jobs := min(max(runtime.GOMAXPROCS(0), 1), len(actions))
+	work := make(chan int, jobs)
+	var workers sync.WaitGroup
+	workers.Add(jobs)
+	for range jobs {
+		go func() {
+			defer workers.Done()
+			for index := range work {
+				failures[index] = readStoredAction(&actions[index], hooks)
+			}
+		}()
+	}
+	for index := range actions {
+		work <- index
+	}
+	close(work)
+	workers.Wait()
+	for _, err := range failures {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readStoredAction(action *storedFile, hooks layerHooks) error {
+	data, err := hooks.readFile(action.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("goatest: read build cache action: %w", err)
+	}
+	var parsed actionRecord
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	action.output = parsed.Output
+	action.size = parsed.Size
+	return nil
 }
 
 func (layer Layer) walk(half string, hooks layerHooks) ([]storedFile, error) {

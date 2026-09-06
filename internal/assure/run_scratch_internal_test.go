@@ -9,11 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/filemode"
 	goanalysis "github.com/P4suta/goatest/internal/golang"
 	"github.com/P4suta/goatest/internal/report"
@@ -221,7 +219,7 @@ func TestBuildCacheScratchesHaveSafeOwnersOnTheirRequiredFilesystems(t *testing.
 	if filepath.Dir(cache.fallback) != cache.scratch || filepath.Base(cache.fallback) != goCacheScratchName {
 		t.Fatalf("external backing cache = %q, want it inside %q", cache.fallback, cache.scratch)
 	}
-	if filepath.Dir(cache.native) != filepath.Dir(base) || !strings.HasPrefix(filepath.Base(cache.native), buildcache.NativeDirectoryPrefix) || cache.nativeOwner == nil {
+	if filepath.Dir(cache.native) != filepath.Dir(base) || !ownedNativeProjection(cache) {
 		t.Fatalf("native build cache = %q, want an owned projection beside %q", cache.native, base)
 	}
 	if err := releaseBuildCache(Options{}, cache, scratch, time.Now()); err != nil {
