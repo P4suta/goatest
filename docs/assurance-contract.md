@@ -427,7 +427,12 @@ directly, so a mutant that opens a repository-reading branch the baseline did
 not take still gets a whole-tree key.
 
 Every stored target or suite key carries an explicit `whole_tree` value. A
-current baseline that requires the whole tree never accepts a narrow record.
+current baseline that requires the whole tree never accepts a narrow record. A
+run that widened any key says so in its report as the
+`whole-tree-behaviour-keys` limitation, counting the targets and package suites
+it widened, and its trace names which of the five boundaries widened each one —
+a package that never reuses anything is usually one that widens every time, and
+that is a fact about the tests rather than about goatest.
 Missing, malformed, truncated, or otherwise ambiguous completed action logs
 widen rather than narrow the key, as does a log goatest could not create or
 read back. A test binary that reports it could not write the log it was given

@@ -14,7 +14,7 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-func mutantExecutionRecord(request gomutants.ExecRequest, result gomutants.MutantResult, err error) trace.MutantRecord {
+func mutantExecutionRecord(request gomutants.ExecRequest, result gomutants.MutantResult, reason wholeTreeReason, err error) trace.MutantRecord {
 	record := trace.MutantRecord{
 		ID:         request.Mutant,
 		DisplayID:  result.DisplayID,
@@ -28,6 +28,8 @@ func mutantExecutionRecord(request gomutants.ExecRequest, result gomutants.Mutan
 	if result.ID != "" {
 		record.ID = result.ID
 	}
+	record.WholeTreeReason = string(reason)
+	record.WholeTree = reason != wholeTreeObserved
 	if err != nil {
 		record.Error = err.Error()
 	}

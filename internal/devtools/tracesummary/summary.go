@@ -554,7 +554,10 @@ func probedLines(routes int) []string {
 	return []string{"probed: " + plural(routes, "route", "routes")}
 }
 
-const probeError = "error"
+const (
+	probeError        = "error"
+	wholeTreeUnstated = "unstated"
+)
 
 type probeTotal struct {
 	executions int
@@ -568,6 +571,7 @@ type probeTotal struct {
 	barrenSuites  int
 
 	wholeTreeSuites  int
+	wholeTreeTargets int
 	wholeTreeReasons []labelCount
 }
 
@@ -591,10 +595,12 @@ func probeBlock(events []trace.Event) []string {
 		fmt.Sprintf("infections: %s across %s; %s",
 			plural(total.pairs, pair, pairs), plural(total.mutants, "mutant", "mutants"), barren),
 	}
-	if total.wholeTreeSuites != 0 {
-		lines = append(lines, fmt.Sprintf("whole-tree keys: %s of %d observed; %s",
-			plural(total.wholeTreeSuites, "package suite", "package suites"),
-			total.suites, formatLabelCounts(total.wholeTreeReasons)))
+	if total.wholeTreeSuites != 0 || total.wholeTreeTargets != 0 {
+		scope := fmt.Sprintf("%d of %d targets", total.wholeTreeTargets, total.targets)
+		if total.suites != 0 {
+			scope += fmt.Sprintf(", %d of %d package suites", total.wholeTreeSuites, total.suites)
+		}
+		lines = append(lines, "whole-tree keys: "+scope+"; "+formatLabelCounts(total.wholeTreeReasons))
 	}
 	return lines
 }
@@ -609,6 +615,7 @@ func probeTotals(events []trace.Event) probeTotal {
 	measuredSuites := make(map[string]bool)
 	wholeTreeReasons := make(map[string]int)
 	wholeTreeSuites := make(map[string]struct{})
+	wholeTreeTargets := make(map[string]struct{})
 	total := probeTotal{}
 	for _, event := range events {
 		if event.Type != trace.TypeProbeExec || event.Probe == nil || event.Probe.Control {
@@ -618,12 +625,20 @@ func probeTotals(events []trace.Event) probeTotal {
 		total.executions++
 		if record.Suite {
 			suites[record.Target] = struct{}{}
-			if record.WholeTree {
-				wholeTreeSuites[record.Target] = struct{}{}
-				wholeTreeReasons[record.WholeTreeReason]++
-			}
 		} else {
 			targets[record.Target] = struct{}{}
+		}
+		if record.WholeTree {
+			widened := wholeTreeTargets
+			if record.Suite {
+				widened = wholeTreeSuites
+			}
+			widened[record.Target] = struct{}{}
+			reason := record.WholeTreeReason
+			if reason == "" {
+				reason = wholeTreeUnstated
+			}
+			wholeTreeReasons[reason]++
 		}
 		switch {
 		case record.Outcome != "":
@@ -660,9 +675,10 @@ func probeTotals(events []trace.Event) probeTotal {
 	total.outcomes = tally(outcomes, trace.ProbeOutcomeMeasured, trace.ProbeOutcomeTestFailed,
 		trace.ProbeOutcomeTimedOut, trace.ProbeOutcomeUnavailable, probeError)
 	total.wholeTreeSuites = len(wholeTreeSuites)
+	total.wholeTreeTargets = len(wholeTreeTargets)
 	total.wholeTreeReasons = tally(wholeTreeReasons,
 		trace.WholeTreeStaticUnobservable, trace.WholeTreeLogUnavailable, trace.WholeTreeLogAmbiguous,
-		trace.WholeTreeDirectoryAccess, trace.WholeTreeOutsideInput)
+		trace.WholeTreeDirectoryAccess, trace.WholeTreeOutsideInput, wholeTreeUnstated)
 	return total
 }
 

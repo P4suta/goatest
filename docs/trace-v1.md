@@ -230,10 +230,17 @@ costs the path, not the event.
 | `outcome` | `killed`, `survived`, `timed_out`, `inconclusive`, `errored`, or `not_run` |
 | `killed_by` | what the engine reports killed it, when something did |
 | `duration_ms` | how long the execution took |
+| `whole_tree` | `true` when this execution keys the whole snapshot rather than its ordinary closure |
+| `whole_tree_reason` | why the key was widened, from the same five boundaries a probe record uses |
 | `error` | the error the execution failed with, if it failed |
 
 Mutant executions run concurrently and the recorder serialises them, so the
 stream holds one complete line per execution, in completion order.
+
+A mutant execution carries its own `whole_tree` because a mutation can open a
+repository-reading branch the baseline never took. Recording the killing
+execution's observation directly is what stops a mutant-only reader from
+escaping the key its verdict is stored under.
 
 ### `route`
 
@@ -411,7 +418,7 @@ before mutation execution and establishes no routing fact.
 | `exit_code` | the exit status |
 | `duration_ms` | how long it ran |
 | `infected` | the mutants the target or suite made differ, by their full mutant identity |
-| `whole_tree` | `true` when this package suite keys the whole snapshot rather than its ordinary closure; absent means the observation kept the key narrow |
+| `whole_tree` | `true` when this target or package suite keys the whole snapshot rather than its ordinary closure; absent means the observation kept the key narrow |
 | `whole_tree_reason` | why the key was widened: `static-unobservable`, `log-unavailable`, `log-ambiguous`, `directory-access`, or `outside-input` |
 | `error` | the error the execution failed with, if it failed |
 
@@ -421,15 +428,15 @@ coverage. It runs them against a probe-instrumented tree where no mutant is
 active, and records per mutant whether the value at its site ever differed from
 the constant the mutant would put there.
 
-Why a key widened. A package suite that reads outside its ordinary inputs keys
-the whole snapshot, and a run that never reuses evidence for a package is
-usually a package that widens every time. `whole_tree_reason` names which of
-the five boundaries did it: the package is statically beyond the action log,
+Why a key widened. A target or package suite that reads outside its ordinary
+inputs keys the whole snapshot, and a run that never reuses evidence for a
+package is usually one that widens every time. `whole_tree_reason` names which
+of the five boundaries did it: the package is statically beyond the action log,
 no log could be created or read back, the completed log was malformed or
 carried an operation the reader does not model, the execution read a repository
 directory, or it read a file outside its ordinary input set. `trace summary`
-counts them, so the packages worth changing can be found without reading the
-stream.
+counts widened targets and widened package suites separately, so the code worth
+changing can be found without reading the stream.
 
 Which targets. goatest probes the test, fuzz seed, and example targets, the ones the
 mutation phase runs under `-test.run=^Name$`, and sends each of them the

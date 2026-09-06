@@ -622,6 +622,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			Acceptances: slices.Clone(acceptances),
 		}
 		baseReport.Limitations = append(baseReport.Limitations, projectExcludeLimitations(loaded.Project.Exclude)...)
+		if limitation, widened := wholeTreeKeyLimitation(baseline.Targets, baseline.Suites); widened {
+			baseReport.Limitations = append(baseReport.Limitations, limitation)
+		}
 		if len(loaded.Resources) != 0 {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
 				Code: "resource-cache-disabled", Summary: "exact cache reuse is disabled because configured resources have runtime state",

@@ -688,7 +688,10 @@ func executePreparedBaselineTarget(
 		options.Trace.ProbeExec(record)
 		return baselineTargetRun{err: err}
 	}
+	wholeTree := options.RepositoryObserver.wholeTreeReason(target.Target, observation)
 	record, _, _ := probeResultRecord(target.Target.ID, false, request, result, options.probeIdentities)
+	record.WholeTreeReason = string(wholeTree)
+	record.WholeTree = wholeTree != wholeTreeObserved
 	options.Trace.ProbeExec(record)
 	first := commandResultFromProbe(result)
 	skipped, skipKind, skipSummary, framingErr := classifyTestFraming(target.Target.Name, first.Output)
@@ -726,7 +729,7 @@ func executePreparedBaselineTarget(
 		Target: target.Target, CoveredFiles: goanalysis.CoveredPaths(coverage.Covered), Covered: coverage.Covered,
 		Instrumented: coverage.Instrumented,
 		Environment:  slices.Clone(target.Environment), Duration: result.Duration,
-		WholeTree: options.RepositoryObserver.wholeTree(target.Target, observation),
+		WholeTree: record.WholeTree,
 		Probed:    probed, Infected: infected,
 	}
 	evidenceItem := report.Evidence{

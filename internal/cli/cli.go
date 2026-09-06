@@ -130,7 +130,9 @@ waves - without executing any test.
 
 Check everything a verify needs before one is run: strict configuration, the
 Go toolchain, offline dependencies, the race detector, the mutation contract,
-writable output directories, Git, configured providers, and disk space.
+writable output directories, Git, configured providers, and disk space. It
+also names the packages whose reads the test action log cannot observe, since
+those key the whole tree and reuse nothing between runs.
 `, true
 	case CommandInit:
 		return `Usage:	goatest init

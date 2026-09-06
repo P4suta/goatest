@@ -552,15 +552,22 @@ func Read(name string) ([]byte, error) { return os.ReadFile(name) }
 	}
 
 	candidates := gotest.RepositoryReadCandidates(root, packages)
-	for _, path := range []string{
-		"example.com/module/rawsyscall", "example.com/module/extended",
-		"example.com/module/child", "example.com/module/loaded",
-		"example.com/module/native", "example.com/module/booted",
-		"example.com/module/consumer",
+	for path, want := range map[string]string{
+		"example.com/module/rawsyscall": "syscall",
+		"example.com/module/extended":   "golang.org/x/sys",
+		"example.com/module/child":      "os/exec",
+		"example.com/module/loaded":     "plugin",
+		"example.com/module/native":     "cgo",
+		"example.com/module/booted":     "os/exec",
+		"example.com/module/consumer":   "os/exec",
 	} {
 		candidate, found := candidates[path]
 		if !found || !candidate.Unobservable {
 			t.Errorf("unobservable reader %s = (%+v, %t)", path, candidate, found)
+			continue
+		}
+		if !slices.Contains(candidate.Reasons, want) {
+			t.Errorf("reader %s reasons = %v, want %q among them", path, candidate.Reasons, want)
 		}
 	}
 	if candidate, found := candidates["example.com/module/ordinary"]; !found || candidate.Unobservable {
