@@ -5,6 +5,7 @@ package app
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -283,9 +284,14 @@ func doctorBehaviourKeys(
 		return report.Evidence{}, err
 	}
 	widened := make([]string, 0, len(model.Packages))
+	reasons := make(map[string]int)
 	for path, candidate := range goanalysis.RepositoryReadCandidates(root, model.Packages) {
-		if candidate.Unobservable {
-			widened = append(widened, path)
+		if !candidate.Unobservable {
+			continue
+		}
+		widened = append(widened, path)
+		for _, reason := range candidate.Reasons {
+			reasons[reason]++
 		}
 	}
 	slices.Sort(widened)
@@ -297,9 +303,31 @@ func doctorBehaviourKeys(
 	}
 	return report.Evidence{
 		Kind: "doctor", ID: "behaviour-keys", Status: "widened",
-		Detail: fmt.Sprintf("%d of %d packages read past the test action log and key the whole tree: %s",
-			len(widened), len(model.Packages), strings.Join(doctorNameSample(widened), ", ")),
+		Detail: fmt.Sprintf("%d of %d packages read past the test action log and key the whole tree; %s; %s",
+			len(widened), len(model.Packages), doctorReasonTally(reasons),
+			strings.Join(doctorNameSample(widened), ", ")),
 	}, nil
+}
+
+func doctorReasonTally(reasons map[string]int) string {
+	if len(reasons) == 0 {
+		return "no reason recorded"
+	}
+	names := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		names = append(names, reason)
+	}
+	slices.SortFunc(names, func(left, right string) int {
+		if order := cmp.Compare(reasons[right], reasons[left]); order != 0 {
+			return order
+		}
+		return cmp.Compare(left, right)
+	})
+	parts := make([]string, 0, len(names))
+	for _, reason := range names {
+		parts = append(parts, fmt.Sprintf("%s %d", reason, reasons[reason]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func doctorNameSample(names []string) []string {

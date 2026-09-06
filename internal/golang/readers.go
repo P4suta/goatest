@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -69,6 +70,26 @@ const cgoImportPath = "C"
 
 type RepositoryReadCandidate struct {
 	Unobservable bool
+
+	Reasons []string
+}
+
+const (
+	reasonCgo              = "cgo"
+	reasonUnqualifiedScope = "dot import"
+	reasonUnreadableSource = "unreadable source"
+	reasonPreRun           = "package initialization"
+	reasonDependency       = "a dependency of this package"
+)
+
+func repositoryReadReason(path, name string) string {
+	switch path {
+	case "os", "path/filepath", "io/ioutil":
+		return path + "." + name
+	case "golang.org/x/sys/unix", "golang.org/x/sys/windows":
+		return "golang.org/x/sys"
+	}
+	return path
 }
 
 func RepositoryReadCandidates(root string, packages []Package) map[string]RepositoryReadCandidate {
@@ -95,28 +116,57 @@ func RepositoryReadCandidates(root string, packages []Package) map[string]Reposi
 	for _, pkg := range packages {
 		scan := scans[pkg.ImportPath]
 		candidate, unobservable := scan.candidate, scan.unobservable
+		reasons := make(map[string]struct{}, len(scan.reasons))
+		mergeReasons(reasons, scan.reasons)
 		for _, dependency := range pkg.Dependencies {
 			candidate = candidate || productionCandidates[dependency]
-			unobservable = unobservable || productionUnobservable[dependency]
+			if productionUnobservable[dependency] {
+				unobservable = true
+				mergeReasons(reasons, dependencyReasons(scans[dependency]))
+			}
 		}
 		for dependency := range scan.preRunDependencies {
 			if productionCandidates[dependency] {
 				candidate = true
 				unobservable = true
+				reasons[reasonPreRun] = struct{}{}
 			}
 		}
 		if candidate {
-			candidates[pkg.ImportPath] = RepositoryReadCandidate{Unobservable: unobservable}
+			candidates[pkg.ImportPath] = RepositoryReadCandidate{
+				Unobservable: unobservable, Reasons: sortedReasons(reasons),
+			}
 		}
 	}
 	return candidates
 }
 
+func dependencyReasons(scan repositoryReadScan) map[string]struct{} {
+	if len(scan.productionReasons) == 0 {
+		return map[string]struct{}{reasonDependency: {}}
+	}
+	return scan.productionReasons
+}
+
+func sortedReasons(reasons map[string]struct{}) []string {
+	if len(reasons) == 0 {
+		return nil
+	}
+	sorted := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		sorted = append(sorted, reason)
+	}
+	slices.Sort(sorted)
+	return sorted
+}
+
 type repositoryReadScan struct {
 	candidate                    bool
 	unobservable                 bool
+	reasons                      map[string]struct{}
 	productionCandidate          bool
 	productionUnobservable       bool
+	productionReasons            map[string]struct{}
 	preRunDependencies           map[string]struct{}
 	productionPreRunDependencies map[string]struct{}
 }
@@ -124,7 +174,11 @@ type repositoryReadScan struct {
 func packageRepositoryReadScan(directory string) repositoryReadScan {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return repositoryReadScan{candidate: true, unobservable: true, productionCandidate: true, productionUnobservable: true}
+		unreadable := map[string]struct{}{reasonUnreadableSource: {}}
+		return repositoryReadScan{
+			candidate: true, unobservable: true, reasons: unreadable,
+			productionCandidate: true, productionUnobservable: true, productionReasons: unreadable,
+		}
 	}
 	files := make([]repositoryReadFile, 0, len(entries))
 	var parseScan repositoryReadScan
@@ -138,9 +192,17 @@ func packageRepositoryReadScan(directory string) repositoryReadScan {
 		if parseErr != nil {
 			parseScan.candidate = true
 			parseScan.unobservable = true
+			if parseScan.reasons == nil {
+				parseScan.reasons = make(map[string]struct{})
+			}
+			parseScan.reasons[reasonUnreadableSource] = struct{}{}
 			if production {
 				parseScan.productionCandidate = true
 				parseScan.productionUnobservable = true
+				if parseScan.productionReasons == nil {
+					parseScan.productionReasons = make(map[string]struct{})
+				}
+				parseScan.productionReasons[reasonUnreadableSource] = struct{}{}
 			}
 			continue
 		}
@@ -148,11 +210,19 @@ func packageRepositoryReadScan(directory string) repositoryReadScan {
 	}
 	all := analyzeRepositoryReads(files, false)
 	production := analyzeRepositoryReads(files, true)
+	reasons := make(map[string]struct{}, len(all.reasons)+len(parseScan.reasons))
+	mergeReasons(reasons, parseScan.reasons)
+	mergeReasons(reasons, all.reasons)
+	productionReasons := make(map[string]struct{}, len(production.reasons)+len(parseScan.productionReasons))
+	mergeReasons(productionReasons, parseScan.productionReasons)
+	mergeReasons(productionReasons, production.reasons)
 	return repositoryReadScan{
 		candidate:                    parseScan.candidate || all.candidate,
 		unobservable:                 parseScan.unobservable || all.unobservable,
+		reasons:                      reasons,
 		productionCandidate:          parseScan.productionCandidate || production.candidate,
 		productionUnobservable:       parseScan.productionUnobservable || production.unobservable,
+		productionReasons:            productionReasons,
 		preRunDependencies:           all.preRunDependencies,
 		productionPreRunDependencies: production.preRunDependencies,
 	}
@@ -165,12 +235,14 @@ type repositoryReadFile struct {
 
 type repositoryReaderCall struct {
 	name          string
+	path          string
 	observability repositoryReadObservability
 }
 
 type repositoryReadAnalysis struct {
 	candidate          bool
 	unobservable       bool
+	reasons            map[string]struct{}
 	preRunDependencies map[string]struct{}
 }
 
@@ -179,6 +251,7 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 	dependencies := make(map[string]map[string]struct{})
 	readers := make(map[string]bool)
 	roots := make(map[string]struct{})
+	reasons := make(map[string]struct{})
 	candidate, unobservable := false, false
 	synthetic := 0
 	for _, parsed := range files {
@@ -189,6 +262,7 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 		imports := repositoryImports(parsed.file)
 		if opaque {
 			candidate, unobservable = true, true
+			reasons[opaqueReason(parsed.file)] = struct{}{}
 		}
 		dotImports := repositoryDotImports(parsed.file)
 		for _, declaration := range parsed.file.Decls {
@@ -197,9 +271,10 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 				name := typed.Name.Name
 				mergeRepositoryReferences(graph, name, repositoryReferences(typed.Body, imports))
 				mergeRepositoryReferences(dependencies, name, repositoryDependencyReferences(typed.Body, imports, dotImports))
-				found, cannotObserve := repositoryCallsIn(typed.Body, selectors)
+				found, cannotObserve, why := repositoryCallsIn(typed.Body, selectors)
 				candidate = candidate || found
 				unobservable = unobservable || cannotObserve
+				mergeReasons(reasons, why)
 				readers[name] = readers[name] || found
 				if name == "init" || name == "TestMain" {
 					roots[name] = struct{}{}
@@ -213,9 +288,10 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 					if !ok {
 						continue
 					}
-					found, cannotObserve := repositoryCallsIn(value, selectors)
+					found, cannotObserve, why := repositoryCallsIn(value, selectors)
 					candidate = candidate || found
 					unobservable = unobservable || cannotObserve
+					mergeReasons(reasons, why)
 					references := repositoryReferences(value, imports)
 					dependencyReferences := repositoryDependencyReferences(value, imports, dotImports)
 					for _, name := range value.Names {
@@ -250,6 +326,7 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 		seen[name] = struct{}{}
 		if readers[name] {
 			unobservable = true
+			reasons[reasonPreRun] = struct{}{}
 		}
 		for dependency := range dependencies[name] {
 			preRunDependencies[dependency] = struct{}{}
@@ -260,11 +337,30 @@ func analyzeRepositoryReads(files []repositoryReadFile, productionOnly bool) rep
 			}
 		}
 	}
-	return repositoryReadAnalysis{candidate: candidate, unobservable: unobservable, preRunDependencies: preRunDependencies}
+	return repositoryReadAnalysis{
+		candidate: candidate, unobservable: unobservable, reasons: reasons,
+		preRunDependencies: preRunDependencies,
+	}
 }
 
-func repositoryCallsIn(node ast.Node, selectors map[string][]repositoryReaderCall) (bool, bool) {
+func mergeReasons(into, from map[string]struct{}) {
+	for reason := range from {
+		into[reason] = struct{}{}
+	}
+}
+
+func opaqueReason(file *ast.File) string {
+	for _, imported := range file.Imports {
+		if strings.Trim(imported.Path.Value, `"`) == cgoImportPath {
+			return reasonCgo
+		}
+	}
+	return reasonUnqualifiedScope
+}
+
+func repositoryCallsIn(node ast.Node, selectors map[string][]repositoryReaderCall) (bool, bool, map[string]struct{}) {
 	found, unobservable := false, false
+	reasons := make(map[string]struct{})
 	ast.Inspect(node, func(node ast.Node) bool {
 		selector, ok := node.(*ast.SelectorExpr)
 		if !ok {
@@ -277,13 +373,16 @@ func repositoryCallsIn(node ast.Node, selectors map[string][]repositoryReaderCal
 		for _, call := range selectors[qualifier.Name] {
 			if call.name == selector.Sel.Name {
 				found = true
-				unobservable = unobservable || call.observability == testLogUnobservable
+				if call.observability == testLogUnobservable {
+					unobservable = true
+					reasons[repositoryReadReason(call.path, call.name)] = struct{}{}
+				}
 				break
 			}
 		}
 		return true
 	})
-	return found, unobservable
+	return found, unobservable, reasons
 }
 
 func repositoryReferences(node ast.Node, imports map[string]string) map[string]struct{} {
@@ -461,7 +560,8 @@ func repositoryReaderSelectors(file *ast.File) (map[string][]repositoryReaderCal
 			selectors = make(map[string][]repositoryReaderCall, len(repositoryReaderCalls))
 		}
 		for call, observability := range calls {
-			selectors[name] = append(selectors[name], repositoryReaderCall{name: call, observability: observability})
+			selectors[name] = append(selectors[name],
+				repositoryReaderCall{name: call, path: path, observability: observability})
 		}
 	}
 	return selectors, false

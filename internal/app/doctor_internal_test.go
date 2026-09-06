@@ -150,4 +150,7 @@ func TestDoctorBehaviourKeysNamesThePackagesThatWidenTheirKey(t *testing.T) {
 		strings.Contains(evidence.Detail, "fixture.example/keys/quiet") {
 		t.Fatalf("behaviour keys = %+v, want the subprocess package named alone", evidence)
 	}
+	if !strings.Contains(evidence.Detail, "os/exec 1") {
+		t.Fatalf("behaviour keys = %+v, want the reason that widened it", evidence)
+	}
 }
