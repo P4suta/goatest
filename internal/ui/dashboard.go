@@ -210,15 +210,19 @@ func progressFraction(detail string) (int, int, bool) {
 }
 
 func (renderer *dashboard) estimatedRemainder() (time.Duration, bool) {
-	if renderer.mutationDone <= 0 || renderer.mutationDone >= renderer.mutationTotal || renderer.mutationStarted.IsZero() {
+	return estimatedRemainder(renderer.mutationStarted, renderer.now, renderer.mutationDone, renderer.mutationTotal)
+}
+
+func estimatedRemainder(started time.Time, now func() time.Time, done, total int) (time.Duration, bool) {
+	if done <= 0 || done >= total || started.IsZero() {
 		return 0, false
 	}
-	elapsed := renderer.now().Sub(renderer.mutationStarted)
+	elapsed := now().Sub(started)
 	if elapsed <= 0 {
 		return 0, false
 	}
-	perMutant := elapsed / time.Duration(renderer.mutationDone)
-	return perMutant * time.Duration(renderer.mutationTotal-renderer.mutationDone), true
+	perUnit := elapsed / time.Duration(done)
+	return perUnit * time.Duration(total-done), true
 }
 
 func formatElapsed(elapsed time.Duration) string {
