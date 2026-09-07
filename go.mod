@@ -3,7 +3,7 @@ module github.com/P4suta/goatest
 go 1.26.0
 
 require (
-	github.com/P4suta/go-mutants v0.0.0-20260906085207-6e152442b74a
+	github.com/P4suta/go-mutants v0.0.0-20260906235613-36924b893436
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/sys v0.47.0
