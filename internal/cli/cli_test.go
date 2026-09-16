@@ -118,6 +118,7 @@ func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
 		{name: "replay", args: []string{"replay", "finding-a", "--trace"}, command: cli.CommandReplay, id: "finding-a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
 			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
@@ -152,6 +153,7 @@ func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testin
 		{name: "replay", args: []string{"replay", "finding-a", "--keep-temp"}, command: cli.CommandReplay, id: "finding-a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
 			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
@@ -367,6 +369,7 @@ func TestInfrastructureErrorsRenderTheirErrorReportBeforeTheDiagnostic(t *testin
 	t.Parallel()
 	for _, jsonOutput := range []bool{false, true} {
 		t.Run(map[bool]string{false: "lines", true: "json"}[jsonOutput], func(t *testing.T) {
+			t.Parallel()
 			result := report.Report{
 				Schema: report.SchemaV1, Verdict: report.VerdictError, Contract: "standard-v1",
 				Findings: []report.Finding{{ID: "infrastructure-error", Kind: "infrastructure", Summary: "workspace failed"}},

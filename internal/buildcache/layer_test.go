@@ -149,6 +149,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 		{
 			name: "malformed action line",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
+				t.Helper()
 				store(t, layer, 1, 2, "content", reference)
 				if err := os.WriteFile(actionPath(layer, 1), []byte("{not json"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
@@ -158,6 +159,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 		{
 			name: "action names no output",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
+				t.Helper()
 				store(t, layer, 1, 2, "content", reference)
 				if err := os.WriteFile(actionPath(layer, 1), []byte(`{"output":"","size":7}`), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
@@ -167,6 +169,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 		{
 			name: "missing object",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
+				t.Helper()
 				store(t, layer, 1, 2, "content", reference)
 				if err := os.Remove(objectPath(layer, 2)); err != nil {
 					t.Fatal(err)
@@ -176,6 +179,7 @@ func TestLayerReportsMissWithoutFailingWhateverItCannotResolve(t *testing.T) {
 		{
 			name: "truncated object",
 			prepare: func(t *testing.T, layer buildcache.Layer) {
+				t.Helper()
 				store(t, layer, 1, 2, "content", reference)
 				if err := os.WriteFile(objectPath(layer, 2), []byte("cut"), filemode.ReadableFile); err != nil {
 					t.Fatal(err)
@@ -463,6 +467,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "an empty directory",
 			prepare: func(t *testing.T, dir string) {
+				t.Helper()
 				if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
@@ -471,6 +476,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "a layer goatest prepared before",
 			prepare: func(t *testing.T, dir string) {
+				t.Helper()
 				if err := (buildcache.Layer{Dir: dir}).Prepare(); err != nil {
 					t.Fatal(err)
 				}
@@ -479,6 +485,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "somebody's home directory",
 			prepare: func(t *testing.T, dir string) {
+				t.Helper()
 				if err := os.MkdirAll(filepath.Join(dir, "Documents"), filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}
@@ -491,6 +498,7 @@ func TestLayerPrepareRefusesADirectoryThatIsNotAGoatestBuildCache(t *testing.T) 
 		{
 			name: "a directory holding one unrelated file",
 			prepare: func(t *testing.T, dir string) {
+				t.Helper()
 				if err := os.MkdirAll(dir, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
 				}

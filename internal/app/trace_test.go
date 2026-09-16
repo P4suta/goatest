@@ -348,6 +348,7 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 		{
 			name: "symlink-to-the-repository",
 			directory: func(t *testing.T, root string) string {
+				t.Helper()
 				return filepath.Join(symlinkTo(t, root, filepath.Join(t.TempDir(), "alias")), "trace")
 			},
 			refused: true,
@@ -355,6 +356,7 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 		{
 			name: "symlink-to-a-directory-of-the-repository",
 			directory: func(t *testing.T, root string) string {
+				t.Helper()
 				inside := filepath.Join(root, "internal")
 				if err := os.MkdirAll(inside, filemode.ReadableDirectory); err != nil {
 					t.Fatal(err)
@@ -367,6 +369,7 @@ func TestATraceDirectoryIsJudgedByWhereItLands(t *testing.T) {
 		{
 			name: "symlink-outside-the-repository",
 			directory: func(t *testing.T, root string) string {
+				t.Helper()
 				return filepath.Join(symlinkTo(t, t.TempDir(), filepath.Join(t.TempDir(), "alias")), "trace")
 			},
 		},

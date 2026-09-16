@@ -633,6 +633,7 @@ func TestPackageSuiteCoverageMeasuresTheExactFallbackAndFailsClosed(t *testing.T
 		{Target: baselineTestTarget("TestTwo"), Duration: 200 * time.Millisecond},
 	}
 	t.Run("passing suite", func(t *testing.T) {
+		t.Parallel()
 		workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
 			if command.Dir != "internal/example" || command.Timeout != 300*time.Millisecond ||
 				!slices.Equal(command.Env, []string{"DB=ready"}) ||
@@ -659,6 +660,7 @@ func TestPackageSuiteCoverageMeasuresTheExactFallbackAndFailsClosed(t *testing.T
 		}
 	})
 	t.Run("failed suite supplies no fact", func(t *testing.T) {
+		t.Parallel()
 		workspace := &baselineFakeWorkspace{exec: func(gomutants.Command) (gomutants.CommandResult, error) {
 			return gomutants.CommandResult{ExitCode: 1}, nil
 		}}
@@ -1065,6 +1067,7 @@ func TestClassifyTargetFailureDistinguishesTimeoutAndFailure(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			kind, summary := classifyTargetFailure(test.attempt)
 			if kind != test.kind || summary != test.summary {
 				t.Fatalf("classifyTargetFailure = (%q, %q), want (%q, %q)", kind, summary, test.kind, test.summary)
@@ -1148,6 +1151,7 @@ func TestSummarizeIsBoundedTrimmedAndValidUTF8(t *testing.T) {
 		{name: "unicode boundary", output: strings.Repeat("界", maximumSummaryRunes+1), want: strings.Repeat("界", maximumSummaryRunes) + "…"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			got := summarize([]byte(test.output))
 			if got != test.want || !utf8.ValidString(got) {
 				t.Fatalf("summarize = %q (valid=%t), want %q", got, utf8.ValidString(got), test.want)

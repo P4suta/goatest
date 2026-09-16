@@ -56,6 +56,7 @@ func TestGetRejectsInvalidDigestWithoutTouchingTheFilesystem(t *testing.T) {
 	store := cache.New(root)
 	for _, digest := range []string{"", ".", "..", "parent/child", `parent\child`} {
 		t.Run(strings.ReplaceAll(digest, "\\", "backslash"), func(t *testing.T) {
+			t.Parallel()
 			if _, ok, err := store.Get(digest); err == nil || ok || !strings.Contains(err.Error(), "invalid cache digest") {
 				t.Fatalf("Get(%q) = ok %v err %v", digest, ok, err)
 			}

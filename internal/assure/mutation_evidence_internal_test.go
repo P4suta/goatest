@@ -259,6 +259,7 @@ func TestWholeTreeMarkerSelectsTheMatchingRepositoryBoundary(t *testing.T) {
 		{name: "whole baseline refuses a narrow record", baselineWhole: true, record: record(narrow, false)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			current := target
 			current.WholeTree = test.baselineWhole
 			index := newRunMutationEvidence(evidence.MutationStore{Records: []evidence.MutationRecord{test.record}},

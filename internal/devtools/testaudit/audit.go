@@ -263,18 +263,18 @@ func topLevelTest(name string) string {
 // until something breaks is a number nobody has been watching.
 func render(out io.Writer, summary result) {
 	for _, failed := range summary.failures {
-		fmt.Fprintf(out, "--- FAIL: %s %s\n", failed.pkg, failed.test)
+		_, _ = fmt.Fprintf(out, "--- FAIL: %s %s\n", failed.pkg, failed.test)
 		for _, line := range failed.output {
-			fmt.Fprintf(out, "    %s\n", line)
+			_, _ = fmt.Fprintf(out, "    %s\n", line)
 		}
 	}
-	fmt.Fprintf(out, "tests: %d passed, %d failed, %d skipped, across %d package(s)\n",
+	_, _ = fmt.Fprintf(out, "tests: %d passed, %d failed, %d skipped, across %d package(s)\n",
 		summary.passed, summary.failed, summary.skipped, len(summary.packages))
 	for _, counted := range summary.packages {
 		if counted.skipped == 0 {
 			continue
 		}
-		fmt.Fprintf(out, "  %s: %d skipped (%s)\n",
+		_, _ = fmt.Fprintf(out, "  %s: %d skipped (%s)\n",
 			counted.pkg, counted.skipped, strings.Join(counted.skippedNames, ", "))
 	}
 }

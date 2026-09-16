@@ -127,6 +127,7 @@ func TestRunWithSignalsMapsTerminationAndNonSyscallInterrupt(t *testing.T) {
 }
 
 func TestEnvironmentTraceBecomesTheFlagTheCommandLayerParses(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name      string
 		value     string
@@ -214,6 +215,7 @@ func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
 }
 
 func TestEnvironmentKeepTempBecomesTheFlagTheCommandLayerParses(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name      string
 		value     string

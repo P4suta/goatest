@@ -160,6 +160,7 @@ func TestValue() { external.Read() }
 		{name: "external helper access", contents: "# test log\nopen " + filepath.Join(root, "docs", "notes.md") + "\n", want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			arguments, finish := observer.instrumentPackage(pkg, nil)
 			log := testLogArgument(t, arguments)
 			if err := os.WriteFile(log, []byte(test.contents), filemode.PrivateFile); err != nil {

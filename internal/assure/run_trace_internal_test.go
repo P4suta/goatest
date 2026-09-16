@@ -108,6 +108,7 @@ func TestRunCoordinatorEndsEveryPhaseItBegins(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			harness := newRunCoordinatorHarness(t)
 			sink := harness.record()
 			if test.change != nil {

@@ -123,6 +123,7 @@ func TestInspectWorkspaceUsesSelectedPackagesAndConfiguredCommandTimeout(t *test
 		{name: "build tags default to all packages", tags: []string{"integration"}, wantArgv: []string{"go", "list", "-json", "-tags=integration", "./..."}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			moduleRoot := t.TempDir()
 			workspace := &scriptedValidationWorkspace{results: []gomutants.CommandResult{
 				{Output: listedPackageJSON(t, moduleRoot)},

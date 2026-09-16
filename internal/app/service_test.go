@@ -553,6 +553,7 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 }
 
 func writeLatestFixture(t *testing.T, root string) {
+	t.Helper()
 	writeLatestFixtureWithMutant(t, root, "mutant-a")
 }
 

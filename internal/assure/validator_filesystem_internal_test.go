@@ -200,30 +200,38 @@ func TestCopyRepositoryPropagatesWalkEntryAndIOFailures(t *testing.T) {
 		run  func(*testing.T, string, string)
 	}{
 		{name: "walk failure", run: func(t *testing.T, _, _ string) {
+			t.Helper()
 			walkCandidateFiles = func(string, fs.WalkDirFunc) error { return cause }
 		}},
 		{name: "walk callback failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go"}, cause)
 		}},
 		{name: "relative failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go"}, nil)
 			relativeCandidatePath = func(string, string) (string, error) { return "", cause }
 		}},
 		{name: "entry info failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go", infoErr: cause}, nil)
 		}},
 		{name: "directory create failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "pkg", mode: fs.ModeDir | filemode.GroupReadableDirectory}, nil)
 			makeCandidateDirectory = func(string, os.FileMode) error { return cause }
 		}},
 		{name: "irregular file", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "pipe", mode: fs.ModeNamedPipe}, nil)
 		}},
 		{name: "parent create failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go"}, nil)
 			makeCandidateDirectory = func(string, os.FileMode) error { return cause }
 		}},
 		{name: "input open failure", run: func(t *testing.T, source, _ string) {
+			t.Helper()
 			walkCandidateFiles = singleCandidateWalk(source, candidateDirEntry{name: "value.go"}, nil)
 			openCandidateInput = func(string) (validationReadCloser, error) { return nil, cause }
 		}},

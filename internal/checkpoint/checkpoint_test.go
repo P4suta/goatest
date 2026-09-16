@@ -265,6 +265,7 @@ func TestCheckpointDecoderRejectsCorruptionUnknownFieldsAndPendingUnits(t *testi
 		}()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := checkpoint.Decode(test.data); err == nil {
 				t.Fatal("invalid checkpoint was accepted")
 			}

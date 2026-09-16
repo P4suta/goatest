@@ -59,6 +59,7 @@ func TestAcquireStateMachine(t *testing.T) {
 	panicWait := func(context.Context) error { panic("unexpected wait") }
 
 	t.Run("directory failure", func(t *testing.T) {
+		t.Parallel()
 		_, err := acquire(t.Context(), t.TempDir(), nil, lockOperations{
 			mkdirAll: func(string, os.FileMode) error { return failure },
 			openFile: panicOpen,
@@ -71,6 +72,7 @@ func TestAcquireStateMachine(t *testing.T) {
 	})
 
 	t.Run("open contract and failure", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		var path string
 		var flags int
@@ -90,6 +92,7 @@ func TestAcquireStateMachine(t *testing.T) {
 	})
 
 	t.Run("lock failure", func(t *testing.T) {
+		t.Parallel()
 		file, err := os.CreateTemp(t.TempDir(), "lock")
 		if err != nil {
 			t.Fatal(err)
@@ -109,6 +112,7 @@ func TestAcquireStateMachine(t *testing.T) {
 	})
 
 	t.Run("lock success", func(t *testing.T) {
+		t.Parallel()
 		file, err := os.CreateTemp(t.TempDir(), "lock")
 		if err != nil {
 			t.Fatal(err)
@@ -128,6 +132,7 @@ func TestAcquireStateMachine(t *testing.T) {
 	})
 
 	t.Run("contention", func(t *testing.T) {
+		t.Parallel()
 		file, err := os.CreateTemp(t.TempDir(), "lock")
 		if err != nil {
 			t.Fatal(err)
