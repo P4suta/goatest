@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # CI usage
 
 A packaged GitHub Action is not required. A repository can install a tagged

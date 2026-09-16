@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Provider protocols v1
 
 Both protocols use newline-delimited, strict JSON and reject unknown fields.

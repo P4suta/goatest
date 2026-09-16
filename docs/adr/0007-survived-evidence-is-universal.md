@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # 0007 — Survived evidence is a universal proposition over the reaching set
 
 ## Status

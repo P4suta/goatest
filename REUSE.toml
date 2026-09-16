@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+version = 1
+SPDX-PackageName = "goatest"
+SPDX-PackageSupplier = "goatest contributors <noreply@goatest.invalid>"
+SPDX-PackageDownloadLocation = "https://github.com/P4suta/goatest"
+
+# Every file goatest ships carries its licence. Most carry it as a header; the
+# ones below cannot, and are annotated here instead.
+#
+# A file is in this list because its format has no comment - JSON has none at
+# all - or because a header would change what the file means. A golden file is
+# compared byte for byte, so a header in it is a header in the expected output;
+# a trace fixture is parsed as JSON Lines, where a comment is a parse error; and
+# go.mod and go.sum are written by the go command, which does not preserve
+# anything it did not put there.
+
+[[annotations]]
+path = [
+  "go.mod",
+  "go.sum",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [
+  ".gitattributes",
+  ".gitignore",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [
+  "internal/trace/schema.json",
+  "internal/devtools/proofaudit/testdata/**",
+  "internal/devtools/reportdiff/testdata/**",
+  "internal/devtools/tracesummary/testdata/**",
+  "internal/testkit/testdata/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"

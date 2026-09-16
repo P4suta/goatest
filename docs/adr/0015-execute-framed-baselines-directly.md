@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # ADR 0015: Execute framed baseline targets directly
 
 ## Status

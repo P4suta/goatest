@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Native fuzzing and property testing
 
 goatest intentionally does not define `Check`, `Draw`, a generator package, a

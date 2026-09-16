@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Run trace v1
 
 The first trace contract is `goatest-trace-v1`. A trace is the diagnostic

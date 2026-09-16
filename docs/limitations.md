@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Current limitations and deferred work
 
 This is a pre-release alpha. The implementation has strong self-tests, but

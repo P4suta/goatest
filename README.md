@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # goatest
 
 `goatest` is an audit-oriented assurance runner for Go 1.26 and newer. It
