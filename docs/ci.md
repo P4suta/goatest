@@ -52,14 +52,19 @@ fails the step.
 
 ## This repository's own checks
 
-The workflow runs four jobs, and `mise.toml` holds the same commands under
-names a developer can run.
+The workflow runs five jobs, and `mise.toml` holds the same commands under
+names a developer can run. `internal/devgates` pins this table to the workflow
+in both directions, and refuses a job that checks out a shallow clone: without
+the whole history, a run asking what changed against a ref it does not hold is
+told that nothing did, which is the same answer as a clean tree and a completely
+different fact.
 
 | Job | What it runs |
 | --- | --- |
 | `test` | the unit tier and then the integration tier, on Linux, macOS and Windows, each audited by `internal/devtools/testaudit` |
 | `race` | both tiers under the race detector, on Linux |
 | `lint` | `golangci-lint`, `actionlint`, `typos`, `gitleaks`, and TOML formatting |
+| `dogfood` | goatest verifying this repository with itself, then auditing the proof layers of the run |
 | `package` | cross-platform snapshot archives |
 
 The suite is in two tiers. `go test ./...` is the unit tier: everything that

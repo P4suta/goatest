@@ -129,6 +129,13 @@ run = "go run ./internal/devtools/tracesummary"
 description = "Compare two assurance reports: verdict, accounting, mutant transitions, and lost kills"
 run = "go run ./internal/devtools/reportdiff"
 
+# Takes arguments, and says so.
+#
+# It read `mise run proof-audit` with no arguments until the day somebody ran
+# it, which printed a usage message and exited 2 - a task that had never worked
+# and could not, because the tool needs a recording and a directory of coverage
+# profiles and neither has a default. A description that implies a task runs is
+# a description that will be believed.
 [tasks.proof-audit]
-description = "Audit the proof layers of a recorded run: does a layer drop a target that killed a mutant?"
+description = "Audit the proof layers of a recorded run: proof-audit TRACE.jsonl PROFILES-DIR"
 run = "go run ./internal/devtools/proofaudit"
