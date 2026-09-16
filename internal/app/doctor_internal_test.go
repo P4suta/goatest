@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/P4suta/goatest/internal/config"
 	"github.com/P4suta/goatest/internal/filemode"
+	"github.com/P4suta/goatest/internal/testkit"
 )
 
 func TestDoctorOptionalAndBooleanStatusesAreExplicit(t *testing.T) {
@@ -124,9 +124,7 @@ func TestDoctorNameSampleKeepsTheListShortAndSaysWhatItLeftOut(t *testing.T) {
 
 func TestDoctorBehaviourKeysNamesThePackagesThatWidenTheirKey(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skipf("Go toolchain is unavailable: %v", err)
-	}
+	testkit.GoBinary(t)
 	root := t.TempDir()
 	for name, contents := range map[string]string{
 		"go.mod":           "module fixture.example/keys\n\ngo 1.26.0\n",

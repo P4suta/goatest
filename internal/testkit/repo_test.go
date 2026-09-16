@@ -22,9 +22,7 @@ const (
 
 func TestTestkitReexecHelper(t *testing.T) {
 	t.Parallel()
-	if !testkit.HelperEnabled(reexecHelperVariable) {
-		return
-	}
+	testkit.SkipUnlessHelper(t, reexecHelperVariable)
 	fmt.Println(reexecHelperMarker)
 }
 
@@ -92,7 +90,7 @@ func TestRepoFileWritesContentsVerbatimAndCreatesParents(t *testing.T) {
 
 func TestRepoGitCommitsTheFixtureDeterministically(t *testing.T) {
 	t.Parallel()
-	gitBinary(t)
+	testkit.GitBinary(t)
 	repository := testkit.NewRepo(t).BoundaryFixture().Git()
 
 	commits := strings.Fields(runGit(t, repository.Root(), "log", "--format=%H"))
@@ -116,7 +114,7 @@ func TestRepoGitCommitsTheFixtureDeterministically(t *testing.T) {
 }
 
 func TestRepoGitIgnoresTheOperatorsGitEnvironment(t *testing.T) {
-	gitBinary(t)
+	testkit.GitBinary(t)
 	timestamp := strconv.Itoa(testkit.GitCommitUnixTime)
 	operators := []struct {
 		name  string
@@ -188,18 +186,9 @@ func runGo(t *testing.T, root string, arguments ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func gitBinary(t *testing.T) string {
-	t.Helper()
-	path, err := exec.LookPath("git")
-	if err != nil {
-		t.Skipf("git binary unavailable: %v", err)
-	}
-	return path
-}
-
 func runGit(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
-	command := exec.CommandContext(t.Context(), gitBinary(t), arguments...)
+	command := exec.CommandContext(t.Context(), testkit.GitBinary(t), arguments...)
 	command.Dir = root
 	output, err := command.CombinedOutput()
 	if err != nil {

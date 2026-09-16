@@ -26,9 +26,7 @@ const (
 )
 
 func TestCacheProgramHelper(t *testing.T) {
-	if !testkit.HelperEnabled(cacheProgramHelper) {
-		return
-	}
+	testkit.SkipUnlessHelper(t, cacheProgramHelper)
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
 	if os.Getenv(cacheProgramPersist) != "" {
 		arguments = append(arguments, "--persist")
@@ -37,13 +35,7 @@ func TestCacheProgramHelper(t *testing.T) {
 }
 
 func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
-	if testing.Short() {
-		t.Skip("compiling through a real toolchain is not a short test")
-	}
-	goBinary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("no go command on PATH")
-	}
+	goBinary := testkit.GoBinary(t)
 	fixture := writeCacheFixtureModule(t)
 	base := preparedCacheLayer(t)
 
@@ -70,13 +62,7 @@ func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
 }
 
 func TestTheSameTreeHitsAndACopiedOneMissesItsOwnPackages(t *testing.T) {
-	if testing.Short() {
-		t.Skip("compiling through a real toolchain is not a short test")
-	}
-	goBinary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("no go command on PATH")
-	}
+	goBinary := testkit.GoBinary(t)
 	base := preparedCacheLayer(t)
 	here := writeCacheFixtureModule(t)
 

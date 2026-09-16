@@ -162,7 +162,7 @@ func (repository *Repo) NarrowedBranchFixture() *Repo {
 
 func (repository *Repo) Git() *Repo {
 	repository.t.Helper()
-	git := gitBinary(repository.t)
+	git := GitBinary(repository.t)
 	date := strconv.Itoa(GitCommitUnixTime) + " +0000"
 
 	environment := append(os.Environ(),
@@ -193,20 +193,22 @@ func (repository *Repo) Path(relative string) string {
 	return filepath.Join(repository.root, filepath.FromSlash(relative))
 }
 
+// GoBinary returns the path of the `go` command, skipping or failing the test
+// when there is none.
+//
+// Which of the two it does is the policy RequireTools states. Before that
+// policy existed this function skipped unconditionally, and because it is the
+// facade the whole harness reaches a toolchain through, a runner that lost Go
+// from PATH retired every end-to-end test in the repository and reported the
+// remainder as a pass.
 func GoBinary(t *testing.T) string {
 	t.Helper()
-	path, err := exec.LookPath("go")
-	if err != nil {
-		t.Skipf("Go binary unavailable: %v", err)
-	}
-	return path
+	return toolPath(t, "go")
 }
 
-func gitBinary(t *testing.T) string {
+// GitBinary returns the path of the `git` command, under the same policy as
+// GoBinary.
+func GitBinary(t *testing.T) string {
 	t.Helper()
-	path, err := exec.LookPath("git")
-	if err != nil {
-		t.Skipf("git binary unavailable: %v", err)
-	}
-	return path
+	return toolPath(t, "git")
 }
