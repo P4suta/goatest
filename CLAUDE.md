@@ -19,7 +19,7 @@ every word of the difference is in
 
 - **Two tiers, enforced by a scan.** A test that starts a real `go` or `git`
   carries `//go:build integration`. The unit tier finishes in about ten seconds
-  and holds 2589 of the 2625 tests. `internal/devgates` refuses a file in the
+  and holds 2591 of the 2627 tests. `internal/devgates` refuses a file in the
   wrong tier in both directions, because a stale tag hides a file from
   `go test ./...` entirely - not skipped, not failed, not counted, not compiled.
 - **A skip is recorded or it is a failure.**
@@ -32,7 +32,9 @@ every word of the difference is in
 - **Seams are arguments, not package-level variables.**
   [ADR 0001](docs/adr/0001-seam-policy.md). The ledger at
   `internal/devgates/seam_allowlist.txt` may shrink and never grow, and a stale
-  entry fails as loudly as a new offender.
+  entry fails as loudly as a new offender. It holds 69 lines. One seam holds a
+  whole package serial: three of them cost `internal/app` 184 seconds, and
+  removing them left it at 9.
 - **Comments are checked, not banned.** Every exported name in a package on
   `internal/devgates/documented_packages.txt` carries a doc comment, every path
   a comment names exists, and every `[Name]` link resolves. That ledger may grow
