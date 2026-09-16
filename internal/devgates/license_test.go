@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/P4suta/goatest/internal/testkit"
 )
 
@@ -126,30 +128,30 @@ func carriesLicenceHeader(t *testing.T, path string) bool {
 
 // annotatedPaths reads the path patterns REUSE.toml annotates.
 //
-// The manifest is read as lines rather than decoded, because the only thing
-// this gate needs from it is the patterns, and a decoder would make the gate
-// depend on the shape of a document whose shape REUSE owns.
+// It decodes the document. The first version read it as lines, on the reasoning
+// that the patterns were all this gate needed and a decoder would tie it to a
+// shape REUSE owns - which had the fragility exactly backwards. Reading lines
+// tied it to the *formatting*, and `taplo fmt` collapsing a multi-line array
+// onto one line was enough to make it report every annotated file as unlicensed
+// and the string `precedence = "aggregate` as a path pattern. A decoder does not
+// care where the newlines are.
 func annotatedPaths(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", reuseManifest, err)
 	}
+	var manifest struct {
+		Annotations []struct {
+			Path []string `toml:"path"`
+		} `toml:"annotations"`
+	}
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode %s: %v", reuseManifest, err)
+	}
 	var patterns []string
-	inside := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(trimmed, "path = ["):
-			inside = true
-		case inside && trimmed == "]":
-			inside = false
-		case inside:
-			pattern := strings.Trim(strings.TrimSuffix(trimmed, ","), `"`)
-			if pattern != "" && !strings.HasPrefix(pattern, "#") {
-				patterns = append(patterns, pattern)
-			}
-		}
+	for _, annotation := range manifest.Annotations {
+		patterns = append(patterns, annotation.Path...)
 	}
 	return patterns
 }

@@ -17,19 +17,13 @@ SPDX-PackageDownloadLocation = "https://github.com/P4suta/goatest"
 # anything it did not put there.
 
 [[annotations]]
-path = [
-  "go.mod",
-  "go.sum",
-]
+path = ["go.mod", "go.sum"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 goatest contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = [
-  ".gitattributes",
-  ".gitignore",
-]
+path = [".gitattributes", ".gitignore"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 goatest contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
@@ -47,10 +41,7 @@ SPDX-FileCopyrightText = "2026 goatest contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = [
-  "LICENSE-APACHE",
-  "LICENSE-MIT",
-]
+path = ["LICENSE-APACHE", "LICENSE-MIT"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 goatest contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"

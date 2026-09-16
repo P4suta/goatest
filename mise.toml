@@ -84,6 +84,8 @@ run = "go test -race -tags integration -timeout 40m ./..."
 
 [tasks.fmt]
 description = "Check Go and TOML formatting without rewriting files"
+# taplo with no path checks every TOML in the tree, which is how REUSE.toml came
+# to be checked at all: it was added later and nobody thought to name it.
 run = [
   'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }',
   "taplo fmt --check",
