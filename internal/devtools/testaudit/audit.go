@@ -64,6 +64,15 @@ type tally struct {
 	// failedNames is every test of this package that failed, in the order the
 	// run reported them.
 	failedNames []string
+
+	// narrowed is every line of package-level output announcing that something
+	// cut this package's run down before it started.
+	//
+	// A TestMain that reads a pattern out of the environment and sets
+	// -test.run leaves no other trace: the tests it excluded were never
+	// started, so they are not passes, failures or skips, and the accounting
+	// above balances perfectly over a suite that is missing most of itself.
+	narrowed []string
 }
 
 // failure is one failed test and what it printed.
@@ -129,6 +138,10 @@ func audit(input io.Reader) (result, error) {
 		switch {
 		case record.Action == "output" && record.Test != "":
 			output[key] = append(output[key], strings.TrimRight(record.Output, "\n"))
+		case record.Action == "output":
+			if line := strings.TrimRight(record.Output, "\n"); strings.Contains(line, NarrowedFilterMarker) {
+				counted.narrowed = append(counted.narrowed, strings.TrimSpace(line))
+			}
 		case record.Action == "pass" && record.Test != "":
 			counted.passed++
 			delete(output, key)
@@ -193,6 +206,24 @@ func (summary result) silentPackages() []string {
 		}
 	}
 	return silent
+}
+
+// narrowedPackages reports every announcement that a package ran less than all
+// of itself.
+//
+// This is the one hole the pass/fail/skip accounting cannot see. A skip is a
+// test that ran far enough to say it would not continue; a test excluded by
+// -test.run never existed as far as the stream is concerned. So the count of
+// tests that did not run has to come from the thing that did the excluding,
+// which is why the marker exists at all.
+func (summary result) narrowedPackages() []string {
+	var narrowed []string
+	for _, counted := range summary.packages {
+		for _, line := range counted.narrowed {
+			narrowed = append(narrowed, counted.pkg+": "+line)
+		}
+	}
+	return narrowed
 }
 
 // unrecordedSkips reports the skips the ledger does not allow, as

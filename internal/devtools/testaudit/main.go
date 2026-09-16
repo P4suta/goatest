@@ -53,6 +53,14 @@ const (
 	failureExitCode = 1
 )
 
+// NarrowedFilterMarker is the line a TestMain prints when something cut its
+// package's run down before it started.
+//
+// It is exported so that the package doing the narrowing and the tool refusing
+// it name the same string. A marker spelt twice is a marker that will be spelt
+// two ways.
+const NarrowedFilterMarker = "goatest-testaudit: narrowed test filter"
+
 func main() {
 	os.Exit(run(os.Stdin, os.Stdout, os.Stderr))
 }
@@ -79,6 +87,15 @@ func run(input io.Reader, out, errorOut io.Writer) int {
 				"Every test in them was skipped, which a non-verbose `go test` reports\n"+
 				"as `ok`. A suite that stepped aside is not a suite that passed.\n",
 			len(silent), strings.Join(silent, "\n  "))
+		failed = true
+	}
+	if narrowed := summary.narrowedPackages(); len(narrowed) > 0 {
+		fmt.Fprintf(errorOut,
+			"goatest: %d package(s) ran less than all of themselves:\n  %s\n\n"+
+				"A test excluded before the run started is not a pass, a failure or a\n"+
+				"skip, so the accounting balances over a suite that is missing most of\n"+
+				"itself. Unset the variable, or run the suite that was asked for.\n",
+			len(narrowed), strings.Join(narrowed, "\n  "))
 		failed = true
 	}
 	if unrecorded := summary.unrecordedSkips(allowed); len(unrecorded) > 0 {

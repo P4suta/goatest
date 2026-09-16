@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -200,4 +201,66 @@ func writeLedger(t *testing.T, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestAuditRefusesARunThatWasNarrowedBeforeItStarted covers the one hole the
+// pass/fail/skip accounting cannot see. A test excluded by -test.run was never
+// started, so it is not a verdict of any kind and the totals balance over a
+// suite that is missing most of itself.
+func TestAuditRefusesARunThatWasNarrowedBeforeItStarted(t *testing.T) {
+	t.Parallel()
+	stream := `{"Action":"output","Package":"example.test/a","Output":"` +
+		NarrowedFilterMarker + `: GOATEST_INTERNAL_ASSURE_TEST_RUN=\"^TestOne$\"\n"}` + "\n" +
+		events(t, "pass example.test/a TestOne")
+	summary, err := audit(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrowed := summary.narrowedPackages()
+	if len(narrowed) != 1 {
+		t.Fatalf("narrowedPackages() = %q, want the one announcement", narrowed)
+	}
+	if !strings.HasPrefix(narrowed[0], "example.test/a: ") {
+		t.Errorf("narrowedPackages() = %q, want it charged to its package", narrowed[0])
+	}
+	if summary.passed != 1 {
+		t.Errorf("passed = %d, want 1: the marker must not disturb the counts", summary.passed)
+	}
+}
+
+// TestAuditIgnoresOrdinaryPackageOutput keeps the marker check off the ordinary
+// lines a package prints, which would otherwise fail every run.
+func TestAuditIgnoresOrdinaryPackageOutput(t *testing.T) {
+	t.Parallel()
+	stream := `{"Action":"output","Package":"example.test/a","Output":"ok  \texample.test/a\t0.01s\n"}` + "\n"
+	summary, err := audit(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrowed := summary.narrowedPackages(); len(narrowed) != 0 {
+		t.Fatalf("narrowedPackages() = %q, want none", narrowed)
+	}
+}
+
+// TestTheNarrowedFilterMarkerIsSpeltTheSameInBothPlaces is a two-element
+// ledger.
+//
+// The package that prints the marker cannot import this command - it is a
+// main package, and a production file here may not import the test harness
+// either - so the string exists twice. A marker spelt twice is a marker that
+// will eventually be spelt two ways, and the failure mode is silent: the
+// printer announces a narrowed run and the reader never recognises it.
+func TestTheNarrowedFilterMarkerIsSpeltTheSameInBothPlaces(t *testing.T) {
+	t.Parallel()
+	const printer = "../../assure/main_test.go"
+	source, err := os.ReadFile(printer)
+	if err != nil {
+		t.Fatalf("read %s: %v", printer, err)
+	}
+	quoted := strconv.Quote(NarrowedFilterMarker)
+	if !strings.Contains(string(source), quoted) {
+		t.Fatalf("%s does not declare the marker as %s.\n\n"+
+			"The two spellings have drifted, so a narrowed run would announce itself\n"+
+			"in words this tool no longer recognises.", printer, quoted)
+	}
 }
