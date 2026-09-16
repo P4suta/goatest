@@ -13,6 +13,17 @@ import (
 	"github.com/P4suta/goatest/internal/filemode"
 )
 
+// eventFieldCount is how many fields a terse event row holds once it names a
+// test: the action, the package and the test.
+//
+// A row with one fewer is a package-level event, which is a shape this tool has
+// to tell apart from a test's.
+const eventFieldCount = 3
+
+// minimumEventFields is the shortest row events accepts: an action and a
+// package.
+const minimumEventFields = 2
+
 // events builds a `go test -json` stream from terse "action package test"
 // rows, so a test reads as the run it describes.
 func events(t *testing.T, rows ...string) string {
@@ -20,11 +31,11 @@ func events(t *testing.T, rows ...string) string {
 	var builder strings.Builder
 	for _, row := range rows {
 		fields := strings.Fields(row)
-		if len(fields) < 2 {
+		if len(fields) < minimumEventFields {
 			t.Fatalf("event row %q needs at least an action and a package", row)
 		}
 		builder.WriteString(`{"Action":"` + fields[0] + `","Package":"` + fields[1] + `"`)
-		if len(fields) > 2 {
+		if len(fields) == eventFieldCount {
 			builder.WriteString(`,"Test":"` + fields[2] + `"`)
 		}
 		builder.WriteString("}\n")
@@ -49,8 +60,9 @@ func TestAuditCountsEveryTerminalVerdict(t *testing.T) {
 		t.Fatalf("passed=%d failed=%d skipped=%d, want 1/1/1",
 			summary.passed, summary.failed, summary.skipped)
 	}
-	if len(summary.packages) != 2 {
-		t.Fatalf("packages = %d, want 2", len(summary.packages))
+	const wantPackages = 2
+	if len(summary.packages) != wantPackages {
+		t.Fatalf("packages = %d, want %d", len(summary.packages), wantPackages)
 	}
 	if summary.packages[0].pkg != "example.test/a" {
 		t.Errorf("packages are not sorted: %q first", summary.packages[0].pkg)
@@ -125,8 +137,10 @@ func TestAuditChargesASkippedSubtestToItsParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.skipped != 2 {
-		t.Fatalf("skipped = %d, want 2: a skipped subtest is a test that did not run", summary.skipped)
+	const wantSkipped = 2
+	if summary.skipped != wantSkipped {
+		t.Fatalf("skipped = %d, want %d: a skipped subtest is a test that did not run",
+			summary.skipped, wantSkipped)
 	}
 	unrecorded := summary.unrecordedSkips([]string{"example.test/a TestParent"})
 	if len(unrecorded) != 0 {
