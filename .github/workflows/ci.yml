@@ -40,7 +40,13 @@ jobs:
           GOSUMDB: "off"
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
-        run: go test -timeout 40m ./...
+          GOATEST_TEST_REQUIRE_TOOLS: "1"
+        shell: bash
+        run: |
+          mkdir -p .goatest
+          go test -json -timeout 40m ./... > .goatest/test-events.jsonl && status=0 || status=$?
+          go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || status=1
+          exit "$status"
 
   race:
     runs-on: ubuntu-latest
@@ -59,6 +65,7 @@ jobs:
           GOSUMDB: "off"
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
+          GOATEST_TEST_REQUIRE_TOOLS: "1"
         run: go test -race -timeout 40m ./...
 
   lint:

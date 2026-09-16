@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Tests that are allowed to skip, one "package Test" per line, sorted.
+#
+# A skip is a test that did not run. On this repository's own suite that has to
+# be a decision somebody made and wrote down, because the alternative is what
+# used to happen: a runner without `git` on PATH retired every end-to-end test
+# and a non-verbose `go test` reported the remainder as `ok`.
+#
+# This ledger is a ratchet in the shrinking direction. It records the skips that
+# survive GOATEST_TEST_REQUIRE_TOOLS, which are of exactly two kinds:
+#
+#   - a platform cannot do what the test is about. Every entry below is a test
+#     of how goatest treats a symbolic link, or of a path behaviour Windows does
+#     not share, and on a platform that cannot make the thing there is nothing
+#     to observe. These fire on Windows and not on Unix, which is why running
+#     the suite on one operating system cannot prove an entry is stale.
+#   - a test is the entry point of a helper process. It asserts nothing unless
+#     its variable selects it, and before it skipped it returned early and was
+#     counted as a pass.
+#
+# A skip for a missing tool belongs to neither kind and must not be added here.
+# Set GOATEST_TEST_REQUIRE_TOOLS=1 in CI and the harness will fail instead.
+github.com/P4suta/goatest/cmd/goatest TestCacheProgramHelper
+github.com/P4suta/goatest/cmd/goatest TestTheCLIServiceNamesWhatBelongsToTheMachine
+github.com/P4suta/goatest/internal/app TestATraceDirectoryIsJudgedByWhereItLands
+github.com/P4suta/goatest/internal/app TestAnEntryThatCannotBeStatedKeepsItsPlaceInTheLedger
+github.com/P4suta/goatest/internal/assure TestRunGenerationProviderHelper
+github.com/P4suta/goatest/internal/assure TestRunResourceProviderHelper
+github.com/P4suta/goatest/internal/cache TestFlushDoesNotFollowAnEntryReplacedAfterValidation
+github.com/P4suta/goatest/internal/cache TestInspectRefusesASymbolicLinkForTheVersionRoot
+github.com/P4suta/goatest/internal/evidence TestFlushMutationNeverTraversesAStoredSymlink
+github.com/P4suta/goatest/internal/repair TestApplyAcceptsRepositoryRootAlias
+github.com/P4suta/goatest/internal/repair TestApplyRejectsSymlinkDirectoryEscapingRepository
+github.com/P4suta/goatest/internal/retention TestInspectFilesRefusesASymlinkedEntry
+github.com/P4suta/goatest/internal/retention TestRetentionRefusesSymlinkedEntries
+github.com/P4suta/goatest/internal/tempowner TestSweepNeverFollowsASymbolicLink
+github.com/P4suta/goatest/internal/testkit TestTestkitReexecHelper

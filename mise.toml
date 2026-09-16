@@ -15,9 +15,39 @@ syft = "1.51.1"
 description = "Build the public library and single CLI"
 run = ["go build ./...", "go vet ./..."]
 
+# Two ways to run the same suite.
+#
+# `test` is what a developer reads: `go test` renders progress and failures the
+# way everyone already knows how to read.
+#
+# `test-audit` is what CI runs, and it answers a question `test` cannot. A
+# non-verbose `go test` prints `ok` for a package whose every test was skipped,
+# so a runner that lost `git` from PATH, or an environment variable that
+# narrowed -test.run, could retire a whole package and leave the job green. The
+# audit reads the machine-readable stream and refuses a run that produced no
+# verdict, or a skip nobody recorded. It renders failures itself, because a
+# -json stream is not readable and a task that hides the reason for a failure
+# is a task nobody will run.
 [tasks.test]
 description = "Run unit, property, protocol, and toolchain-backed E2E tests"
 run = "go test -timeout 40m ./..."
+
+[tasks.test-audit]
+description = "Run the suite and audit what actually ran: no silent package, no unrecorded skip"
+run = """
+mkdir -p .goatest
+go test -json -timeout 40m ./... > .goatest/test-events.jsonl && status=0 || status=$?
+go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || status=1
+exit $status
+"""
+run_windows = """
+New-Item -ItemType Directory -Force -Path .goatest | Out-Null
+go test -json -timeout 40m ./... > .goatest/test-events.jsonl
+$status = $LASTEXITCODE
+Get-Content .goatest/test-events.jsonl | go run ./internal/devtools/testaudit
+if ($LASTEXITCODE -ne 0) { $status = 1 }
+exit $status
+"""
 
 [tasks.test-race]
 description = "Run the complete suite under Go's race detector"
