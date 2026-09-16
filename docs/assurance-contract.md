@@ -215,9 +215,9 @@ environment.
 A failed or timed-out original cannot distinguish a mutant failure from the
 suite's own state, so all mutants sharing it become inconclusive without
 repeating the command. A passing original supplies the closest duration
-control. The deadline covers test execution, not a second workspace's cold
-compilation. Mutant replay deliberately skips probe preparation and retains a
-lazy pristine-workspace fallback.
+control. The deadline covers test execution, not compilation. Mutant replay
+deliberately skips probe preparation, and takes its control through the same
+prepared session as every other run.
 
 These reach statements rest on one measured execution. A target or suite whose
 behaviour differs between runs may enter a block, or make a site differ, in the

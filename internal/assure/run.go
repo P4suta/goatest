@@ -19,7 +19,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"runtime/debug"
@@ -420,45 +419,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 		}
 
-		var controlMutex sync.RWMutex
-		var controlOpenOnce sync.Once
-		var controlWorkspace *mutationbridge.Workspace
-		var controlOpenErr error
-		var controlClosed bool
-		openControl := func(controlContext context.Context) (*mutationbridge.Workspace, error) {
-			if controlClosed {
-				return nil, errors.New("goatest: original-control workspace is closed")
-			}
-			controlOpenOnce.Do(func() {
-				opened, openErr := dependencies.openWorkspace(controlContext, root, mutationbridge.Options{
-					GoBinary: options.GoBinary, TempDirectory: scratch.dir,
-					ReportDirectory: internalOutputDirectory, SnapshotExclude: assuranceSnapshotExclusions(),
-					Environment: overlayEnvironment(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()),
-					Trace:       options.Trace, KeepTemp: options.KeepTemp,
-				})
-				if openErr != nil {
-					controlOpenErr = openErr
-					return
-				}
-				reportMutationSweep(options, opened.Swept())
-				controlWorkspace = opened
-			})
-			if controlOpenErr != nil {
-				return nil, controlOpenErr
-			}
-			return controlWorkspace, nil
-		}
-		closeControl := func() error {
-			controlMutex.Lock()
-			defer controlMutex.Unlock()
-			controlClosed = true
-			if controlWorkspace == nil {
-				return nil
-			}
-			err := closeWorkspace(controlWorkspace)
-			controlWorkspace = nil
-			return err
-		}
 		var closeRound func() error
 		var executionSession MutationSession
 		var catalog gomutants.Catalog
@@ -531,7 +491,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		closeRound = func() error {
 			settlePreparation(true)
-			return errors.Join(closeControl(), manager.Close(), closeWorkspace(workspace))
+			return errors.Join(manager.Close(), closeWorkspace(workspace))
 		}
 
 		phases.enter(phaseBaseline)
@@ -566,16 +526,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			StopAfterChecks:    options.ReplayMutantID == "",
 		}
 		startPreparation()
-		controlMutex.RLock()
-		pristine, openErr := openControl(ctx)
-		controlMutex.RUnlock()
-		if openErr != nil {
-			settlePreparation(true)
-			removeErr := releaseBaselineScratch(options, dependencies.removeBaselineScratch, artifactDirectory)
-			_ = closeRound()
-			return report.Report{}, errors.Join(openErr, removeErr)
-		}
-		baselineCommands := withBuildCache(pristine, buildCache)
+		baselineCommands := commands
 		baseline, err := dependencies.collectBaseline(ctx, baselineCommands, metadata.model, baselineTargets, baselineOptions)
 		phases.leave()
 		if err != nil || len(baseline.Findings) != 0 {
@@ -678,16 +629,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
 				PersistCompile: buildCache.needsPersistentCompile(), Timeout: options.CommandTimeout,
 			}
-			controlMutex.RLock()
-			pristine, openErr := openControl(ctx)
-			if openErr == nil {
-				raceResult, err = dependencies.collectRaceWithOptions(
-					ctx, withBuildCache(pristine, buildCache), raceModel, racePackages, contract, raceOptions,
-				)
-			} else {
-				err = openErr
-			}
-			controlMutex.RUnlock()
+			raceResult, err = dependencies.collectRaceWithOptions(
+				ctx, commands, raceModel, racePackages, contract, raceOptions,
+			)
 			if err != nil {
 				_ = closeRound()
 				return report.Report{}, err

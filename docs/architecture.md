@@ -96,8 +96,8 @@ request's same-run derived deadline, memoized by package, arguments,
 environment, and deadline;
 a failure or expiration makes that compatible execution group inconclusive
 without executing it. Other groups still run because any one may establish a
-kill. Compilation is outside the derived budget. Replay uses its pristine
-fallback for the same control. With no positive control, no mutant starts for
+kill. Compilation is outside the derived budget. Replay takes the same control
+through the same prepared session. With no positive control, no mutant starts for
 that group. A mutant timeout answers only its group and starts no recalibration,
 split, or retry. The design is recorded in
 [ADR 0018](adr/0018-confirm-comparative-watchdogs.md).
@@ -178,9 +178,10 @@ and baseline or race compilation write through that protocol to the base.
 Mutation preparation runs against the native projection and atomically promotes
 only its new valid content-addressed actions and objects after preparation
 succeeds. Test execution never persists its incidental cache writes.
-Preparation runs on the mutation workspace while `go vet` and `go build` run
-on a distinct pristine control workspace. Their trace spans overlap, and the
-coordinator joins preparation before any probe or mutant execution.
+Preparation and the `go vet` and `go build` checks run on one workspace: a
+command waits only for the instrumentation window, so their trace spans still
+overlap without a second snapshot of the same tree. The coordinator joins
+preparation before any probe or mutant execution.
 When both owned layers miss, the external cache may read that one action from
 cmd/go's host cache. It accepts the entry only after validating the native
 record, identifiers, size, regular file, and complete content hash, then copies

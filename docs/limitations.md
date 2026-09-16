@@ -220,9 +220,9 @@ self-dogfood is not evidence about other repositories.
   derived budget plus one containment ceiling and is then left inconclusive.
   That ceiling is the one number the operator sets.
   Other groups continue because a completed failure in any one is a kill; if
-  none kills, the unknown groups prevent survival. Replay has
-  no prepared probe tree and can still pay for its pristine fallback
-  compilation.
+  none kills, the unknown groups prevent survival. Replay prepares no probe
+  tree, and takes its controls through the prepared session like every other
+  run.
 - Timeout findings are not durable evidence. A later run must execute the
   request again and either obtain a completed proof or remain inconclusive.
 - Checkpoint I/O, evidence digesting, mutant accounting, and report rendering

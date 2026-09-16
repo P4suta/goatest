@@ -477,9 +477,13 @@ confirmation and does not cause mutant re-execution. The synthetic identity is
 request, and `control: true` is required. A control never carries `suite` or
 `infected`: incidental probe logging is not infection evidence, `proofaudit`
 ignores it, and `tracesummary` accounts for it in a separate exact original
-preflights block. A mutant replay deliberately prepares no probe tree and
-instead uses a lazy pristine-workspace control, recorded as an ordinary `exec`
-event.
+preflights block.
+
+A control is recorded in the probe payload because this contract's `type` enum
+is closed and has no payload of its own for one. The vocabulary is borrowed: an
+infection probe answers whether a mutated value would have differed, and a
+control answers whether the program the user wrote passes its own tests. The
+borrowing ends when the contract version does.
 
 A target or suite the pass could not measure keeps no facts at all. A
 `test-failed`, a `timed-out`, an `unavailable`, and an execution stopped by an
