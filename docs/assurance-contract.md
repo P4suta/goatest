@@ -16,6 +16,13 @@ scope.
 Replay is an operation, not a new project assurance. It returns `REPRODUCED`
 when the selected finding remains observable or `RESOLVED` when it does not.
 
+The other operations assure nothing at all - `init`, `plan`, `doctor`,
+`report`, `accept`, `fix`, `cache` and `trace` - and return `COMPLETED`. The
+word is deliberately not one of the assured family: those commands measure no
+mutant and prove no property, and a verdict meaning "the command worked" must
+not be readable as "the project is assured". `COMPLETED` exits zero, with
+`ASSURED`, `CHANGE_ASSURED`, `SCOPE_ASSURED` and `RESOLVED`.
+
 ## Fault model
 
 `standard-v1` requires:

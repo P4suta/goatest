@@ -209,23 +209,6 @@ func validatePrepareRecord(sequence int64, record *PrepareRecord) error {
 	return nil
 }
 
-func knownPreparePhase(phase string) bool {
-	switch phase {
-	case PreparePhaseDiscovery,
-		PreparePhaseProbeSnapshot,
-		PreparePhaseMainValidation,
-		PreparePhaseMainRestoration,
-		PreparePhaseVerification,
-		PreparePhaseBinaryBuild,
-		PreparePhaseProbeValidation,
-		PreparePhaseProbeCoverageBuild,
-		PreparePhaseProbeRestoration:
-		return true
-	default:
-		return false
-	}
-}
-
 func Diff(before, after Summary) SummaryDiff {
 	result := SummaryDiff{
 		EventsDelta:           after.Events - before.Events,

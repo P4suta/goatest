@@ -96,7 +96,7 @@ const help = `Usage:
 	goatest trace summary [RUN]
 	goatest trace diff RUN-A RUN-B
 	goatest help [command]
-Every command accepts --ui=auto|plain|jsonl and --json for its output; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
+Every command accepts --ui=auto|plain|jsonl and --json for its output, and refuses both at once; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
 Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
 Keeping temporaries: --keep-temp leaves the run's temporary directories on disk and records each kept path in the trace and in .goatest/kept-temp-v1.json; GOATEST_KEEP_TEMP=1 asks for the same. 'cache status' lists them and 'cache gc' removes them once they are older than the [cache] ttl.
@@ -137,8 +137,9 @@ those key the whole tree and reuse nothing between runs.
 	case CommandInit:
 		return `Usage:	goatest init
 
-Write an annotated .goatest.toml describing every section, with the strict
-defaults active, and never overwrite an existing file.
+Write a minimal .goatest.toml holding the required version and the selected
+contract, and never overwrite an existing file. Every other setting keeps its
+built-in default; see docs/configuration.md for the sections and their keys.
 `, true
 	case CommandExplain:
 		return `Usage:	goatest explain ID

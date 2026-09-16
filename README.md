@@ -97,7 +97,9 @@ an estimated remainder - on an interactive terminal and deterministic plain
 lines everywhere else; `plain` always renders the deterministic lines; `jsonl`
 streams one JSON progress event per note to stdout and ends with the final
 `{"type":"report",...}` event, which is the stream's one stable contract.
-`--json` emits the report object. Exit codes are
+`--json` emits the report object, and is refused together with `--ui=jsonl`:
+one prints a document and the other streams one, and a command cannot do both
+on the same stream. Exit codes are
 `0` for an assured/resolved/completed operation, `1` for `DEFECT` or
 `REPRODUCED`, `2` for `INSUFFICIENT`, `3` for configuration/tool errors, and
 `130`/`143` for interruption/termination.
@@ -133,6 +135,11 @@ There is no resume flag. See
 - `CHANGE_ASSURED`: the requested and resolved changeset scope completed.
 - `SCOPE_ASSURED`: an explicit package scope completed.
 - `REPRODUCED` / `RESOLVED`: replay operation outcome.
+- `COMPLETED`: an operation that assures nothing finished - `init`, `plan`,
+  `doctor`, `report`, `accept`, `fix`, `cache` and `trace`. It is a separate
+  verdict rather than an `ASSURED` because those commands measure nothing, and
+  a word that means "the command worked" must not be readable as "the project
+  is assured".
 - `DEFECT`: user code failed a baseline, race, build, vet, or test contract.
 - `INSUFFICIENT`: execution completed but evidence gaps remain.
 - `ERROR`: evidence is incomplete or a tool/provider/filesystem failure stopped
