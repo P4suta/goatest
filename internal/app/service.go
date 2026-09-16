@@ -35,6 +35,20 @@ import (
 
 type RunFunc func(context.Context, assure.Options) (report.Report, error)
 
+// GitOutput runs one git command in root and returns its standard output.
+//
+// An error means the command could not be run or did not succeed; the caller
+// decides whether that is fatal or is the repository simply not being one.
+type GitOutput func(ctx context.Context, root string, arguments ...string) ([]byte, error)
+
+// resolved fills in the real git for a nil GitOutput.
+func (git GitOutput) resolved() GitOutput {
+	if git == nil {
+		return gitOutputBytes
+	}
+	return git
+}
+
 type Service struct {
 	Root          string
 	GoBinary      string
@@ -57,6 +71,24 @@ type Service struct {
 	ProcessID func() int
 
 	TraceFilesystem trace.Filesystem
+
+	// Git runs one git command in a directory and returns its standard output.
+	//
+	// The zero value runs the real git, like the two filesystems above it. It
+	// is a field rather than a package-level variable because ADR 0001 wants
+	// replaceable behaviour to travel as an argument, and it is on Service
+	// rather than passed to each call because the operations that need it are
+	// reached through Service.Execute and nothing else.
+	//
+	// Before it existed, every test that drove an operation started a real git
+	// - about ten files' worth - even when the test had a fake Run installed
+	// and cared nothing for the repository. The process always failed, because
+	// the root was a temporary directory outside any repository, and the run
+	// settled into the git-metadata-unavailable limitation it was supposed to.
+	// So the child cost a few milliseconds and changed no answer, which is the
+	// worst shape a dependency can have: it made those tests need git in order
+	// to be classified, while needing nothing from it in order to pass.
+	Git GitOutput
 
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
@@ -100,7 +132,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 				result.Contract = loaded.Contract
 			}
 		}
-		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC())
+		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC(), service.Git)
 		if validationErr := report.ValidateForPersistence(result); validationErr != nil {
 			return result, fmt.Errorf("goatest: finalize %s report: %w", command, validationErr)
 		}
@@ -264,7 +296,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 			return report.Report{}, err
 		}
 		result = infrastructureErrorReport(result, request, err)
-		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+		result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.Git)
 		service.writeDiagnostics(root, result, recording, err)
 		if ownsCacheLease {
 			service.collectDiagnosticRetention(root)
@@ -278,7 +310,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
-	result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+	result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.Git)
 	if err := WriteReports(root, result); err != nil {
 		return report.Report{}, err
 	}
@@ -453,11 +485,11 @@ func (service Service) buildCacheDirectory(root string) string {
 	return buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
 }
 
-func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {
-	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished)
+func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time, git GitOutput) report.Report {
+	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished, git)
 }
 
-func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time) report.Report {
+func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time, git GitOutput) report.Report {
 	result := input
 	result.Schema = report.SchemaV1
 	result.RunKind = kind
@@ -544,19 +576,19 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 			result.Scope.Resolved.Modules = []string{result.Repository.Module}
 		}
 	}
-	git, gitErr := inspectGit(ctx, root, request)
+	metadata, gitErr := inspectGit(ctx, root, request, git)
 	if gitErr != nil {
 		result.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
 			Code: "git-metadata-unavailable", Summary: "Git identity or changeset metadata could not be resolved",
 		})
 	} else {
-		result.Repository.Git = git
+		result.Repository.Git = metadata
 		if len(result.Scope.Requested.Files) == 0 && kind == report.RunChangeset {
-			result.Scope.Requested.Files = slices.Clone(git.ChangedFiles)
+			result.Scope.Requested.Files = slices.Clone(metadata.ChangedFiles)
 		}
 		if len(result.Scope.Resolved.Files) == 0 && result.Scope.Resolved.Kind == string(report.RunChangeset) {
-			result.Scope.Resolved.Files = slices.Clone(git.ChangedFiles)
+			result.Scope.Resolved.Files = slices.Clone(metadata.ChangedFiles)
 		}
 	}
 	return result
@@ -654,12 +686,13 @@ func configurationDigest(root string, request cli.Request) (string, error) {
 	return hex.EncodeToString(digest), readErr
 }
 
-func inspectGit(ctx context.Context, root string, request cli.Request) (report.Git, error) {
+func inspectGit(ctx context.Context, root string, request cli.Request, git GitOutput) (report.Git, error) {
+	gitOutput := git.resolved()
 	commit, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return report.Git{}, err
 	}
-	status, err := gitOutputBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	status, err := gitOutput(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -680,11 +713,11 @@ func inspectGit(ctx context.Context, root string, request cli.Request) (report.G
 	if diffBase == "" {
 		diffBase = base
 	}
-	changed, err := gitOutputBytes(ctx, root, "diff", "--name-only", "-z", "--find-renames", diffBase)
+	changed, err := gitOutput(ctx, root, "diff", "--name-only", "-z", "--find-renames", diffBase)
 	if err != nil {
 		return report.Git{}, err
 	}
-	untracked, err := gitOutputBytes(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
+	untracked, err := gitOutput(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -693,10 +726,6 @@ func inspectGit(ctx context.Context, root string, request cli.Request) (report.G
 }
 
 const gitMetadataTimeout = 30 * time.Second
-
-func gitOutput(ctx context.Context, root string, arguments ...string) ([]byte, error) {
-	return gitOutputBytes(ctx, root, arguments...)
-}
 
 func gitOutputBytes(ctx context.Context, root string, arguments ...string) ([]byte, error) {
 	bounded, cancel := context.WithTimeout(ctx, gitMetadataTimeout)
