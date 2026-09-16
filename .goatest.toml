@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# goatest's configuration for verifying goatest.
+#
+# The file exists as much for what it proves as for what it sets. Until it was
+# written, every dogfood run used the built-in defaults, so `goatest init`, the
+# parser, and the path a setting takes from this file to a run were the one part
+# of this tool the tool had never exercised on itself. A configuration format
+# nothing reads is a configuration format that will be wrong.
+#
+# Every value below is either the default stated in docs/configuration.md or a
+# decision with its reason beside it. There is no third kind, and a setting that
+# cannot be given a reason belongs at its default where a reader will not wonder
+# why it was moved.
+
+version = 1
+contract = "standard-v1"
+
+[execution]
+# Written out although it is the default, because the absence is a decision.
+#
+# Adding "integration" here would put goatest's own end-to-end tests into every
+# mutant execution: each one compiles a module and drives a whole mutation run,
+# so a mutant would cost minutes to buy evidence the unit tier already gives in
+# seconds. A reader who wonders why the dogfood does not cover that tier should
+# find the answer here rather than conclude it was overlooked.
+build_tags = []
