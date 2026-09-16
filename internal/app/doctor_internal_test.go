@@ -16,6 +16,7 @@ import (
 )
 
 func TestDoctorOptionalAndBooleanStatusesAreExplicit(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"", os.DevNull, "off", "OFF"} {
 		if got := doctorOptionalStatus(value); got != "not-configured" {
 			t.Errorf("doctorOptionalStatus(%q) = %q", value, got)
@@ -30,6 +31,7 @@ func TestDoctorOptionalAndBooleanStatusesAreExplicit(t *testing.T) {
 }
 
 func TestDoctorProviderCommandResolvesRepositoryRelativePathsAndRejectsDirectories(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	provider := filepath.Join(root, "tools", "provider.exe")
 	if err := os.MkdirAll(filepath.Dir(provider), filemode.ReadableDirectory); err != nil {
@@ -47,6 +49,7 @@ func TestDoctorProviderCommandResolvesRepositoryRelativePathsAndRejectsDirectori
 }
 
 func TestProbeWritableDirectoryRestoresWhatItCreated(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	directory := filepath.Join(root, ".goatest")
 	if err := probeWritableDirectory(doctorProbeFilesystem{}, directory); err != nil {
@@ -68,6 +71,7 @@ func TestProbeWritableDirectoryRestoresWhatItCreated(t *testing.T) {
 }
 
 func TestProbeWritableDirectoryReportsInjectedFailures(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("disk says no")
 	root := t.TempDir()
 	directory := filepath.Join(root, "reports")
@@ -91,6 +95,7 @@ func TestProbeWritableDirectoryReportsInjectedFailures(t *testing.T) {
 }
 
 func TestLimitedDoctorBufferBoundsOutputAndMarksTruncation(t *testing.T) {
+	t.Parallel()
 	const doctorOutputOverflow = 7
 	var buffer limitedDoctorBuffer
 	input := strings.Repeat("x", doctorOutputLimit+doctorOutputOverflow)

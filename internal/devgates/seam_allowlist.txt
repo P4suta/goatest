@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: 2026 goatest contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
-internal/app operatingSystemAtomicWrites
-internal/app readConfigurationFile
-internal/app startDoctorProcess
 internal/assure absoluteRepositoryPath
 internal/assure acquireProductionResource
 internal/assure changedImpactFiles

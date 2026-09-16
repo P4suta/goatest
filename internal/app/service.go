@@ -96,12 +96,52 @@ type Service struct {
 	notes ui.Notes
 
 	doctorFilesystem doctorProbeFilesystem
+
+	// doctorProcess starts the children `goatest doctor` runs.
+	//
+	// It is nil in production and a fake in a test that drives a failure a real
+	// process would not produce. It was a package-level variable, which is why
+	// every test in this package ran alone: a variable one test replaces is
+	// shared with every test that does not.
+	doctorProcess startDoctorProcess
 }
 
 var (
-	reportRunSequence     atomic.Uint64
-	readConfigurationFile = os.ReadFile
+	reportRunSequence atomic.Uint64
 )
+
+// reportHooks are the operations finalizing a report performs outside itself.
+//
+// One value rather than a parameter each, because they arrive together and
+// travel together: a report is finalized once, from one place, and a caller that
+// has to remember two arguments will one day remember one. The zero value is
+// production.
+type reportHooks struct {
+	// git runs one git command in a directory.
+	git GitOutput
+
+	// readConfiguration reads the configuration file whose bytes the run is
+	// identified by.
+	readConfiguration func(string) ([]byte, error)
+}
+
+// reportHooks are the operations this service finalizes a report through.
+//
+// Git is a field of Service, like the two filesystems, so a caller outside this
+// package can replace it. readConfiguration is not: nothing outside needs to,
+// and an exported field nobody sets is a surface with no reader.
+func (service Service) reportHooks() reportHooks {
+	return reportHooks{git: service.Git}.resolved()
+}
+
+// resolved fills every operation this value leaves unset from the real thing.
+func (hooks reportHooks) resolved() reportHooks {
+	hooks.git = hooks.git.resolved()
+	if hooks.readConfiguration == nil {
+		hooks.readConfiguration = os.ReadFile
+	}
+	return hooks
+}
 
 const (
 	goCacheEnvironmentVariable = "GOCACHE"
@@ -132,7 +172,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 				result.Contract = loaded.Contract
 			}
 		}
-		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC(), service.Git)
+		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC(), service.reportHooks())
 		if validationErr := report.ValidateForPersistence(result); validationErr != nil {
 			return result, fmt.Errorf("goatest: finalize %s report: %w", command, validationErr)
 		}
@@ -296,7 +336,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 			return report.Report{}, err
 		}
 		result = infrastructureErrorReport(result, request, err)
-		result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.Git)
+		result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.reportHooks())
 		service.writeDiagnostics(root, result, recording, err)
 		if ownsCacheLease {
 			service.collectDiagnosticRetention(root)
@@ -310,7 +350,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
-	result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.Git)
+	result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.reportHooks())
 	if err := WriteReports(root, result); err != nil {
 		return report.Report{}, err
 	}
@@ -485,11 +525,12 @@ func (service Service) buildCacheDirectory(root string) string {
 	return buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
 }
 
-func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time, git GitOutput) report.Report {
-	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished, git)
+func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time, hooks reportHooks) report.Report {
+	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished, hooks)
 }
 
-func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time, git GitOutput) report.Report {
+func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time, hooks reportHooks) report.Report {
+	hooks = hooks.resolved()
 	result := input
 	result.Schema = report.SchemaV1
 	result.RunKind = kind
@@ -526,7 +567,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		DurationMS: max(0, finished.Sub(started).Milliseconds()),
 	}
 	if result.Configuration.Digest == "" {
-		digest, digestErr := configurationDigest(root, request)
+		digest, digestErr := configurationDigest(root, request, hooks)
 		result.Configuration.Digest = digest
 		if digestErr != nil {
 			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
@@ -576,7 +617,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 			result.Scope.Resolved.Modules = []string{result.Repository.Module}
 		}
 	}
-	metadata, gitErr := inspectGit(ctx, root, request, git)
+	metadata, gitErr := inspectGit(ctx, root, request, hooks.git)
 	if gitErr != nil {
 		result.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
@@ -655,8 +696,8 @@ func newRunID(root, snapshot string, kind report.RunKind, finished time.Time) st
 	return finished.UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(digest[:6])
 }
 
-func configurationDigest(root string, request cli.Request) (string, error) {
-	data, err := readConfigurationFile(filepath.Join(root, config.FileName))
+func configurationDigest(root string, request cli.Request, hooks reportHooks) (string, error) {
+	data, err := hooks.resolved().readConfiguration(filepath.Join(root, config.FileName))
 	var readErr error
 	if errors.Is(err, os.ErrNotExist) {
 		data = []byte("goatest-config-v1-defaults")

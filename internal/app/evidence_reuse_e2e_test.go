@@ -253,6 +253,7 @@ import (
 )
 
 func TestThreshold(t *testing.T) {
+	t.Parallel()
 	for _, value := range []int{1, 4} {
 		want := value
 		if value >= 4 {
@@ -265,12 +266,14 @@ func TestThreshold(t *testing.T) {
 }
 
 func TestThresholdAtZero(t *testing.T) {
+	t.Parallel()
 	if got := Threshold(0); got != 0 {
 		t.Fatalf("Threshold(0) = %d, want 0", got)
 	}
 }
 
 func TestTheDirectoryIsReadable(t *testing.T) {
+	t.Parallel()
 	count := DirectoryEntryCount()
 	if count != 3 {
 		t.Fatalf("directory entries = %d, want 3", count)
@@ -283,6 +286,7 @@ const changedBoundaryTestSource = `package assured
 import "testing"
 
 func TestBoundary(t *testing.T) {
+	t.Parallel()
 	for _, value := range []int{5, 9, 10, 11} {
 		want := value
 		if value >= 10 {
@@ -295,6 +299,7 @@ func TestBoundary(t *testing.T) {
 }
 
 func TestBoundaryAtZero(t *testing.T) {
+	t.Parallel()
 	if got := Boundary(0); got != 0 {
 		t.Fatalf("Boundary(0) = %d, want 0", got)
 	}
@@ -458,6 +463,7 @@ const otherTestSource = `package other
 import "testing"
 
 func TestCeiling(t *testing.T) {
+	t.Parallel()
 	for _, value := range []int{1, 4} {
 		want := value
 		if value >= 4 {
@@ -470,6 +476,7 @@ func TestCeiling(t *testing.T) {
 }
 
 func TestCeilingAtZero(t *testing.T) {
+	t.Parallel()
 	if got := Ceiling(0); got != 0 {
 		t.Fatalf("Ceiling(0) = %d, want 0", got)
 	}
@@ -488,6 +495,7 @@ const survivingTestSource = `package unsure
 import "testing"
 
 func TestDoubled(t *testing.T) {
+	t.Parallel()
 	if !Doubled(4) {
 		t.Fatal("Doubled(4) = false, want true")
 	}
@@ -502,6 +510,7 @@ const changedSurvivingTestSource = `package unsure
 import "testing"
 
 func TestDoubled(t *testing.T) {
+	t.Parallel()
 	if !Doubled(4) {
 		t.Fatal("Doubled(4) = false, want true")
 	}

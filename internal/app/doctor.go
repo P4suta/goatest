@@ -50,8 +50,22 @@ type doctorProcessTree interface {
 	Close() error
 }
 
-var startDoctorProcess = func(command *exec.Cmd) (doctorProcessTree, error) {
-	return processtree.Start(command)
+// startDoctorProcess starts one child and returns its process tree.
+//
+// A nil value starts a real one. It travels on Service beside the other
+// replaceable behaviours rather than living in package scope, because a
+// package-level variable is shared by every test in the package whether or not
+// it touches this.
+type startDoctorProcess func(command *exec.Cmd) (doctorProcessTree, error)
+
+// resolved fills in the real process tree for a nil starter.
+func (start startDoctorProcess) resolved() startDoctorProcess {
+	if start == nil {
+		return func(command *exec.Cmd) (doctorProcessTree, error) {
+			return processtree.Start(command)
+		}
+	}
+	return start
 }
 
 func (service Service) doctor(ctx context.Context, root string) (report.Report, error) {
@@ -61,7 +75,7 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		return doctorFailure(result, "config", config.FileName, err), nil
 	}
 	result.Contract = loaded.Contract
-	digest, digestErr := configurationDigest(root, cli.Request{})
+	digest, digestErr := configurationDigest(root, cli.Request{}, service.reportHooks())
 	result.Configuration.Digest = digest
 	if digestErr != nil {
 		return doctorFailure(result, "config", "configuration-metadata", digestErr), nil
@@ -80,13 +94,13 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 	offline := withEnvironment(environment, map[string]string{
 		"GOPROXY": "off", "GOSUMDB": "off", "GOTELEMETRY": "off", "GOTOOLCHAIN": "local",
 	})
-	version, err := doctorCommand(ctx, root, offline, doctorQuickCommandTimeout, goBinary, "version")
+	version, err := doctorCommand(ctx, service.doctorProcess, root, offline, doctorQuickCommandTimeout, goBinary, "version")
 	if err != nil {
 		return doctorFailure(result, "toolchain", "go-version", err), nil
 	}
 	result.Toolchain = report.Toolchain{Go: strings.TrimSpace(version), Goatest: "local", OS: runtime.GOOS, Arch: runtime.GOARCH}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "go-version", Status: "ready", Detail: strings.TrimSpace(version)})
-	envOutput, err := doctorCommand(ctx, root, offline, doctorQuickCommandTimeout, goBinary, "env", "GOMOD", "GOWORK", "CGO_ENABLED", "GOOS", "GOARCH")
+	envOutput, err := doctorCommand(ctx, service.doctorProcess, root, offline, doctorQuickCommandTimeout, goBinary, "env", "GOMOD", "GOWORK", "CGO_ENABLED", "GOOS", "GOARCH")
 	if err != nil {
 		return doctorFailure(result, "toolchain", "go-env", err), nil
 	}
@@ -108,11 +122,11 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		listArgs = append(listArgs, "-tags="+strings.Join(loaded.Execution.BuildTags, ","))
 	}
 	listArgs = append(listArgs, packages...)
-	if _, err := doctorCommand(ctx, root, offline, loaded.Execution.Timeout, goBinary, listArgs...); err != nil {
+	if _, err := doctorCommand(ctx, service.doctorProcess, root, offline, loaded.Execution.Timeout, goBinary, listArgs...); err != nil {
 		return doctorFailure(result, "dependency", "offline-dependencies", err), nil
 	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "offline-dependencies", Status: "ready", Detail: strings.Join(packages, ",")})
-	keys, keysErr := doctorBehaviourKeys(ctx, root, offline, loaded, goBinary, packages)
+	keys, keysErr := doctorBehaviourKeys(ctx, service.doctorProcess, root, offline, loaded, goBinary, packages)
 	if keysErr != nil {
 		return doctorFailure(result, "dependency", "behaviour-keys", keysErr), nil
 	}
@@ -126,11 +140,11 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 		raceArgs = append(raceArgs, "-args")
 		raceArgs = append(raceArgs, loaded.Execution.TestBinaryArgs...)
 	}
-	if _, err := doctorCommand(ctx, root, offline, loaded.Execution.Timeout, goBinary, raceArgs...); err != nil {
+	if _, err := doctorCommand(ctx, service.doctorProcess, root, offline, loaded.Execution.Timeout, goBinary, raceArgs...); err != nil {
 		return doctorFailure(result, "race", "race-detector", err), nil
 	}
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "race-detector", Status: "ready", Detail: values[doctorGOOSField] + "/" + values[doctorGOARCHField]})
-	if git, err := doctorCommand(ctx, root, environment, doctorQuickCommandTimeout, "git", "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(git) != "true" {
+	if git, err := doctorCommand(ctx, service.doctorProcess, root, environment, doctorQuickCommandTimeout, "git", "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(git) != "true" {
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "git", Status: "unavailable", Detail: doctorErrorDetail(err)})
 		result.Limitations = append(result.Limitations, report.Limitation{Code: "git-unavailable", Summary: "changeset scope and Git identity cannot be resolved"})
 	} else {
@@ -262,6 +276,7 @@ func doctorFailure(input report.Report, kind, id string, cause error) report.Rep
 
 func doctorBehaviourKeys(
 	ctx context.Context,
+	start startDoctorProcess,
 	root string,
 	environment []string,
 	loaded config.Config,
@@ -273,7 +288,7 @@ func doctorBehaviourKeys(
 		arguments = append(arguments, "-tags="+strings.Join(loaded.Execution.BuildTags, ","))
 	}
 	arguments = append(arguments, packages...)
-	listing, err := doctorCommandWithLimit(ctx, root, environment, loaded.Execution.Timeout, doctorListingLimit, goBinary, arguments...)
+	listing, err := doctorCommandWithLimit(ctx, start, root, environment, loaded.Execution.Timeout, doctorListingLimit, goBinary, arguments...)
 	if err != nil {
 		return report.Evidence{}, err
 	}
@@ -339,12 +354,13 @@ func doctorNameSample(names []string) []string {
 	return append(sample, fmt.Sprintf("and %d more", len(names)-doctorNameSampleSize))
 }
 
-func doctorCommand(ctx context.Context, root string, environment []string, timeout time.Duration, name string, arguments ...string) (string, error) {
-	return doctorCommandWithLimit(ctx, root, environment, timeout, doctorOutputLimit, name, arguments...)
+func doctorCommand(ctx context.Context, start startDoctorProcess, root string, environment []string, timeout time.Duration, name string, arguments ...string) (string, error) {
+	return doctorCommandWithLimit(ctx, start, root, environment, timeout, doctorOutputLimit, name, arguments...)
 }
 
 func doctorCommandWithLimit(
 	ctx context.Context,
+	start startDoctorProcess,
 	root string,
 	environment []string,
 	timeout time.Duration,
@@ -362,7 +378,7 @@ func doctorCommandWithLimit(
 	command.Env = slices.Clone(environment)
 	output := limitedDoctorBuffer{limit: limit}
 	command.Stdout, command.Stderr = &output, &output
-	tree, err := startDoctorProcess(command)
+	tree, err := start.resolved()(command)
 	if err != nil {
 		return output.String(), fmt.Errorf("%s %s: %w", name, strings.Join(arguments, " "), err)
 	}

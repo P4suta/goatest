@@ -27,6 +27,7 @@ const (
 )
 
 func TestTraceSummaryAndDiffAreReadOnlyAndExposeCompleteness(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root}
 	missing, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{}, "summary")
@@ -57,6 +58,7 @@ func TestTraceSummaryAndDiffAreReadOnlyAndExposeCompleteness(t *testing.T) {
 }
 
 func TestTraceSummarySkipsUnrelatedEntries(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root}
 	traceRoot := filepath.Join(root, ".goatest", "trace")
@@ -71,6 +73,7 @@ func TestTraceSummarySkipsUnrelatedEntries(t *testing.T) {
 }
 
 func TestTraceSummaryRejectsExtraRunNames(t *testing.T) {
+	t.Parallel()
 	service := app.Service{Root: t.TempDir()}
 	_, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{IDs: []string{"run-a", "run-b"}}, "summary")
 	// The message differs from the command line's on purpose. The surface
@@ -83,6 +86,7 @@ func TestTraceSummaryRejectsExtraRunNames(t *testing.T) {
 }
 
 func TestTraceSummaryDoesNotRecognizeLatestAsARunAlias(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	traceRoot := filepath.Join(root, ".goatest", "trace")
 	writeCompletedTrace(t, traceRoot, "latest", "ASSURED", 0, traceRunAPrepareDuration)

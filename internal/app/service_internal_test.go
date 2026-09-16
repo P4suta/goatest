@@ -14,6 +14,7 @@ import (
 )
 
 func TestServicePropagatesRepositoryRootResolutionFailure(t *testing.T) {
+	t.Parallel()
 	sentinel := errors.New("absolute root failed")
 	service := Service{
 		Root: "relative",
@@ -28,15 +29,14 @@ func TestServicePropagatesRepositoryRootResolutionFailure(t *testing.T) {
 }
 
 func TestFinalizeReportMarksUnreadableConfigurationMetadata(t *testing.T) {
-	previous := readConfigurationFile
-	t.Cleanup(func() { readConfigurationFile = previous })
-	readConfigurationFile = func(string) ([]byte, error) {
+	t.Parallel()
+	hooks := reportHooks{git: absentGit, readConfiguration: func(string) ([]byte, error) {
 		return nil, errors.New("configuration read failed")
-	}
+	}}
 	now := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 	result := finalizeReportKind(t.Context(), t.TempDir(), cli.Request{}, report.Report{
 		Verdict: report.VerdictCompleted,
-	}, report.RunOperation, now, now, absentGit)
+	}, report.RunOperation, now, now, hooks)
 	if len(result.Configuration.Digest) != len(appTestDigest("a")) {
 		t.Fatalf("configuration digest = %q", result.Configuration.Digest)
 	}
@@ -88,7 +88,7 @@ func TestGitMetadataComesFromTheServiceGitHook(t *testing.T) {
 	now := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 	result := finalizeReportKind(t.Context(), t.TempDir(), cli.Request{}, report.Report{
 		Verdict: report.VerdictCompleted,
-	}, report.RunOperation, now, now, scripted)
+	}, report.RunOperation, now, now, reportHooks{git: scripted})
 
 	if !result.Repository.Git.Available || result.Repository.Git.Commit != commit {
 		t.Fatalf("git metadata = %+v, want the commit the hook reported", result.Repository.Git)
@@ -113,7 +113,7 @@ func TestGitMetadataIsUnavailableWhenTheHookRefuses(t *testing.T) {
 	now := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 	result := finalizeReportKind(t.Context(), t.TempDir(), cli.Request{}, report.Report{
 		Verdict: report.VerdictCompleted,
-	}, report.RunOperation, now, now, absentGit)
+	}, report.RunOperation, now, now, reportHooks{git: absentGit})
 
 	if result.Repository.Git.Available || result.Repository.Git.Commit != "unavailable" {
 		t.Fatalf("git metadata = %+v, want the unavailable placeholder", result.Repository.Git)

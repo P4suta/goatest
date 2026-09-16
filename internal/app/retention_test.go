@@ -73,6 +73,7 @@ func storedArtifact(t *testing.T, root, store, name string, moment time.Time) {
 }
 
 func TestCacheMaintenanceBoundsStoredCandidatesAndPatches(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
@@ -124,6 +125,7 @@ func TestCacheMaintenanceBoundsStoredCandidatesAndPatches(t *testing.T) {
 }
 
 func TestStoredCandidatesSurviveWhileACheckpointCouldStillResume(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
@@ -162,6 +164,7 @@ func TestStoredCandidatesSurviveWhileACheckpointCouldStillResume(t *testing.T) {
 }
 
 func TestEveryRunBoundsTheRepairStoresAndNotesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	storedArtifact(t, root, "candidates", "0000000000000001.json", base)
@@ -193,6 +196,7 @@ func TestEveryRunBoundsTheRepairStoresAndNotesWhatItCannotRead(t *testing.T) {
 }
 
 func TestEveryRunBoundsTheVerdictCacheItRanAgainst(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	cacheRoot := filepath.Join(root, ".goatest", "cache")
 	store := cache.New(cacheRoot)
@@ -230,6 +234,7 @@ func TestEveryRunBoundsTheVerdictCacheItRanAgainst(t *testing.T) {
 }
 
 func TestAVerdictCacheThatCannotBeCollectedIsANoteRatherThanAFailedRun(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	versionRoot := filepath.Join(root, ".goatest", "cache", "v1")
 	if err := os.MkdirAll(versionRoot, filemode.ReadableDirectory); err != nil {
@@ -271,7 +276,9 @@ func historyEntries(t *testing.T, root string) []string {
 }
 
 func TestEveryRunBoundsTheHistoryItJustExtended(t *testing.T) {
+	t.Parallel()
 	t.Run("a completed run collects the runs it made obsolete", func(t *testing.T) {
+		t.Parallel()
 		root := boundedHistoryRoot(t)
 		service := historyService(t, root)
 		historyRun(t, service, nil)
@@ -284,6 +291,7 @@ func TestEveryRunBoundsTheHistoryItJustExtended(t *testing.T) {
 	})
 
 	t.Run("a run that failed collects as well", func(t *testing.T) {
+		t.Parallel()
 		root := boundedHistoryRoot(t)
 		service := app.Service{
 			Root: root, TempDirectory: t.TempDir(),
@@ -303,6 +311,7 @@ func TestEveryRunBoundsTheHistoryItJustExtended(t *testing.T) {
 	})
 
 	t.Run("a history that cannot be listed is a note rather than a failed run", func(t *testing.T) {
+		t.Parallel()
 		root := boundedHistoryRoot(t)
 		var progress bytes.Buffer
 		service := historyService(t, root)
@@ -323,6 +332,7 @@ func TestEveryRunBoundsTheHistoryItJustExtended(t *testing.T) {
 }
 
 func TestACollectedRunIsNamedByReportAndLeavesEveryLatestCommandWorking(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	finding := report.Finding{ID: "finding-a", Kind: "survivor", Path: "value.go", Line: 3, Summary: "survived", MutantID: "mutant-a"}
 	service := app.Service{
@@ -362,6 +372,7 @@ func TestACollectedRunIsNamedByReportAndLeavesEveryLatestCommandWorking(t *testi
 }
 
 func TestCacheMaintenanceBoundsTheRunHistoryAndSparesReferencedRuns(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := historyService(t, root)
 

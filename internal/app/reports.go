@@ -29,13 +29,28 @@ type atomicWriteOperations struct {
 	rename     func(string, string) error
 }
 
-var operatingSystemAtomicWrites = atomicWriteOperations{
-	mkdirAll: os.MkdirAll,
-	createTemp: func(directory, pattern string) (atomicReportFile, error) {
-		return os.CreateTemp(directory, pattern)
-	},
-	remove: os.Remove,
-	rename: os.Rename,
+// resolved fills every operation this value leaves unset from package os.
+//
+// The default is written once, in code, rather than restored once per test.
+// This used to be a package-level variable holding the same four functions,
+// which meant a test that replaced one of them owned the package for as long
+// as it ran - and internal/app has forty-six tests.
+func (operations atomicWriteOperations) resolved() atomicWriteOperations {
+	if operations.mkdirAll == nil {
+		operations.mkdirAll = os.MkdirAll
+	}
+	if operations.createTemp == nil {
+		operations.createTemp = func(directory, pattern string) (atomicReportFile, error) {
+			return os.CreateTemp(directory, pattern)
+		}
+	}
+	if operations.remove == nil {
+		operations.remove = os.Remove
+	}
+	if operations.rename == nil {
+		operations.rename = os.Rename
+	}
+	return operations
 }
 
 func WriteReports(root string, input report.Report) error {
@@ -117,10 +132,11 @@ func safeRunID(id string) bool {
 }
 
 func atomicWrite(path string, data []byte) error {
-	return atomicWriteWith(path, data, operatingSystemAtomicWrites)
+	return atomicWriteWith(path, data, atomicWriteOperations{})
 }
 
 func atomicWriteWith(path string, data []byte, operations atomicWriteOperations) error {
+	operations = operations.resolved()
 	if err := operations.mkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
 		return err
 	}
