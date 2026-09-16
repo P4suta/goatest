@@ -243,6 +243,13 @@ A mutant is `killed` only after:
 1. the exact original-code control for that request passes; and
 2. one execution of the same request with the mutant active fails.
 
+The control is `Session.Control`: the same prepared test binaries the mutant
+runs on, launched the same way, with nothing activated. There is one way to ask
+it. Until the control existed there were two, chosen by the kind of run - an
+argv assembled here and handed to a second workspace, or the probe tree's
+`test-failed` outcome read as a red suite - and neither measured the binaries
+the comparison is about.
+
 Each distinct control command — the package, arguments, and environment of the
 killing request, which the original code does not vary by mutant — runs once
 per mutation phase under the containment ceiling, and its outcome answers every

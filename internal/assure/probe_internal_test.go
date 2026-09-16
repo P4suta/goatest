@@ -688,12 +688,18 @@ func TestProbePassRecordsWhatEachTargetMeasured(t *testing.T) {
 	}
 }
 
-func TestPreparedProbeMutationControlRunsTheExactSemanticOriginal(t *testing.T) {
+// TestSessionOriginalControlRunsTheOriginalThroughThePreparedBinaries covers
+// the one path a control takes now.
+//
+// It used to take two, and the test that stood here covered the second: a probe
+// of the semantics-preserving tree, whose test-failed outcome was read as "the
+// original is red". That measured the probe tree's binaries rather than the
+// mutant tree's, and answered in a vocabulary built for infection facts.
+func TestSessionOriginalControlRunsTheOriginalThroughThePreparedBinaries(t *testing.T) {
 	t.Parallel()
-	session := &mutationUnitSession{probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
-		return gomutants.ProbeResult{
-			Outcome: gomutants.ProbeMeasured, ExitCode: 0,
-			Duration: 1250 * time.Millisecond, Output: []byte("passing output"),
+	session := &mutationUnitSession{control: func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{
+			ExitCode: 0, Duration: 1250 * time.Millisecond, Output: []byte("passing output"),
 		}, nil
 	}}
 	recording, recorder := newProbeRecording()
@@ -703,84 +709,88 @@ func TestPreparedProbeMutationControlRunsTheExactSemanticOriginal(t *testing.T) 
 		Mutant: "mutant-a", Package: "fixture.example/module/pkg",
 		Args: args, Env: environment, Timeout: 7 * time.Second,
 	}
-	result, err := preparedProbeMutationControl(session, recorder)(t.Context(), request)
+	result, err := sessionOriginalControl(session, recorder)(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRequest := gomutants.ProbeRequest{
-		Package: request.Package, Args: slices.Clone(args), Env: slices.Clone(environment), Timeout: request.Timeout,
+	wantRequest := gomutants.ControlRequest{
+		Package: request.Package, Args: slices.Clone(args), Env: slices.Clone(environment),
+		Timeout: request.Timeout, OutputLimit: commandOutputLimit,
 	}
 	args[0], environment[0] = "mutated", "mutated"
-	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], wantRequest) {
-		t.Fatalf("probe requests = %+v, want %+v", got, wantRequest)
+	if got := session.controlRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], wantRequest) {
+		t.Fatalf("control requests = %+v, want %+v", got, wantRequest)
 	}
-	wantResult := gomutants.CommandResult{
-		ExitCode: 0, Duration: 1250 * time.Millisecond, Output: []byte("passing output"),
-	}
-	if !reflect.DeepEqual(result, wantResult) {
-		t.Fatalf("control result = %+v, want %+v", result, wantResult)
+	if result.ExitCode != 0 || result.Duration != 1250*time.Millisecond {
+		t.Fatalf("control result = %+v", result)
 	}
 	validateProbeLines(t, recording.Lines())
 	records := probeRecords(t, recording)
 	wantRecord := trace.ProbeRecord{
 		Target: trace.MutationControlProbePrefix + "fixture.example/module/pkg", Package: "fixture.example/module/pkg",
-		Control: true, Args: wantRequest.Args, TimeoutMS: 7000,
-		Outcome: trace.ProbeOutcomeMeasured, DurationMS: 1250,
+		Control: true, Args: wantRequest.Args, TimeoutMS: 7000, DurationMS: 1250,
+		Outcome: trace.ProbeOutcomeMeasured,
 	}
 	if got := records[wantRecord.Target]; !reflect.DeepEqual(got, wantRecord) {
 		t.Fatalf("control record = %+v, want %+v", got, wantRecord)
 	}
 }
 
-func TestPreparedProbeMutationControlFailsClosed(t *testing.T) {
+// TestSessionOriginalControlFailsClosed keeps the two ways a control can be
+// unusable apart from the one way it can report a red suite.
+//
+// A red suite is a result, and the caller turns it into an inconclusive mutant.
+// An engine that could not measure, and a measurement that contradicts itself,
+// are errors: neither says anything about the repository, and reporting either
+// as an exit status would have the run blame the user's tests for the engine.
+func TestSessionOriginalControlFailsClosed(t *testing.T) {
 	t.Parallel()
-	cause := errors.New("probe process did not start")
+	cause := errors.New("control process did not start")
 	tests := []struct {
 		name       string
-		result     gomutants.ProbeResult
+		result     gomutants.ControlResult
 		failure    error
 		wantError  string
-		wantResult gomutants.CommandResult
+		wantResult gomutants.ControlResult
 	}{
 		{
-			name: "a timed-out original", result: gomutants.ProbeResult{
-				Outcome: gomutants.ProbeTimedOut, ExitCode: -1, Duration: 3 * time.Second, Output: []byte("stalled"),
+			name: "a red original is a result, not an error", result: gomutants.ControlResult{
+				Package: "fixture.example/module/pkg", ExitCode: 1,
+				Duration: time.Second, Output: []byte("FAIL"),
 			},
-			wantResult: gomutants.CommandResult{
+			wantResult: gomutants.ControlResult{
+				Package: "fixture.example/module/pkg", ExitCode: 1,
+				Duration: time.Second, Output: []byte("FAIL"),
+			},
+		},
+		{
+			name: "a timed-out original is a result too", result: gomutants.ControlResult{
+				ExitCode: -1, TimedOut: true, Duration: 3 * time.Second, Output: []byte("stalled"),
+			},
+			wantResult: gomutants.ControlResult{
 				ExitCode: -1, TimedOut: true, Duration: 3 * time.Second, Output: []byte("stalled"),
 			},
 		},
-		{name: "an execution error", failure: cause, wantError: "goatest: prepared original control: probe process did not start"},
+		{name: "an execution error", failure: cause, wantError: "goatest: original control: control process did not start"},
 		{
-			name: "an unknown outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeOutcome("future")},
-			wantError: `goatest: prepared original control returned unknown outcome "future"`,
-		},
-		{
-			name: "a contradictory measured outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, ExitCode: 2},
-			wantError: "goatest: prepared original control returned measured with exit code 2",
-		},
-		{
-			name: "a contradictory failed outcome", result: gomutants.ProbeResult{Outcome: gomutants.ProbeTestFailed},
-			wantError: "goatest: prepared original control returned test-failed with exit code 0",
-		},
-		{
-			name: "a negative duration", result: gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Duration: -time.Nanosecond},
-			wantError: "goatest: prepared original control returned negative duration -1ns",
+			name:      "a negative duration",
+			result:    gomutants.ControlResult{Duration: -time.Nanosecond},
+			wantError: "goatest: original control returned negative duration -1ns",
 		},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			session := &mutationUnitSession{probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
+			session := &mutationUnitSession{control: func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
 				return testCase.result, testCase.failure
 			}}
 			recording, recorder := newProbeRecording()
-			result, err := preparedProbeMutationControl(session, recorder)(t.Context(), gomutants.ExecRequest{Timeout: time.Second})
+			result, err := sessionOriginalControl(session, recorder)(t.Context(), gomutants.ExecRequest{Timeout: time.Second})
 			if testCase.wantError == "" {
 				if err != nil || !reflect.DeepEqual(result, testCase.wantResult) {
 					t.Fatalf("control = (%+v, %v), want (%+v, nil)", result, err, testCase.wantResult)
 				}
-			} else if err == nil || err.Error() != testCase.wantError || !reflect.DeepEqual(result, gomutants.CommandResult{}) {
+			} else if err == nil || err.Error() != testCase.wantError || !reflect.DeepEqual(result, gomutants.ControlResult{}) {
 				t.Fatalf("control = (%+v, %v), want zero result and %q", result, err, testCase.wantError)
 			}
 			validateProbeLines(t, recording.Lines())

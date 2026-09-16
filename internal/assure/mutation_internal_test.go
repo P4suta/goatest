@@ -67,9 +67,35 @@ type mutationUnitSession struct {
 	exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
 	probes   []gomutants.ProbeRequest
 	probe    func(gomutants.ProbeRequest) (gomutants.ProbeResult, error)
+	controls []gomutants.ControlRequest
+	control  func(gomutants.ControlRequest) (gomutants.ControlResult, error)
+}
+
+// Control answers a control of the original program.
+//
+// The zero handler reports a clean run of a measurable duration, because the
+// tests in this file are about routing and budgets rather than about a red
+// suite, and a control that reported nothing would make every one of them
+// inconclusive for a reason none of them is testing.
+func (session *mutationUnitSession) Control(_ context.Context, request gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	session.mu.Lock()
+	session.controls = append(session.controls, request)
+	handler := session.control
+	session.mu.Unlock()
+	if handler == nil {
+		return gomutants.ControlResult{Duration: time.Millisecond}, nil
+	}
+	return handler(request)
 }
 
 func (session *mutationUnitSession) Catalog() gomutants.Catalog { return session.catalog }
+
+// controlRequests is every control this session was asked for.
+func (session *mutationUnitSession) controlRequests() []gomutants.ControlRequest {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return slices.Clone(session.controls)
+}
 
 func (session *mutationUnitSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.mu.Lock()
@@ -351,9 +377,9 @@ func TestMutationExecutionTimeoutSumsCleanObservationsAndKeepsTheConfiguredCeili
 func TestOriginalControlMemoizationIncludesTheComparativeDeadline(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	control := memoizedOriginalControl(func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	control := memoizedOriginalControl(func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
 		calls++
-		return gomutants.CommandResult{}, nil
+		return gomutants.ControlResult{}, nil
 	})
 	request := gomutants.ExecRequest{Package: "fixture.example/module", Args: []string{"-test.run=^TestValue$"}, Timeout: time.Second}
 	if _, err := control(t.Context(), request); err != nil {

@@ -235,12 +235,12 @@ func TestRunCoordinatorOverlapsPreparationWithPristineBaselineChecks(t *testing.
 	}
 }
 
-func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
+func TestRunCoordinatorTakesOriginalControlsThroughThePreparedSession(t *testing.T) {
 	t.Parallel()
 	harness := newRunCoordinatorHarness(t)
 	sink := harness.record()
-	session := &mutationUnitSession{catalog: harness.catalog, probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
-		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Duration: 25 * time.Millisecond}, nil
+	session := &mutationUnitSession{catalog: harness.catalog, control: func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{Duration: 25 * time.Millisecond}, nil
 	}}
 	harness.dependencies.prepareSession = func(_ context.Context, _ *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
 		harness.prepareCalls++
@@ -266,12 +266,18 @@ func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
 	if _, err := harness.run(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	want := gomutants.ProbeRequest{
+	want := gomutants.ControlRequest{
 		Package: "fixture.example/module", Args: []string{"-test.run=^TestValue$"},
-		Env: []string{"DB=ready"}, Timeout: 2 * time.Second,
+		Env: []string{"DB=ready"}, Timeout: 2 * time.Second, OutputLimit: commandOutputLimit,
 	}
-	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+	if got := session.controlRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("prepared control requests = %+v, want %+v", got, want)
+	}
+	if probes := session.probeRequests(); len(probes) != 0 {
+		t.Fatalf("a control was taken through Probe: %+v\n\n"+
+			"There is one way to ask whether the original program passes, and it is\n"+
+			"Session.Control. Reading a probe's test-failed outcome as a red suite\n"+
+			"measures the probe tree's binaries, not the ones the mutants run on.", probes)
 	}
 	if harness.openCalls != preparedAndPristineWorkspaceCount {
 		t.Fatalf("workspace opens = %d, want prepared and pristine workspaces", harness.openCalls)

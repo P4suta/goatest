@@ -530,8 +530,8 @@ func TestEvaluateMutationsDoesNotRecordATimeoutAgainstTheTargetsItRan(t *testing
 	session := &mutationUnitSession{catalog: catalog, exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
 	}}
-	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		return gomutants.CommandResult{}, nil
+	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{}, nil
 	}
 
 	if _, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{
@@ -554,7 +554,7 @@ func TestEvaluateMutationsDoesNotRecordRejectedOrInconclusiveEvidence(t *testing
 		name    string
 		targets []TargetEvidence
 		exec    func(gomutants.ExecRequest) (gomutants.MutantResult, error)
-		control func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+		control func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error)
 	}{
 		{
 			name: "an inconclusive outcome under a reaching target",
@@ -570,8 +570,8 @@ func TestEvaluateMutationsDoesNotRecordRejectedOrInconclusiveEvidence(t *testing
 		},
 		{
 			name: "an exact original control that failed before mutation",
-			control: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-				return gomutants.CommandResult{ExitCode: 1, Output: []byte("the original failed")}, nil
+			control: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+				return gomutants.ControlResult{ExitCode: 1, Output: []byte("the original failed")}, nil
 			},
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
@@ -579,8 +579,8 @@ func TestEvaluateMutationsDoesNotRecordRejectedOrInconclusiveEvidence(t *testing
 		},
 		{
 			name: "a timeout whose original timed out",
-			control: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-				return gomutants.CommandResult{TimedOut: true}, nil
+			control: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+				return gomutants.ControlResult{TimedOut: true}, nil
 			},
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
@@ -588,8 +588,8 @@ func TestEvaluateMutationsDoesNotRecordRejectedOrInconclusiveEvidence(t *testing
 		},
 		{
 			name: "a timeout whose original failed",
-			control: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-				return gomutants.CommandResult{ExitCode: 1}, nil
+			control: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+				return gomutants.ControlResult{ExitCode: 1}, nil
 			},
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeTimedOut}, nil
@@ -646,8 +646,8 @@ func TestEvaluateMutationsDoesNotRetryATimeoutIntoASurvival(t *testing.T) {
 			return gomutants.MutantResult{ID: request.Mutant, Outcome: outcome}, nil
 		},
 	}
-	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		return gomutants.CommandResult{}, nil
+	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{}, nil
 	}
 
 	evaluation, err := evaluateMutationsForTest(t.Context(), session,

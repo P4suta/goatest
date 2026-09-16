@@ -213,9 +213,9 @@ func TestExactOriginalRunsUnderTheContainmentCeiling(t *testing.T) {
 	var controlDeadline time.Duration
 	options := mutationOptionsForTest(MutationOptions{
 		Timeout: time.Hour,
-		OriginalControl: func(_ context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+		OriginalControl: func(_ context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
 			controlDeadline = request.Timeout
-			return gomutants.CommandResult{Duration: aggregateExactControlDuration}, nil
+			return gomutants.ControlResult{Duration: aggregateExactControlDuration}, nil
 		},
 	})
 	session := &mutationUnitSession{exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {

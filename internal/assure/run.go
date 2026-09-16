@@ -448,15 +448,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 			return controlWorkspace, nil
 		}
-		originalControl := func(controlContext context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			controlMutex.RLock()
-			defer controlMutex.RUnlock()
-			opened, openErr := openControl(controlContext)
-			if openErr != nil {
-				return gomutants.CommandResult{}, openErr
-			}
-			return runOriginalMutationControl(controlContext, opened, request, options.BuildTags)
-		}
 		closeControl := func() error {
 			controlMutex.Lock()
 			defer controlMutex.Unlock()
@@ -781,10 +772,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					countedNoun(probed.SuitesMeasured, "package suite", "package suites")+" measured, "+
 					fmt.Sprintf("%d without facts", probed.SuitesUnmeasured))
 		}
-		mutationOriginalControl := originalControl
-		if options.ReplayMutantID == "" {
-			mutationOriginalControl = preparedProbeMutationControl(executionSession, options.Trace)
-		}
+		mutationOriginalControl := sessionOriginalControl(executionSession, options.Trace)
 
 		var mutationEvidence *MutationEvidence
 		evidencePath := filepath.Join(root, ".goatest", "cache", mutationEvidenceFileName)
@@ -915,70 +903,82 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	}
 }
 
-func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string) (gomutants.CommandResult, error) {
-	argv := []string{"go", "test", "-count=1"}
-	if len(buildTags) != 0 {
-		argv = append(argv, "-tags="+strings.Join(buildTags, ","))
-	}
-	if request.Package == "" {
-		argv = append(argv, "./...")
-	} else {
-		argv = append(argv, request.Package)
-	}
-	arguments := slices.Clone(request.Args)
-	if len(arguments) != 0 {
-		argv = append(argv, "-args")
-		argv = append(argv, arguments...)
-	}
-	return workspace.Exec(ctx, gomutants.Command{
-		Argv: argv, Env: slices.Clone(request.Env), Timeout: request.Timeout, OutputLimit: commandOutputLimit,
-	})
-}
-
-func preparedProbeMutationControl(session MutationSession, recorder *trace.Recorder) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		probeRequest := gomutants.ProbeRequest{
-			Package: request.Package, Args: slices.Clone(request.Args),
-			Env: slices.Clone(request.Env), Timeout: request.Timeout,
+// sessionOriginalControl measures the original program through the prepared
+// session.
+//
+// One path, whatever the run. There used to be two, chosen by whether the run
+// was a replay: an argv this package assembled and handed to a second workspace,
+// or the probe tree's test-failed outcome translated into a command result. The
+// first measured binaries no mutant was ever run against and the second measured
+// the probe tree's; neither was the thing the comparison is about.
+//
+// A control and an execution of the same request are now settled by one function
+// inside the engine, so they cannot come to disagree about the argument vector,
+// the working directory, the paired timeouts, the instrumentation overlay, the
+// reserved flags, the private scratch directory or the fuzz isolation. In a
+// recording of the engine's own the two differ by one name in the environment.
+//
+// The recording this package keeps still writes a control down as a probe with
+// Control set, which is the shape goatest-trace-v1 has. Giving a control its own
+// event type is a change to a closed enum and therefore to the contract version,
+// and go-mutants has the mirror of it to make at the same time, so the two are
+// one change rather than two.
+func sessionOriginalControl(session MutationSession, recorder *trace.Recorder) OriginalControl {
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		control := gomutants.ControlRequest{
+			Package:     request.Package,
+			Args:        slices.Clone(request.Args),
+			Env:         slices.Clone(request.Env),
+			Timeout:     request.Timeout,
+			OutputLimit: commandOutputLimit,
 		}
 		record := trace.ProbeRecord{
-			Target: mutationControlProbeTarget(request.Package), Package: request.Package,
-			Args: slices.Clone(request.Args), TimeoutMS: traceMilliseconds(request.Timeout), Control: true,
+			Target:    mutationControlProbeTarget(request.Package),
+			Package:   request.Package,
+			Args:      slices.Clone(request.Args),
+			TimeoutMS: traceMilliseconds(request.Timeout),
+			Control:   true,
 		}
-		result, err := session.Probe(ctx, probeRequest)
+		result, err := session.Control(ctx, control)
 		if err != nil {
 			record.Error = err.Error()
 			recorder.ProbeExec(record)
-			return gomutants.CommandResult{}, fmt.Errorf("goatest: prepared original control: %w", err)
+			return gomutants.ControlResult{}, fmt.Errorf("goatest: original control: %w", err)
 		}
 		record.ExitCode = result.ExitCode
 		record.DurationMS = traceMilliseconds(result.Duration)
-		switch {
-		case result.Duration < 0:
-			err = fmt.Errorf("goatest: prepared original control returned negative duration %s", result.Duration)
-		case result.Outcome == gomutants.ProbeMeasured:
-			if result.ExitCode != 0 {
-				err = fmt.Errorf("goatest: prepared original control returned measured with exit code %d", result.ExitCode)
-			}
-		case result.Outcome == gomutants.ProbeTestFailed || result.Outcome == gomutants.ProbeUnavailable:
-			if result.ExitCode == 0 {
-				err = fmt.Errorf("goatest: prepared original control returned %s with exit code 0", result.Outcome)
-			}
-		case result.Outcome == gomutants.ProbeTimedOut:
-		default:
-			err = fmt.Errorf("goatest: prepared original control returned unknown outcome %q", result.Outcome)
-		}
-		if err != nil {
-			record.Error = err.Error()
+		if result.Duration < 0 {
+			record.Error = fmt.Sprintf("goatest: original control returned negative duration %s", result.Duration)
 			recorder.ProbeExec(record)
-			return gomutants.CommandResult{}, err
+			return gomutants.ControlResult{}, errors.New(record.Error)
 		}
-		record.Outcome = string(result.Outcome)
+		record.Outcome = controlProbeOutcome(result)
 		recorder.ProbeExec(record)
-		return gomutants.CommandResult{
-			ExitCode: result.ExitCode, TimedOut: result.Outcome == gomutants.ProbeTimedOut,
-			Duration: result.Duration, Output: slices.Clone(result.Output),
-		}, nil
+		return result, nil
+	}
+}
+
+// controlProbeOutcome says what a control did, in the probe vocabulary the
+// recording has.
+//
+// The vocabulary is borrowed and the borrowing is visible: an infection probe
+// answers whether a mutated value would have differed, and a control answers
+// whether the program the user wrote passes its own tests. They are different
+// questions, and goatest-trace-v1 has one payload for both because a control
+// used to be measured by a probe.
+//
+// It stays borrowed until the contract version moves. go-mutants has the mirror
+// of this to make - its own recording carries a control as executions of kind
+// control-run plus a note, because its type enum is closed too - so the two
+// halves are one change to make together rather than two to make apart.
+func controlProbeOutcome(result gomutants.ControlResult) string {
+	switch {
+	case result.TimedOut:
+		return trace.ProbeOutcomeTimedOut
+	case result.ExitCode != 0:
+		return trace.ProbeOutcomeTestFailed
+	default:
+		return trace.ProbeOutcomeMeasured
 	}
 }
 

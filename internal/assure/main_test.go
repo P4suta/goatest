@@ -44,8 +44,8 @@ func mutationOptionsForTest(options MutationOptions) MutationOptions {
 		options.Timeout = mutationTestContainment
 	}
 	if options.OriginalControl == nil {
-		options.OriginalControl = func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			return gomutants.CommandResult{Duration: mutationTestControlDuration}, nil
+		options.OriginalControl = func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{Duration: mutationTestControlDuration}, nil
 		}
 	}
 	options.freshControl = options.OriginalControl
