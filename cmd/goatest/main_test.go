@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/P4suta/goatest/internal/buildcache"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/report"
 )
@@ -198,8 +199,13 @@ func TestTheCacheProgramIsDispatchedBeforeTheCommandLayer(t *testing.T) {
 		t.Fatalf("cacheprog stdout = %q, want the protocol", stdout.String())
 	}
 	stdout.Reset()
-	if exit := realMainStreams([]string{"cacheprog"}, strings.NewReader(""), &stdout, &stderr, service); exit != cli.ExitInsufficient {
-		t.Fatalf("cacheprog without a scratch layer = %d, want a refusal", exit)
+	// The refusal is the cache program's own code, not INSUFFICIENT. This
+	// assertion used to name cli.ExitInsufficient, which was the collision
+	// rather than a decision: the two codes were the same number, so a test
+	// about a cache server that could not start passed by naming a verdict no
+	// verification had reached.
+	if exit := realMainStreams([]string{"cacheprog"}, strings.NewReader(""), &stdout, &stderr, service); exit != buildcache.CacheProgramUsageExitCode {
+		t.Fatalf("cacheprog without a scratch layer = %d, want %d", exit, buildcache.CacheProgramUsageExitCode)
 	}
 	stdout.Reset()
 	if exit := realMainWith([]string{"--help"}, &stdout, &stderr, service); exit != 0 || bytes.Contains(stdout.Bytes(), []byte("cacheprog")) {

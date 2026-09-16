@@ -12,12 +12,33 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
 )
 
 const SchemaV1 = "assurance-report-v1"
+
+// toolPrefix matches the leading "goatest: " of a message, however many times
+// it was applied.
+var toolPrefix = regexp.MustCompile(`^(?:goatest: )+`)
+
+// WithoutToolPrefix removes the leading "goatest: " a message carries.
+//
+// Every error this tool builds begins with the prefix, because an error read off
+// a terminal has to say what produced it. A report does not: the document
+// already says so, the field is structured, and a consumer grepping a summary
+// would be grepping past a word every summary holds. It was in some of them and
+// not others - a doctor finding carried no prefix, an infrastructure finding
+// carried one - so the same failure read two ways in one JSON document.
+//
+// Only the leading run is removed. A prefix in the middle of a wrapped chain is
+// a different problem - two packages disagreeing about whose job the prefix is -
+// and hiding it here would hide the disagreement.
+func WithoutToolPrefix(message string) string {
+	return toolPrefix.ReplaceAllString(message, "")
+}
 
 type Verdict string
 

@@ -36,7 +36,7 @@ func (renderer *jsonl) Note(kind, detail string) {
 	defer renderer.mutex.Unlock()
 
 	data, _ := json.Marshal(progressEvent{
-		Type: "progress", Kind: kind, Detail: detail,
+		Type: "progress", Kind: kind, Detail: NoteDetail(detail),
 		ElapsedMS: max(0, renderer.now().Sub(renderer.started).Milliseconds()),
 	})
 	_, _ = renderer.writer.Write(append(data, '\n'))

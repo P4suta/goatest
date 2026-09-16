@@ -221,7 +221,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	result, err := service.Execute(ctx, command, request, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
+			// The cause is kept. A run that was stopped part way through is the
+			// hardest kind to understand afterwards, and "interrupted" on its
+			// own says only that somebody pressed a key - not which phase was
+			// open, nor what the run was waiting for when it stopped.
+			diagnose(stderr, "interrupted: "+err.Error())
 			return ExitInterrupted
 		}
 		if result.Verdict == report.VerdictError {

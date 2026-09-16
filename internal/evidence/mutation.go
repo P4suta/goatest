@@ -55,6 +55,15 @@ type targetKeyJSON struct {
 	WholeTree *bool  `json:"whole_tree"`
 }
 
+// ErrMutationIdentityMismatch is a stored mutation evidence file whose recorded
+// identity is not the one the caller asked about.
+//
+// It is a value rather than two identical strings in two files. The message was
+// written out twice - in the load path and in the maintenance path - which is
+// two things to keep in step for a condition a caller may want to recognise
+// rather than read.
+var ErrMutationIdentityMismatch = errors.New("goatest: mutation evidence identity mismatch")
+
 func (target *TargetKey) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -238,7 +247,7 @@ func loadMutationWithHooks(path, modulePath string, hooks mutationHooks) (Mutati
 	}
 
 	if store.Schema != MutationSchemaV1 || store.ModulePath == "" || store.ModulePath != modulePath {
-		return MutationStore{}, false, fmt.Errorf("goatest: mutation evidence identity mismatch")
+		return MutationStore{}, false, ErrMutationIdentityMismatch
 	}
 	if err := store.validate(); err != nil {
 		return MutationStore{}, false, err

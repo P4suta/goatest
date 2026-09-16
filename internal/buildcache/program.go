@@ -16,7 +16,16 @@ import (
 )
 
 const (
-	CacheProgramUsageExitCode = 2
+	// CacheProgramUsageExitCode is what the cache program returns when it
+	// cannot serve.
+	//
+	// It is three rather than two, and the difference matters to exactly one
+	// reader: a person looking at a shell. Two means INSUFFICIENT - a
+	// verification that ran and found the evidence wanting - and this program
+	// runs no verification and reaches no verdict. A cache server that could not
+	// start is a configuration or environment failure, which is what three
+	// means everywhere else in this tool.
+	CacheProgramUsageExitCode = 3
 	decimalRadix              = 10
 )
 

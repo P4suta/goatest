@@ -349,7 +349,7 @@ func infrastructureErrorReport(partial report.Report, request cli.Request, cause
 	result.Findings = append(result.Findings, report.Finding{
 		ID:      report.FindingID("infrastructure", "assurance-run"),
 		Kind:    "infrastructure",
-		Summary: cause.Error(),
+		Summary: report.WithoutToolPrefix(cause.Error()),
 	})
 	result.Limitations = appendLimitation(result.Limitations, report.Limitation{
 		Code: "assurance-incomplete", Summary: "Assurance stopped before the configured contract could be completed",

@@ -102,7 +102,7 @@ func (renderer *dashboard) Note(kind, detail string) {
 	phase, known := dashboardPhase(kind)
 	if !known {
 		renderer.eraseLocked()
-		_, _ = fmt.Fprintf(renderer.writer, noteLineFormat, report.LineText(kind), report.LineText(detail))
+		_, _ = fmt.Fprintf(renderer.writer, noteLineFormat, report.LineText(kind), report.LineText(NoteDetail(detail)))
 		renderer.renderLocked()
 		return
 	}

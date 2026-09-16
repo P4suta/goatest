@@ -103,7 +103,7 @@ func TestMainRefusesAnInvocationItCannotServe(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			exit := buildcache.Main(testCase.arguments, strings.NewReader(""), &stdout, &stderr)
 			if exit != buildcache.CacheProgramUsageExitCode {
-				t.Fatalf("Main exit = %d, want 2", exit)
+				t.Fatalf("Main exit = %d, want %d", exit, buildcache.CacheProgramUsageExitCode)
 			}
 			if !strings.Contains(stderr.String(), testCase.want) {
 				t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), testCase.want)
@@ -123,7 +123,7 @@ func TestMainRefusesALayerItCannotCreate(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	exit := buildcache.Main([]string{"--scratch", filepath.Join(file, "scratch")}, strings.NewReader(""), &stdout, &stderr)
-	if exit != 2 || !strings.Contains(stderr.String(), "goatest:") {
+	if exit != buildcache.CacheProgramUsageExitCode || !strings.Contains(stderr.String(), "goatest:") {
 		t.Fatalf("Main exit = %d, stderr = %q", exit, stderr.String())
 	}
 }
@@ -233,7 +233,7 @@ func TestMainReportsAStreamItCannotRead(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := buildcache.Main(
 		[]string{"--scratch", filepath.Join(root, "scratch")}, strings.NewReader("{not json}\n"), &stdout, &stderr)
-	if exit != 2 || !strings.Contains(stderr.String(), "goatest:") {
+	if exit != buildcache.CacheProgramUsageExitCode || !strings.Contains(stderr.String(), "goatest:") {
 		t.Fatalf("Main exit = %d, stderr = %q", exit, stderr.String())
 	}
 }

@@ -254,7 +254,8 @@ func doctorFailure(input report.Report, kind, id string, cause error) report.Rep
 	input.Verdict = report.VerdictError
 	input.Evidence = append(input.Evidence, report.Evidence{Kind: "doctor", ID: id, Status: "failed", Detail: cause.Error()})
 	input.Findings = append(input.Findings, report.Finding{
-		ID: report.FindingID("doctor", id), Kind: "doctor-" + kind, Summary: cause.Error(),
+		ID: report.FindingID("doctor", id), Kind: "doctor-" + kind,
+		Summary: report.WithoutToolPrefix(cause.Error()),
 	})
 	return input
 }
