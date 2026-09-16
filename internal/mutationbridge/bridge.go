@@ -43,6 +43,14 @@ type PrepareOptions struct {
 	VerifyTimeout      time.Duration
 	SkipVerify         bool
 
+	// Selection narrows what the run executes to given line ranges, after
+	// discovery has found every mutant of the included files.
+	//
+	// Nil executes everything discovery found, which is what a changeset run
+	// did before this existed: the include patterns name whole files, so a
+	// one-line change measured every mutant in the four hundred lines beside it.
+	Selection *gomutants.Selection
+
 	Probe bool
 }
 
@@ -207,6 +215,7 @@ func (workspace *Workspace) Prepare(ctx context.Context, options PrepareOptions)
 			Timeout: options.VerifyTimeout,
 		},
 		SkipVerify: options.SkipVerify,
+		Selection:  options.Selection,
 		Probe:      options.Probe,
 		Trace:      prepareTrace,
 	})

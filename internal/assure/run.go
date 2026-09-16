@@ -362,6 +362,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				emit(options, "impact-broad", "dependency or prior evidence was unknown")
 			} else {
 				emit(options, "impact-targeted", fmt.Sprintf("%d of %d targets", len(selection.targets), len(targets)))
+				if narrowed := mutationSelection(selection); narrowed != nil {
+					emit(options, "impact-lines", fmt.Sprintf("%d changed file(s) narrowed by line", len(narrowed.Lines)))
+				}
 			}
 		}
 		targets = selection.targets
@@ -443,6 +446,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				packages = slices.Clone(options.Packages)
 				include = scopedMutationInclude(metadata.model)
 			}
+			narrowed := mutationSelection(selection)
 			probe := options.ReplayMutantID == ""
 			var probeCoverPackages []string
 			if probe {
@@ -464,6 +468,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				ProbeCoverPackages: probeCoverPackages,
 				Jobs:               mutationJobs, BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
 				SkipVerify: true,
+				Selection:  narrowed,
 				Probe:      probe,
 			}
 			go func() {
