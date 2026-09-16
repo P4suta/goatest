@@ -33,7 +33,16 @@ const (
 
 	// jobTableHeading opens the table of jobs on that page.
 	jobTableHeading = "| Job | What it runs |"
+
+	// miseInvocation is a step running one of this repository's own tasks.
+	miseInvocation = "mise run "
+
+	// miseAction is the step that puts mise on the runner's path.
+	miseAction = "jdx/mise-action@"
 )
+
+// miseTaskInvocation captures the task name of a `mise run` step.
+var miseTaskInvocation = regexp.MustCompile(`mise run ([a-z][a-z0-9-]*)`)
 
 // workflowJob matches a job name: two spaces, a name, a colon, end of line.
 //
@@ -186,4 +195,79 @@ func documentedJobs(t *testing.T, path string) []string {
 		documented = append(documented, match[1])
 	}
 	return documented
+}
+
+// TestEveryJobThatRunsAMiseTaskInstallsMise is the gate for a failure that can
+// only be found by running the workflow.
+//
+// A job that calls `mise run` without the action that installs it fails on
+// `command not found`, and nothing local notices: the task exists, the task is
+// correct, the task is even pinned by a ledger. Two jobs were written that way
+// here - one of them the dogfood job added to run a task nobody had been
+// running, which would have failed on its first execution for a reason that had
+// nothing to do with what it was meant to check.
+func TestEveryJobThatRunsAMiseTaskInstallsMise(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(workflowPath)))
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+	var broken []string
+	job, runs, installs := "", false, false
+	settle := func() {
+		if job != "" && runs && !installs {
+			broken = append(broken, job)
+		}
+	}
+	inside := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == jobsKey {
+			inside = true
+			continue
+		}
+		if !inside {
+			continue
+		}
+		if match := workflowJob.FindStringSubmatch(line); match != nil {
+			settle()
+			job, runs, installs = match[1], false, false
+			continue
+		}
+		if strings.Contains(line, miseInvocation) {
+			runs = true
+		}
+		if strings.Contains(line, miseAction) {
+			installs = true
+		}
+	}
+	settle()
+	if len(broken) > 0 {
+		t.Errorf("%d job(s) run a mise task without installing mise: %s\n\n"+
+			"The task exists, is correct and is pinned by a ledger; the job still fails\n"+
+			"on `mise: command not found`, and only the workflow can tell you.",
+			len(broken), strings.Join(broken, ", "))
+	}
+}
+
+// TestEveryMiseTaskTheWorkflowRunsExists is the other direction.
+//
+// A job naming a task that is not there fails the same way and reads the same:
+// a step that was never run against the file it names.
+func TestEveryMiseTaskTheWorkflowRunsExists(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	workflow, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(workflowPath)))
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+	tasks, err := os.ReadFile(filepath.Join(root, "mise.toml"))
+	if err != nil {
+		t.Fatalf("read mise.toml: %v", err)
+	}
+	for _, match := range miseTaskInvocation.FindAllStringSubmatch(string(workflow), -1) {
+		if !strings.Contains(string(tasks), "[tasks."+match[1]+"]") {
+			t.Errorf("the workflow runs `mise run %s`, and mise.toml declares no such task", match[1])
+		}
+	}
 }

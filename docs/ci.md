@@ -52,8 +52,12 @@ fails the step.
 
 ## This repository's own checks
 
-The workflow runs five jobs, and `mise.toml` holds the same commands under
-names a developer can run. `internal/devgates` pins this table to the workflow
+The workflow runs five jobs, and every step that checks something runs a
+`mise.toml` task rather than restating it. A workflow that restates a task has
+two definitions to keep in step and gives a developer no way to run what CI
+runs; `internal/devgates` refuses a job that calls a task mise does not declare,
+and one that calls a task without installing mise - which is a failure only the
+workflow can find. `internal/devgates` pins this table to the workflow
 in both directions, and refuses a job that checks out a shallow clone: without
 the whole history, a run asking what changed against a ref it does not hold is
 told that nothing did, which is the same answer as a clean tree and a completely

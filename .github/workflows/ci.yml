@@ -32,13 +32,17 @@ jobs:
         with:
           go-version: 1.26.6
           cache-dependency-path: go.sum
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+        with:
+          version: 2026.8.14
+          install_args: taplo
       - name: Download pinned modules
         run: go mod download
       - name: Verify formatting
         shell: bash
-        run: test -z "$(gofmt -l .)"
+        run: mise run fmt
       - name: Vet
-        run: go vet ./...
+        run: mise run build
       - name: Unit tier offline
         env:
           GOPROXY: "off"
@@ -108,6 +112,9 @@ jobs:
         with:
           go-version: 1.26.6
           cache-dependency-path: go.sum
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+        with:
+          version: 2026.8.14
       - run: go mod download
       - name: Verify what this branch changed, with itself
         env:
@@ -142,8 +149,6 @@ jobs:
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
         run: mise run lint
-      - name: TOML formatting
-        run: taplo fmt --check
 
   package:
     runs-on: ubuntu-latest

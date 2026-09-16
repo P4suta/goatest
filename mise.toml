@@ -84,8 +84,14 @@ run = "go test -race -tags integration -timeout 40m ./..."
 
 [tasks.fmt]
 description = "Check Go and TOML formatting without rewriting files"
-# taplo with no path checks every TOML in the tree, which is how REUSE.toml came
-# to be checked at all: it was added later and nobody thought to name it.
+# taplo with no path checks every TOML in the tree, so a TOML added tomorrow is
+# checked without anybody remembering to name it. The alternative - listing the
+# files - moves the same problem rather than solving it: then the list is the
+# thing nobody reviews, and the seventh file is the one that goes unformatted.
+#
+# What CI runs is this task. It used to reimplement it: `test -z "$(gofmt -l .)"`
+# in one job and `taplo fmt --check` in another, which is two places for the
+# definition to drift from and neither of them the one a developer runs.
 run = [
   'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }',
   "taplo fmt --check",
