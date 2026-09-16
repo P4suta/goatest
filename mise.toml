@@ -15,25 +15,37 @@ syft = "1.51.1"
 description = "Build the public library and single CLI"
 run = ["go build ./...", "go vet ./..."]
 
-# Two ways to run the same suite.
+# Two tiers, and two ways to run each.
 #
-# `test` is what a developer reads: `go test` renders progress and failures the
-# way everyone already knows how to read.
+# The unit tier is `go test ./...`: everything that needs nothing but a
+# compiler. It is what a developer runs on every save, and it finishes in about
+# ten seconds. The integration tier adds `-tags integration`, which compiles in
+# the suites that drive a real toolchain - a go build, a git history, a whole
+# mutation run - and takes about half a minute.
 #
-# `test-audit` is what CI runs, and it answers a question `test` cannot. A
-# non-verbose `go test` prints `ok` for a package whose every test was skipped,
-# so a runner that lost `git` from PATH, or an environment variable that
-# narrowed -test.run, could retire a whole package and leave the job green. The
-# audit reads the machine-readable stream and refuses a run that produced no
-# verdict, or a skip nobody recorded. It renders failures itself, because a
-# -json stream is not readable and a task that hides the reason for a failure
-# is a task nobody will run.
+# The split is not about speed, although speed is what it buys. A suite that
+# cannot say which of its tests need a toolchain cannot be told that it lost
+# one, which is how go-mutants once retired seventy-four tests and reported the
+# rest as a pass.
+#
+# The `-audit` variants answer a question `go test` cannot. A non-verbose run
+# prints `ok` for a package whose every test was skipped, so a runner that lost
+# `git` from PATH, or an environment variable that narrowed -test.run, could
+# retire a whole package and leave the job green. They read the
+# machine-readable stream and refuse a run that produced no verdict, a run that
+# was narrowed before it started, or a skip nobody recorded. They render
+# failures themselves, because a -json stream is not readable and a CI step that
+# hides the reason for a failure is a step nobody will trust.
 [tasks.test]
-description = "Run unit, property, protocol, and toolchain-backed E2E tests"
+description = "Run the unit tier: everything that needs nothing but a compiler"
 run = "go test -timeout 40m ./..."
 
+[tasks.test-integration]
+description = "Run both tiers, including the suites that drive a real toolchain"
+run = "go test -tags integration -timeout 40m ./..."
+
 [tasks.test-audit]
-description = "Run the suite and audit what actually ran: no silent package, no unrecorded skip"
+description = "Run the unit tier and audit what actually ran"
 run = """
 mkdir -p .goatest
 go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
@@ -49,9 +61,26 @@ if ($LASTEXITCODE -ne 0) { $auditExit = 1 }
 exit $auditExit
 """
 
+[tasks.test-integration-audit]
+description = "Run both tiers and audit what actually ran"
+run = """
+mkdir -p .goatest
+go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl && audit_exit=0 || audit_exit=$?
+go run ./internal/devtools/testaudit < .goatest/integration-events.jsonl || audit_exit=1
+exit $audit_exit
+"""
+run_windows = """
+New-Item -ItemType Directory -Force -Path .goatest | Out-Null
+go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl
+$auditExit = $LASTEXITCODE
+Get-Content .goatest/integration-events.jsonl | go run ./internal/devtools/testaudit
+if ($LASTEXITCODE -ne 0) { $auditExit = 1 }
+exit $auditExit
+"""
+
 [tasks.test-race]
-description = "Run the complete suite under Go's race detector"
-run = "go test -race -timeout 40m ./..."
+description = "Run both tiers under Go's race detector"
+run = "go test -race -tags integration -timeout 40m ./..."
 
 [tasks.fmt]
 description = "Check Go and TOML formatting without rewriting files"

@@ -4,10 +4,8 @@
 package app_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,8 +14,6 @@ import (
 	"github.com/P4suta/goatest/internal/assure"
 	"github.com/P4suta/goatest/internal/cli"
 	"github.com/P4suta/goatest/internal/report"
-	"github.com/P4suta/goatest/internal/testkit"
-	"github.com/P4suta/goatest/internal/trace"
 )
 
 func TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle(t *testing.T) {
@@ -44,52 +40,6 @@ func TestKeepTempReachesTheRunAndWhatItKeptReachesTheBundle(t *testing.T) {
 	preserved := bundleFile(t, diagnosticsBundle(t, root), "preserved-paths.txt")
 	if !strings.Contains(preserved, scratch) {
 		t.Fatalf("preserved-paths.txt = %q, want the scratch directory the run kept", preserved)
-	}
-}
-
-func TestKeepTempLeavesTheBaselineScratchOfARealRunWhereItSaysItDid(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		name string
-		args []string
-		kept bool
-	}{
-		{name: "removed by default"},
-		{name: "kept on request", args: []string{"--keep-temp"}, kept: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			repository := testkit.NewRepo(t).BoundaryFixture().Git()
-			directory := filepath.Join(t.TempDir(), "trace")
-			service := app.Service{
-				Root: repository.Root(), GoBinary: testkit.GoBinary(t),
-
-				TempDirectory: t.TempDir(), Environment: os.Environ(),
-			}
-			var stdout, stderr bytes.Buffer
-			arguments := append([]string{"verify", "--trace=" + directory}, test.args...)
-			if exit := cli.Run(t.Context(), arguments, &stdout, &stderr, service); exit != cli.ExitAssured {
-				t.Fatalf("verify exit = %d\nstdout: %s\nstderr: %s", exit, stdout.String(), stderr.String())
-			}
-			var scratch []string
-			for _, event := range traceOfType(readTrace(t, traceRun(t, directory)), trace.TypeArtifact) {
-				if event.Artifact.Kind == "baseline-scratch" {
-					scratch = append(scratch, event.Artifact.Path)
-				}
-			}
-			if !test.kept {
-				if len(scratch) != 0 {
-					t.Fatalf("a run that kept nothing recorded %v", scratch)
-				}
-				return
-			}
-			if len(scratch) != 1 {
-				t.Fatalf("recorded scratch directories = %v, want the one the round made", scratch)
-			}
-			if info, err := os.Stat(scratch[0]); err != nil || !info.IsDir() {
-				t.Fatalf("kept scratch %s = %v", scratch[0], err)
-			}
-		})
 	}
 }
 

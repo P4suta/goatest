@@ -34,7 +34,7 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
-      - name: Test offline
+      - name: Unit tier offline
         env:
           GOPROXY: "off"
           GOSUMDB: "off"
@@ -46,6 +46,19 @@ jobs:
           mkdir -p .goatest
           go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
           go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || audit_exit=1
+          exit "$audit_exit"
+      - name: Integration tier offline
+        env:
+          GOPROXY: "off"
+          GOSUMDB: "off"
+          GOTELEMETRY: "off"
+          GOTOOLCHAIN: "local"
+          GOATEST_TEST_REQUIRE_TOOLS: "1"
+        shell: bash
+        run: |
+          mkdir -p .goatest
+          go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl && audit_exit=0 || audit_exit=$?
+          go run ./internal/devtools/testaudit < .goatest/integration-events.jsonl || audit_exit=1
           exit "$audit_exit"
 
   race:
@@ -66,7 +79,7 @@ jobs:
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
           GOATEST_TEST_REQUIRE_TOOLS: "1"
-        run: go test -race -timeout 40m ./...
+        run: go test -race -tags integration -timeout 40m ./...
 
   lint:
     runs-on: ubuntu-latest

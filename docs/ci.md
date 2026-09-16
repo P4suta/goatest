@@ -45,8 +45,29 @@ the cache identity of the run. See [trace v1](trace-v1.md) for the format and
 [ADR 0002](adr/0002-trace-is-not-evidence.md) for why a failed trace never
 fails the step.
 
-For this repository itself, the required checks are `go test ./...`,
-`go test -race ./...`, `go vet ./...`, schema tests in those packages, and the
-local benchmark set in [development](development.md). Packaging, signing, and
-publishing a dedicated Action are outside the current self-application
-roadmap.
+## This repository's own checks
+
+The workflow runs four jobs, and `mise.toml` holds the same commands under
+names a developer can run.
+
+| Job | What it runs |
+| --- | --- |
+| `test` | the unit tier and then the integration tier, on Linux, macOS and Windows, each audited by `internal/devtools/testaudit` |
+| `race` | both tiers under the race detector, on Linux |
+| `lint` | `golangci-lint`, `actionlint`, `typos`, `gitleaks`, and TOML formatting |
+| `package` | cross-platform snapshot archives |
+
+The suite is in two tiers. `go test ./...` is the unit tier: everything that
+needs nothing but a compiler, which finishes in about ten seconds.
+`go test -tags integration ./...` adds the suites that drive a real toolchain -
+a `go build`, a git history, a whole mutation run - and takes about half a
+minute. `internal/devgates` refuses a test file that starts a toolchain without
+the tag, and a file that carries the tag and starts nothing.
+
+Both tiers run with `GOATEST_TEST_REQUIRE_TOOLS=1`, which turns a missing `go`
+or `git` from a skip into a failure. Unset it locally: a developer without a
+toolchain should see the toolchain tests step aside, while a CI job without one
+is a broken job rather than a smaller suite.
+
+Packaging, signing, and publishing a dedicated Action are outside the current
+self-application roadmap.
