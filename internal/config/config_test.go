@@ -18,6 +18,7 @@ import (
 const configuredReportsKeep = 5
 
 func TestLoadIsOptionalStrictAndVersioned(t *testing.T) {
+	t.Parallel()
 	empty, err := config.Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +72,7 @@ expires = "2026-12-31T00:00:00Z"
 }
 
 func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
+	t.Parallel()
 	defaults, err := config.Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +111,7 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
@@ -131,6 +134,7 @@ func TestLoadBoundsAndLocatesTheBuildCache(t *testing.T) {
 }
 
 func TestInitLoadsTheDefaultBuildCacheBound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -145,6 +149,7 @@ func TestInitLoadsTheDefaultBuildCacheBound(t *testing.T) {
 }
 
 func TestLoadBoundsTheReportHistory(t *testing.T) {
+	t.Parallel()
 	defaults, err := config.Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +181,7 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte("version = 1\n"+test.contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
@@ -198,6 +204,7 @@ func TestLoadBoundsTheReportHistory(t *testing.T) {
 }
 
 func TestInitAndAcceptanceUseTheReportHistoryBound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -229,6 +236,7 @@ func TestInitAndAcceptanceUseTheReportHistoryBound(t *testing.T) {
 }
 
 func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	contents := "version = 1\n[execution]\ntest_binary_args = [\"-short\", \"-custom=value\"]\n"
 	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
@@ -244,6 +252,7 @@ func TestLoadCanonicalizesStandardTestBinaryShorthand(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, section, values, want string
 	}{
@@ -252,6 +261,7 @@ func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
 		{name: "case duplicate", section: "generation", values: `"Token", "TOKEN"`, want: `generation environment name "TOKEN" is duplicated`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			contents := "version = 1\n[" + test.section + "]\nenvironment = [" + test.values + "]\n"
 			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
@@ -273,6 +283,7 @@ func TestLoadRejectsInvalidAndAmbiguousEnvironmentNames(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
+	t.Parallel()
 	for name, contents := range map[string]string{
 		"unknown":               "version = 1\ncontrcat = \"standard-v1\"\n",
 		"version":               "version = 2\n",
@@ -292,6 +303,7 @@ func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
 		"acceptance-whitespace": "version = 1\n[[acceptance]]\nid = \" finding\"\nreason = \"reviewed\"\nexpires = \"2026-12-31T00:00:00Z\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
 				t.Fatal(err)
@@ -304,6 +316,7 @@ func TestLoadRejectsUnknownKeysAndInvalidContracts(t *testing.T) {
 }
 
 func TestLoadRejectsUnsafeMalformedAndDuplicateProjectExcludes(t *testing.T) {
+	t.Parallel()
 	for _, pattern := range []string{"", "../secret", "/absolute", `windows\\path`, "[", "generated/**", "generated/**"} {
 		root := t.TempDir()
 		patterns := `"` + pattern + `"`
@@ -321,6 +334,7 @@ func TestLoadRejectsUnsafeMalformedAndDuplicateProjectExcludes(t *testing.T) {
 }
 
 func TestLoadReportsReadErrorsAndPreservesDefaults(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, config.FileName), filemode.ReadableDirectory); err != nil {
 		t.Fatal(err)
@@ -339,6 +353,7 @@ func TestLoadReportsReadErrorsAndPreservesDefaults(t *testing.T) {
 }
 
 func TestLoadAppliesResourceDefaultsAndOwnsDecodedSlices(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	contents := "version = 1\n[resources.db]\ncommand = [\"provider\", \"db\"]\n[generation]\ncommand = [\"generate\"]\nallowed_paths = [\"**/*_test.go\"]\n"
 	if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
@@ -358,6 +373,7 @@ func TestLoadAppliesResourceDefaultsAndOwnsDecodedSlices(t *testing.T) {
 }
 
 func TestLoadDistinguishesMalformedAndNonPositiveResourceTimeouts(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name    string
 		timeout string
@@ -368,6 +384,7 @@ func TestLoadDistinguishesMalformedAndNonPositiveResourceTimeouts(t *testing.T) 
 		{name: "negative", timeout: "-1s", want: "is not positive"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			contents := "version = 1\n[resources.db]\ncommand = [\"provider\"]\ntimeout = \"" + testCase.timeout + "\"\n"
 			if err := os.WriteFile(filepath.Join(root, config.FileName), []byte(contents), filemode.ReadableFile); err != nil {
@@ -381,6 +398,7 @@ func TestLoadDistinguishesMalformedAndNonPositiveResourceTimeouts(t *testing.T) 
 }
 
 func TestInitAndAddAcceptanceRoundTripWithoutWeakeningStrictness(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -407,6 +425,7 @@ func TestInitAndAddAcceptanceRoundTripWithoutWeakeningStrictness(t *testing.T) {
 }
 
 func TestInitWritesMinimalDefaultsAndReportsCreateFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)
@@ -435,6 +454,7 @@ func TestInitWritesMinimalDefaultsAndReportsCreateFailure(t *testing.T) {
 }
 
 func TestAddAcceptanceRejectsEveryIncompleteFieldAndPropagatesLoadFailure(t *testing.T) {
+	t.Parallel()
 	expires := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	for name, acceptance := range map[string]config.Acceptance{
 		"id-empty":     {Reason: "reviewed", Expires: expires},
@@ -444,6 +464,7 @@ func TestAddAcceptanceRejectsEveryIncompleteFieldAndPropagatesLoadFailure(t *tes
 		"expiry":       {ID: "finding", Reason: "reviewed"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if err := config.AddAcceptance(t.TempDir(), acceptance); err == nil || !strings.Contains(err.Error(), "requires id, reason, and expiry") {
 				t.Fatalf("AddAcceptance error = %v", err)
 			}
@@ -460,6 +481,7 @@ func TestAddAcceptanceRejectsEveryIncompleteFieldAndPropagatesLoadFailure(t *tes
 }
 
 func TestAddAcceptancePersistsDeterministicIDOrder(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
 		t.Fatal(err)

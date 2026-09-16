@@ -30,11 +30,6 @@ internal/assure statRepositoryPath
 internal/assure walkCandidateFiles
 internal/assure writeCandidateFile
 internal/assure writeCandidateRepositoryFile
-internal/config createConfigTemp
-internal/config marshalConfig
-internal/config openConfigFile
-internal/config removeConfigFile
-internal/config renameConfigFile
 internal/golang relativePackagePath
 internal/mutationbridge openMutationWorkspace
 internal/processtree assignWindowsProcessToJob
