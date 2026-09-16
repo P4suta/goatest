@@ -110,6 +110,28 @@ run = [
 description = "Build cross-platform snapshot archives"
 run = "goreleaser release --snapshot --clean"
 
+# Two scopes, because they answer to different readers.
+#
+# `dogfood` measures the whole project, which is the run whose verdict means
+# something: ASSURED is defined over a full scope and nothing else. It is also
+# over an hour of work on this repository - the mutation phase evaluates every
+# mutant of 2591 tests - so it belongs to a developer who asked for it, or to a
+# schedule, and not to a check that has to answer a pull request.
+#
+# `dogfood-changed` measures what a change touched. That is the scope
+# docs/ci.md recommends to anybody using goatest in a workflow, and the one this
+# repository's own workflow should therefore be seen using.
+[tasks.dogfood-changed]
+description = "Verify what this branch changed, the way docs/ci.md tells a user to"
+run = [
+  "go build -o ./dist/dogfood/goatest ./cmd/goatest",
+  "./dist/dogfood/goatest verify --changed=origin/main --ui=plain",
+]
+run_windows = [
+  "go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
+  '.\dist\dogfood\goatest.exe verify --changed=origin/main --ui=plain',
+]
+
 [tasks.dogfood]
 description = "Run goatest against its own repository"
 run = [

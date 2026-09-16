@@ -64,7 +64,7 @@ different fact.
 | `test` | the unit tier and then the integration tier, on Linux, macOS and Windows, each audited by `internal/devtools/testaudit` |
 | `race` | both tiers under the race detector, on Linux |
 | `lint` | `golangci-lint`, `actionlint`, `typos`, `gitleaks`, and TOML formatting |
-| `dogfood` | goatest verifying this repository with itself, then auditing the proof layers of the run |
+| `dogfood` | goatest verifying what the branch changed, with itself |
 | `package` | cross-platform snapshot archives |
 
 The suite is in two tiers. `go test ./...` is the unit tier: everything that
@@ -78,6 +78,14 @@ Both tiers run with `GOATEST_TEST_REQUIRE_TOOLS=1`, which turns a missing `go`
 or `git` from a skip into a failure. Unset it locally: a developer without a
 toolchain should see the toolchain tests step aside, while a CI job without one
 is a broken job rather than a smaller suite.
+
+The `dogfood` job uses the changeset scope, which is the scope this page
+recommends above and the only one that fits a check answering a pull request. A
+full run of this repository against itself takes over an hour - the mutation
+phase evaluates every mutant of 2591 tests - and `ASSURED` is defined over a full
+scope, so `mise run dogfood` is the one whose verdict means something and
+`mise run dogfood-changed` is the one CI can wait for. The first version of this
+job ran the full scope, which was wired in before it had been timed.
 
 Packaging, signing, and publishing a dedicated Action are outside the current
 self-application roadmap.
