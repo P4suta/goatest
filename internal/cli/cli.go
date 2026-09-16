@@ -211,11 +211,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	if err != nil {
 		diagnose(stderr, err.Error())
 		var usage usageError
-		if errors.As(err, &usage) {
-			_, _ = fmt.Fprintf(stderr, "run 'goatest help %s' for usage\n", usage.command)
-		} else {
-			_, _ = fmt.Fprintln(stderr, "run 'goatest --help' for usage")
+		if !errors.As(err, &usage) {
+			usage = usageError{}
 		}
+		_, _ = fmt.Fprintln(stderr, usage.Hint())
 		return ExitError
 	}
 	result, err := service.Execute(ctx, command, request, id)
@@ -243,12 +242,42 @@ func diagnose(stderr io.Writer, message string) {
 	_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(message))
 }
 
+// usageError is a command line this tool will not act on.
+//
+// It is the only error type this module declares, which makes what it does and
+// does not do the whole of the vocabulary a caller has for recognising a
+// failure. Until it had Unwrap, it had neither: Error returned the cause's text
+// and nothing could reach the cause, so errors.Is through a usage error found
+// nothing however carefully the cause had been constructed.
+//
+// Hint is separate from the message on purpose. The usage errors this package
+// builds say what is wrong and never what to do about it, and the command line
+// prints the remedy on its own line - "run 'goatest help trace' for usage". That
+// separation is the one an error-code table wants: a message is what happened,
+// and a remedy is what to do, and a table that mixes them has a column nobody
+// can fill in.
 type usageError struct {
+	// command is the subcommand whose usage the reader should be sent to.
 	command Command
-	cause   error
+
+	// cause is what was wrong.
+	cause error
 }
 
+// Error reports the cause.
 func (err usageError) Error() string { return err.cause.Error() }
+
+// Unwrap exposes the cause, so that errors.Is and errors.As reach through a
+// usage error to whatever it was built from.
+func (err usageError) Unwrap() error { return err.cause }
+
+// Hint is what to do about it, which the command line prints on its own line.
+func (err usageError) Hint() string {
+	if err.command == "" {
+		return "run 'goatest --help' for usage"
+	}
+	return fmt.Sprintf("run 'goatest help %s' for usage", err.command)
+}
 
 func runHelp(args []string, stdout, stderr io.Writer) (bool, int) {
 	before := args
