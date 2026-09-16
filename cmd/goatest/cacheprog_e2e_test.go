@@ -28,7 +28,9 @@ const (
 )
 
 func TestCacheProgramHelper(t *testing.T) {
-	testkit.SkipUnlessHelper(t, cacheProgramHelper)
+	if !testkit.RunningAsHelper(t, cacheProgramHelper, "TestCacheProgramHelper") {
+		return
+	}
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
 	if os.Getenv(cacheProgramPersist) != "" {
 		arguments = append(arguments, "--persist")

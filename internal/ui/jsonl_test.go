@@ -27,6 +27,7 @@ func steppingClock(step time.Duration) func() time.Time {
 }
 
 func TestJSONLStreamsOneEventPerNote(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewJSONL(&buffer, steppingClock(1500*time.Millisecond))
 	notes.Note("snapshot", "captured")
@@ -40,6 +41,7 @@ func TestJSONLStreamsOneEventPerNote(t *testing.T) {
 }
 
 func TestJSONLStreamsBoundedPhaseProgress(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewJSONL(&buffer, steppingClock(1000*time.Millisecond))
 	notes.Note("baseline-progress", "17/42")
@@ -57,6 +59,7 @@ func TestJSONLStreamsBoundedPhaseProgress(t *testing.T) {
 }
 
 func TestJSONLKeepsForgedNotesOnOnePhysicalLine(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewJSONL(&buffer, nil)
 	notes.Note("phase\nforged", "detail\x1b[31m\"quoted\"")

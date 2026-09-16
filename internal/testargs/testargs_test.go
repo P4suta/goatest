@@ -12,6 +12,7 @@ import (
 )
 
 func TestNormalizeCanonicalizesShortClonesAndPreservesCustomFlags(t *testing.T) {
+	t.Parallel()
 	input := []string{"-short", "--short=false", "--test.short", "--test.parallel=3", "-custom=value"}
 	got, err := testargs.Normalize(input)
 	if err != nil || !slices.Equal(got, []string{"-test.short=true", "-test.short=false", "-test.short=true", "-test.parallel=3", "-custom=value"}) {
@@ -24,6 +25,7 @@ func TestNormalizeCanonicalizesShortClonesAndPreservesCustomFlags(t *testing.T) 
 }
 
 func TestNormalizeRejectsEveryAssuranceOwnedFlag(t *testing.T) {
+	t.Parallel()
 	for _, argument := range []string{
 		"-test.run=TestOther", "--test.run=TestOther", "-test.fuzz", "-test.fuzztime=1x", "-test.fuzzcachedir=tmp",
 		"-test.coverprofile=other", "-test.timeout=0", "-test.count=9", "-test.v=true", "-test.skip=Slow", "-test.list=.", "-test.shuffle=on",

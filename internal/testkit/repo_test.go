@@ -20,7 +20,9 @@ const (
 
 func TestTestkitReexecHelper(t *testing.T) {
 	t.Parallel()
-	testkit.SkipUnlessHelper(t, reexecHelperVariable)
+	if !testkit.RunningAsHelper(t, reexecHelperVariable, "TestTestkitReexecHelper") {
+		return
+	}
 	fmt.Println(reexecHelperMarker)
 }
 

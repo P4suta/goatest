@@ -13,6 +13,7 @@ import (
 )
 
 func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for index, name := range []string{"old", "middle", "new"} {
@@ -39,6 +40,7 @@ func TestCollectExpiresThenBoundsDiagnosticDirectoriesDeterministically(t *testi
 }
 
 func TestCollectExpiresEmptyArtifactDirectoryByDirectoryTimestamp(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	directory := filepath.Join(root, "empty")
 	if err := os.Mkdir(directory, filemode.ReadableDirectory); err != nil {
@@ -73,6 +75,7 @@ func retainedDirectory(t *testing.T, root, name string, moment time.Time) {
 }
 
 func TestKeepRemovesOldestFirstAndTiesByName(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	retainedDirectory(t, root, "run-a", base)
@@ -97,6 +100,7 @@ func TestKeepRemovesOldestFirstAndTiesByName(t *testing.T) {
 }
 
 func TestKeepSparesAProtectedEntryOnTopOfTheBound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for index, name := range []string{"run-a", "run-b", "run-c", "run-d"} {
@@ -116,6 +120,7 @@ func TestKeepSparesAProtectedEntryOnTopOfTheBound(t *testing.T) {
 }
 
 func TestKeepWithoutASurplusOrWithoutABoundRemovesNothing(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, keep := range []int{0, -1, 2, 5} {
 		root := t.TempDir()
@@ -134,6 +139,7 @@ func TestKeepWithoutASurplusOrWithoutABoundRemovesNothing(t *testing.T) {
 }
 
 func TestKeepRefusesAChildThatIsNotADirectory(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hand written"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
@@ -155,6 +161,7 @@ func retainedFile(t *testing.T, root, name, contents string, moment time.Time) {
 }
 
 func TestCollectFilesExpiresThenBoundsFlatEntriesDeterministically(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	retainedFile(t, root, "old.json", "1234567890", base)
@@ -174,6 +181,7 @@ func TestCollectFilesExpiresThenBoundsFlatEntriesDeterministically(t *testing.T)
 }
 
 func TestFileAndDirectoryModesRefuseEachOthersRoots(t *testing.T) {
+	t.Parallel()
 	files := t.TempDir()
 	retainedFile(t, files, "candidate.json", "{}", time.Now())
 	if _, err := Inspect(files); err == nil {
@@ -187,6 +195,7 @@ func TestFileAndDirectoryModesRefuseEachOthersRoots(t *testing.T) {
 }
 
 func TestInspectFilesRefusesASymlinkedEntry(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	target := filepath.Join(t.TempDir(), "elsewhere.json")
 	if err := os.WriteFile(target, []byte("{}"), filemode.PrivateFile); err != nil {
@@ -201,6 +210,7 @@ func TestInspectFilesRefusesASymlinkedEntry(t *testing.T) {
 }
 
 func TestRetentionRefusesSymlinkedEntries(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	target := t.TempDir()
 	if err := os.Symlink(target, filepath.Join(root, "linked")); err != nil {

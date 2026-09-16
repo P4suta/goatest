@@ -17,6 +17,7 @@ const (
 )
 
 func TestDashboardPhaseVocabularyIsExhaustive(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ kind, phase string }{
 		{"snapshot", "snapshot"}, {"cache-hit", "snapshot"}, {"cache-wait", "snapshot"},
 		{"impact-broad", "impact"}, {"impact-targeted", "impact"},
@@ -36,6 +37,7 @@ func TestDashboardPhaseVocabularyIsExhaustive(t *testing.T) {
 }
 
 func TestDashboardFormattingAndEstimateBoundaries(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		input time.Duration
 		want  string
@@ -78,6 +80,7 @@ func TestDashboardFormattingAndEstimateBoundaries(t *testing.T) {
 }
 
 func TestDashboardNoOpRenderingAndDefaultTickerLifecycle(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	renderer := &dashboard{writer: &output, now: time.Now, width: 80}
 	renderer.eraseLocked()
@@ -104,6 +107,7 @@ func TestDashboardNoOpRenderingAndDefaultTickerLifecycle(t *testing.T) {
 }
 
 func TestDashboardInvalidAndEarlyMutationProgress(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	tick := make(chan time.Time)
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
@@ -137,6 +141,7 @@ func TestDashboardInvalidAndEarlyMutationProgress(t *testing.T) {
 }
 
 func TestDashboardWatcherStopsWhenTickStreamCloses(t *testing.T) {
+	t.Parallel()
 	tick := make(chan time.Time)
 	renderer := NewDashboard(io.Discard, DashboardOptions{Tick: tick}).(*dashboard)
 	close(tick)
@@ -149,6 +154,7 @@ func TestDashboardWatcherStopsWhenTickStreamCloses(t *testing.T) {
 }
 
 func TestDashboardWatchDoesNotRenderAClosedDashboard(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	tick := make(chan time.Time, 1)
@@ -166,6 +172,7 @@ func TestDashboardWatchDoesNotRenderAClosedDashboard(t *testing.T) {
 }
 
 func TestBoundedLineKeepsShortTextAndTruncatesByRunes(t *testing.T) {
+	t.Parallel()
 	if got := boundedLine("short", 5); got != "short" {
 		t.Fatalf("short line = %q", got)
 	}

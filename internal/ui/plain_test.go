@@ -12,6 +12,7 @@ import (
 )
 
 func TestPlainRendersTheDeterministicNoteLine(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewPlain(&buffer)
 	notes.Note("snapshot", "captured")
@@ -22,6 +23,7 @@ func TestPlainRendersTheDeterministicNoteLine(t *testing.T) {
 }
 
 func TestPlainEscapesTerminalControlCharactersOntoOneLine(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewPlain(&buffer)
 	notes.Note("phase\nforged", "detail\x1b[31m")
@@ -37,6 +39,7 @@ func TestPlainEscapesTerminalControlCharactersOntoOneLine(t *testing.T) {
 }
 
 func TestPlainShowsBoundedPhaseProgress(t *testing.T) {
+	t.Parallel()
 	var buffer bytes.Buffer
 	notes := ui.NewPlain(&buffer)
 	notes.Note("baseline-progress", "17/42")
@@ -58,6 +61,7 @@ func TestPlainShowsBoundedPhaseProgress(t *testing.T) {
 }
 
 func TestPlainWithoutAWriterRendersNothing(t *testing.T) {
+	t.Parallel()
 	notes := ui.NewPlain(nil)
 	notes.Note("snapshot", "captured")
 	notes.Close()

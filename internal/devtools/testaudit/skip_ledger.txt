@@ -16,18 +16,17 @@
 #     not share, and on a platform that cannot make the thing there is nothing
 #     to observe. These fire on Windows and not on Unix, which is why running
 #     the suite on one operating system cannot prove an entry is stale.
-#   - a test is the entry point of a helper process. It asserts nothing unless
-#     its variable selects it, and before it skipped it returned early and was
-#     counted as a pass.
+# A helper process entry point used to be the second kind, and is not any more.
+# It asserted nothing in an ordinary run, so it skipped - and goatest's own
+# accounting treats a selected target that skipped as missing evidence, which is
+# correct. It asserts that its variable did not select it now, which is small and
+# true, so it runs.
 #
 # A skip for a missing tool belongs to neither kind and must not be added here.
 # Set GOATEST_TEST_REQUIRE_TOOLS=1 in CI and the harness will fail instead.
-github.com/P4suta/goatest/cmd/goatest TestCacheProgramHelper
 github.com/P4suta/goatest/cmd/goatest TestTheCLIServiceNamesWhatBelongsToTheMachine
 github.com/P4suta/goatest/internal/app TestATraceDirectoryIsJudgedByWhereItLands
 github.com/P4suta/goatest/internal/app TestAnEntryThatCannotBeStatedKeepsItsPlaceInTheLedger
-github.com/P4suta/goatest/internal/assure TestRunGenerationProviderHelper
-github.com/P4suta/goatest/internal/assure TestRunResourceProviderHelper
 github.com/P4suta/goatest/internal/cache TestFlushDoesNotFollowAnEntryReplacedAfterValidation
 github.com/P4suta/goatest/internal/cache TestInspectRefusesASymbolicLinkForTheVersionRoot
 github.com/P4suta/goatest/internal/evidence TestFlushMutationNeverTraversesAStoredSymlink
@@ -36,4 +35,3 @@ github.com/P4suta/goatest/internal/repair TestApplyRejectsSymlinkDirectoryEscapi
 github.com/P4suta/goatest/internal/retention TestInspectFilesRefusesASymlinkedEntry
 github.com/P4suta/goatest/internal/retention TestRetentionRefusesSymlinkedEntries
 github.com/P4suta/goatest/internal/tempowner TestSweepNeverFollowsASymbolicLink
-github.com/P4suta/goatest/internal/testkit TestTestkitReexecHelper

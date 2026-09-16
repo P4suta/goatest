@@ -10,6 +10,7 @@ import (
 )
 
 func TestDogfoodTaskRunsBuiltCLIWithoutGoRunWrapper(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("mise.toml")
 	if err != nil {
 		t.Fatal(err)

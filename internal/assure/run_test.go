@@ -40,7 +40,9 @@ const (
 )
 
 func TestRunResourceProviderHelper(t *testing.T) {
-	testkit.SkipUnlessHelper(t, "GOATEST_ASSURE_RESOURCE_HELPER")
+	if !testkit.RunningAsHelper(t, "GOATEST_ASSURE_RESOURCE_HELPER", "TestRunResourceProviderHelper") {
+		return
+	}
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	var start resource.Request
@@ -63,7 +65,9 @@ func TestRunResourceProviderHelper(t *testing.T) {
 }
 
 func TestRunGenerationProviderHelper(t *testing.T) {
-	testkit.SkipUnlessHelper(t, "GOATEST_ASSURE_GENERATION_HELPER")
+	if !testkit.RunningAsHelper(t, "GOATEST_ASSURE_GENERATION_HELPER", "TestRunGenerationProviderHelper") {
+		return
+	}
 	var request provider.Request
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		os.Exit(generationRequestExitCode)

@@ -11,6 +11,7 @@ import (
 )
 
 func TestRunPreservesTestingTAndScope(t *testing.T) {
+	t.Parallel()
 	called := false
 	goatest.Run(t, goatest.Unit(), func(gt *goatest.T) {
 		called = true
@@ -27,6 +28,7 @@ func TestRunPreservesTestingTAndScope(t *testing.T) {
 }
 
 func TestIntegrationCarriesUniqueCapabilitiesWithoutAliasing(t *testing.T) {
+	t.Parallel()
 	got := goatest.Integration("postgres", "redis", "postgres")
 	if got.Kind != goatest.ScopeIntegration || !slices.Equal(got.Capabilities(), []string{"postgres", "redis"}) {
 		t.Fatalf("scope = %+v", got)
@@ -39,6 +41,7 @@ func TestIntegrationCarriesUniqueCapabilitiesWithoutAliasing(t *testing.T) {
 }
 
 func TestIntegrationRejectsBlankCapability(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("Integration accepted a blank capability")

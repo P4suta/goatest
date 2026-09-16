@@ -10,6 +10,7 @@ import (
 )
 
 func TestTerminalProbeRejectsBuffersAndRegularFiles(t *testing.T) {
+	t.Parallel()
 	called := false
 	if IsTerminalWriter(&bytes.Buffer{}, func(int) bool { called = true; return true }) {
 		t.Fatal("buffer reported as a terminal")

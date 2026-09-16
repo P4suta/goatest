@@ -19,14 +19,16 @@ every word of the difference is in
 
 - **Two tiers, enforced by a scan.** A test that starts a real `go` or `git`
   carries `//go:build integration`. The unit tier finishes in about ten seconds
-  and holds 2558 of the 2586 tests. `internal/devgates` refuses a file in the
+  and holds 2589 of the 2625 tests. `internal/devgates` refuses a file in the
   wrong tier in both directions, because a stale tag hides a file from
   `go test ./...` entirely - not skipped, not failed, not counted, not compiled.
 - **A skip is recorded or it is a failure.**
   `internal/devtools/testaudit/skip_ledger.txt` names every test allowed to step
-  aside. `GOATEST_TEST_REQUIRE_TOOLS=1`, which CI sets, turns a missing tool from
-  a skip into a failure. A non-verbose `go test` prints `ok` for a package whose
-  every test was skipped, which is how a lost toolchain becomes a green run.
+  aside, and holds eleven - every one a platform that cannot do the thing the
+  test is about. `GOATEST_TEST_REQUIRE_TOOLS=1`, which CI sets, turns a missing
+  tool from a skip into a failure. On Linux and macOS both tiers run with no skip
+  at all. A non-verbose `go test` prints `ok` for a package whose every test was
+  skipped, which is how a lost toolchain becomes a green run.
 - **Seams are arguments, not package-level variables.**
   [ADR 0001](docs/adr/0001-seam-policy.md). The ledger at
   `internal/devgates/seam_allowlist.txt` may shrink and never grow, and a stale

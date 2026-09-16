@@ -67,6 +67,7 @@ func checkpointFixture() checkpoint.State {
 }
 
 func TestCheckpointStrictRoundTripAndSchema(t *testing.T) {
+	t.Parallel()
 	input := checkpointFixture()
 	data := checkpoint.JSON(input)
 	decoded, err := checkpoint.Decode(data)
@@ -136,6 +137,7 @@ func TestCheckpointStrictRoundTripAndSchema(t *testing.T) {
 }
 
 func TestCheckpointRejectsTargetWithoutExactCoverage(t *testing.T) {
+	t.Parallel()
 	var document map[string]any
 	if err := json.Unmarshal(checkpoint.JSON(checkpointFixture()), &document); err != nil {
 		t.Fatal(err)
@@ -153,6 +155,7 @@ func TestCheckpointRejectsTargetWithoutExactCoverage(t *testing.T) {
 }
 
 func TestCheckpointRejectsSingularTargetCapability(t *testing.T) {
+	t.Parallel()
 	var document map[string]any
 	if err := json.Unmarshal(checkpoint.JSON(checkpointFixture()), &document); err != nil {
 		t.Fatal(err)
@@ -170,6 +173,7 @@ func TestCheckpointRejectsSingularTargetCapability(t *testing.T) {
 }
 
 func TestCheckpointRoundTripsPartialPackageSuiteControls(t *testing.T) {
+	t.Parallel()
 	state := checkpointFixture()
 	state.Baseline.Complete = false
 	state.Baseline.Routing = nil
@@ -186,6 +190,7 @@ func TestCheckpointRoundTripsPartialPackageSuiteControls(t *testing.T) {
 }
 
 func TestCheckpointDecoderRejectsCorruptionUnknownFieldsAndPendingUnits(t *testing.T) {
+	t.Parallel()
 	valid := checkpoint.JSON(checkpointFixture())
 	for _, test := range []struct {
 		name string

@@ -15,6 +15,7 @@ import (
 )
 
 func TestWindowsVirtualTerminalAcceptsOwnedRenderersAndRegularFiles(t *testing.T) {
+	t.Parallel()
 	if !EnableVirtualTerminal(&bytes.Buffer{}) {
 		t.Fatal("non-file renderer was refused")
 	}
