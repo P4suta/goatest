@@ -37,3 +37,4 @@ the tree no longer holds fails as loudly.
 | [0018](0018-confirm-comparative-watchdogs.md) | Fail closed at comparative watchdogs |
 | [0019](0019-instrument-the-test-binary-import-closure.md) | Instrument the test binary import closure |
 | [0020](0020-bootstrap-cold-preparation-with-verified-local-work.md) | Bootstrap cold preparation with verified local work |
+| [0021](0021-what-a-ledger-cannot-check.md) | What a ledger cannot check |

@@ -77,6 +77,11 @@ Adding a page that enumerates something means adding its ledger in the same
 change. Each ledger carries a test proving it can fail, because two agreeing
 lists is also what it looks like when one of them was read as empty.
 
+[ADR 0021](docs/adr/0021-what-a-ledger-cannot-check.md) records what this
+discipline does not cover: a ledger checks that a claim matches a set, and
+nothing mechanical checks that the set covers what happens, or that the reason
+written beside a choice is correct.
+
 ## Where things are
 
 | | |
