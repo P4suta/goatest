@@ -35,7 +35,7 @@ func TestDoctorBehaviourKeysNamesThePackagesThatWidenTheirKey(t *testing.T) {
 		}
 	}
 	loaded := config.Config{Execution: config.Execution{Timeout: time.Minute}}
-	evidence, err := doctorBehaviourKeys(t.Context(), root, os.Environ(), loaded, "go", []string{"./..."})
+	evidence, err := doctorBehaviourKeys(t.Context(), nil, root, os.Environ(), loaded, "go", []string{"./..."})
 	if err != nil {
 		t.Fatal(err)
 	}
