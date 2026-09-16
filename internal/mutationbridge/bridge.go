@@ -100,13 +100,52 @@ func (workspace *Workspace) Trace() *trace.Recorder {
 	return workspace.trace
 }
 
+// GoWorkVariable and goWorkDisabled keep a command inside the module it is
+// measuring.
+//
+// A go workspace changes what `go list ./...` answers, what a build resolves,
+// and - because GOWORK is one of the names in buildEnvironmentNames - the
+// identity a cached verdict is keyed on. goatest assures one main module per
+// run and refuses a go.work that holds several, on purpose and in writing. A
+// go.work inherited from the operator's shell would not be a second opinion
+// about that; it would be the refusal firing on a repository nobody asked to
+// aggregate, or worse, a silently different answer.
+//
+// go-mutants states the rule for consumers that run their own go commands
+// through Workspace.Exec: pass GOWORK=off. This is where goatest passes it, and
+// there is exactly one such place, because every workspace command in this
+// module goes through here.
+const (
+	GoWorkVariable = "GOWORK"
+
+	goWorkDisabled = GoWorkVariable + "=off"
+)
+
+// Exec runs one command in the frozen workspace, inside the module it is
+// measuring.
 func (workspace *Workspace) Exec(ctx context.Context, command gomutants.Command) (gomutants.CommandResult, error) {
 	if workspace == nil || workspace.inner == nil {
 		return gomutants.CommandResult{}, errors.New("goatest: nil mutation workspace")
 	}
+	command.Env = withoutGoWorkspace(command.Env)
 	result, err := workspace.inner.Exec(ctx, command)
 	workspace.trace.Exec(executionRecord(command, result, err))
 	return result, err
+}
+
+// withoutGoWorkspace adds GOWORK=off unless the caller named GOWORK itself.
+//
+// Deferring to an explicit setting rather than overwriting it keeps this from
+// being a rule no caller can opt out of. A caller that means to run under a
+// workspace - and there is none today - says so and is obeyed, which is a
+// decision somebody made rather than an accident of the environment.
+func withoutGoWorkspace(environment []string) []string {
+	for _, entry := range environment {
+		if name, _, found := strings.Cut(entry, "="); found && name == GoWorkVariable {
+			return environment
+		}
+	}
+	return append(slices.Clone(environment), goWorkDisabled)
 }
 
 func executionRecord(command gomutants.Command, result gomutants.CommandResult, err error) trace.ExecRecord {

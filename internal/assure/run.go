@@ -1245,10 +1245,22 @@ func modeIdentity(options Options) string {
 	return identity + ";execution=" + string(encoded)
 }
 
+// buildEnvironmentNames are the variables of the operator's environment that
+// can change what a build produces, and therefore belong to the identity a
+// cached verdict is keyed on.
+//
+// GOWORK is deliberately absent, for the reason ADR 0005 keeps GOCACHEPROG
+// out: a variable that cannot change what a command does has no business
+// changing what a run is called. Every command this module runs in a frozen
+// workspace carries GOWORK=off - see mutationbridge.Workspace.Exec - so the
+// operator's own GOWORK reaches nothing. Leaving it here would key the cache on
+// a setting the run overrides, which is worse than either answer on its own:
+// two runs that did exactly the same work would miss each other's evidence, and
+// the identity would name a workspace that took no part in it.
 var buildEnvironmentNames = []string{
 	"AR", "CC", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_ENABLED", "CGO_FFLAGS", "CGO_LDFLAGS",
 	"CXX", "FC", "GCCGO", "GODEBUG", "GOENV", "GOEXPERIMENT", "GOFLAGS", "GO386", "GOAMD64", "GOARM",
-	"GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOTOOLCHAIN", "GOWASM", "GOWORK", "PKG_CONFIG",
+	"GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOTOOLCHAIN", "GOWASM", "PKG_CONFIG",
 }
 
 func selectedEnvironment(environment, configured []string) []string {

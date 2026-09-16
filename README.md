@@ -247,8 +247,9 @@ preserved as artifacts under `.goatest/patches/`.
 
 The implementation deliberately fails closed where support is incomplete:
 
-- a `go.work` containing multiple main modules is rejected rather than partly
-  assured;
+- a `go.work` is not read: every command runs with `GOWORK=off`, so a run
+  assures the one module it was pointed at rather than partly assuring a
+  workspace;
 - symbolic links in the evidence tree are rejected;
 - the resource protocol currently supports start/ready/stop and shared or
   exclusive instances, but not health/reset/log-artifact operations; and

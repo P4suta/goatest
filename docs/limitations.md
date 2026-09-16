@@ -5,8 +5,14 @@ self-dogfood is not evidence about other repositories.
 
 ## Fail-closed implementation limits
 
-- Only one main Go module is assured per run. Multiple main modules in a
-  `go.work` are rejected; workspace aggregation is not implemented.
+- Only one main Go module is assured per run. Every command a run executes in
+  the frozen workspace carries `GOWORK=off`, so a `go.work` beside or above the
+  module is not read and takes no part in the run: goatest assures the module it
+  was pointed at, and says so rather than aggregating. `GOWORK` is for the same
+  reason not part of the identity a cached verdict is keyed on. The refusal of
+  packages from several module roots remains, for the case a `go list` reports
+  them without a workspace being involved. Workspace aggregation is not
+  implemented.
 - Evidence scanning rejects symbolic links and irregular files rather than
   following confined links. Reflink/copy-on-write snapshot optimization is not
   implemented.
