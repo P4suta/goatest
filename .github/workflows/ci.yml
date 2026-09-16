@@ -101,6 +101,15 @@ jobs:
   # code is what this repository says it is; this one asks whether the tool does
   # what it says it does, which is the only question the tool itself can answer.
   dogfood:
+    # Pull requests only, because the scope is what the branch changed and on a
+    # push to main that is nothing. The job would run, find no changed file,
+    # verify nothing and report a green check - which is the shape every other
+    # gate on this branch was written to refuse. A check that cannot fail is
+    # worse than an absent one, because it is counted.
+    #
+    # The full-scope run is `mise run dogfood`, and it is not wired anywhere: it
+    # takes over an hour, and nothing here has a schedule to put it on yet.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -116,18 +125,20 @@ jobs:
         with:
           version: 2026.8.14
       - run: go mod download
+      # No GOATEST_TRACE. It was set here so that a failing dogfood would leave a
+      # recording to read, which is the right instinct and was an unmeasured
+      # cost: go-mutants measured the same flag on a comparable workload at
+      # about twenty times the wall clock, because a recording saves the output
+      # of every child and a baseline runs whole test suites. Turning it back on
+      # needs a measurement of this job with it, not an argument about it.
       - name: Verify what this branch changed, with itself
-        env:
-          GOATEST_TRACE: "1"
         run: mise run dogfood-changed
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: dogfood-reports
           if-no-files-found: ignore
-          path: |
-            reports/
-            .goatest/trace/
+          path: reports/
 
   lint:
     runs-on: ubuntu-latest

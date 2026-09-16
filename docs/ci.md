@@ -68,7 +68,7 @@ different fact.
 | `test` | the unit tier and then the integration tier, on Linux, macOS and Windows, each audited by `internal/devtools/testaudit` |
 | `race` | both tiers under the race detector, on Linux |
 | `lint` | `golangci-lint`, `actionlint`, `typos`, `gitleaks`, and TOML formatting |
-| `dogfood` | goatest verifying what the branch changed, with itself |
+| `dogfood` | goatest verifying what the branch changed, with itself; pull requests only |
 | `package` | cross-platform snapshot archives |
 
 The suite is in two tiers. `go test ./...` is the unit tier: everything that
@@ -82,6 +82,11 @@ Both tiers run with `GOATEST_TEST_REQUIRE_TOOLS=1`, which turns a missing `go`
 or `git` from a skip into a failure. Unset it locally: a developer without a
 toolchain should see the toolchain tests step aside, while a CI job without one
 is a broken job rather than a smaller suite.
+
+The `dogfood` job runs on pull requests and not on pushes to `main`, because the
+scope is what the branch changed and on `main` that is nothing: the job would
+find no changed file, verify nothing, and report a green check. A check that
+cannot fail is worse than an absent one, because it is counted.
 
 The `dogfood` job uses the changeset scope, which is the scope this page
 recommends above and the only one that fits a check answering a pull request. A

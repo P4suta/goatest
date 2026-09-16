@@ -101,6 +101,26 @@ Beyond that, three things follow from what a ledger cannot do.
    can check; "read as lines rather than decoded, which couples this to taplo's
    line breaks instead" is one anybody can.
 
+### A measurement is a claim about a mechanism
+
+A number borrowed from somewhere else is a reason with its evidence detached,
+and it reads as stronger than a reason because it has digits in it.
+
+go-mutants measured a recording flag on its own dogfood at about twenty times
+the wall clock and said so. The number was right. Acting on it here was not:
+that cost comes from the engine writing every child's output to a file, and this
+module's recording keeps a length and a digest and drops the bytes - so the
+mechanism producing the twenty was absent here, and the number said nothing
+about this repository. A flag was removed from a workflow on the strength of it,
+which is a change made with no measurement at all, wearing somebody else's.
+
+The obligation runs both ways, and the sending half is the easier one to miss.
+"About twenty times" can be borrowed; "about twenty times, for a baseline that
+runs seventeen packages' tests three times, in an implementation that saves each
+child's output to a file" cannot. A measurement shared without its mechanism is
+a conclusion shared without its reason, which is the same defect as the one
+above with more authority behind it.
+
 ## Consequences
 
 - The twelve ledgers are cheap to keep and were worth their cost several times
@@ -112,6 +132,9 @@ Beyond that, three things follow from what a ledger cannot do.
   habit, recorded here so that the next person to write a confident sentence
   about why has read a page saying that three such sentences were wrong in one
   day.
+- A number from another project, another scope or another day is evidence about
+  what it measured and a hypothesis about anything else. Saying which is free at
+  the moment of writing and expensive afterwards.
 - This record will age. The examples in it are from a single day of work on one
   branch, and their value is as evidence that the categories exist rather than
   as a survey. A later reader should trust the three questions and check the
