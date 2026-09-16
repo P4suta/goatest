@@ -36,17 +36,17 @@ run = "go test -timeout 40m ./..."
 description = "Run the suite and audit what actually ran: no silent package, no unrecorded skip"
 run = """
 mkdir -p .goatest
-go test -json -timeout 40m ./... > .goatest/test-events.jsonl && status=0 || status=$?
-go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || status=1
-exit $status
+go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
+go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || audit_exit=1
+exit $audit_exit
 """
 run_windows = """
 New-Item -ItemType Directory -Force -Path .goatest | Out-Null
 go test -json -timeout 40m ./... > .goatest/test-events.jsonl
-$status = $LASTEXITCODE
+$auditExit = $LASTEXITCODE
 Get-Content .goatest/test-events.jsonl | go run ./internal/devtools/testaudit
-if ($LASTEXITCODE -ne 0) { $status = 1 }
-exit $status
+if ($LASTEXITCODE -ne 0) { $auditExit = 1 }
+exit $auditExit
 """
 
 [tasks.test-race]

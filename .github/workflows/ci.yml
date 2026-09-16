@@ -44,9 +44,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p .goatest
-          go test -json -timeout 40m ./... > .goatest/test-events.jsonl && status=0 || status=$?
-          go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || status=1
-          exit "$status"
+          go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
+          go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || audit_exit=1
+          exit "$audit_exit"
 
   race:
     runs-on: ubuntu-latest
