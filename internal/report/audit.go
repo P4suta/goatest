@@ -119,6 +119,11 @@ func ValidateForPersistence(input Report) error {
 	if input.Verdict == "" {
 		return errors.New("goatest: persisted report is missing verdict")
 	}
+	for _, limitation := range input.Limitations {
+		if !KnownLimitationCode(limitation.Code) {
+			return fmt.Errorf("goatest: persisted report limitation code %q is unknown", limitation.Code)
+		}
+	}
 	if strings.TrimSpace(input.Contract) == "" {
 		return errors.New("goatest: persisted report is missing contract")
 	}
@@ -151,7 +156,7 @@ func ValidateForPersistence(input Report) error {
 		if input.Repository.Git.Commit != "unavailable" || input.Repository.Git.MergeBase != "unavailable" || input.Repository.Git.Dirty || len(input.Repository.Git.ChangedFiles) != 0 {
 			return errors.New("goatest: unavailable Git metadata contains an ambiguous partial identity")
 		}
-		if !hasLimitation(input.Limitations, "git-metadata-unavailable") {
+		if !hasLimitation(input.Limitations, LimitationGitMetadataUnavailable) {
 			return errors.New("goatest: unavailable Git metadata is missing its limitation")
 		}
 	} else if input.Repository.Git.Commit == "unavailable" || input.Repository.Git.MergeBase == "unavailable" {

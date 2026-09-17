@@ -46,9 +46,11 @@ func fixture() report.Report {
 			{ID: "f1", Kind: "coverage", Path: "a.go", Summary: "unreached"},
 		},
 		Repairs: []report.Repair{{ID: "r1", Finding: "f2", Path: "z_test.go", Status: "applied"}},
+		// Out of order on purpose, to prove the renderers sort them. Real
+		// codes, because a persisted report is refused an invented one.
 		Limitations: []report.Limitation{
-			{Code: "z-risk", Summary: "z risk"},
-			{Code: "a-risk", Summary: "a risk"},
+			{Code: report.LimitationWholeTreeBehaviourKeys, Summary: "z risk"},
+			{Code: report.LimitationAssuranceIncomplete, Summary: "a risk"},
 		},
 	}
 }
@@ -93,8 +95,8 @@ func TestJSONAndLineRenderersAreCanonical(t *testing.T) {
 		"  MUTANT lt-to-le: < -> <=\n" +
 		"  REPLAY goatest replay f2\n" +
 		"REPAIR r1 applied z_test.go finding=f2\n" +
-		"LIMITATION a-risk a risk\n" +
-		"LIMITATION z-risk z risk\n"
+		"LIMITATION assurance-incomplete a risk\n" +
+		"LIMITATION whole-tree-behaviour-keys z risk\n"
 	if got := report.Lines(fixture()); got != want {
 		t.Errorf("lines =\n%s\nwant\n%s", got, want)
 	}
@@ -357,6 +359,9 @@ func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
 		{name: "configuration", change: func(value *report.Report) { value.Configuration.Digest = "not-a-digest" }, want: "SHA-256"},
 		{name: "execution", change: func(value *report.Report) { value.Execution.MutationJobs = -1 }, want: "negative"},
 		{name: "toolchain", change: func(value *report.Report) { value.Toolchain.Go = "" }, want: "toolchain"},
+		{name: "limitation-code", change: func(value *report.Report) {
+			value.Limitations = append(value.Limitations, report.Limitation{Code: "invented-here", Summary: "invented by a test"})
+		}, want: "invented-here"},
 		{name: "git-commit", change: func(value *report.Report) { value.Repository.Git.Commit = "" }, want: "Git identity"},
 		{name: "cache-source", change: func(value *report.Report) { value.Cache.SourceRunID = "unexpected" }, want: "non-cache"},
 		{name: "expired-acceptance", change: func(value *report.Report) {
@@ -376,7 +381,7 @@ func TestPersistenceValidationRequiresUnambiguousAuditMetadata(t *testing.T) {
 	unavailable := valid
 	unavailable.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 	unavailable.Limitations = append(unavailable.Limitations, report.Limitation{
-		Code: "git-metadata-unavailable", Summary: "Git metadata is unavailable",
+		Code: report.LimitationGitMetadataUnavailable, Summary: "Git metadata is unavailable",
 	})
 	if err := report.ValidateForPersistence(unavailable); err != nil {
 		t.Fatalf("explicit unavailable Git identity rejected: %v", err)

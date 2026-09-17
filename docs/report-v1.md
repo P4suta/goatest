@@ -125,3 +125,30 @@ provider or test output cannot forge `FINDING`, `REPAIR`, `ACCEPTANCE`, or
 | 3 | `ERROR`, invalid input, or infrastructure failure |
 | 130 | interrupted |
 | 143 | terminated |
+
+A run stopped by a signal records itself before it exits, rather than leaving
+one line on stderr - when it can. A process blocked in the kernel, or killed
+outright rather than signalled, runs no code and publishes nothing; what follows
+describes a run that was signalled and allowed to finish exiting. It publishes a report into `reports/runs/` in the same five
+formats as any other run, writes its diagnostics bundle, and renders the report
+on the terminal. Its verdict is `INSUFFICIENT`, which is what a run with missing
+evidence is, and its exit code is `130` or `143` rather than the `2` that
+verdict usually carries: the verdict says what the evidence supports and the
+exit code says how the run ended, and a run that was stopped and a run that
+finished short of its contract are different facts. The report carries an
+`assurance-interrupted` limitation and a finding of kind `interrupted`.
+
+What that report holds is the run's identity, scope, contract, configuration
+digest and duration - not its measurements. A cancelled run hands back no
+partial result to publish, so the record of how far it got is the diagnostics
+bundle written beside it under `.goatest/diagnostics/`, which holds the events
+the run had recorded: the phase that was open and the commands that had run. A
+workflow that keeps `reports/` for the finished runs wants that directory too,
+for the stopped ones.
+
+The latest indexes are not moved. `report`, `explain`, `accept` and `replay`
+load them when they need a run that can answer a question, and a run that
+settled nothing cannot answer one; the history keeps it, which is where a reader
+looking for the stopped run will go. Nor is anything published at all by a
+process stopped before its run began - one still waiting for the repository
+cache lock has measured nothing and has nothing to say about this repository.
