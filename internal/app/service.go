@@ -319,9 +319,12 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		}()
 	}
 	var result report.Report
+	var ran bool
 	if err == nil {
+		ran = true
 		result, err = service.run(ctx, root, request, recording.recorder)
 	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		ran = true
 		runResult, runErr := service.run(ctx, root, request, recording.recorder)
 		result = runResult
 		err = errors.Join(err, runErr)
@@ -332,16 +335,32 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		service.collectVerdictCache(root)
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if !ran && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			// Stopped while still waiting for the repository cache lease, so
+			// the run never began and has nothing to say about this
+			// repository. Either cause is the same fact here, which is why
+			// this is the one place they are not told apart: what differs
+			// between them is how the process ends, and this process is
+			// ending the same way whatever it writes.
 			return report.Report{}, err
 		}
-		result = infrastructureErrorReport(result, request, err)
+		interrupted := errors.Is(err, context.Canceled)
+		if !interrupted {
+			result = infrastructureErrorReport(result, request, err)
+		}
 		result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.reportHooks())
+		if interrupted {
+			result = interruptedReport(result, err)
+		}
 		service.writeDiagnostics(root, result, recording, err)
 		if ownsCacheLease {
 			service.collectDiagnosticRetention(root)
 		}
-		if writeErr := WriteReports(root, result); writeErr != nil {
+		publish := WriteReports
+		if interrupted {
+			publish = WriteReportHistory
+		}
+		if writeErr := publish(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
 		if ownsCacheLease {
@@ -392,7 +411,47 @@ func infrastructureErrorReport(partial report.Report, request cli.Request, cause
 		Summary: report.WithoutToolPrefix(cause.Error()),
 	})
 	result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-		Code: "assurance-incomplete", Summary: "Assurance stopped before the configured contract could be completed",
+		Code: report.LimitationAssuranceIncomplete, Summary: "Assurance stopped before the configured contract could be completed",
+	})
+	return result
+}
+
+// interruptedReport marks a stopped run as stopped.
+//
+// Every other way a run can end badly leaves a report and a diagnostics bundle.
+// Cancellation left a line on stderr, which is the wrong way round: the run
+// most likely to be stopped is the long one on a machine nobody is watching,
+// and a CI job that reaches its own time limit is sent a SIGTERM - so the case
+// where the failure is hardest to reproduce was the one case that recorded
+// nothing about itself.
+//
+// What this publishes is worth stating exactly, because the obvious reading is
+// wrong. assure.Run pairs every error it returns with an empty report, at all
+// thirty-one of its error returns, and a cancellation arrives as an error - so
+// this report carries the run's identity, scope, contract, configuration digest
+// and duration, and none of its measurements.
+// The measurements-so-far are in the diagnostics bundle written beside it,
+// which holds the recorded events the run had reached: the phase that was open
+// and the commands that had run. Making assure.Run hand back what it had
+// settled is the change that would put them in the report, and it is not this
+// one.
+//
+// The verdict is INSUFFICIENT rather than ERROR. Nothing failed; the evidence is
+// missing, which is the one thing INSUFFICIENT means. This is applied after
+// finalizeReport rather than before it, unlike infrastructureErrorReport,
+// because scopedVerdict maps a replay run by its findings count and an
+// interrupted replay that found nothing is not RESOLVED.
+func interruptedReport(partial report.Report, cause error) report.Report {
+	result := partial
+	result.Verdict = report.VerdictInsufficient
+	result.Findings = append(result.Findings, report.Finding{
+		ID:      report.FindingID("interrupted", "assurance-run"),
+		Kind:    "interrupted",
+		Summary: report.WithoutToolPrefix(cause.Error()),
+	})
+	result.Limitations = appendLimitation(result.Limitations, report.Limitation{
+		Code:    report.LimitationAssuranceInterrupted,
+		Summary: "The run was stopped by a signal; this report records the run and not its results, and the diagnostics bundle beside it holds how far it got",
 	})
 	return result
 }
@@ -541,13 +600,13 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Contract == "" {
 		result.Contract = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "contract-metadata-unavailable", Summary: "The assurance contract could not be resolved before execution stopped",
+			Code: report.LimitationContractMetadataUnavailable, Summary: "The assurance contract could not be resolved before execution stopped",
 		})
 	}
 	if result.Snapshot == "" {
 		result.Snapshot = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "snapshot-metadata-unavailable", Summary: "The source snapshot identity could not be computed before execution stopped",
+			Code: report.LimitationSnapshotMetadataUnavailable, Summary: "The source snapshot identity could not be computed before execution stopped",
 		})
 	}
 	requested := requestedScope(request, kind)
@@ -571,7 +630,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		result.Configuration.Digest = digest
 		if digestErr != nil {
 			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-				Code: "configuration-metadata-unavailable", Summary: "The effective configuration could not be read while finalizing the report",
+				Code: report.LimitationConfigurationMetadataUnavailable, Summary: "The effective configuration could not be read while finalizing the report",
 			})
 		}
 	}
@@ -581,7 +640,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Toolchain.Go == "" {
 		result.Toolchain.Go = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "go-toolchain-metadata-unavailable", Summary: "The Go toolchain identity could not be resolved before execution stopped",
+			Code: report.LimitationGoToolchainMetadataUnavailable, Summary: "The Go toolchain identity could not be resolved before execution stopped",
 		})
 	}
 	if result.Toolchain.GoMutants == "" {
@@ -590,7 +649,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		} else {
 			result.Toolchain.GoMutants = "unavailable"
 			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-				Code: "go-mutants-metadata-unavailable", Summary: "The go-mutants version could not be resolved from build info",
+				Code: report.LimitationGoMutantsMetadataUnavailable, Summary: "The go-mutants version could not be resolved from build info",
 			})
 		}
 	}
@@ -606,7 +665,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Repository.Module == "" {
 		result.Repository.Module = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "module-metadata-unavailable", Summary: "The Go module identity could not be resolved before execution stopped",
+			Code: report.LimitationModuleMetadataUnavailable, Summary: "The Go module identity could not be resolved before execution stopped",
 		})
 	}
 	if result.Repository.Module != "" {
@@ -621,7 +680,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if gitErr != nil {
 		result.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "git-metadata-unavailable", Summary: "Git identity or changeset metadata could not be resolved",
+			Code: report.LimitationGitMetadataUnavailable, Summary: "Git identity or changeset metadata could not be resolved",
 		})
 	} else {
 		result.Repository.Git = metadata

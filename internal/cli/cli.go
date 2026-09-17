@@ -220,6 +220,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	result, err := service.Execute(ctx, command, request, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			// A stopped run publishes what it had settled, and a published
+			// report is rendered here the same way a failed one is - otherwise
+			// the only trace of it on a terminal is a line saying the run
+			// stopped, and the reader has to know to go looking.
+			if result.RunID != "" {
+				render(stdout, result, request)
+			}
 			// The cause is kept. A run that was stopped part way through is the
 			// hardest kind to understand afterwards, and "interrupted" on its
 			// own says only that somebody pressed a key - not which phase was

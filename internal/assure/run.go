@@ -46,7 +46,6 @@ const (
 	workspaceInspectionTimeout = 5 * time.Minute
 	defaultMutationJobLimit    = 4
 	progressDivisions          = 100
-	laterPhasesNotRunCode      = "later-phases-not-run"
 )
 
 const goMutantsModulePath = "github.com/P4suta/go-mutants"
@@ -574,13 +573,13 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		if len(loaded.Resources) != 0 {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: "resource-cache-disabled", Summary: "exact cache reuse is disabled because configured resources have runtime state",
+				Code: report.LimitationResourceCacheDisabled, Summary: "exact cache reuse is disabled because configured resources have runtime state",
 			})
 		}
 		if len(baseline.Findings) != 0 {
 			baseReport.Verdict = baselineVerdict(baseline.Findings)
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: laterPhasesNotRunCode, Summary: "race and mutation phases were not run because baseline verification did not pass",
+				Code: report.LimitationLaterPhasesNotRun, Summary: "race and mutation phases were not run because baseline verification did not pass",
 			})
 			checkpointController.discard()
 			if closeErr := closeRound(); closeErr != nil {
@@ -614,7 +613,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			racePackages = modelPackagePaths(raceModel)
 		} else {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code:      "race-scope-static-estimate",
+				Code:      report.LimitationRaceScopeStaticEstimate,
 				Summary:   "standard-v1 selects race packages using static concurrency and observed reachability",
 				Estimated: true,
 			})
@@ -649,7 +648,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			baseReport.Verdict = report.VerdictDefect
 			baseReport.Findings = raceResult.Findings
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: laterPhasesNotRunCode, Summary: "mutation phases were not run because race verification did not pass",
+				Code: report.LimitationLaterPhasesNotRun, Summary: "mutation phases were not run because race verification did not pass",
 			})
 			checkpointController.discard()
 			if closeErr := closeRound(); closeErr != nil {
@@ -835,7 +834,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		} else {
 			result.Verdict = report.VerdictInsufficient
 			result.Limitations = append(result.Limitations, report.Limitation{
-				Code: "unresolved-mutation-gaps", Summary: "Unresolved mutation evidence gaps remain",
+				Code: report.LimitationUnresolvedMutationGaps, Summary: "Unresolved mutation evidence gaps remain",
 			})
 		}
 		if result.Accounting.Mutants.Unknown != 0 {
@@ -1277,7 +1276,7 @@ func projectExcludeLimitations(excludes []string) []report.Limitation {
 	result := make([]report.Limitation, 0, len(excludes))
 	for _, pattern := range excludes {
 		result = append(result, report.Limitation{
-			Code: "project-exclude", Summary: fmt.Sprintf("paths matching %q are outside the configured assurance boundary", pattern),
+			Code: report.LimitationProjectExclude, Summary: fmt.Sprintf("paths matching %q are outside the configured assurance boundary", pattern),
 		})
 	}
 	return result
@@ -1327,7 +1326,7 @@ func cachedReportReusable(cached report.Report, accepted map[string]bool) bool {
 		return false
 	}
 	return !slices.ContainsFunc(cached.Limitations, func(item report.Limitation) bool {
-		return item.Code == laterPhasesNotRunCode
+		return item.Code == report.LimitationLaterPhasesNotRun
 	})
 }
 

@@ -73,7 +73,7 @@ func (service Service) fix(ctx context.Context, root string, request cli.Request
 	}
 	if rejected {
 		result.Verdict = report.VerdictInsufficient
-		result.Limitations = []report.Limitation{{Code: "repair-validation-rejected", Summary: "no candidates were applied because at least one fresh validation failed"}}
+		result.Limitations = []report.Limitation{{Code: report.LimitationRepairValidationRejected, Summary: "no candidates were applied because at least one fresh validation failed"}}
 		return result, nil
 	}
 	applications := make([]repair.Application, len(validated))
@@ -96,7 +96,7 @@ func (service Service) fix(ctx context.Context, root string, request cli.Request
 	if !allApplied {
 		result.Verdict = report.VerdictInsufficient
 		result.Limitations = append(result.Limitations, report.Limitation{
-			Code: "repair-preimage-changed", Summary: "the candidate batch was not applied because at least one preimage changed",
+			Code: report.LimitationRepairPreimageChanged, Summary: "the candidate batch was not applied because at least one preimage changed",
 		})
 	}
 	if closeErr := closeResources(); closeErr != nil {

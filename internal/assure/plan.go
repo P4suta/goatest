@@ -164,7 +164,7 @@ func planWithGoMutantsVersion(ctx context.Context, options Options, goMutants st
 		Execution:   reportExecution(options, jobs),
 		Toolchain:   report.Toolchain{Go: metadata.toolchain, Goatest: ResolvedGoatestVersion(), GoMutants: goMutants, OS: runtime.GOOS, Arch: runtime.GOARCH},
 		Evidence:    evidenceItems,
-		Limitations: append(projectExcludeLimitations(loaded.Project.Exclude), report.Limitation{Code: "plan-cost-estimate", Summary: "mutation waves exclude target-specific runtime, resource startup, and race", Estimated: true}),
+		Limitations: append(projectExcludeLimitations(loaded.Project.Exclude), report.Limitation{Code: report.LimitationPlanCostEstimate, Summary: "mutation waves exclude target-specific runtime, resource startup, and race", Estimated: true}),
 	}, nil
 }
 

@@ -53,7 +53,26 @@ func (operations atomicWriteOperations) resolved() atomicWriteOperations {
 	return operations
 }
 
+// WriteReports publishes a run into the report history and points the latest
+// indexes at it.
 func WriteReports(root string, input report.Report) error {
+	return writeReports(root, input, true)
+}
+
+// WriteReportHistory publishes a run into the report history and leaves the
+// latest indexes where they are.
+//
+// The indexes are not a record of what happened last; they are what `report`,
+// `explain`, `accept` and `replay` load when they need a run that can answer a
+// question. A run that was stopped before it settled anything cannot answer
+// one, so pointing them at it would replace a report that could with a report
+// that says only that somebody stopped a run. The history keeps it either way,
+// which is where a reader looking for the stopped run will go.
+func WriteReportHistory(root string, input report.Report) error {
+	return writeReports(root, input, false)
+}
+
+func writeReports(root string, input report.Report, index bool) error {
 	if err := report.ValidateForPersistence(input); err != nil {
 		return err
 	}
@@ -98,6 +117,9 @@ func WriteReports(root string, input report.Report) error {
 	}
 	if err := os.Rename(stagingDirectory, runDirectory); err != nil {
 		return fmt.Errorf("goatest: publish report run %s: %w", input.RunID, err)
+	}
+	if !index {
+		return nil
 	}
 	indexes := []string{
 		filepath.Join(root, ".goatest", "latest-any.json"),

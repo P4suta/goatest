@@ -146,7 +146,13 @@ func (service Service) doctor(ctx context.Context, root string) (report.Report, 
 	result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "race-detector", Status: "ready", Detail: values[doctorGOOSField] + "/" + values[doctorGOARCHField]})
 	if git, err := doctorCommand(ctx, service.doctorProcess, root, environment, doctorQuickCommandTimeout, "git", "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(git) != "true" {
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "git", Status: "unavailable", Detail: doctorErrorDetail(err)})
-		result.Limitations = append(result.Limitations, report.Limitation{Code: "git-unavailable", Summary: "changeset scope and Git identity cannot be resolved"})
+		// The same code a run uses for the same fact. This said
+		// "git-unavailable" and a run said "git-metadata-unavailable", which
+		// meant a reader who had grepped one could not find the other, for a
+		// condition where the two reports are about the same missing tool.
+		result.Limitations = append(result.Limitations, report.Limitation{
+			Code: report.LimitationGitMetadataUnavailable, Summary: "changeset scope and Git identity cannot be resolved",
+		})
 	} else {
 		result.Evidence = append(result.Evidence, report.Evidence{Kind: "doctor", ID: "git", Status: "ready"})
 	}
