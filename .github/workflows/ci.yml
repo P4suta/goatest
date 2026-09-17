@@ -111,7 +111,17 @@ jobs:
     # takes over an hour, and nothing here has a schedule to put it on yet.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A bound on a runaway, not a budget for a wait. It was 30, chosen as a
+    # length somebody was willing to wait for, and the branch that added it
+    # runs past 30 on its own changeset - so the first thing that number would
+    # have done is fail a check about this workflow rather than about the code.
+    # 60 is not derived from a measurement of this job either, and saying so is
+    # the point: it is set above any run this repository has been seen to take,
+    # against a GitHub default of 360, so that a hung run is killed within the
+    # hour instead of burning six. What makes a generous bound cheap is that
+    # reaching it is no longer silent - a SIGTERM'd run publishes a report and
+    # a diagnostics bundle, and both are uploaded below.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -133,12 +143,20 @@ jobs:
       # needs a measurement of this job with it, not an argument about it.
       - name: Verify what this branch changed, with itself
         run: mise run dogfood-changed
+      # Both directories, because the two failures this job can have leave
+      # their evidence in different places. A run that finishes writes a report
+      # under reports/; a run this job's own time limit kills is sent a SIGTERM
+      # and writes a report with no measurements in it, and what it had reached
+      # is in the diagnostics bundle. Keeping only the first would keep nothing
+      # for the failure that is hardest to reproduce.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: dogfood-reports
           if-no-files-found: ignore
-          path: reports/
+          path: |
+            reports/
+            .goatest/diagnostics/
 
   lint:
     runs-on: ubuntu-latest

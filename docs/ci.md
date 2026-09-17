@@ -71,6 +71,20 @@ different fact.
 | `dogfood` | goatest verifying what the branch changed, with itself; pull requests only |
 | `package` | cross-platform snapshot archives |
 
+`gitleaks` is handed `.gitleaks.toml`, which narrows what it walks. The
+scanner does not ask git what it tracks: `gitleaks dir .` reads whatever the
+last run left in the working tree, which here was 142 MB against 3.3 MB of
+tracked files - the rest being the build cache under `.goatest/` and report
+artifacts under `reports/`. That is not only slow, it is a gate that can go red
+for content the repository does not contain, which is a failure nobody can fix
+by editing the repository and so a failure people learn to scroll past. With
+the allowlist the same scan reads 3.37 MB in 62 ms. Each entry is the claim
+that a path is outside the repository rather than a judgement that something is
+not a secret, and `internal/devgates` checks the claim in the two ways it can be
+false: git must ignore the path, and no tracked file may match it. The second is
+the one that matters, because a path can be named in `.gitignore` and tracked at
+the same time.
+
 The suite is in two tiers. `go test ./...` is the unit tier: everything that
 needs nothing but a compiler, which finishes in about ten seconds.
 `go test -tags integration ./...` adds the suites that drive a real toolchain -
@@ -95,6 +109,37 @@ phase evaluates every mutant of 2591 tests - and `ASSURED` is defined over a ful
 scope, so `mise run dogfood` is the one whose verdict means something and
 `mise run dogfood-changed` is the one CI can wait for. The first version of this
 job ran the full scope, which was wired in before it had been timed.
+
+The job's `timeout-minutes` is a bound on a runaway rather than a budget for a
+wait, and it is not derived from a measurement of this job. The attempt to take
+one is worth recording, because it failed in a way that is easy to repeat: the
+scoped run was timed on a developer machine that was concurrently running
+another project's verification at a load average of thirteen, and finished at
+74% of one core's worth of CPU. That makes the wall clock a measurement of the
+machine rather than of the job.
+
+The run's accounting survives the load, and says something the clock would have
+hidden. The changeset scope selected 12,090 mutants - which is not what "what
+the branch changed" sounds like, and is correct: the branch changed `_test.go`
+files, a changed test can alter the fate of any mutant in its package, so the
+scope widens to those whole packages and the line ranges that would otherwise
+narrow it are not sent. A changeset of production code alone is a far smaller
+run than this one. So the largest scoped run this repository has produced is a
+branch that rewrote its own test suite, and it is a poor model of the pull
+requests this job will actually see.
+
+The bound is therefore set above any run this repository has been seen to take,
+against a GitHub default of 360, and that is all it claims.
+
+Reaching it is no longer silent, with one qualification worth stating. A job
+that hits its limit is cancelled, its processes are signalled, and a signalled
+goatest publishes a report and a diagnostics bundle before it exits - both of
+which this job uploads. What it cannot do is publish from a process that is not
+running: a run blocked in the kernel, or one still writing when the runner's
+grace period ends and the signal becomes a kill, leaves what it had written and
+no more. So the bound is generous for that reason too. The evidence a stopped
+run leaves is the reason a bound can be generous, and a bound that is generous
+is the reason the run gets to leave it.
 
 Packaging, signing, and publishing a dedicated Action are outside the current
 self-application roadmap.

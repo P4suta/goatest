@@ -15,6 +15,21 @@ SPDX-PackageDownloadLocation = "https://github.com/P4suta/goatest"
 # a trace fixture is parsed as JSON Lines, where a comment is a parse error; and
 # go.mod and go.sum are written by the go command, which does not preserve
 # anything it did not put there.
+#
+# What internal/devgates checks about this file is that every tracked file is
+# covered - by a header or by an entry here - and that no entry covers nothing.
+# What it does not check is whether an entry covers more than it should, and the
+# difference is worth knowing, because the two directions fail differently. A
+# file this manifest misses is reported as unlicensed, loudly, by name. A file
+# it covers that should have carried a header is excused in silence.
+#
+# The globs below are where that could happen: they cover whole testdata trees,
+# so a `.md` note or a `.go` fixture added under one would be excused without
+# anybody deciding to excuse it. Nothing mechanical separates that case from a
+# legitimate one - `.txt` is a ledger that carries a header in three places here
+# and a golden that cannot in eight, so even the extension does not decide it.
+# The entries are therefore as narrow as the files allow, and widening one is a
+# decision to be made rather than a line to be added.
 
 [[annotations]]
 path = ["go.mod", "go.sum"]

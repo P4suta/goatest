@@ -90,10 +90,23 @@ repository's own test suite rather than about a user's. `internal/app` and
 the service beneath it - so a default that records every run records every one of
 those too. go-mutants measured the equivalent change in its own tree and found a
 suite going from about seven seconds to over six hundred, and kept the flag
-opt-in for that reason. The number here is not known: `GOATEST_TRACE` is read in
-`cmd/goatest` and translated into `--trace`, and the tests construct their
-service directly, so the variable does not reach them and the measurement cannot
-be taken without first making the change it is meant to justify.
+opt-in for that reason.
+
+That figure carries its mechanism, because a figure without one is a conclusion
+without a reason - see [ADR 0021](adr/0021-what-a-ledger-cannot-check.md), which
+records this number being borrowed badly. The cost is a recorder writing each
+executed command's output to a file, over a suite whose tests execute whole
+commands, and both halves hold here: `DirSink.preserveOutput` writes one file
+per executed command under `output/`, capped at a mebibyte, and the two packages
+named above execute runs. So the figure is a hypothesis about this repository
+rather than evidence, but a hypothesis about the right mechanism, and nothing
+here argues for a smaller factor.
+
+The number itself is not known, and cannot be taken from where it would matter:
+`GOATEST_TRACE` is read in `cmd/goatest` and translated into `--trace`, and the
+tests construct their service directly, so the variable does not reach them and
+the measurement cannot be taken without first making the change it is meant to
+justify.
 
 So the default stands, and stands on a measurement this repository has not taken.
 That is the honest state of it. What is already true is that the runs which most

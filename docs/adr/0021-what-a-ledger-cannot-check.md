@@ -101,25 +101,65 @@ Beyond that, three things follow from what a ledger cannot do.
    can check; "read as lines rather than decoded, which couples this to taplo's
    line breaks instead" is one anybody can.
 
+4. **Separate a reason nothing can check from one nobody ran.** The point above
+   treats those as one thing, and the day this record was written produced three
+   of the second kind and none of the first. Each was a statement about this
+   code - that a recorder dropped its bytes, that a cancelled run handed back
+   what it had settled, that a duplicated licence annotation would be reported
+   as stale - and each was settled in under a minute by running something, after
+   being asserted and acted on without. A reason about behaviour in this
+   repository is nearly always cheap to check, which makes not checking it a
+   choice rather than a limit. The ones that genuinely cannot be checked are
+   about the future, about other people, or about what a reader will find
+   confusing; those are the ones the paragraph above is for.
+
+   The second half of this is that a reason can be right and its mechanism
+   still do nothing, and that failure is quieter than a wrong reason because
+   everything about it looks correct. The dogfood job wrote a diagnostics
+   bundle for a run that failed, for a directory the workflow did not upload -
+   the bundle was produced, the reason for producing it was sound, and the
+   evidence was unreachable from the only place anyone would look for it.
+   go-mutants found the same shape one layer down: a gate that chose to report
+   a harmless annotation rather than fail on it, with the reason written beside
+   it, using `t.Logf` - which `go test` discards for a test that passes, on a
+   runner that does not pass `-v`. So the question after "did you run the
+   reason?" is "can anyone see what it does?" `t.Logf` runs. Nothing happens.
+
 ### A measurement is a claim about a mechanism
 
 A number borrowed from somewhere else is a reason with its evidence detached,
 and it reads as stronger than a reason because it has digits in it.
 
 go-mutants measured a recording flag on its own dogfood at about twenty times
-the wall clock and said so. The number was right. Acting on it here was not:
-that cost comes from the engine writing every child's output to a file, and this
-module's recording keeps a length and a digest and drops the bytes - so the
-mechanism producing the twenty was absent here, and the number said nothing
-about this repository. A flag was removed from a workflow on the strength of it,
-which is a change made with no measurement at all, wearing somebody else's.
+the wall clock and said so. The number was right. Acting on it here was not: a
+flag was removed from a workflow on the strength of it, which is a change made
+with no measurement at all, wearing somebody else's.
 
 The obligation runs both ways, and the sending half is the easier one to miss.
 "About twenty times" can be borrowed; "about twenty times, for a baseline that
 runs seventeen packages' tests three times, in an implementation that saves each
 child's output to a file" cannot. A measurement shared without its mechanism is
-a conclusion shared without its reason, which is the same defect as the one
-above with more authority behind it.
+a conclusion shared without its reason, which is the same defect as the third
+point above with more authority behind it.
+
+This section had a third turn, and it is the reason the third point above is
+here at all. The first draft dismissed the borrowed number with a mechanism:
+that the cost comes from writing every child's output to a file, and that this
+module "keeps a length and a digest and drops the bytes". That reason was read
+off the `Output []byte` field's `json:"-"` tag, which says only that the bytes
+are not inlined into the stream. `DirSink.preserveOutput` writes them to a
+sidecar file under the trace directory, capped at a mebibyte, for every
+executed command - the same mechanism, in the same shape, one file per exec.
+The borrowed number was closer to applicable than the sentence rejecting it
+claimed.
+
+So the rule is not "check whether the other project's mechanism is present".
+It is that a mechanism asserted from a type declaration is an unchecked reason
+like any other, and asserting one in order to dismiss a measurement is the
+expensive direction to be wrong in - it ends an inquiry instead of opening one.
+The measurement is being taken. The number will go in
+[docs/trace-v1.md](../trace-v1.md), where the absence is currently recorded as
+an absence.
 
 ## Consequences
 
@@ -128,10 +168,12 @@ above with more authority behind it.
 - Granularity is a design decision with no test behind it. A reviewer asking
   "what does this ledger not see?" is doing work no tool does, and the answer
   belongs in the ledger's own comment.
-- The third point has no enforcement and is not going to get one. It is a
-  habit, recorded here so that the next person to write a confident sentence
-  about why has read a page saying that three such sentences were wrong in one
-  day.
+- The third and fourth points have no enforcement and are not going to get one.
+  They are habits, recorded here so that the next person to write a confident
+  sentence about why has read a page saying that several such sentences were
+  wrong in a single day, and that the cheap-to-check ones were the expensive
+  ones. No total is given, because a count of mistakes found is a count of
+  mistakes found.
 - A number from another project, another scope or another day is evidence about
   what it measured and a hypothesis about anything else. Saying which is free at
   the moment of writing and expensive afterwards.

@@ -65,9 +65,12 @@ and the only question is when.
 | the command surface in `README.md` | the `Command` constants, `commandHelp`, and the dispatch | `internal/cli/docs_test.go` |
 | the mutant accounting equations | the arithmetic `audit.go` runs, evaluated | `internal/report/docs_test.go` |
 | the disposition vocabulary | the published JSON Schema | `internal/report/docs_test.go` |
+| the limitation codes in `docs/limitations.md` | `LimitationCodes()` | `internal/report/limitations_docs_test.go` |
 | the run phases and their order | `runPhaseNames` | `internal/assure/trace_phases_docs_test.go` |
 | `docs/README.md` and `docs/adr/README.md` | the directories beside them | `internal/devgates/index_test.go` |
 | `REUSE.toml` | every file git holds | `internal/devgates/license_test.go` |
+| `.gitleaks.toml` allowlist | what git ignores, and what it tracks | `internal/devgates/gitleaks_test.go` |
+| where this repository names itself | `repository_references.txt` | `internal/devgates/repository_references_test.go` |
 | exported doc comments, and the paths and links inside them | the tree | `internal/devgates/docs_test.go` |
 | which files may start a toolchain | the build tags | `internal/devgates/tiers_test.go` |
 | package-level seams | `seam_allowlist.txt` | `internal/devgates/seams_test.go` |
