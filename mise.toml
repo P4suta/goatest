@@ -111,7 +111,7 @@ run = [
   "golangci-lint run",
   "actionlint",
   "typos",
-  "gitleaks dir . --no-banner --redact",
+  "gitleaks dir . --no-banner --redact --config .gitleaks.toml",
 ]
 
 [tasks.package]
