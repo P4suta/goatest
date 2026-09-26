@@ -49,12 +49,12 @@ and `mise run package` to reproduce the packaging job locally.
 
 ## Dependencies
 
-- Go modules and GitHub Actions are updated weekly by Dependabot. Actions are
-  pinned to commit SHAs with a version comment; keep that format when editing
-  workflows.
-- Tool versions in `mise.toml` are not managed by Dependabot. Bump them
-  manually and update the matching versions in `.github/workflows` (Go and
-  goreleaser) in the same change.
+- Mend-hosted Renovate proposes weekly updates.
+  It manages Go modules, GitHub Actions, and tool versions in `mise.toml`.
+  Actions use commit SHA pins with version comments.
+  Keep that format when editing workflows.
+- Go and GoReleaser versions also appear in `.github/workflows`.
+  Keep those copies aligned with `mise.toml` when editing them manually.
 
 ## Releases
 
