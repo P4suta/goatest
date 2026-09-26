@@ -97,9 +97,6 @@ jobs:
           version: v2.17.1
           args: release --snapshot --clean
 
-  # The one status check branch protection requires,
-  # named the same in every P4suta repository.
-  # It passes only when every job it needs succeeded or was skipped.
   required:
     name: required
     if: always()
