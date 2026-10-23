@@ -1,0 +1,12 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>P4suta/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Exclude the divergent tags retracted in https://github.com/P4suta/go-mutants/blob/e9c9682eed1526ade2acb3a2faba56c44b33c1ac/go.mod",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/P4suta/go-mutants"],
+      "allowedVersions": "!/^v?0\\.1\\.[012]$/"
+    }
+  ]
+}
