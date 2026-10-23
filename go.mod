@@ -3,7 +3,7 @@ module github.com/P4suta/goatest
 go 1.26.0
 
 require (
-	github.com/P4suta/go-mutants v0.1.2
+	github.com/P4suta/go-mutants v0.0.0-20260907060957-f55bffd8ee9e
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/sys v0.49.0
@@ -11,8 +11,8 @@ require (
 )
 
 require (
-	golang.org/x/mod v0.40.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 )
