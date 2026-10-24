@@ -38,6 +38,7 @@ func TestCacheProgramHelper(t *testing.T) {
 }
 
 func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("compiling through a real toolchain is not a short test")
 	}
@@ -71,6 +72,7 @@ func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
 }
 
 func TestTheSameTreeHitsAndACopiedOneMissesItsOwnPackages(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("compiling through a real toolchain is not a short test")
 	}
