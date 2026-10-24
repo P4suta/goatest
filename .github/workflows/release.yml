@@ -8,13 +8,115 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  test:
+    name: Go 1.27.3 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.27.3
+          cache: false
+      - name: Download pinned modules
+        run: go mod download
+      - name: Verify formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test offline
+        env:
+          GOPROXY: "off"
+          GOSUMDB: "off"
+          GOTELEMETRY: "off"
+          GOTOOLCHAIN: "local"
+        run: go test -timeout 40m ./...
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.27.3
+          cache: false
+      - run: go mod download
+      - name: Race detector
+        env:
+          GOPROXY: "off"
+          GOSUMDB: "off"
+          GOTELEMETRY: "off"
+          GOTOOLCHAIN: "local"
+        run: go test -race -timeout 40m ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+        with:
+          version: 2026.10.11
+          install_args: go golangci-lint actionlint typos gitleaks taplo
+          cache: false
+      - name: Lint
+        env:
+          GOTELEMETRY: "off"
+          GOTOOLCHAIN: "local"
+        run: mise run lint
+      - name: TOML formatting
+        run: taplo fmt --check
+
+  package:
+    name: Snapshot package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.27.3
+          cache: false
+      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --snapshot --clean
+
   release:
-    runs-on: ubuntu-latest
+    name: Publish release
+    needs: [test, race, lint, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # Publish release archives.
+      id-token: write # Authenticate the provenance attestation.
+      attestations: write # Attach provenance to the release archives.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
