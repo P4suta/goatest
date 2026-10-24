@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+name = "goatest"
+summary = "A scope-aware assurance runner for Go tests, fuzzing, mutation testing, and durable reports"
+install = """
+git clone https://github.com/P4suta/goatest.git
+cd goatest
+mise install go
+mise x -- go install ./cmd/goatest
+"""
+usage = "mise x -- go mod download all\ngoatest init\ngoatest plan ./..."
+usage_language = "sh"
+documentation_index = true
+copyright = "2026 goatest contributors"
+license = "MIT OR Apache-2.0"
+
+[preserved_licenses]
+mit_sha256 = "7b29d96ab60607fc031ef13181af5edf4afc46956eb5f8a8221fcfee3f763bac"
+apache_sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+
+[[consent]]
+contributor = "Yasunobu"
+evidence = "https://github.com/P4suta/goatest/commit/6932ce8d8904c7f02cb3ace3d7d1253d9ac71a73"
