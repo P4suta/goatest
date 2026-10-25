@@ -73,8 +73,8 @@ func TestProcessSignalsProduceDocumentedExitCodes(t *testing.T) {
 			}
 			if err := sendProcessSignal(command.Process.Pid, testCase.signal); err != nil {
 				_ = command.Process.Kill()
-				<-wait
-				t.Fatal(err)
+				processErr := <-wait
+				t.Fatalf("could not send signal: %v (process: %v)\nstdout=%s\nstderr=%s", err, processErr, stdout.String(), stderr.String())
 			}
 			select {
 			case err := <-wait:
