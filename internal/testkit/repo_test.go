@@ -4,6 +4,7 @@
 package testkit_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -175,6 +176,58 @@ func TestHelperArgvReexecutesTheTestBinary(t *testing.T) {
 	}
 }
 
+func TestRepoGitIgnoresForeignRepositoryBindings(t *testing.T) {
+	gitBinary(t)
+	for _, prefix := range []string{"GIT_", "gIt_"} {
+		t.Run(prefix, func(t *testing.T) {
+			foreign := testkit.NewRepo(t).File("foreign.txt", "foreign\n")
+			runGit(t, foreign.Root(), "init", "--quiet", "--initial-branch="+testkit.GitBranch)
+			runGit(t, foreign.Root(), "add", "-A")
+			runGit(t, foreign.Root(), "-c", "user.name="+testkit.GitUserName,
+				"-c", "user.email="+testkit.GitUserEmail, "commit", "--quiet", "-m", "foreign fixture")
+			refs := runGit(t, foreign.Root(), "for-each-ref", "--format=%(refname) %(objectname)")
+			files := make(map[string][]byte)
+			for _, name := range []string{".git/config", ".git/index"} {
+				contents, err := os.ReadFile(foreign.Path(name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[name] = contents
+			}
+			repository := testkit.NewRepo(t).BoundaryFixture()
+			for name, value := range map[string]string{
+				"DIR":        foreign.Path(".git"),
+				"COMMON_DIR": foreign.Path(".git"),
+				"WORK_TREE":  repository.Root(),
+				"INDEX_FILE": foreign.Path(".git/index"),
+			} {
+				t.Setenv(prefix+name, value)
+			}
+
+			repository.Git()
+
+			if got := runGit(t, foreign.Root(), "for-each-ref", "--format=%(refname) %(objectname)"); got != refs {
+				t.Errorf("foreign refs changed: got %q, want %q", got, refs)
+			}
+			for name, want := range files {
+				got, err := os.ReadFile(foreign.Path(name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("foreign %s changed", name)
+				}
+			}
+			if got := runGit(t, repository.Root(), "log", "--format=%s"); got != testkit.GitCommitMessage {
+				t.Errorf("fixture commit = %q, want %q", got, testkit.GitCommitMessage)
+			}
+			if got := runGit(t, repository.Root(), "status", "--porcelain"); got != "" {
+				t.Errorf("fixture status = %q, want clean", got)
+			}
+		})
+	}
+}
+
 func runGo(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
 	command := exec.CommandContext(t.Context(), testkit.GoBinary(t), arguments...)
@@ -201,6 +254,10 @@ func runGit(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
 	command := exec.CommandContext(t.Context(), gitBinary(t), arguments...)
 	command.Dir = root
+	command.Env = append(slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		const prefix = "GIT_"
+		return len(entry) >= len(prefix) && strings.EqualFold(entry[:len(prefix)], prefix)
+	}), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", arguments, err, output)
