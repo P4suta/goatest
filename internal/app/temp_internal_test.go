@@ -38,6 +38,21 @@ func abandonedRunScratch(t *testing.T, parent, name string, bytes int) string {
 	return directory
 }
 
+func logScratchState(t *testing.T, phase, directory string) {
+	t.Helper()
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Logf("scratch %s: stat %q: %v", phase, directory, err)
+	} else {
+		t.Logf("scratch %s: directory=%q is_dir=%t mode=%s modified=%s",
+			phase, directory, info.IsDir(), info.Mode(), info.ModTime().UTC().Format(time.RFC3339Nano))
+	}
+	payload, err := os.ReadFile(filepath.Join(directory, "payload"))
+	t.Logf("scratch %s: payload bytes=%d error=%v", phase, len(payload), err)
+	marker, err := tempowner.ReadMarker(directory)
+	t.Logf("scratch %s: marker=%+v error=%v", phase, marker, err)
+}
+
 func keptDirectory(t *testing.T, parent, name string, bytes int) string {
 	t.Helper()
 	directory := filepath.Join(parent, name)
@@ -103,6 +118,7 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 		t.Fatal(err)
 	}
 	orphan := abandonedRunScratch(t, temporary, "goatest-run-dead", 4096)
+	logScratchState(t, "after release", orphan)
 	expired := keptDirectory(t, temporary, "goatest-run-old", 2048)
 	current := keptDirectory(t, temporary, "goatest-run-new", 512)
 	moment := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
@@ -120,6 +136,7 @@ func TestCacheGCCollectsTheOrphansAndTheKeptDirectoriesTheTTLHasExpired(t *testi
 	reclaimed := fmt.Sprintf("removed=1 bytes=%d live=0 kept=2", tempowner.Size(orphan))
 
 	expiredBytes := fmt.Sprintf("removed-entries=2 removed-bytes=%d remaining=1", tempowner.Size(expired))
+	logScratchState(t, "before collection", orphan)
 	collected, err := service.Execute(t.Context(), cli.CommandCache, cli.Request{}, "gc")
 	if err != nil || collected.Verdict != report.VerdictCompleted {
 		t.Fatalf("cache gc = %+v, %v", collected, err)
