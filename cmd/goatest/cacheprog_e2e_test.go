@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/P4suta/goatest/internal/buildcache"
+	"github.com/P4suta/goatest/internal/environment"
 	"github.com/P4suta/goatest/internal/filemode"
 	"github.com/P4suta/goatest/internal/testkit"
 )
@@ -206,27 +207,26 @@ func ageCacheFixture(t *testing.T, directory string) {
 func compileCacheFixture(t *testing.T, goBinary, fixture, base, scratch string, persist bool) {
 	t.Helper()
 	program := quoteCacheProgram(os.Args[0]) + " -test.run=^TestCacheProgramHelper$"
-	environment := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + t.TempDir(),
-		"GOPATH=" + t.TempDir(),
-		"GOCACHE=" + t.TempDir(),
+	env := append(environment.Provider(nil, nil),
+		"HOME="+t.TempDir(),
+		"GOPATH="+t.TempDir(),
+		"GOCACHE="+t.TempDir(),
 
 		"GOFLAGS=-buildvcs=false",
 		"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOTELEMETRY=off",
 
-		"GOCOVERDIR=" + t.TempDir(),
-		"GOCACHEPROG=" + program,
-		cacheProgramHelper + "=1",
-		cacheProgramBase + "=" + base,
-		cacheProgramScratch + "=" + scratch,
-	}
+		"GOCOVERDIR="+t.TempDir(),
+		"GOCACHEPROG="+program,
+		cacheProgramHelper+"=1",
+		cacheProgramBase+"="+base,
+		cacheProgramScratch+"="+scratch,
+	)
 	if persist {
-		environment = append(environment, cacheProgramPersist+"=1")
+		env = append(env, cacheProgramPersist+"=1")
 	}
 	command := exec.Command(goBinary, "build", "./...")
 	command.Dir = fixture
-	command.Env = environment
+	command.Env = env
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build through the cache program: %v\n%s", err, output)

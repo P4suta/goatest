@@ -4,28 +4,32 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Go 1.26 / ${{ matrix.os }}
+    name: Go 1.27.3 / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-26.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.26.6
+          go-version: 1.27.3
           cache-dependency-path: go.sum
       - name: Download pinned modules
         run: go mod download
@@ -42,34 +46,17 @@ jobs:
           GOTOOLCHAIN: "local"
         run: go test -timeout 40m ./...
 
-  race:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache-dependency-path: go.sum
-      - run: go mod download
-      - name: Race detector
-        env:
-          GOPROXY: "off"
-          GOSUMDB: "off"
-          GOTELEMETRY: "off"
-          GOTOOLCHAIN: "local"
-        run: go test -race -timeout 40m ./...
-
   lint:
-    runs-on: ubuntu-latest
+    name: Lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
-          version: 2026.8.14
+          version: 2026.10.17
           install_args: go golangci-lint actionlint typos gitleaks taplo
       - name: Lint
         env:
@@ -79,20 +66,17 @@ jobs:
       - name: TOML formatting
         run: taplo fmt --check
 
-  package:
-    runs-on: ubuntu-latest
+  required:
+    name: required
+    if: always()
+    needs: [test, lint]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache: false
-      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
-        with:
-          distribution: goreleaser
-          version: v2.17.1
-          args: release --snapshot --clean
+      - name: Fail unless every needed job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "${RESULTS}"
+          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"

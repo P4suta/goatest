@@ -51,9 +51,13 @@ must not silently change the program mutation discovery measures.
    job count is omitted.
 5. **The frozen workspace admits concurrent controls safely.** Each
    go-mutants `Workspace.Exec` call receives a private temporary directory.
-   `Prepare` and `Close` take the exclusive side of the execution lock and wait
-   for every control. Before discovery, `Prepare` re-digests the snapshot and
-   refuses any path a control added, removed, or changed.
+   `Close` takes the exclusive side of the workspace lock and waits for every
+   control and for a preparation; `Prepare` holds the tree exclusively only
+   for its instrumentation window (from the integrity gate through validation
+   and source restoration) and runs beside controls everywhere else. At the top
+   of that window, after discovery, `Prepare` re-digests the snapshot and
+   refuses any path a control added, removed, or changed, and compares every
+   file discovery read against the frozen manifest.
 6. **Package controls overlap by package.** Whole-suite coverage controls run
    in deterministic import-path slots after target controls have supplied their
    duration references. Full-run original controls reuse the prepared probe
