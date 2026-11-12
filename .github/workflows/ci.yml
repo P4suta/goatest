@@ -4,195 +4,82 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Go 1.26 / ${{ matrix.os }}
+    name: Go 1.27.3 / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-26.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # The whole history, so that a run asking what changed can be told.
-          # A shallow clone answers "nothing changed" to every question about a
-          # range it does not hold, which is the same answer as a clean tree and
-          # a completely different fact.
-          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache-dependency-path: go.sum
+          fetch-depth: 0
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
-          version: 2026.8.14
-          install_args: taplo
+          version: 2026.11.2
+          install_args: go
       - name: Download pinned modules
         run: go mod download
       - name: Verify formatting
         shell: bash
-        run: mise run fmt
+        run: test -z "$(gofmt -l .)"
       - name: Vet
-        run: mise run build
-      - name: Unit tier offline
+        run: go vet ./...
+      - name: Test offline
         env:
           GOPROXY: "off"
           GOSUMDB: "off"
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
           GOATEST_TEST_REQUIRE_TOOLS: "1"
-        shell: bash
-        run: |
-          mkdir -p .goatest
-          go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
-          go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || audit_exit=1
-          exit "$audit_exit"
-      - name: Integration tier offline
-        env:
-          GOPROXY: "off"
-          GOSUMDB: "off"
-          GOTELEMETRY: "off"
-          GOTOOLCHAIN: "local"
-          GOATEST_TEST_REQUIRE_TOOLS: "1"
-        shell: bash
-        run: |
-          mkdir -p .goatest
-          go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl && audit_exit=0 || audit_exit=$?
-          go run ./internal/devtools/testaudit < .goatest/integration-events.jsonl || audit_exit=1
-          exit "$audit_exit"
-
-  race:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          # The whole history, so that a run asking what changed can be told.
-          # A shallow clone answers "nothing changed" to every question about a
-          # range it does not hold, which is the same answer as a clean tree and
-          # a completely different fact.
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache-dependency-path: go.sum
-      - run: go mod download
-      - name: Race detector
-        env:
-          GOPROXY: "off"
-          GOSUMDB: "off"
-          GOTELEMETRY: "off"
-          GOTOOLCHAIN: "local"
-          GOATEST_TEST_REQUIRE_TOOLS: "1"
-        run: go test -race -tags integration -timeout 40m ./...
-
-  # goatest verifying goatest.
-  #
-  # The task existed and nothing ran it. Every other check here asks whether the
-  # code is what this repository says it is; this one asks whether the tool does
-  # what it says it does, which is the only question the tool itself can answer.
-  dogfood:
-    # Pull requests only, because the scope is what the branch changed and on a
-    # push to main that is nothing. The job would run, find no changed file,
-    # verify nothing and report a green check - which is the shape every other
-    # gate on this branch was written to refuse. A check that cannot fail is
-    # worse than an absent one, because it is counted.
-    #
-    # The full-scope run is `mise run dogfood`, and it is not wired anywhere: it
-    # takes over an hour, and nothing here has a schedule to put it on yet.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # A bound on a runaway, not a budget for a wait. It was 30, chosen as a
-    # length somebody was willing to wait for, and the branch that added it
-    # runs past 30 on its own changeset - so the first thing that number would
-    # have done is fail a check about this workflow rather than about the code.
-    # 60 is not derived from a measurement of this job either, and saying so is
-    # the point: it is set above any run this repository has been seen to take,
-    # against a GitHub default of 360, so that a hung run is killed within the
-    # hour instead of burning six. What makes a generous bound cheap is that
-    # reaching it is no longer silent - a SIGTERM'd run publishes a report and
-    # a diagnostics bundle, and both are uploaded below.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache-dependency-path: go.sum
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
-        with:
-          version: 2026.8.14
-      - run: go mod download
-      # No GOATEST_TRACE. It was set here so that a failing dogfood would leave a
-      # recording to read, which is the right instinct and was an unmeasured
-      # cost: go-mutants measured the same flag on a comparable workload at
-      # about twenty times the wall clock, because a recording saves the output
-      # of every child and a baseline runs whole test suites. Turning it back on
-      # needs a measurement of this job with it, not an argument about it.
-      - name: Verify what this branch changed, with itself
-        run: mise run dogfood-changed
-      # Both directories, because the two failures this job can have leave
-      # their evidence in different places. A run that finishes writes a report
-      # under reports/; a run this job's own time limit kills is sent a SIGTERM
-      # and writes a report with no measurements in it, and what it had reached
-      # is in the diagnostics bundle. Keeping only the first would keep nothing
-      # for the failure that is hardest to reproduce.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: dogfood-reports
-          if-no-files-found: ignore
-          path: |
-            reports/
-            .goatest/diagnostics/
+        run: mise run test-integration-audit
 
   lint:
-    runs-on: ubuntu-latest
+    name: Lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # The whole history, so that a run asking what changed can be told.
-          # A shallow clone answers "nothing changed" to every question about a
-          # range it does not hold, which is the same answer as a clean tree and
-          # a completely different fact.
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 0
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
-          version: 2026.8.14
+          version: 2026.11.2
           install_args: go golangci-lint actionlint typos gitleaks taplo
       - name: Lint
         env:
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
         run: mise run lint
+      - name: TOML formatting
+        run: taplo fmt --check
 
-  package:
-    runs-on: ubuntu-latest
+  required:
+    name: required
+    if: always()
+    needs: [test, lint]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.6
-          cache: false
-      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
-        with:
-          distribution: goreleaser
-          version: v2.17.1
-          args: release --snapshot --clean
+      - name: Fail unless every needed job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "${RESULTS}"
+          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"

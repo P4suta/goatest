@@ -26,3 +26,4 @@ README.md
 REUSE.toml
 SECURITY.md
 internal/report/formats.go
+repository.toml

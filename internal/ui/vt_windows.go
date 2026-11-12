@@ -29,7 +29,6 @@ func EnableVirtualTerminal(writer io.Writer, injected ...virtualTerminalOperatio
 	handle := windows.Handle(file.Fd())
 	var mode uint32
 	if err := operations.get(handle, &mode); err != nil {
-
 		return true
 	}
 	if mode&windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {

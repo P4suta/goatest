@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 goatest contributors
-SPDX-License-Identifier: MIT OR Apache-2.0
--->
-
 # 0004 — Proof layers, not budgets
 
 ## Status

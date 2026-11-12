@@ -5,10 +5,8 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Documentation
 
-`internal/devgates` pins this index to the directory, in both directions: a page
-with no line here fails, and a line here naming a page the tree no longer holds
-fails as loudly. A page nothing checks is a page that will be wrong, and the only
-question is when.
+`internal/devgates` pins this index to the directory, in both directions: a page with no line here fails, and a line here naming a page the tree no longer holds fails as loudly.
+A page nothing checks is a page that will be wrong, and the only question is when.
 
 ## What it does, and will not do
 
@@ -19,8 +17,8 @@ question is when.
 
 ## Contracts
 
-These are the documents something else validates against. Each is pinned to the
-code by a ledger in the package that owns it.
+These are the documents something else validates against.
+Each is pinned to the code by a ledger in the package that owns it.
 
 | Page | Subject |
 | --- | --- |
@@ -31,6 +29,8 @@ code by a ledger in the package that owns it.
 | [protocols.md](protocols.md) | the resource and generation provider protocols |
 
 ## Surfaces
+
+[commands.md](commands.md) lists the command surface.
 
 | Page | Subject |
 | --- | --- |
