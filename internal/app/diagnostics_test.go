@@ -180,40 +180,30 @@ func TestABundleThatCannotBeWrittenWarnsAndLeavesTheRunAlone(t *testing.T) {
 	}
 }
 
-func TestARunThatDidNotFailLeavesNoBundle(t *testing.T) {
+// TestARunThatFinishedLeavesNoBundle used to cover an interrupted run too, on
+// the reading that a run which was stopped had not failed. It had not, and it
+// had not finished either, and grouping it with a run that reached a verdict
+// meant the one outcome with nothing else to show for it was also the one that
+// wrote nothing down. A stopped run now leaves a bundle; that is asserted in
+// interrupted_test.go, along with the fact that it holds how far the run got.
+func TestARunThatFinishedLeavesNoBundle(t *testing.T) {
 	t.Parallel()
-	for _, testCase := range []struct {
-		name   string
-		runErr error
-	}{
-
-		{name: "assured"},
-
-		{name: "interrupted", runErr: context.Canceled},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			var progress bytes.Buffer
-			service := app.Service{
-				Root: root, Progress: &progress,
-				Run: func(context.Context, assure.Options) (report.Report, error) {
-					if testCase.runErr != nil {
-						return report.Report{}, testCase.runErr
-					}
-					return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
-				},
-			}
-			if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); !errors.Is(err, testCase.runErr) {
-				t.Fatalf("verify error = %v, want %v", err, testCase.runErr)
-			}
-			if _, err := os.Stat(filepath.Join(root, ".goatest", "diagnostics")); !os.IsNotExist(err) {
-				t.Fatalf("a run that did not fail left a bundle: %v", err)
-			}
-			if strings.Contains(progress.String(), "diagnostics") {
-				t.Fatalf("progress = %q", progress.String())
-			}
-		})
+	root := t.TempDir()
+	var progress bytes.Buffer
+	service := app.Service{
+		Root: root, Progress: &progress,
+		Run: func(context.Context, assure.Options) (report.Report, error) {
+			return report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}, nil
+		},
+	}
+	if _, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, ""); err != nil {
+		t.Fatalf("verify error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".goatest", "diagnostics")); !os.IsNotExist(err) {
+		t.Fatalf("a run that reached a verdict left a bundle: %v", err)
+	}
+	if strings.Contains(progress.String(), "diagnostics") {
+		t.Fatalf("progress = %q", progress.String())
 	}
 }
 

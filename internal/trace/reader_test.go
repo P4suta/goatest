@@ -18,6 +18,7 @@ const (
 )
 
 func TestReadSummaryMakesMissingIncompleteGapsAndDropsExplicit(t *testing.T) {
+	t.Parallel()
 	missing, err := ReadSummary(filepath.Join(t.TempDir(), "absent"))
 	if err != nil || !missing.Missing || missing.HasRunEnd {
 		t.Fatalf("missing summary = (%+v, %v)", missing, err)
@@ -46,6 +47,7 @@ func TestReadSummaryMakesMissingIncompleteGapsAndDropsExplicit(t *testing.T) {
 }
 
 func TestReadSummaryRejectsUnknownFieldsAndOutOfOrderSequences(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, FileName), []byte(`{"seq":1,"type":"run-start","schema":"goatest-trace-v1","timestamp":"2026-01-01T00:00:00Z","elapsed_ms":0,"unknown":true}`+"\n"), filemode.PrivateFile); err != nil {
 		t.Fatal(err)
@@ -63,6 +65,7 @@ func TestReadSummaryRejectsUnknownFieldsAndOutOfOrderSequences(t *testing.T) {
 }
 
 func TestReadSummaryCountsAProbeExecAndRejectsOneWithoutItsPayload(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	writeTraceEvents(t, directory,
 		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
@@ -83,6 +86,7 @@ func TestReadSummaryCountsAProbeExecAndRejectsOneWithoutItsPayload(t *testing.T)
 }
 
 func TestReadSummaryRejectsARouteWithoutGranularity(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	writeTraceEvents(t, directory,
 		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
@@ -95,6 +99,7 @@ func TestReadSummaryRejectsARouteWithoutGranularity(t *testing.T) {
 }
 
 func TestReadSummaryAggregatesFinishedPreparationAndRejectsMalformedEvents(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	writeTraceEvents(t, directory,
 		Event{Seq: 1, Type: TypeRunStart, Schema: SchemaV1, Timestamp: "2026-01-01T00:00:00Z"},
@@ -140,6 +145,7 @@ func TestReadSummaryAggregatesFinishedPreparationAndRejectsMalformedEvents(t *te
 }
 
 func TestDiffReportsPreparationDurationChanges(t *testing.T) {
+	t.Parallel()
 	difference := Diff(
 		Summary{PrepareDurationMS: map[string]int64{PreparePhaseBinaryBuild: readerPrepareDurationMS}},
 		Summary{PrepareDurationMS: map[string]int64{PreparePhaseBinaryBuild: laterPrepareDurationMS}},

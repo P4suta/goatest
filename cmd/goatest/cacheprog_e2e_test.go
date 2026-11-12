@@ -1,3 +1,5 @@
+//go:build integration
+
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
@@ -27,7 +29,7 @@ const (
 )
 
 func TestCacheProgramHelper(t *testing.T) {
-	if !testkit.HelperEnabled(cacheProgramHelper) {
+	if !testkit.RunningAsHelper(t, cacheProgramHelper, "TestCacheProgramHelper") {
 		return
 	}
 	arguments := []string{"cacheprog", "--base", os.Getenv(cacheProgramBase), "--scratch", os.Getenv(cacheProgramScratch)}
@@ -39,13 +41,7 @@ func TestCacheProgramHelper(t *testing.T) {
 
 func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("compiling through a real toolchain is not a short test")
-	}
-	goBinary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("no go command on PATH")
-	}
+	goBinary := testkit.GoBinary(t)
 	fixture := writeCacheFixtureModule(t)
 	base := preparedCacheLayer(t)
 
@@ -73,13 +69,7 @@ func TestTheGoCommandCompilesThroughTheCacheProgram(t *testing.T) {
 
 func TestTheSameTreeHitsAndACopiedOneMissesItsOwnPackages(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("compiling through a real toolchain is not a short test")
-	}
-	goBinary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("no go command on PATH")
-	}
+	goBinary := testkit.GoBinary(t)
 	base := preparedCacheLayer(t)
 	here := writeCacheFixtureModule(t)
 

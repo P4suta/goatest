@@ -217,6 +217,15 @@ func (session *resumeMutationSession) Probe(context.Context, gomutants.ProbeRequ
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
 }
 
+// Control reports a clean original of a measurable duration.
+//
+// These tests are about what a resumed run re-executes, and a control that
+// reported nothing would make every mutant inconclusive for a reason none of
+// them is about.
+func (session *resumeMutationSession) Control(context.Context, gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	return gomutants.ControlResult{Duration: time.Millisecond}, nil
+}
+
 func (session *resumeMutationSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	session.calls = append(session.calls, request.Mutant)
 	session.requests = append(session.requests, request)
@@ -311,8 +320,8 @@ func TestMutationSurvivorReachedByAFuzzTargetIsCheckpointedAfterSeedExecution(t 
 	checkpointed := make(map[string]MutationEvaluation)
 	evaluation, err := evaluateMutationsForTest(t.Context(), session, reachedMutationTargets(), MutationOptions{
 		Jobs: 1, Timeout: time.Second,
-		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{Duration: time.Millisecond}, nil
 		},
 		Checkpoint: func(id string, unit MutationEvaluation) {
 			saved = append(saved, id)

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Run trace v1
 
 The first trace contract is `goatest-trace-v1`. A trace is the diagnostic
@@ -60,6 +65,60 @@ not a way past that refusal: `--trace=/tmp/alias/run` is refused when
 refused whatever it points at. Only the part of the path that already exists
 can be resolved, which is the part that decides where the directory the sink
 is about to create will land.
+
+## Why recording is asked for
+
+A trace is opt-in, and the case for turning it on by default is strong enough
+that it should be written down rather than left as an absence.
+
+The case: a trace cannot be taken retroactively. `docs/ci.md` tells a reader
+that the way to diagnose a run which only misbehaves on a runner is to set
+`GOATEST_TRACE: '1'` on the verify step - which is advice to make it fail again,
+and useless for a failure that does not repeat. A recording nobody asked for in
+advance is a recording nobody has.
+
+Three of the usual objections do not apply here, and [ADR
+0002](adr/0002-trace-is-not-evidence.md) is why. Asking for a recording enters
+no identity, so a traced run and an untraced one share a cache key and reach the
+same verdict. A sink that cannot be written costs a `trace-unavailable` note
+rather than the run. And retention bounds the directory by the same TTL and byte
+budget as the cache.
+
+The fourth objection is the one that has not been answered, and it is about this
+repository's own test suite rather than about a user's. `internal/app` and
+`internal/cli` drive whole runs - a test asserting an exit code still executes
+the service beneath it - so a default that records every run records every one of
+those too. go-mutants measured the equivalent change in its own tree and found a
+suite going from about seven seconds to over six hundred, and kept the flag
+opt-in for that reason.
+
+That figure carries its mechanism, because a figure without one is a conclusion
+without a reason - see [ADR 0021](adr/0021-what-a-ledger-cannot-check.md), which
+records this number being borrowed badly. The cost is a recorder writing each
+executed command's output to a file, over a suite whose tests execute whole
+commands, and both halves hold here: `DirSink.preserveOutput` writes one file
+per executed command under `output/`, capped at a mebibyte, and the two packages
+named above execute runs. So the figure is a hypothesis about this repository
+rather than evidence, but a hypothesis about the right mechanism, and nothing
+here argues for a smaller factor.
+
+The number itself is not known, and cannot be taken from where it would matter:
+`GOATEST_TRACE` is read in `cmd/goatest` and translated into `--trace`, and the
+tests construct their service directly, so the variable does not reach them and
+the measurement cannot be taken without first making the change it is meant to
+justify.
+
+So the default stands, and stands on a measurement this repository has not taken.
+That is the honest state of it. What is already true is that the runs which most
+need a recording - long, on a machine nobody is watching, failing in a way nobody
+can reproduce - are the runs a workflow can ask for explicitly, and `docs/ci.md`
+says how.
+
+One detail belongs here for whoever does flip it. `os.Getenv` cannot tell an
+unset variable from an empty one, so reading an empty `GOATEST_TRACE` as "off"
+would disable a default for every run that never mentioned the variable. An empty
+value has to mean "said nothing", and switching a default off has to be its own
+spelling.
 
 ## Recording without a flag
 
@@ -472,9 +531,13 @@ confirmation and does not cause mutant re-execution. The synthetic identity is
 request, and `control: true` is required. A control never carries `suite` or
 `infected`: incidental probe logging is not infection evidence, `proofaudit`
 ignores it, and `tracesummary` accounts for it in a separate exact original
-preflights block. A mutant replay deliberately prepares no probe tree and
-instead uses a lazy pristine-workspace control, recorded as an ordinary `exec`
-event.
+preflights block.
+
+A control is recorded in the probe payload because this contract's `type` enum
+is closed and has no payload of its own for one. The vocabulary is borrowed: an
+infection probe answers whether a mutated value would have differed, and a
+control answers whether the program the user wrote passes its own tests. The
+borrowing ends when the contract version does.
 
 A target or suite the pass could not measure keeps no facts at all. A
 `test-failed`, a `timed-out`, an `unavailable`, and an execution stopped by an

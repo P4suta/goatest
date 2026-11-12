@@ -191,6 +191,7 @@ func TestBuildCacheLocationResolvesTheProgramAndTheLayerTheMachineKeeps(t *testi
 }
 
 func TestCacheStatusAndCollectionReachTheBuildCache(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	if err := os.WriteFile(filepath.Join(root, config.FileName),
@@ -274,6 +275,7 @@ func TestCacheMaintenanceReportsAndCollectsAbandonedNativeProjections(t *testing
 }
 
 func TestCacheGCReportsABuildLayerAnotherProcessIsCollecting(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	if err := os.WriteFile(filepath.Join(root, config.FileName),
@@ -323,6 +325,7 @@ func TestCacheGCReportsABuildLayerAnotherProcessIsCollecting(t *testing.T) {
 }
 
 func TestCacheStatusSurvivesAMachineWithNowhereToKeepABuildCache(t *testing.T) {
+	t.Parallel()
 	service := Service{
 		Root: t.TempDir(), Progress: io.Discard, TempDirectory: t.TempDir(),
 	}

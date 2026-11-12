@@ -119,6 +119,7 @@ func TestCollectRaceCommandIsDeterministicClonedAndDeepIncludesEveryPackage(t *t
 		{name: "deep", contract: "deep-v1", concurrent: []string{"ignored"}, model: goanalysis.Model{Packages: []goanalysis.Package{{ImportPath: "fixture/z"}, {ImportPath: "fixture/a"}, {ImportPath: "fixture/a"}}}, packages: []string{"fixture/a", "fixture/z"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			environment := []string{"DB=ready"}
 			workspace := &baselineFakeWorkspace{exec: func(command gomutants.Command) (gomutants.CommandResult, error) {
 				wantArgv := append([]string{"go", "test", "-race", "-count=1"}, test.packages...)
@@ -208,6 +209,7 @@ func TestCollectRaceClassifiesPanicAndUnexpectedExitPrecisely(t *testing.T) {
 		{name: "unexpected", output: "go: -race requires cgo", wantErr: "goatest: race verification failed (exit=2): go: -race requires cgo"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			workspace := &baselineFakeWorkspace{exec: func(gomutants.Command) (gomutants.CommandResult, error) {
 				return gomutants.CommandResult{ExitCode: 2, Output: []byte(test.output)}, nil
 			}}

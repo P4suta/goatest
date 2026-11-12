@@ -25,7 +25,8 @@ func (renderer *plain) Note(kind, detail string) {
 	if renderer.writer == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(renderer.writer, noteLineFormat, report.LineText(kind), report.LineText(renderer.annotate(kind, detail)))
+	_, _ = fmt.Fprintf(renderer.writer, noteLineFormat,
+		report.LineText(kind), report.LineText(NoteDetail(renderer.annotate(kind, detail))))
 }
 
 func (renderer *plain) annotate(kind, detail string) string {

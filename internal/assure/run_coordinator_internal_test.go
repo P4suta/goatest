@@ -819,7 +819,7 @@ func TestRunCoordinatorCacheHitRequiresCurrentAcceptanceAndClosesSnapshot(t *tes
 		harness.cache.found = true
 		harness.cache.getReport = report.Report{
 			Verdict:     report.VerdictDefect,
-			Limitations: []report.Limitation{{Code: laterPhasesNotRunCode}},
+			Limitations: []report.Limitation{{Code: report.LimitationLaterPhasesNotRun}},
 		}
 		result, err := harness.run(Options{})
 		if err != nil || result.Snapshot != harness.digest || harness.discoverCalls != 1 {

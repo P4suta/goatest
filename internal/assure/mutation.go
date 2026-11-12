@@ -61,10 +61,20 @@ const (
 	mutationControlUnavailable        = "no positive clean observation is available to bound mutation execution"
 )
 
+// MutationSession is the prepared go-mutants session a run measures through.
+//
+// Control is the fourth method and the newest. Before it existed, "did the
+// original program pass these tests" was answered two different ways depending
+// on the kind of run - a second workspace running a `go test` argv it built
+// itself, or the probe tree's test-failed outcome read as a red suite - and
+// neither was the binaries the mutants were measured against. The engine
+// answers it directly now: the same prepared binaries, the same launch shape,
+// with nothing activated.
 type MutationSession interface {
 	Catalog() gomutants.Catalog
 	Exec(context.Context, gomutants.ExecRequest) (gomutants.MutantResult, error)
 	Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error)
+	Control(context.Context, gomutants.ControlRequest) (gomutants.ControlResult, error)
 }
 
 type TargetEvidence struct {
@@ -101,10 +111,20 @@ type MutationOptions struct {
 	Progress func(completed, total int)
 	Resume   map[string]MutationEvaluation
 
-	Checkpoint      func(string, MutationEvaluation)
-	OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+	Checkpoint func(string, MutationEvaluation)
 
-	freshControl func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+	// OriginalControl runs the original program under the same request a
+	// mutant is about to run under, memoised so that every mutant sharing a
+	// request pays for one.
+	OriginalControl OriginalControl
+
+	// freshControl is the same measurement without the memo.
+	//
+	// A mutant that exhausted its budget is answered by a fresh control rather
+	// than by the expiration: a derived budget is a claim about how long the
+	// work takes, and a mutant that timed out has just falsified it. Reusing
+	// the memoised answer would re-use the claim that was falsified.
+	freshControl OriginalControl
 
 	Trace *trace.Recorder
 
@@ -644,19 +664,27 @@ func mutationOutcomeProtocolError(mutant gomutants.Mutant, outcome gomutants.Out
 	return fmt.Errorf("goatest: mutant %s returned %q without an execution error", mutant.DisplayID, outcome)
 }
 
+// OriginalControl measures the original program under one mutant's request.
+//
+// It takes an ExecRequest rather than a ControlRequest because the caller is
+// always holding the execution it is a control for, and a control of a
+// different target is a control of nothing. The narrowing to what a control
+// may carry happens in one place, at the session boundary.
+type OriginalControl func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error)
+
 type controlOutcome struct {
 	once   sync.Once
-	result gomutants.CommandResult
+	result gomutants.ControlResult
 	err    error
 }
 
-func memoizedOriginalControl(control func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+func memoizedOriginalControl(control OriginalControl) OriginalControl {
 	if control == nil {
 		return nil
 	}
 	var mutex sync.Mutex
 	outcomes := make(map[string]*controlOutcome)
-	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
 		key := request.Package + "\x00" + strings.Join(request.Args, "\x00") + "\x00" + strings.Join(request.Env, "\x00") + "\x00" + strconv.FormatInt(int64(request.Timeout), 10)
 		mutex.Lock()
 		outcome, remembered := outcomes[key]
@@ -757,7 +785,7 @@ func executeMutation(ctx context.Context, session MutationSession, request gomut
 	return result, observation, err
 }
 
-func runOriginalControl(ctx context.Context, request gomutants.ExecRequest, options MutationOptions) (gomutants.CommandResult, error) {
+func runOriginalControl(ctx context.Context, request gomutants.ExecRequest, options MutationOptions) (gomutants.ControlResult, error) {
 	return options.OriginalControl(ctx, request)
 }
 

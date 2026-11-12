@@ -25,6 +25,7 @@ type service struct {
 }
 
 func TestHelpListsPublicSurfaceWithoutRunningService(t *testing.T) {
+	t.Parallel()
 	for _, flag := range []string{"--help", "-h"} {
 		fake := &service{}
 		var stdout, stderr bytes.Buffer
@@ -52,6 +53,7 @@ func (s *service) Execute(_ context.Context, command cli.Command, request cli.Re
 }
 
 func TestDefaultCommandAndGlobalFlags(t *testing.T) {
+	t.Parallel()
 	fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "deep-v1"}}
 	var stdout, stderr bytes.Buffer
 	exit := cli.Run(t.Context(), []string{"--changed=origin/main", "--contract=deep-v1", "--json", "--ui=plain"}, &stdout, &stderr, fake)
@@ -71,6 +73,7 @@ func TestDefaultCommandAndGlobalFlags(t *testing.T) {
 }
 
 func TestTestBinaryArgumentsAreCanonicalizedAfterSeparator(t *testing.T) {
+	t.Parallel()
 	fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 	exit := cli.Run(t.Context(), []string{"verify", "./...", "--", "-short", "-custom=value"}, &bytes.Buffer{}, &bytes.Buffer{}, fake)
 	if exit != cli.ExitAssured {
@@ -82,6 +85,7 @@ func TestTestBinaryArgumentsAreCanonicalizedAfterSeparator(t *testing.T) {
 }
 
 func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
+	t.Parallel()
 	changed := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 	if exit := cli.Run(t.Context(), []string{"--changed"}, &bytes.Buffer{}, &bytes.Buffer{}, changed); exit != cli.ExitAssured || !changed.request.Changed || changed.request.ChangedRef != "" {
 		t.Fatalf("bare changed = exit %d request %+v", exit, changed.request)
@@ -90,12 +94,17 @@ func TestBareChangedFlagAndCancellationArePreserved(t *testing.T) {
 	cancelled := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictError}, err: context.Canceled}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if exit := cli.Run(t.Context(), []string{"verify"}, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted || stderr.String() != "goatest: interrupted\n" || stdout.Len() != 0 {
+	// The cause is kept beside the word. A run stopped part way through is the
+	// hardest kind to understand afterwards, and "interrupted" on its own says
+	// only that somebody pressed a key.
+	if exit := cli.Run(t.Context(), []string{"verify"}, &stdout, &stderr, cancelled); exit != cli.ExitInterrupted ||
+		stderr.String() != "goatest: interrupted: context canceled\n" || stdout.Len() != 0 {
 		t.Fatalf("cancellation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 
 func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		args      []string
@@ -109,6 +118,7 @@ func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
 		{name: "replay", args: []string{"replay", "finding-a", "--trace"}, command: cli.CommandReplay, id: "finding-a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
 			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
@@ -130,6 +140,7 @@ func TestTraceFlagAsksForADefaultOrANamedDirectory(t *testing.T) {
 }
 
 func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		args    []string
@@ -142,6 +153,7 @@ func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testin
 		{name: "replay", args: []string{"replay", "finding-a", "--keep-temp"}, command: cli.CommandReplay, id: "finding-a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &service{report: report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured}}
 			exit := cli.Run(t.Context(), test.args, &bytes.Buffer{}, &bytes.Buffer{}, fake)
 			if exit != cli.ExitAssured || fake.command != test.command || fake.id != test.id {
@@ -172,6 +184,7 @@ func TestKeepTempFlagIsAcceptedByTheCommandsThatAccountForWhatTheyKeep(t *testin
 }
 
 func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		args    []string
 		command cli.Command
@@ -211,6 +224,7 @@ func TestSubcommandsRequireTheirDocumentedArguments(t *testing.T) {
 }
 
 func TestTraceReaderArgumentsReachServiceWithoutBecomingVerificationScope(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		args []string
 		id   string
@@ -227,6 +241,7 @@ func TestTraceReaderArgumentsReachServiceWithoutBecomingVerificationScope(t *tes
 }
 
 func TestVerdictsMapToStableExitCodes(t *testing.T) {
+	t.Parallel()
 	for verdict, want := range map[report.Verdict]int{
 		report.VerdictAssured:       cli.ExitAssured,
 		report.VerdictChangeAssured: cli.ExitAssured,
@@ -246,6 +261,7 @@ func TestVerdictsMapToStableExitCodes(t *testing.T) {
 }
 
 func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
+	t.Parallel()
 	fake := &service{err: errors.New("failed\nFINDING forged\x1b[31m")}
 	var stderr bytes.Buffer
 	if exit := cli.Run(t.Context(), []string{"verify"}, &bytes.Buffer{}, &stderr, fake); exit != cli.ExitError {
@@ -257,6 +273,7 @@ func TestErrorsEscapeTerminalControlCharactersOntoOneLine(t *testing.T) {
 }
 
 func TestErrorPrefixIsNeverDoubled(t *testing.T) {
+	t.Parallel()
 	for _, wrapped := range []string{
 		"goatest: read latest report: file is absent",
 		"goatest: goatest: read latest report: file is absent",
@@ -273,6 +290,7 @@ func TestErrorPrefixIsNeverDoubled(t *testing.T) {
 }
 
 func TestBareInvocationShowsHelpWithoutRunningService(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{nil, {}} {
 		fake := &service{}
 		var stdout, stderr bytes.Buffer
@@ -286,6 +304,7 @@ func TestBareInvocationShowsHelpWithoutRunningService(t *testing.T) {
 }
 
 func TestCommandHelpIsAvailablePerSubcommand(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{
 		{"verify", "--help"}, {"help", "verify"}, {"--help", "verify"}, {"verify", "-h"},
 	} {
@@ -324,6 +343,7 @@ func TestCommandHelpIsAvailablePerSubcommand(t *testing.T) {
 }
 
 func TestParseErrorsPointAtHelp(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		args []string
 		hint string
@@ -346,8 +366,10 @@ func TestParseErrorsPointAtHelp(t *testing.T) {
 }
 
 func TestInfrastructureErrorsRenderTheirErrorReportBeforeTheDiagnostic(t *testing.T) {
+	t.Parallel()
 	for _, jsonOutput := range []bool{false, true} {
 		t.Run(map[bool]string{false: "lines", true: "json"}[jsonOutput], func(t *testing.T) {
+			t.Parallel()
 			result := report.Report{
 				Schema: report.SchemaV1, Verdict: report.VerdictError, Contract: "standard-v1",
 				Findings: []report.Finding{{ID: "infrastructure-error", Kind: "infrastructure", Summary: "workspace failed"}},

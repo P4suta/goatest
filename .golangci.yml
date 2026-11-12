@@ -10,5 +10,37 @@ linters:
     - mnd
     - misspell
     - nolintlint
+    # thelper: a helper that does not mark itself reports a failure at its own
+    # line, which sends a reader to the assertion rather than to the test that
+    # made it. The discipline was already near-perfect by hand - one lapse in
+    # 1405 signatures - and a rule kept by hand is a rule the next contributor
+    # has not read.
+    - thelper
+    # tparallel: a parent that calls t.Parallel while its subtests do not, or the
+    # other way round, is a suite that reads as parallel and runs as serial.
+    - tparallel
     - unconvert
     - whitespace
+  settings:
+    thelper:
+      # What is wanted is the t.Helper() call, which decides where a failure is
+      # reported. What is not wanted is the naming rule that comes with it: this
+      # repository writes `t testing.TB` throughout, and renaming the parameter
+      # in three places to satisfy a convention nothing else here follows would
+      # be the tool choosing the house style.
+      test:
+        first: true
+        name: false
+        begin: true
+      benchmark:
+        first: true
+        name: false
+        begin: true
+      tb:
+        first: true
+        name: false
+        begin: true
+      fuzz:
+        first: true
+        name: false
+        begin: true

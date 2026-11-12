@@ -638,3 +638,18 @@ func overlayEnvironment(existing, overlay []string) []string {
 	}
 	return append(result, overlay...)
 }
+
+// unwrapBuildCacheWorkspace returns the workspace a build-cache wrapper wraps,
+// or the value itself when it is not one.
+//
+// It exists so that a test can ask which workspace a command actually ran on.
+// withBuildCache returns a wrapper when the cache serves and the workspace
+// itself when it does not, so comparing the value a caller was handed against
+// the workspace it came from answers two different questions depending on a
+// configuration the test is not about.
+func unwrapBuildCacheWorkspace(workspace CommandWorkspace) CommandWorkspace {
+	if wrapper, ok := workspace.(buildCacheWorkspace); ok {
+		return wrapper.workspace
+	}
+	return workspace
+}

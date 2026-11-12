@@ -27,6 +27,7 @@ const (
 )
 
 func TestTraceSummaryAndDiffAreReadOnlyAndExposeCompleteness(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root}
 	missing, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{}, "summary")
@@ -57,6 +58,7 @@ func TestTraceSummaryAndDiffAreReadOnlyAndExposeCompleteness(t *testing.T) {
 }
 
 func TestTraceSummarySkipsUnrelatedEntries(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root}
 	traceRoot := filepath.Join(root, ".goatest", "trace")
@@ -71,14 +73,20 @@ func TestTraceSummarySkipsUnrelatedEntries(t *testing.T) {
 }
 
 func TestTraceSummaryRejectsExtraRunNames(t *testing.T) {
+	t.Parallel()
 	service := app.Service{Root: t.TempDir()}
 	_, err := service.Execute(t.Context(), cli.CommandTrace, cli.Request{IDs: []string{"run-a", "run-b"}}, "summary")
-	if err == nil || !strings.Contains(err.Error(), "at most one run") {
+	// The message differs from the command line's on purpose. The surface
+	// refuses this first, with a usage hint; reaching the operation means
+	// something called it directly, and the same words in two layers would make
+	// one mistake read two ways depending on which caught it.
+	if err == nil || !strings.Contains(err.Error(), "was given 2 runs and accepts at most one") {
 		t.Fatalf("extra summary run error = %v", err)
 	}
 }
 
 func TestTraceSummaryDoesNotRecognizeLatestAsARunAlias(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	traceRoot := filepath.Join(root, ".goatest", "trace")
 	writeCompletedTrace(t, traceRoot, "latest", "ASSURED", 0, traceRunAPrepareDuration)

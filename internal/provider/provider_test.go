@@ -139,6 +139,7 @@ func TestGenerateRejectsInvalidRequestsBeforeStartingProvider(t *testing.T) {
 		{name: "missing finding", client: provider.Client{Command: []string{"must-not-start"}}, request: provider.Request{Version: provider.ProtocolVersion}, want: "goatest: generation request requires protocol v1 and a finding ID"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := test.client.Generate(t.Context(), test.request)
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("Generate error = %v, want %q", err, test.want)

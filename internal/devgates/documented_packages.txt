@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Packages whose exported identifiers must each carry a doc comment, one path
+# per line, relative to the module root and sorted.
+#
+# This ledger may only GROW. It is the mirror of seam_allowlist.txt beside it,
+# which may only shrink: a line there is a debt, and a line here is a debt that
+# has been paid and must stay paid. A package named here that the tree no longer
+# holds fails the gate, so a deletion cannot leave its claim behind.
+#
+# The ledger exists because this repository had no doc comments at all when the
+# gate replaced the ban on comments that used to stand here. A gate that
+# demanded them everywhere on the first day would have been switched off on the
+# first day.
+.
+internal/devgates

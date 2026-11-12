@@ -126,6 +126,7 @@ func TestDiscoverTargetsTreatsEmptyRelativeDirectoryAsRoot(t *testing.T) {
 func TestDiscoverTargetsReportsDirectoryAndParseFailures(t *testing.T) {
 	t.Parallel()
 	t.Run("directory", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		_, err := gotest.DiscoverTargets(root, []gotest.Package{{ImportPath: "example.com/missing", RelativeDir: "missing"}})
 		if err == nil || !strings.HasPrefix(err.Error(), "goatest: read package example.com/missing: ") {
@@ -133,6 +134,7 @@ func TestDiscoverTargetsReportsDirectoryAndParseFailures(t *testing.T) {
 		}
 	})
 	t.Run("parse", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		path := filepath.Join(root, "broken_test.go")
 		writeGo(t, root, "broken_test.go", "package broken\nfunc TestBroken(")

@@ -53,6 +53,7 @@ func TestCoverageFilesReportsExactMalformedLineDiagnostics(t *testing.T) {
 		{name: "span", line: "example.com/sample/b.go:1.1,2 1 1\n", want: "goatest: malformed coverage span on line 3"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			profile := []byte("mode: set\n" + valid + test.line)
 			_, err := gotest.CoverageFiles(profile, "example.com/sample")
 			if err == nil || err.Error() != test.want {

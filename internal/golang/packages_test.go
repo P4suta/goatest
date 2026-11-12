@@ -44,6 +44,7 @@ func TestDecodePackagesRejectsMalformedAndEmptyStreams(t *testing.T) {
 		{name: "malformed", input: "{", want: "goatest: decode go list package: unexpected EOF"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := gotest.DecodePackages(strings.NewReader(test.input))
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("DecodePackages error = %v, want %q", err, test.want)

@@ -96,7 +96,7 @@ const help = `Usage:
 	goatest trace summary [RUN]
 	goatest trace diff RUN-A RUN-B
 	goatest help [command]
-Every command accepts --ui=auto|plain|jsonl and --json for its output; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
+Every command accepts --ui=auto|plain|jsonl and --json for its output, and refuses both at once; --version prints the version. 'goatest help COMMAND' or 'goatest COMMAND --help' explains one command; flags without a command run verify.
 Exit codes: 0 assured, 1 defect, 2 insufficient, 3 error, 130 interrupted, 143 terminated.
 Tracing: --trace collects diagnostic exhaust in DIR, or under .goatest/trace by default, one directory per run; GOATEST_TRACE=1|DIR asks for the same. A trace is never evidence.
 Keeping temporaries: --keep-temp leaves the run's temporary directories on disk and records each kept path in the trace and in .goatest/kept-temp-v1.json; GOATEST_KEEP_TEMP=1 asks for the same. 'cache status' lists them and 'cache gc' removes them once they are older than the [cache] ttl.
@@ -137,8 +137,9 @@ those key the whole tree and reuse nothing between runs.
 	case CommandInit:
 		return `Usage:	goatest init
 
-Write an annotated .goatest.toml describing every section, with the strict
-defaults active, and never overwrite an existing file.
+Write a minimal .goatest.toml holding the required version and the selected
+contract, and never overwrite an existing file. Every other setting keeps its
+built-in default; see docs/configuration.md for the sections and their keys.
 `, true
 	case CommandExplain:
 		return `Usage:	goatest explain ID
@@ -210,17 +211,27 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, service S
 	if err != nil {
 		diagnose(stderr, err.Error())
 		var usage usageError
-		if errors.As(err, &usage) {
-			_, _ = fmt.Fprintf(stderr, "run 'goatest help %s' for usage\n", usage.command)
-		} else {
-			_, _ = fmt.Fprintln(stderr, "run 'goatest --help' for usage")
+		if !errors.As(err, &usage) {
+			usage = usageError{}
 		}
+		_, _ = fmt.Fprintln(stderr, usage.Hint())
 		return ExitError
 	}
 	result, err := service.Execute(ctx, command, request, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			_, _ = fmt.Fprintln(stderr, "goatest: interrupted")
+			// A stopped run publishes what it had settled, and a published
+			// report is rendered here the same way a failed one is - otherwise
+			// the only trace of it on a terminal is a line saying the run
+			// stopped, and the reader has to know to go looking.
+			if result.RunID != "" {
+				render(stdout, result, request)
+			}
+			// The cause is kept. A run that was stopped part way through is the
+			// hardest kind to understand afterwards, and "interrupted" on its
+			// own says only that somebody pressed a key - not which phase was
+			// open, nor what the run was waiting for when it stopped.
+			diagnose(stderr, "interrupted: "+err.Error())
 			return ExitInterrupted
 		}
 		if result.Verdict == report.VerdictError {
@@ -238,12 +249,42 @@ func diagnose(stderr io.Writer, message string) {
 	_, _ = fmt.Fprintf(stderr, "goatest: %s\n", report.LineText(message))
 }
 
+// usageError is a command line this tool will not act on.
+//
+// It is the only error type this module declares, which makes what it does and
+// does not do the whole of the vocabulary a caller has for recognising a
+// failure. Until it had Unwrap, it had neither: Error returned the cause's text
+// and nothing could reach the cause, so errors.Is through a usage error found
+// nothing however carefully the cause had been constructed.
+//
+// Hint is separate from the message on purpose. The usage errors this package
+// builds say what is wrong and never what to do about it, and the command line
+// prints the remedy on its own line - "run 'goatest help trace' for usage". That
+// separation is the one an error-code table wants: a message is what happened,
+// and a remedy is what to do, and a table that mixes them has a column nobody
+// can fill in.
 type usageError struct {
+	// command is the subcommand whose usage the reader should be sent to.
 	command Command
-	cause   error
+
+	// cause is what was wrong.
+	cause error
 }
 
+// Error reports the cause.
 func (err usageError) Error() string { return err.cause.Error() }
+
+// Unwrap exposes the cause, so that errors.Is and errors.As reach through a
+// usage error to whatever it was built from.
+func (err usageError) Unwrap() error { return err.cause }
+
+// Hint is what to do about it, which the command line prints on its own line.
+func (err usageError) Hint() string {
+	if err.command == "" {
+		return "run 'goatest --help' for usage"
+	}
+	return fmt.Sprintf("run 'goatest help %s' for usage", err.command)
+}
 
 func runHelp(args []string, stdout, stderr io.Writer) (bool, int) {
 	before := args

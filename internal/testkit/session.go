@@ -19,6 +19,9 @@ type ScriptedSession struct {
 	requests      []gomutants.ExecRequest
 	probeRules    []*ProbeRule
 	probeRequests []gomutants.ProbeRequest
+
+	controlRules    []*ControlRule
+	controlRequests []gomutants.ControlRequest
 }
 
 type MutantRule struct {
@@ -218,6 +221,120 @@ func cloneProbeResult(result gomutants.ProbeResult) gomutants.ProbeResult {
 }
 
 func cloneProbeRequest(request gomutants.ProbeRequest) gomutants.ProbeRequest {
+	request.Args = slices.Clone(request.Args)
+	request.Env = slices.Clone(request.Env)
+	return request
+}
+
+// ControlRule is one scripted answer to a control of the original program.
+type ControlRule struct {
+	mutex   *sync.Mutex
+	pkg     string
+	args    []string
+	handler func(gomutants.ControlRequest) (gomutants.ControlResult, error)
+}
+
+// OnControl scripts what the original program does for one package and set of
+// arguments.
+//
+// A control is scripted the way a mutant execution and a probe are, and for the
+// same reason: a test about what a runner concludes should be able to say what
+// the engine answered, without building a repository and compiling it. The
+// unmatched case is deliberately the same as Exec's - an error naming what was
+// asked for - rather than Probe's, which invents an unavailable outcome. A
+// control nobody scripted is a test that forgot to say whether the user's suite
+// passes, and inventing an answer for it would decide the very thing the test is
+// about.
+func (session *ScriptedSession) OnControl(pkg string, args ...string) *ControlRule {
+	rule := &ControlRule{
+		mutex: &session.mutex,
+		pkg:   pkg,
+		args:  slices.Clone(args),
+		handler: func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{}, nil
+		},
+	}
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	session.controlRules = append(session.controlRules, rule)
+	return rule
+}
+
+// Return answers this control with a fixed result.
+func (rule *ControlRule) Return(result gomutants.ControlResult) *ControlRule {
+	scripted := cloneControlResult(result)
+	return rule.Do(func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+		return cloneControlResult(scripted), nil
+	})
+}
+
+// Fail answers this control with an error, which is the engine failing to
+// measure rather than the program failing its tests.
+func (rule *ControlRule) Fail(err error) *ControlRule {
+	return rule.Do(func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{}, err
+	})
+}
+
+// Do answers this control with a handler.
+func (rule *ControlRule) Do(handler func(gomutants.ControlRequest) (gomutants.ControlResult, error)) *ControlRule {
+	rule.mutex.Lock()
+	defer rule.mutex.Unlock()
+	rule.handler = handler
+	return rule
+}
+
+// Control runs the scripted original program.
+func (session *ScriptedSession) Control(_ context.Context, request gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	handler := session.routeControl(request)
+	if handler == nil {
+		return gomutants.ControlResult{}, fmt.Errorf(
+			"goatest: scripted session has no control for package %q with arguments %q: %w",
+			request.Package, request.Args, ErrNoRule)
+	}
+	return handler(request)
+}
+
+// ControlRequests is every control this session was asked for, in order.
+//
+// It is what a test asserts on to show that a control was taken once per
+// distinct request rather than once per mutant, which is the whole of the memo's
+// contract.
+func (session *ScriptedSession) ControlRequests() []gomutants.ControlRequest {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	requests := make([]gomutants.ControlRequest, len(session.controlRequests))
+	for index, request := range session.controlRequests {
+		requests[index] = cloneControlRequest(request)
+	}
+	return requests
+}
+
+// routeControl records the request and finds the rule that answers it.
+func (session *ScriptedSession) routeControl(request gomutants.ControlRequest) func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	session.controlRequests = append(session.controlRequests, cloneControlRequest(request))
+	for _, rule := range session.controlRules {
+		if rule.pkg != request.Package {
+			continue
+		}
+		if len(rule.args) != 0 && !slices.Equal(rule.args, request.Args) {
+			continue
+		}
+		return rule.handler
+	}
+	return nil
+}
+
+func cloneControlResult(result gomutants.ControlResult) gomutants.ControlResult {
+	result.Output = slices.Clone(result.Output)
+	result.Binaries = slices.Clone(result.Binaries)
+	result.ExecSeqs = slices.Clone(result.ExecSeqs)
+	return result
+}
+
+func cloneControlRequest(request gomutants.ControlRequest) gomutants.ControlRequest {
 	request.Args = slices.Clone(request.Args)
 	request.Env = slices.Clone(request.Env)
 	return request

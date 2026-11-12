@@ -354,8 +354,8 @@ func TestEvaluateMutationsDischargesFuzzSeedTargetsWithDeterministicCoverage(t *
 		narrowedBranchTarget("TestSkipsIt", goanalysis.KindTest, time.Millisecond, header, tail),
 	}, MutationOptions{
 		Timeout: time.Second,
-		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{Duration: time.Millisecond}, nil
 		},
 		Instrumented: narrowedBranchInstrumentation(header, body, tail),
 	})

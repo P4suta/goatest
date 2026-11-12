@@ -56,7 +56,7 @@ func TestWorkspaceExecRecordsTheCommandItRan(t *testing.T) {
 	if !slices.Equal(record.Argv, []string{"go", "test", "./..."}) || record.Dir != "internal/assure" {
 		t.Fatalf("recorded command = %+v", record)
 	}
-	if !slices.Equal(record.EnvNames, []string{"AWS_SECRET_ACCESS_KEY", "GOFLAGS"}) {
+	if !slices.Equal(record.EnvNames, []string{"AWS_SECRET_ACCESS_KEY", "GOFLAGS", GoWorkVariable}) {
 		t.Fatalf("recorded environment = %q", record.EnvNames)
 	}
 	if record.TimeoutMS != 120_000 || record.DurationMS != 1500 || record.ExitCode != 0 || record.TimedOut || record.Error != "" {

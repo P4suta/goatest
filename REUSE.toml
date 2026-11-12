@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+version = 1
+SPDX-PackageName = "goatest"
+SPDX-PackageSupplier = "goatest contributors <noreply@goatest.invalid>"
+SPDX-PackageDownloadLocation = "https://github.com/P4suta/goatest"
+
+# Every file goatest ships carries its licence.
+# Most carry it as a header; the ones below cannot, and are annotated here instead.
+#
+# A file is in this list because its format has no comment - JSON has none at all - or because a header would change what the file means.
+# A golden file is compared byte for byte, so a header in it is a header in the expected output;
+# a trace fixture is parsed as JSON Lines, where a comment is a parse error; and go.mod and go.sum are written by the go command, which does not preserve anything it did not put there.
+#
+# What internal/devgates checks about this file is that every tracked file is covered - by a header or by an entry here - and that no entry covers nothing.
+# What it does not check is whether an entry covers more than it should, and the difference is worth knowing, because the two directions fail differently.
+# A file this manifest misses is reported as unlicensed, loudly, by name.
+# A file it covers that should have carried a header is excused in silence.
+#
+# The globs below are where that could happen: they cover whole testdata trees,
+# so a `.md` note or a `.go` fixture added under one would be excused without anybody deciding to excuse it.
+# Nothing mechanical separates that case from a legitimate one - `.txt` is a ledger that carries a header in three places here and a golden that cannot in eight, so even the extension does not decide it.
+# The entries are therefore as narrow as the files allow, and widening one is a decision to be made rather than a line to be added.
+
+[[annotations]]
+path = ["go.mod", "go.sum"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [".gitattributes", ".gitignore"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [
+  "README.md",
+  "renovate.json",
+  "docs/adr/0001-seam-policy.md",
+  "docs/adr/0002-trace-is-not-evidence.md",
+  "docs/adr/0003-no-replay-engine.md",
+  "docs/adr/0004-proof-layers-not-budgets.md",
+  "docs/adr/0005-build-cache-goatest-owns.md",
+  "docs/adr/0006-every-temporary-directory-has-an-owner.md",
+  "docs/adr/0007-survived-evidence-is-universal.md",
+  "docs/adr/0008-controls-before-timeouts.md",
+  "docs/adr/0009-parallel-measurement-serial-commit.md",
+  "docs/adr/0010-whole-suite-reach-before-fallback.md",
+  "docs/adr/0011-append-only-checkpoint-journal.md",
+  "docs/adr/0012-aggregate-proof-before-timeout.md",
+  "docs/adr/0013-preserve-block-routing-across-resume.md",
+  "docs/adr/0014-resume-complete-probe-phase.md",
+  "docs/adr/0015-execute-framed-baselines-directly.md",
+  "docs/adr/0016-publish-every-baseline-control.md",
+  "docs/adr/0017-project-controls-use-a-native-cache-projection.md",
+  "docs/adr/0018-confirm-comparative-watchdogs.md",
+  "docs/adr/0019-instrument-the-test-binary-import-closure.md",
+  "docs/adr/0020-bootstrap-cold-preparation-with-verified-local-work.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = [
+  "internal/trace/schema.json",
+  "internal/devtools/proofaudit/testdata/**",
+  "internal/devtools/reportdiff/testdata/**",
+  "internal/devtools/tracesummary/testdata/**",
+  "internal/testkit/testdata/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = ["LICENSE-APACHE", "LICENSE-MIT"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 goatest contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"

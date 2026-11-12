@@ -35,6 +35,20 @@ import (
 
 type RunFunc func(context.Context, assure.Options) (report.Report, error)
 
+// GitOutput runs one git command in root and returns its standard output.
+//
+// An error means the command could not be run or did not succeed; the caller
+// decides whether that is fatal or is the repository simply not being one.
+type GitOutput func(ctx context.Context, root string, arguments ...string) ([]byte, error)
+
+// resolved fills in the real git for a nil GitOutput.
+func (git GitOutput) resolved() GitOutput {
+	if git == nil {
+		return gitOutputBytes
+	}
+	return git
+}
+
 type Service struct {
 	Root          string
 	GoBinary      string
@@ -58,18 +72,76 @@ type Service struct {
 
 	TraceFilesystem trace.Filesystem
 
+	// Git runs one git command in a directory and returns its standard output.
+	//
+	// The zero value runs the real git, like the two filesystems above it. It
+	// is a field rather than a package-level variable because ADR 0001 wants
+	// replaceable behaviour to travel as an argument, and it is on Service
+	// rather than passed to each call because the operations that need it are
+	// reached through Service.Execute and nothing else.
+	//
+	// Before it existed, every test that drove an operation started a real git
+	// - about ten files' worth - even when the test had a fake Run installed
+	// and cared nothing for the repository. The process always failed, because
+	// the root was a temporary directory outside any repository, and the run
+	// settled into the git-metadata-unavailable limitation it was supposed to.
+	// So the child cost a few milliseconds and changed no answer, which is the
+	// worst shape a dependency can have: it made those tests need git in order
+	// to be classified, while needing nothing from it in order to pass.
+	Git GitOutput
+
 	DiagnosticsFilesystem DiagnosticsFilesystem
 	absolute              func(string) (string, error)
 
 	notes ui.Notes
 
 	doctorFilesystem doctorProbeFilesystem
+
+	// doctorProcess starts the children `goatest doctor` runs.
+	//
+	// It is nil in production and a fake in a test that drives a failure a real
+	// process would not produce. It was a package-level variable, which is why
+	// every test in this package ran alone: a variable one test replaces is
+	// shared with every test that does not.
+	doctorProcess startDoctorProcess
 }
 
 var (
-	reportRunSequence     atomic.Uint64
-	readConfigurationFile = os.ReadFile
+	reportRunSequence atomic.Uint64
 )
+
+// reportHooks are the operations finalizing a report performs outside itself.
+//
+// One value rather than a parameter each, because they arrive together and
+// travel together: a report is finalized once, from one place, and a caller that
+// has to remember two arguments will one day remember one. The zero value is
+// production.
+type reportHooks struct {
+	// git runs one git command in a directory.
+	git GitOutput
+
+	// readConfiguration reads the configuration file whose bytes the run is
+	// identified by.
+	readConfiguration func(string) ([]byte, error)
+}
+
+// reportHooks are the operations this service finalizes a report through.
+//
+// Git is a field of Service, like the two filesystems, so a caller outside this
+// package can replace it. readConfiguration is not: nothing outside needs to,
+// and an exported field nobody sets is a surface with no reader.
+func (service Service) reportHooks() reportHooks {
+	return reportHooks{git: service.Git}.resolved()
+}
+
+// resolved fills every operation this value leaves unset from the real thing.
+func (hooks reportHooks) resolved() reportHooks {
+	hooks.git = hooks.git.resolved()
+	if hooks.readConfiguration == nil {
+		hooks.readConfiguration = os.ReadFile
+	}
+	return hooks
+}
 
 const (
 	goCacheEnvironmentVariable = "GOCACHE"
@@ -100,7 +172,7 @@ func (service Service) Execute(ctx context.Context, command cli.Command, request
 				result.Contract = loaded.Contract
 			}
 		}
-		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC())
+		result = finalizeReportKind(ctx, absolute, request, result, report.RunOperation, started, clock().UTC(), service.reportHooks())
 		if validationErr := report.ValidateForPersistence(result); validationErr != nil {
 			return result, fmt.Errorf("goatest: finalize %s report: %w", command, validationErr)
 		}
@@ -247,9 +319,12 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		}()
 	}
 	var result report.Report
+	var ran bool
 	if err == nil {
+		ran = true
 		result, err = service.run(ctx, root, request, recording.recorder)
 	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		ran = true
 		runResult, runErr := service.run(ctx, root, request, recording.recorder)
 		result = runResult
 		err = errors.Join(err, runErr)
@@ -260,16 +335,32 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		service.collectVerdictCache(root)
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if !ran && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			// Stopped while still waiting for the repository cache lease, so
+			// the run never began and has nothing to say about this
+			// repository. Either cause is the same fact here, which is why
+			// this is the one place they are not told apart: what differs
+			// between them is how the process ends, and this process is
+			// ending the same way whatever it writes.
 			return report.Report{}, err
 		}
-		result = infrastructureErrorReport(result, request, err)
-		result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+		interrupted := errors.Is(err, context.Canceled)
+		if !interrupted {
+			result = infrastructureErrorReport(result, request, err)
+		}
+		result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.reportHooks())
+		if interrupted {
+			result = interruptedReport(result, err)
+		}
 		service.writeDiagnostics(root, result, recording, err)
 		if ownsCacheLease {
 			service.collectDiagnosticRetention(root)
 		}
-		if writeErr := WriteReports(root, result); writeErr != nil {
+		publish := WriteReports
+		if interrupted {
+			publish = WriteReportHistory
+		}
+		if writeErr := publish(root, result); writeErr != nil {
 			return result, errors.Join(err, writeErr)
 		}
 		if ownsCacheLease {
@@ -278,7 +369,7 @@ func (service Service) runAndWrite(ctx context.Context, root string, request cli
 		return result, err
 	}
 	result = selectReplayFinding(result, request.ReplayFindingID)
-	result = finalizeReport(ctx, root, request, result, started, clock().UTC())
+	result = finalizeReport(ctx, root, request, result, started, clock().UTC(), service.reportHooks())
 	if err := WriteReports(root, result); err != nil {
 		return report.Report{}, err
 	}
@@ -317,10 +408,50 @@ func infrastructureErrorReport(partial report.Report, request cli.Request, cause
 	result.Findings = append(result.Findings, report.Finding{
 		ID:      report.FindingID("infrastructure", "assurance-run"),
 		Kind:    "infrastructure",
-		Summary: cause.Error(),
+		Summary: report.WithoutToolPrefix(cause.Error()),
 	})
 	result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-		Code: "assurance-incomplete", Summary: "Assurance stopped before the configured contract could be completed",
+		Code: report.LimitationAssuranceIncomplete, Summary: "Assurance stopped before the configured contract could be completed",
+	})
+	return result
+}
+
+// interruptedReport marks a stopped run as stopped.
+//
+// Every other way a run can end badly leaves a report and a diagnostics bundle.
+// Cancellation left a line on stderr, which is the wrong way round: the run
+// most likely to be stopped is the long one on a machine nobody is watching,
+// and a CI job that reaches its own time limit is sent a SIGTERM - so the case
+// where the failure is hardest to reproduce was the one case that recorded
+// nothing about itself.
+//
+// What this publishes is worth stating exactly, because the obvious reading is
+// wrong. assure.Run pairs every error it returns with an empty report, at all
+// thirty-one of its error returns, and a cancellation arrives as an error - so
+// this report carries the run's identity, scope, contract, configuration digest
+// and duration, and none of its measurements.
+// The measurements-so-far are in the diagnostics bundle written beside it,
+// which holds the recorded events the run had reached: the phase that was open
+// and the commands that had run. Making assure.Run hand back what it had
+// settled is the change that would put them in the report, and it is not this
+// one.
+//
+// The verdict is INSUFFICIENT rather than ERROR. Nothing failed; the evidence is
+// missing, which is the one thing INSUFFICIENT means. This is applied after
+// finalizeReport rather than before it, unlike infrastructureErrorReport,
+// because scopedVerdict maps a replay run by its findings count and an
+// interrupted replay that found nothing is not RESOLVED.
+func interruptedReport(partial report.Report, cause error) report.Report {
+	result := partial
+	result.Verdict = report.VerdictInsufficient
+	result.Findings = append(result.Findings, report.Finding{
+		ID:      report.FindingID("interrupted", "assurance-run"),
+		Kind:    "interrupted",
+		Summary: report.WithoutToolPrefix(cause.Error()),
+	})
+	result.Limitations = appendLimitation(result.Limitations, report.Limitation{
+		Code:    report.LimitationAssuranceInterrupted,
+		Summary: "The run was stopped by a signal; this report records the run and not its results, and the diagnostics bundle beside it holds how far it got",
 	})
 	return result
 }
@@ -453,11 +584,12 @@ func (service Service) buildCacheDirectory(root string) string {
 	return buildcache.BaseDirectory(root, loaded.Cache.BuildDir, fallback)
 }
 
-func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time) report.Report {
-	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished)
+func finalizeReport(ctx context.Context, root string, request cli.Request, input report.Report, started, finished time.Time, hooks reportHooks) report.Report {
+	return finalizeReportKind(ctx, root, request, input, requestedRunKind(request), started, finished, hooks)
 }
 
-func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time) report.Report {
+func finalizeReportKind(ctx context.Context, root string, request cli.Request, input report.Report, kind report.RunKind, started, finished time.Time, hooks reportHooks) report.Report {
+	hooks = hooks.resolved()
 	result := input
 	result.Schema = report.SchemaV1
 	result.RunKind = kind
@@ -468,13 +600,13 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Contract == "" {
 		result.Contract = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "contract-metadata-unavailable", Summary: "The assurance contract could not be resolved before execution stopped",
+			Code: report.LimitationContractMetadataUnavailable, Summary: "The assurance contract could not be resolved before execution stopped",
 		})
 	}
 	if result.Snapshot == "" {
 		result.Snapshot = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "snapshot-metadata-unavailable", Summary: "The source snapshot identity could not be computed before execution stopped",
+			Code: report.LimitationSnapshotMetadataUnavailable, Summary: "The source snapshot identity could not be computed before execution stopped",
 		})
 	}
 	requested := requestedScope(request, kind)
@@ -494,11 +626,11 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		DurationMS: max(0, finished.Sub(started).Milliseconds()),
 	}
 	if result.Configuration.Digest == "" {
-		digest, digestErr := configurationDigest(root, request)
+		digest, digestErr := configurationDigest(root, request, hooks)
 		result.Configuration.Digest = digest
 		if digestErr != nil {
 			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-				Code: "configuration-metadata-unavailable", Summary: "The effective configuration could not be read while finalizing the report",
+				Code: report.LimitationConfigurationMetadataUnavailable, Summary: "The effective configuration could not be read while finalizing the report",
 			})
 		}
 	}
@@ -508,7 +640,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Toolchain.Go == "" {
 		result.Toolchain.Go = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "go-toolchain-metadata-unavailable", Summary: "The Go toolchain identity could not be resolved before execution stopped",
+			Code: report.LimitationGoToolchainMetadataUnavailable, Summary: "The Go toolchain identity could not be resolved before execution stopped",
 		})
 	}
 	if result.Toolchain.GoMutants == "" {
@@ -517,7 +649,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 		} else {
 			result.Toolchain.GoMutants = "unavailable"
 			result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-				Code: "go-mutants-metadata-unavailable", Summary: "The go-mutants version could not be resolved from build info",
+				Code: report.LimitationGoMutantsMetadataUnavailable, Summary: "The go-mutants version could not be resolved from build info",
 			})
 		}
 	}
@@ -533,7 +665,7 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 	if result.Repository.Module == "" {
 		result.Repository.Module = "unavailable"
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "module-metadata-unavailable", Summary: "The Go module identity could not be resolved before execution stopped",
+			Code: report.LimitationModuleMetadataUnavailable, Summary: "The Go module identity could not be resolved before execution stopped",
 		})
 	}
 	if result.Repository.Module != "" {
@@ -544,19 +676,19 @@ func finalizeReportKind(ctx context.Context, root string, request cli.Request, i
 			result.Scope.Resolved.Modules = []string{result.Repository.Module}
 		}
 	}
-	git, gitErr := inspectGit(ctx, root, request)
+	metadata, gitErr := inspectGit(ctx, root, request, hooks.git)
 	if gitErr != nil {
 		result.Repository.Git = report.Git{Commit: "unavailable", MergeBase: "unavailable"}
 		result.Limitations = appendLimitation(result.Limitations, report.Limitation{
-			Code: "git-metadata-unavailable", Summary: "Git identity or changeset metadata could not be resolved",
+			Code: report.LimitationGitMetadataUnavailable, Summary: "Git identity or changeset metadata could not be resolved",
 		})
 	} else {
-		result.Repository.Git = git
+		result.Repository.Git = metadata
 		if len(result.Scope.Requested.Files) == 0 && kind == report.RunChangeset {
-			result.Scope.Requested.Files = slices.Clone(git.ChangedFiles)
+			result.Scope.Requested.Files = slices.Clone(metadata.ChangedFiles)
 		}
 		if len(result.Scope.Resolved.Files) == 0 && result.Scope.Resolved.Kind == string(report.RunChangeset) {
-			result.Scope.Resolved.Files = slices.Clone(git.ChangedFiles)
+			result.Scope.Resolved.Files = slices.Clone(metadata.ChangedFiles)
 		}
 	}
 	return result
@@ -623,8 +755,8 @@ func newRunID(root, snapshot string, kind report.RunKind, finished time.Time) st
 	return finished.UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(digest[:6])
 }
 
-func configurationDigest(root string, request cli.Request) (string, error) {
-	data, err := readConfigurationFile(filepath.Join(root, config.FileName))
+func configurationDigest(root string, request cli.Request, hooks reportHooks) (string, error) {
+	data, err := hooks.resolved().readConfiguration(filepath.Join(root, config.FileName))
 	var readErr error
 	if errors.Is(err, os.ErrNotExist) {
 		data = []byte("goatest-config-v1-defaults")
@@ -654,12 +786,13 @@ func configurationDigest(root string, request cli.Request) (string, error) {
 	return hex.EncodeToString(digest), readErr
 }
 
-func inspectGit(ctx context.Context, root string, request cli.Request) (report.Git, error) {
+func inspectGit(ctx context.Context, root string, request cli.Request, git GitOutput) (report.Git, error) {
+	gitOutput := git.resolved()
 	commit, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return report.Git{}, err
 	}
-	status, err := gitOutputBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	status, err := gitOutput(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -680,11 +813,11 @@ func inspectGit(ctx context.Context, root string, request cli.Request) (report.G
 	if diffBase == "" {
 		diffBase = base
 	}
-	changed, err := gitOutputBytes(ctx, root, "diff", "--name-only", "-z", "--find-renames", diffBase)
+	changed, err := gitOutput(ctx, root, "diff", "--name-only", "-z", "--find-renames", diffBase)
 	if err != nil {
 		return report.Git{}, err
 	}
-	untracked, err := gitOutputBytes(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
+	untracked, err := gitOutput(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return report.Git{}, err
 	}
@@ -693,10 +826,6 @@ func inspectGit(ctx context.Context, root string, request cli.Request) (report.G
 }
 
 const gitMetadataTimeout = 30 * time.Second
-
-func gitOutput(ctx context.Context, root string, arguments ...string) ([]byte, error) {
-	return gitOutputBytes(ctx, root, arguments...)
-}
 
 func gitOutputBytes(ctx context.Context, root string, arguments ...string) ([]byte, error) {
 	bounded, cancel := context.WithTimeout(ctx, gitMetadataTimeout)

@@ -34,6 +34,7 @@ func (file *stubReportFile) Chmod(os.FileMode) error { return file.chmodErr }
 func (file *stubReportFile) Close() error            { return file.closeErr }
 
 func TestAtomicWritePropagatesEveryFilesystemStageAndRenameFallback(t *testing.T) {
+	t.Parallel()
 	stageErr := errors.New("stage failed")
 	fallbackErr := errors.New("fallback failed")
 	for _, testCase := range []struct {
@@ -66,6 +67,7 @@ func TestAtomicWritePropagatesEveryFilesystemStageAndRenameFallback(t *testing.T
 		}, want: fallbackErr, wantRename: 2},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			file := &stubReportFile{path: filepath.Join(t.TempDir(), "temporary")}
 			renameCalls := 0
 			ops := atomicWriteOperations{
@@ -98,6 +100,7 @@ func TestAtomicWritePropagatesEveryFilesystemStageAndRenameFallback(t *testing.T
 }
 
 func TestWriteReportsNamesTheArtifactWhoseAtomicWriteFailed(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 		t.Fatal(err)

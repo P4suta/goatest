@@ -1,22 +1,85 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Current limitations and deferred work
 
 This is a pre-release alpha. The implementation has strong self-tests, but
 self-dogfood is not evidence about other repositories.
 
+## Limitation codes
+
+A run that reaches a verdict can still carry caveats, and it names each one with
+a code. The code is what a reader greps: it appears in plain output as
+`LIMITATION <code> <summary>`, in HTML inside a `<code>` element, and in JSON as
+`limitations[].code`. The summary beside it is prose for a person and may be
+reworded; the code is a key and is not. A persisted report carrying a code that
+is not in this table is refused, because a vocabulary nothing checks is a
+vocabulary that grows a second spelling for the same fact - which is what
+happened here: `goatest doctor` said `git-unavailable` for the condition a run
+called `git-metadata-unavailable`, so a reader who had grepped one could not
+find the other.
+
+This table is pinned to `LimitationCodes()` in `internal/report` in both
+directions.
+
+| Code | What the run is saying |
+| --- | --- |
+| `assurance-incomplete` | it stopped on an infrastructure failure rather than on a verdict about the code |
+| `assurance-interrupted` | it was stopped by a signal; the report records the run and not its results, and the bundle beside it holds how far it got |
+| `configuration-metadata-unavailable` | its effective configuration could not be read while the report was finalized |
+| `contract-metadata-unavailable` | its assurance contract could not be resolved before execution stopped |
+| `git-metadata-unavailable` | Git identity or changeset metadata could not be resolved |
+| `go-mutants-metadata-unavailable` | the go-mutants version could not be resolved from build information |
+| `go-toolchain-metadata-unavailable` | the Go toolchain identity could not be resolved before execution stopped |
+| `later-phases-not-run` | a phase did not pass, so the phases after it were not run |
+| `module-metadata-unavailable` | the Go module identity could not be resolved before execution stopped |
+| `plan-cost-estimate` | a plan's cost excludes target-specific runtime, resource startup and the race pass |
+| `project-exclude` | the configured boundary put some paths outside what was assured |
+| `race-scope-static-estimate` | the race scope was counted statically rather than from what the pass executed |
+| `repair-preimage-changed` | a repair batch was not applied because at least one preimage had changed |
+| `repair-validation-rejected` | a repair batch was not applied because at least one fresh validation failed |
+| `resource-cache-disabled` | exact cache reuse was disabled because a configured resource carries runtime state |
+| `snapshot-metadata-unavailable` | the source snapshot identity could not be computed before execution stopped |
+| `unresolved-mutation-gaps` | mutation evidence gaps remained that the run could not resolve |
+| `whole-tree-behaviour-keys` | behaviour keys were taken from the whole tree rather than from the observed changeset |
+
+A report whose Git metadata is unavailable must carry
+`git-metadata-unavailable`; persistence refuses one that does not, because an
+absent identity and an unstated absent identity read the same in JSON.
+
+These are not the tool's error codes. An error names a failure that ended
+something; a limitation names a caveat on a run that reached a verdict anyway,
+which is why a report can carry several and still be `ASSURED`.
+
 ## Fail-closed implementation limits
 
-- Only one main Go module is assured per run. Multiple main modules in a
-  `go.work` are rejected; workspace aggregation is not implemented.
+- Only one main Go module is assured per run. Every command a run executes in
+  the frozen workspace carries `GOWORK=off`, so a `go.work` beside or above the
+  module is not read and takes no part in the run: goatest assures the module it
+  was pointed at, and says so rather than aggregating. `GOWORK` is for the same
+  reason not part of the identity a cached verdict is keyed on. The refusal of
+  packages from several module roots remains, for the case a `go list` reports
+  them without a workspace being involved. Workspace aggregation is not
+  implemented.
 - Evidence scanning rejects symbolic links and irregular files rather than
   following confined links. Reflink/copy-on-write snapshot optimization is not
   implemented.
 - Project excludes are explicit limitations. Excluded mutants are represented
   by the configured boundary, not enumerated from source that was never sent to
   the mutation catalog.
-- Changeset mutation discovery conservatively includes every mutant in each
-  changed non-test Go file. The pinned go-mutants API does not expose line-range
-  selection, so this can over-select work but cannot omit a mutant in a selected
-  changed file.
+- Changeset mutation discovery includes every mutant in each changed non-test Go
+  file, and then narrows execution to the lines the diff added. Three cases
+  narrow nothing, and each is a refusal rather than an oversight. A broad scope
+  has nothing to narrow against. A diff that could not be read narrows nothing,
+  because a selection built from a misread diff would omit a mutant in changed
+  code - the one mistake a changeset scope may not make. And a changeset in which
+  any `_test.go` changed narrows nothing at all, not even in the packages whose
+  sources did not: a changed test can change the fate of any mutant in its
+  package, so the lines it touched say nothing about which mutants it now
+  reaches. In those three cases the run over-selects work and still cannot omit a
+  mutant in a selected changed file.
 - Mutation routing places a mutant by the start position of its mutation, so a
   mutation spanning several lines is routed by the block that contains its
   first byte. Where the coverage toolchain and the mutation catalog disagree
@@ -209,9 +272,9 @@ self-dogfood is not evidence about other repositories.
   derived budget plus one containment ceiling and is then left inconclusive.
   That ceiling is the one number the operator sets.
   Other groups continue because a completed failure in any one is a kill; if
-  none kills, the unknown groups prevent survival. Replay has
-  no prepared probe tree and can still pay for its pristine fallback
-  compilation.
+  none kills, the unknown groups prevent survival. Replay prepares no probe
+  tree, and takes its controls through the prepared session like every other
+  run.
 - Timeout findings are not durable evidence. A later run must execute the
   request again and either obtain a completed proof or remain inconclusive.
 - Checkpoint I/O, evidence digesting, mutant accounting, and report rendering

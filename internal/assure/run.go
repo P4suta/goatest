@@ -19,7 +19,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"runtime/debug"
@@ -47,7 +46,6 @@ const (
 	workspaceInspectionTimeout = 5 * time.Minute
 	defaultMutationJobLimit    = 4
 	progressDivisions          = 100
-	laterPhasesNotRunCode      = "later-phases-not-run"
 )
 
 const goMutantsModulePath = "github.com/P4suta/go-mutants"
@@ -363,6 +361,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				emit(options, "impact-broad", "dependency or prior evidence was unknown")
 			} else {
 				emit(options, "impact-targeted", fmt.Sprintf("%d of %d targets", len(selection.targets), len(targets)))
+				if narrowed := mutationSelection(selection); narrowed != nil {
+					emit(options, "impact-lines", fmt.Sprintf("%d changed file(s) narrowed by line", len(narrowed.Lines)))
+				}
 			}
 		}
 		targets = selection.targets
@@ -420,54 +421,6 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			}
 		}
 
-		var controlMutex sync.RWMutex
-		var controlOpenOnce sync.Once
-		var controlWorkspace *mutationbridge.Workspace
-		var controlOpenErr error
-		var controlClosed bool
-		openControl := func(controlContext context.Context) (*mutationbridge.Workspace, error) {
-			if controlClosed {
-				return nil, errors.New("goatest: original-control workspace is closed")
-			}
-			controlOpenOnce.Do(func() {
-				opened, openErr := dependencies.openWorkspace(controlContext, root, mutationbridge.Options{
-					GoBinary: options.GoBinary, TempDirectory: scratch.dir,
-					ReportDirectory: internalOutputDirectory, SnapshotExclude: assuranceSnapshotExclusions(),
-					Environment: overlayEnvironment(mutationEnvironment(options.Environment, options.BuildTags), buildCache.environment()),
-					Trace:       options.Trace, KeepTemp: options.KeepTemp,
-				})
-				if openErr != nil {
-					controlOpenErr = openErr
-					return
-				}
-				reportMutationSweep(options, opened.Swept())
-				controlWorkspace = opened
-			})
-			if controlOpenErr != nil {
-				return nil, controlOpenErr
-			}
-			return controlWorkspace, nil
-		}
-		originalControl := func(controlContext context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			controlMutex.RLock()
-			defer controlMutex.RUnlock()
-			opened, openErr := openControl(controlContext)
-			if openErr != nil {
-				return gomutants.CommandResult{}, openErr
-			}
-			return runOriginalMutationControl(controlContext, opened, request, options.BuildTags)
-		}
-		closeControl := func() error {
-			controlMutex.Lock()
-			defer controlMutex.Unlock()
-			controlClosed = true
-			if controlWorkspace == nil {
-				return nil
-			}
-			err := closeWorkspace(controlWorkspace)
-			controlWorkspace = nil
-			return err
-		}
 		var closeRound func() error
 		var executionSession MutationSession
 		var catalog gomutants.Catalog
@@ -492,6 +445,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				packages = slices.Clone(options.Packages)
 				include = scopedMutationInclude(metadata.model)
 			}
+			narrowed := mutationSelection(selection)
 			probe := options.ReplayMutantID == ""
 			var probeCoverPackages []string
 			if probe {
@@ -513,6 +467,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				ProbeCoverPackages: probeCoverPackages,
 				Jobs:               mutationJobs, BuildTimeout: options.CommandTimeout, MutantTimeout: options.CommandTimeout,
 				SkipVerify: true,
+				Selection:  narrowed,
 				Probe:      probe,
 			}
 			go func() {
@@ -540,7 +495,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		closeRound = func() error {
 			settlePreparation(true)
-			return errors.Join(closeControl(), manager.Close(), closeWorkspace(workspace))
+			return errors.Join(manager.Close(), closeWorkspace(workspace))
 		}
 
 		phases.enter(phaseBaseline)
@@ -575,16 +530,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			StopAfterChecks:    options.ReplayMutantID == "",
 		}
 		startPreparation()
-		controlMutex.RLock()
-		pristine, openErr := openControl(ctx)
-		controlMutex.RUnlock()
-		if openErr != nil {
-			settlePreparation(true)
-			removeErr := releaseBaselineScratch(options, dependencies.removeBaselineScratch, artifactDirectory)
-			_ = closeRound()
-			return report.Report{}, errors.Join(openErr, removeErr)
-		}
-		baselineCommands := withBuildCache(pristine, buildCache)
+		baselineCommands := commands
 		baseline, err := dependencies.collectBaseline(ctx, baselineCommands, metadata.model, baselineTargets, baselineOptions)
 		phases.leave()
 		if err != nil || len(baseline.Findings) != 0 {
@@ -627,13 +573,13 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		}
 		if len(loaded.Resources) != 0 {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: "resource-cache-disabled", Summary: "exact cache reuse is disabled because configured resources have runtime state",
+				Code: report.LimitationResourceCacheDisabled, Summary: "exact cache reuse is disabled because configured resources have runtime state",
 			})
 		}
 		if len(baseline.Findings) != 0 {
 			baseReport.Verdict = baselineVerdict(baseline.Findings)
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: laterPhasesNotRunCode, Summary: "race and mutation phases were not run because baseline verification did not pass",
+				Code: report.LimitationLaterPhasesNotRun, Summary: "race and mutation phases were not run because baseline verification did not pass",
 			})
 			checkpointController.discard()
 			if closeErr := closeRound(); closeErr != nil {
@@ -667,7 +613,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			racePackages = modelPackagePaths(raceModel)
 		} else {
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code:      "race-scope-static-estimate",
+				Code:      report.LimitationRaceScopeStaticEstimate,
 				Summary:   "standard-v1 selects race packages using static concurrency and observed reachability",
 				Estimated: true,
 			})
@@ -687,16 +633,9 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 				Environment: resourceEnv, TestArgs: slices.Clone(options.TestArgs), BuildTags: slices.Clone(options.BuildTags),
 				PersistCompile: buildCache.needsPersistentCompile(), Timeout: options.CommandTimeout,
 			}
-			controlMutex.RLock()
-			pristine, openErr := openControl(ctx)
-			if openErr == nil {
-				raceResult, err = dependencies.collectRaceWithOptions(
-					ctx, withBuildCache(pristine, buildCache), raceModel, racePackages, contract, raceOptions,
-				)
-			} else {
-				err = openErr
-			}
-			controlMutex.RUnlock()
+			raceResult, err = dependencies.collectRaceWithOptions(
+				ctx, commands, raceModel, racePackages, contract, raceOptions,
+			)
 			if err != nil {
 				_ = closeRound()
 				return report.Report{}, err
@@ -709,7 +648,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 			baseReport.Verdict = report.VerdictDefect
 			baseReport.Findings = raceResult.Findings
 			baseReport.Limitations = append(baseReport.Limitations, report.Limitation{
-				Code: laterPhasesNotRunCode, Summary: "mutation phases were not run because race verification did not pass",
+				Code: report.LimitationLaterPhasesNotRun, Summary: "mutation phases were not run because race verification did not pass",
 			})
 			checkpointController.discard()
 			if closeErr := closeRound(); closeErr != nil {
@@ -781,10 +720,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 					countedNoun(probed.SuitesMeasured, "package suite", "package suites")+" measured, "+
 					fmt.Sprintf("%d without facts", probed.SuitesUnmeasured))
 		}
-		mutationOriginalControl := originalControl
-		if options.ReplayMutantID == "" {
-			mutationOriginalControl = preparedProbeMutationControl(executionSession, options.Trace)
-		}
+		mutationOriginalControl := sessionOriginalControl(executionSession, options.Trace)
 
 		var mutationEvidence *MutationEvidence
 		evidencePath := filepath.Join(root, ".goatest", "cache", mutationEvidenceFileName)
@@ -898,7 +834,7 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 		} else {
 			result.Verdict = report.VerdictInsufficient
 			result.Limitations = append(result.Limitations, report.Limitation{
-				Code: "unresolved-mutation-gaps", Summary: "Unresolved mutation evidence gaps remain",
+				Code: report.LimitationUnresolvedMutationGaps, Summary: "Unresolved mutation evidence gaps remain",
 			})
 		}
 		if result.Accounting.Mutants.Unknown != 0 {
@@ -915,70 +851,82 @@ func runWithDependencies(ctx context.Context, options Options, dependencies runD
 	}
 }
 
-func runOriginalMutationControl(ctx context.Context, workspace CommandWorkspace, request gomutants.ExecRequest, buildTags []string) (gomutants.CommandResult, error) {
-	argv := []string{"go", "test", "-count=1"}
-	if len(buildTags) != 0 {
-		argv = append(argv, "-tags="+strings.Join(buildTags, ","))
-	}
-	if request.Package == "" {
-		argv = append(argv, "./...")
-	} else {
-		argv = append(argv, request.Package)
-	}
-	arguments := slices.Clone(request.Args)
-	if len(arguments) != 0 {
-		argv = append(argv, "-args")
-		argv = append(argv, arguments...)
-	}
-	return workspace.Exec(ctx, gomutants.Command{
-		Argv: argv, Env: slices.Clone(request.Env), Timeout: request.Timeout, OutputLimit: commandOutputLimit,
-	})
-}
-
-func preparedProbeMutationControl(session MutationSession, recorder *trace.Recorder) func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		probeRequest := gomutants.ProbeRequest{
-			Package: request.Package, Args: slices.Clone(request.Args),
-			Env: slices.Clone(request.Env), Timeout: request.Timeout,
+// sessionOriginalControl measures the original program through the prepared
+// session.
+//
+// One path, whatever the run. There used to be two, chosen by whether the run
+// was a replay: an argv this package assembled and handed to a second workspace,
+// or the probe tree's test-failed outcome translated into a command result. The
+// first measured binaries no mutant was ever run against and the second measured
+// the probe tree's; neither was the thing the comparison is about.
+//
+// A control and an execution of the same request are now settled by one function
+// inside the engine, so they cannot come to disagree about the argument vector,
+// the working directory, the paired timeouts, the instrumentation overlay, the
+// reserved flags, the private scratch directory or the fuzz isolation. In a
+// recording of the engine's own the two differ by one name in the environment.
+//
+// The recording this package keeps still writes a control down as a probe with
+// Control set, which is the shape goatest-trace-v1 has. Giving a control its own
+// event type is a change to a closed enum and therefore to the contract version,
+// and go-mutants has the mirror of it to make at the same time, so the two are
+// one change rather than two.
+func sessionOriginalControl(session MutationSession, recorder *trace.Recorder) OriginalControl {
+	return func(ctx context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		control := gomutants.ControlRequest{
+			Package:     request.Package,
+			Args:        slices.Clone(request.Args),
+			Env:         slices.Clone(request.Env),
+			Timeout:     request.Timeout,
+			OutputLimit: commandOutputLimit,
 		}
 		record := trace.ProbeRecord{
-			Target: mutationControlProbeTarget(request.Package), Package: request.Package,
-			Args: slices.Clone(request.Args), TimeoutMS: traceMilliseconds(request.Timeout), Control: true,
+			Target:    mutationControlProbeTarget(request.Package),
+			Package:   request.Package,
+			Args:      slices.Clone(request.Args),
+			TimeoutMS: traceMilliseconds(request.Timeout),
+			Control:   true,
 		}
-		result, err := session.Probe(ctx, probeRequest)
+		result, err := session.Control(ctx, control)
 		if err != nil {
 			record.Error = err.Error()
 			recorder.ProbeExec(record)
-			return gomutants.CommandResult{}, fmt.Errorf("goatest: prepared original control: %w", err)
+			return gomutants.ControlResult{}, fmt.Errorf("goatest: original control: %w", err)
 		}
 		record.ExitCode = result.ExitCode
 		record.DurationMS = traceMilliseconds(result.Duration)
-		switch {
-		case result.Duration < 0:
-			err = fmt.Errorf("goatest: prepared original control returned negative duration %s", result.Duration)
-		case result.Outcome == gomutants.ProbeMeasured:
-			if result.ExitCode != 0 {
-				err = fmt.Errorf("goatest: prepared original control returned measured with exit code %d", result.ExitCode)
-			}
-		case result.Outcome == gomutants.ProbeTestFailed || result.Outcome == gomutants.ProbeUnavailable:
-			if result.ExitCode == 0 {
-				err = fmt.Errorf("goatest: prepared original control returned %s with exit code 0", result.Outcome)
-			}
-		case result.Outcome == gomutants.ProbeTimedOut:
-		default:
-			err = fmt.Errorf("goatest: prepared original control returned unknown outcome %q", result.Outcome)
-		}
-		if err != nil {
-			record.Error = err.Error()
+		if result.Duration < 0 {
+			record.Error = fmt.Sprintf("goatest: original control returned negative duration %s", result.Duration)
 			recorder.ProbeExec(record)
-			return gomutants.CommandResult{}, err
+			return gomutants.ControlResult{}, errors.New(record.Error)
 		}
-		record.Outcome = string(result.Outcome)
+		record.Outcome = controlProbeOutcome(result)
 		recorder.ProbeExec(record)
-		return gomutants.CommandResult{
-			ExitCode: result.ExitCode, TimedOut: result.Outcome == gomutants.ProbeTimedOut,
-			Duration: result.Duration, Output: slices.Clone(result.Output),
-		}, nil
+		return result, nil
+	}
+}
+
+// controlProbeOutcome says what a control did, in the probe vocabulary the
+// recording has.
+//
+// The vocabulary is borrowed and the borrowing is visible: an infection probe
+// answers whether a mutated value would have differed, and a control answers
+// whether the program the user wrote passes its own tests. They are different
+// questions, and goatest-trace-v1 has one payload for both because a control
+// used to be measured by a probe.
+//
+// It stays borrowed until the contract version moves. go-mutants has the mirror
+// of this to make - its own recording carries a control as executions of kind
+// control-run plus a note, because its type enum is closed too - so the two
+// halves are one change to make together rather than two to make apart.
+func controlProbeOutcome(result gomutants.ControlResult) string {
+	switch {
+	case result.TimedOut:
+		return trace.ProbeOutcomeTimedOut
+	case result.ExitCode != 0:
+		return trace.ProbeOutcomeTestFailed
+	default:
+		return trace.ProbeOutcomeMeasured
 	}
 }
 
@@ -1245,10 +1193,22 @@ func modeIdentity(options Options) string {
 	return identity + ";execution=" + string(encoded)
 }
 
+// buildEnvironmentNames are the variables of the operator's environment that
+// can change what a build produces, and therefore belong to the identity a
+// cached verdict is keyed on.
+//
+// GOWORK is deliberately absent, for the reason ADR 0005 keeps GOCACHEPROG
+// out: a variable that cannot change what a command does has no business
+// changing what a run is called. Every command this module runs in a frozen
+// workspace carries GOWORK=off - see mutationbridge.Workspace.Exec - so the
+// operator's own GOWORK reaches nothing. Leaving it here would key the cache on
+// a setting the run overrides, which is worse than either answer on its own:
+// two runs that did exactly the same work would miss each other's evidence, and
+// the identity would name a workspace that took no part in it.
 var buildEnvironmentNames = []string{
 	"AR", "CC", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_ENABLED", "CGO_FFLAGS", "CGO_LDFLAGS",
 	"CXX", "FC", "GCCGO", "GODEBUG", "GOENV", "GOEXPERIMENT", "GOFLAGS", "GO386", "GOAMD64", "GOARM",
-	"GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOTOOLCHAIN", "GOWASM", "GOWORK", "PKG_CONFIG",
+	"GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOTOOLCHAIN", "GOWASM", "PKG_CONFIG",
 }
 
 func selectedEnvironment(environment, configured []string) []string {
@@ -1316,7 +1276,7 @@ func projectExcludeLimitations(excludes []string) []report.Limitation {
 	result := make([]report.Limitation, 0, len(excludes))
 	for _, pattern := range excludes {
 		result = append(result, report.Limitation{
-			Code: "project-exclude", Summary: fmt.Sprintf("paths matching %q are outside the configured assurance boundary", pattern),
+			Code: report.LimitationProjectExclude, Summary: fmt.Sprintf("paths matching %q are outside the configured assurance boundary", pattern),
 		})
 	}
 	return result
@@ -1366,7 +1326,7 @@ func cachedReportReusable(cached report.Report, accepted map[string]bool) bool {
 		return false
 	}
 	return !slices.ContainsFunc(cached.Limitations, func(item report.Limitation) bool {
-		return item.Code == laterPhasesNotRunCode
+		return item.Code == report.LimitationLaterPhasesNotRun
 	})
 }
 

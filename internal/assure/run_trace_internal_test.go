@@ -19,8 +19,6 @@ import (
 	"github.com/P4suta/goatest/internal/trace"
 )
 
-const preparedAndPristineWorkspaceCount = 2
-
 var everyRunPhase = []string{
 	"snapshot", "cache-check", "discover", "impact", "resources", "baseline",
 	"baseline", "graph", "race", "probe", "mutation", "repair", "finalize",
@@ -110,6 +108,7 @@ func TestRunCoordinatorEndsEveryPhaseItBegins(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			harness := newRunCoordinatorHarness(t)
 			sink := harness.record()
 			if test.change != nil {
@@ -160,7 +159,20 @@ func TestRunCoordinatorHandsTheRecorderToEveryTracedComponent(t *testing.T) {
 	}
 }
 
-func TestRunCoordinatorOverlapsPreparationWithPristineBaselineChecks(t *testing.T) {
+// TestRunCoordinatorOverlapsPreparationWithBaselineChecksOnOneWorkspace covers
+// what the second workspace used to buy and how it is bought now.
+//
+// The overlap is the point: `go vet` and `go build` have no reason to wait for a
+// mutation session to be prepared, and a run that made them wait would pay for
+// the preparation twice over on every round. What changed is where they run. A
+// round used to open a second workspace over the same root to get the overlap -
+// a second snapshot, a second discovery pass, a second compile of everything -
+// and go-mutants now runs a command beside a preparation on the workspace that
+// is preparing, waiting only for the instrumentation window.
+//
+// So the assertion is inverted from what it was. Sharing the workspace was the
+// failure; sharing it is the answer.
+func TestRunCoordinatorOverlapsPreparationWithBaselineChecksOnOneWorkspace(t *testing.T) {
 	t.Parallel()
 	harness := newRunCoordinatorHarness(t)
 	sink := harness.record()
@@ -204,8 +216,13 @@ func TestRunCoordinatorOverlapsPreparationWithPristineBaselineChecks(t *testing.
 	if _, err := harness.run(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if baselineWorkspace == CommandWorkspace(preparationWorkspace) {
-		t.Fatal("mutation preparation and baseline checks shared a workspace")
+	if baselineWorkspace == nil || preparationWorkspace == nil {
+		t.Fatal("the run did not reach both a baseline and a preparation")
+	}
+	if unwrapBuildCacheWorkspace(baselineWorkspace) != CommandWorkspace(preparationWorkspace) {
+		t.Fatalf("the baseline ran on %p and the preparation on %p.\n\n"+
+			"A second snapshot of the same tree is what this run stopped paying for.",
+			baselineWorkspace, preparationWorkspace)
 	}
 	events := sink.Events()
 	baselineOpen := false
@@ -235,12 +252,12 @@ func TestRunCoordinatorOverlapsPreparationWithPristineBaselineChecks(t *testing.
 	}
 }
 
-func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
+func TestRunCoordinatorTakesOriginalControlsThroughThePreparedSession(t *testing.T) {
 	t.Parallel()
 	harness := newRunCoordinatorHarness(t)
 	sink := harness.record()
-	session := &mutationUnitSession{catalog: harness.catalog, probe: func(gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
-		return gomutants.ProbeResult{Outcome: gomutants.ProbeMeasured, Duration: 25 * time.Millisecond}, nil
+	session := &mutationUnitSession{catalog: harness.catalog, control: func(gomutants.ControlRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{Duration: 25 * time.Millisecond}, nil
 	}}
 	harness.dependencies.prepareSession = func(_ context.Context, _ *mutationbridge.Workspace, options mutationbridge.PrepareOptions) (MutationSession, error) {
 		harness.prepareCalls++
@@ -266,15 +283,23 @@ func TestRunCoordinatorReusesThePreparedProbeForOriginalControls(t *testing.T) {
 	if _, err := harness.run(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	want := gomutants.ProbeRequest{
+	want := gomutants.ControlRequest{
 		Package: "fixture.example/module", Args: []string{"-test.run=^TestValue$"},
-		Env: []string{"DB=ready"}, Timeout: 2 * time.Second,
+		Env: []string{"DB=ready"}, Timeout: 2 * time.Second, OutputLimit: commandOutputLimit,
 	}
-	if got := session.probeRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+	if got := session.controlRequests(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("prepared control requests = %+v, want %+v", got, want)
 	}
-	if harness.openCalls != preparedAndPristineWorkspaceCount {
-		t.Fatalf("workspace opens = %d, want prepared and pristine workspaces", harness.openCalls)
+	if probes := session.probeRequests(); len(probes) != 0 {
+		t.Fatalf("a control was taken through Probe: %+v\n\n"+
+			"There is one way to ask whether the original program passes, and it is\n"+
+			"Session.Control. Reading a probe's test-failed outcome as a red suite\n"+
+			"measures the probe tree's binaries, not the ones the mutants run on.", probes)
+	}
+	if harness.openCalls != completedRoundWorkspaceCount {
+		t.Fatalf("workspace opens = %d, want one.\n\n"+
+			"A control runs on the binaries the session prepared, so a round has no\n"+
+			"reason to snapshot the tree twice.", harness.openCalls)
 	}
 	var controls []trace.ProbeRecord
 	for _, event := range sink.Events() {

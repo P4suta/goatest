@@ -206,6 +206,7 @@ func TestOutcomeTotalsOrderByExecutionsDurationAndIdentity(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, outcomes, _, _ := mutantTotals(test.events)
 			if len(outcomes) != expectedTotalCount || outcomes[0].outcome != test.want {
 				t.Fatalf("outcomes = %+v, want %q first", outcomes, test.want)

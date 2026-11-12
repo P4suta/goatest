@@ -37,6 +37,7 @@ func (validator *operationValidator) Suite(context.Context, provider.Candidate) 
 }
 
 func TestFixPreviewsThenFreshlyValidatesAndExplicitlyAppliesCandidate(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	finding := report.Finding{ID: "finding-a", Kind: "surviving-mutant", Summary: "survived", MutantID: "mutant-a"}
 	candidate := provider.Candidate{Kind: "patch", Path: "generated_test.go", Content: []byte("package fixture\n")}
@@ -73,6 +74,7 @@ func TestFixPreviewsThenFreshlyValidatesAndExplicitlyAppliesCandidate(t *testing
 }
 
 func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	planCalls, runCalls := 0, 0
 	service := app.Service{
@@ -116,6 +118,7 @@ func TestPlanDispatchIsReadOnlyAndCacheCommandsReportAndCollect(t *testing.T) {
 }
 
 func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root, TempDirectory: t.TempDir()}
 	cacheRoot := filepath.Join(root, ".goatest", "cache")
@@ -226,6 +229,7 @@ func TestCacheStatusReportsMutationEvidenceAndFlushForgetsOnlyReusableResults(t 
 }
 
 func TestCacheFlushPreflightsEvidenceBeforeRemovingExactCache(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	cacheRoot := filepath.Join(root, ".goatest", "cache")
 	store := cache.New(cacheRoot)
@@ -245,6 +249,7 @@ func TestCacheFlushPreflightsEvidenceBeforeRemovingExactCache(t *testing.T) {
 }
 
 func TestDoctorReturnsAuditableErrorInsteadOfRunningAssurance(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root, GoBinary: "definitely-missing-goatest-go", Run: func(context.Context, assure.Options) (report.Report, error) {
 		t.Fatal("doctor ran assurance")

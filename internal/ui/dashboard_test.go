@@ -69,6 +69,7 @@ func (clock *fixedClock) Advance(delta time.Duration) {
 }
 
 func TestDashboardRendersPhaseElapsedAndMutationEstimate(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()
 	tick := make(chan time.Time, 1)
@@ -103,6 +104,7 @@ func TestDashboardRendersPhaseElapsedAndMutationEstimate(t *testing.T) {
 }
 
 func TestDashboardPrintsUnknownKindsAsPermanentLines(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()
 	tick := make(chan time.Time)
@@ -120,6 +122,7 @@ func TestDashboardPrintsUnknownKindsAsPermanentLines(t *testing.T) {
 }
 
 func TestDashboardTicksKeepTheElapsedTimeMoving(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{write: make(chan struct{}, 1)}
 	clock := newFixedClock()
 	tick := make(chan time.Time, 1)
@@ -140,6 +143,7 @@ func TestDashboardTicksKeepTheElapsedTimeMoving(t *testing.T) {
 }
 
 func TestDashboardBoundsTheStatusLineWidth(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{}
 	tick := make(chan time.Time)
 	notes := ui.NewDashboard(buffer, ui.DashboardOptions{Now: newFixedClock().Now, Tick: tick, Width: dashboardFixtureWidth})
@@ -153,6 +157,7 @@ func TestDashboardBoundsTheStatusLineWidth(t *testing.T) {
 }
 
 func TestDashboardStopsWatchingWhenTheTickStreamCloses(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{}
 	tick := make(chan time.Time)
 	notes := ui.NewDashboard(buffer, ui.DashboardOptions{Now: newFixedClock().Now, Tick: tick})
@@ -167,6 +172,7 @@ func TestDashboardStopsWatchingWhenTheTickStreamCloses(t *testing.T) {
 }
 
 func TestDashboardSurvivesConcurrentNotesTicksAndClose(t *testing.T) {
+	t.Parallel()
 	buffer := &lockedBuffer{}
 	clock := newFixedClock()
 	tick := make(chan time.Time)

@@ -27,10 +27,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+          fetch-depth: 0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
-          go-version: 1.27.3
-          cache-dependency-path: go.sum
+          version: 2026.11.2
+          install_args: go
       - name: Download pinned modules
         run: go mod download
       - name: Verify formatting
@@ -44,7 +45,8 @@ jobs:
           GOSUMDB: "off"
           GOTELEMETRY: "off"
           GOTOOLCHAIN: "local"
-        run: go test -timeout 40m ./...
+          GOATEST_TEST_REQUIRE_TOOLS: "1"
+        run: mise run test-integration-audit
 
   lint:
     name: Lint
@@ -54,6 +56,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
           version: 2026.11.2

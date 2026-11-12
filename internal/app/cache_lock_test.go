@@ -32,6 +32,7 @@ const (
 )
 
 func TestVerificationCacheWaitIsVisibleAndContextCancellationStopsBeforeRunner(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -99,6 +100,7 @@ func (watch *watchedProgress) String() string {
 }
 
 func TestARunCollectsExpiredRecordingsUnderTheLeaseItOwns(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	recorded := time.Date(2026, 8, 1, 10, 11, 12, 0, time.UTC)
@@ -176,6 +178,7 @@ func TestARunCollectsExpiredRecordingsUnderTheLeaseItOwns(t *testing.T) {
 }
 
 func TestCompletedReportDeletesCheckpointButCancellationLeavesIt(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		runErr    error
@@ -185,6 +188,7 @@ func TestCompletedReportDeletesCheckpointButCancellationLeavesIt(t *testing.T) {
 		{name: "cancelled", runErr: context.Canceled, wantExist: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			digest := appTestDigest("b")
 			store := cache.New(filepath.Join(root, ".goatest", "cache"))

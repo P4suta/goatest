@@ -27,6 +27,7 @@ import (
 )
 
 func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	result := report.Report{
 		Schema: report.SchemaV1, Verdict: report.VerdictInsufficient, Contract: "deep-v1", Snapshot: "snapshot-a",
@@ -70,6 +71,7 @@ func TestVerifyWritesEveryDeterministicReportAndReportReadsLatest(t *testing.T) 
 }
 
 func TestDefaultAllPatternIsFullButNarrowPatternIsPackageScope(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		packages     []string
@@ -81,6 +83,7 @@ func TestDefaultAllPatternIsFullButNarrowPatternIsPackageScope(t *testing.T) {
 		{name: "narrow", packages: []string{"./internal/report"}, packageScope: true, kind: report.RunPackage, verdict: report.VerdictScopeAssured},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			var received assure.Options
 			service := app.Service{Root: t.TempDir(), Run: func(_ context.Context, options assure.Options) (report.Report, error) {
 				received = options
@@ -95,6 +98,7 @@ func TestDefaultAllPatternIsFullButNarrowPatternIsPackageScope(t *testing.T) {
 }
 
 func TestChangesetHistoryNeverReplacesLatestFull(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	result := report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured, Contract: "standard-v1"}
 	service := app.Service{Root: root, Run: func(_ context.Context, options assure.Options) (report.Report, error) {
@@ -148,8 +152,10 @@ func mutantInventory(total, selected int) []report.MutantDisposition {
 }
 
 func TestVerifyAndReplayPersistInfrastructureErrorReports(t *testing.T) {
+	t.Parallel()
 	for _, command := range []cli.Command{cli.CommandVerify, cli.CommandReplay} {
 		t.Run(string(command), func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if command == cli.CommandReplay {
 				writeLatestFixture(t, root)
@@ -196,6 +202,7 @@ func TestVerifyAndReplayPersistInfrastructureErrorReports(t *testing.T) {
 }
 
 func TestCancelledRunDoesNotReplaceTheLatestCompletedReport(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeLatestFixture(t, root)
 	service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
@@ -203,7 +210,9 @@ func TestCancelledRunDoesNotReplaceTheLatestCompletedReport(t *testing.T) {
 	}}
 
 	result, err := service.Execute(t.Context(), cli.CommandVerify, cli.Request{}, "")
-	if !errors.Is(err, context.Canceled) || result.Verdict != "" {
+	// The cancelled run reports itself - the assertion here is that it does not
+	// become the report the next command reads, which is what the indexes are.
+	if !errors.Is(err, context.Canceled) || result.Verdict != report.VerdictInsufficient {
 		t.Fatalf("cancelled verify = %+v, %v", result, err)
 	}
 	latest, loadErr := service.Execute(t.Context(), cli.CommandReport, cli.Request{}, "")
@@ -213,6 +222,7 @@ func TestCancelledRunDoesNotReplaceTheLatestCompletedReport(t *testing.T) {
 }
 
 func TestPlainUIWritesDeterministicProgressImmediately(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	var progress bytes.Buffer
 	service := app.Service{
@@ -234,6 +244,7 @@ func TestPlainUIWritesDeterministicProgressImmediately(t *testing.T) {
 }
 
 func TestCacheHitProvenanceDoesNotDependOnAProgressWriter(t *testing.T) {
+	t.Parallel()
 	service := app.Service{
 		Root: t.TempDir(),
 		Run: func(_ context.Context, options assure.Options) (report.Report, error) {
@@ -254,6 +265,7 @@ func TestCacheHitProvenanceDoesNotDependOnAProgressWriter(t *testing.T) {
 }
 
 func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
+	t.Parallel()
 	var progress bytes.Buffer
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress,
@@ -277,6 +289,7 @@ func TestProgressEscapesTerminalControlCharacters(t *testing.T) {
 }
 
 func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
+	t.Parallel()
 	const replayTimeout = 2 * time.Minute
 	root := t.TempDir()
 	if err := config.Init(root); err != nil {
@@ -350,6 +363,7 @@ func TestExplainAcceptAndReplayOperateOnStableFindingIdentity(t *testing.T) {
 }
 
 func TestReplayRejectsFindingWithoutMutantIdentityBeforeRunner(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeLatestFixtureWithMutant(t, root, "")
 	runnerCalled := false
@@ -364,6 +378,7 @@ func TestReplayRejectsFindingWithoutMutantIdentityBeforeRunner(t *testing.T) {
 }
 
 func TestReplayRejectsIncompleteExecutionMetadataBeforeRunner(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeLatestFixture(t, root)
 	path := filepath.Join(root, ".goatest", "latest-any.json")
@@ -391,6 +406,7 @@ func TestReplayRejectsIncompleteExecutionMetadataBeforeRunner(t *testing.T) {
 }
 
 func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing.T) {
+	t.Parallel()
 	valid := report.JSON(report.Report{Schema: report.SchemaV1, Verdict: report.VerdictAssured})
 	for _, testCase := range []struct {
 		name    string
@@ -405,6 +421,7 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 		{name: "incomplete-audit", content: valid, write: true, want: "invalid latest report"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if testCase.write {
 				path := filepath.Join(root, ".goatest", "latest-any.json")
@@ -424,6 +441,7 @@ func TestReportRejectsMissingMalformedTrailingAndWrongSchemaArtifacts(t *testing
 }
 
 func TestHistoricalReportLoadErrorsIdentifyTheRequestedRun(t *testing.T) {
+	t.Parallel()
 	_, err := (app.Service{Root: t.TempDir()}).Execute(t.Context(), cli.CommandReport, cli.Request{ReportRunID: "missing-run"}, "")
 	want := `goatest: report run "missing-run" is not in reports/runs: it was collected or never written`
 	if err == nil || err.Error() != want {
@@ -432,8 +450,10 @@ func TestHistoricalReportLoadErrorsIdentifyTheRequestedRun(t *testing.T) {
 }
 
 func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.T) {
+	t.Parallel()
 	sentinel := errors.New("runner failed")
 	t.Run("init-existing", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		if err := config.Init(root); err != nil {
 			t.Fatal(err)
@@ -444,6 +464,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 	})
 	for _, command := range []cli.Command{cli.CommandVerify, cli.CommandReplay} {
 		t.Run(string(command)+"-runner", func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			if command == cli.CommandReplay {
 				writeLatestFixture(t, root)
@@ -459,6 +480,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 	}
 
 	t.Run("verify-report-write", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
@@ -472,6 +494,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 	})
 
 	t.Run("runner-error-report-write", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		if err := os.WriteFile(filepath.Join(root, ".goatest"), []byte("blocks directory"), filemode.ReadableFile); err != nil {
 			t.Fatal(err)
@@ -486,6 +509,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 	})
 
 	t.Run("replay-report-write", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		writeLatestFixture(t, root)
 		if err := os.RemoveAll(filepath.Join(root, "reports")); err != nil {
@@ -503,6 +527,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 	})
 
 	t.Run("accept-config", func(t *testing.T) {
+		t.Parallel()
 		root := t.TempDir()
 		if err := config.Init(root); err != nil {
 			t.Fatal(err)
@@ -520,6 +545,7 @@ func TestServicePropagatesInitRunnerPersistenceAndAcceptanceFailures(t *testing.
 }
 
 func TestServiceRejectsMissingFindingsAndUnsupportedCommands(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeLatestFixture(t, root)
 	service := app.Service{Root: root}
@@ -534,8 +560,10 @@ func TestServiceRejectsMissingFindingsAndUnsupportedCommands(t *testing.T) {
 }
 
 func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
+	t.Parallel()
 	for _, command := range []cli.Command{cli.CommandExplain, cli.CommandAccept, cli.CommandReplay} {
 		t.Run(string(command), func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			path := filepath.Join(root, ".goatest", "latest-any.json")
 			if err := os.MkdirAll(filepath.Dir(path), filemode.ReadableDirectory); err != nil {
@@ -553,6 +581,7 @@ func TestFindingCommandsPreserveLatestReportLoadFailures(t *testing.T) {
 }
 
 func writeLatestFixture(t *testing.T, root string) {
+	t.Helper()
 	writeLatestFixtureWithMutant(t, root, "mutant-a")
 }
 
@@ -578,6 +607,7 @@ func writeLatestFixtureWithMutant(t *testing.T, root, mutantID string) {
 }
 
 func TestInitCreatesStrictConfigWithoutRunningAssurance(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	service := app.Service{Root: root, Run: func(context.Context, assure.Options) (report.Report, error) {
 		t.Fatal("init invoked assurance")
@@ -605,6 +635,7 @@ func TestInitCreatesStrictConfigWithoutRunningAssurance(t *testing.T) {
 }
 
 func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
+	t.Parallel()
 	var output, progress bytes.Buffer
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress, Output: &output,
@@ -642,6 +673,7 @@ func TestJSONLUIStreamsProgressEventsToTheOutput(t *testing.T) {
 }
 
 func TestTraceUnavailableReachesTheSelectedUI(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	service := app.Service{
 		Root: t.TempDir(), Output: &output,
@@ -659,6 +691,7 @@ func TestTraceUnavailableReachesTheSelectedUI(t *testing.T) {
 }
 
 func TestJSONLWithoutAnOutputWriterFallsBackToPlain(t *testing.T) {
+	t.Parallel()
 	var progress bytes.Buffer
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress,
@@ -676,6 +709,7 @@ func TestJSONLWithoutAnOutputWriterFallsBackToPlain(t *testing.T) {
 }
 
 func TestAutoUIWithoutATerminalRendersPlainLines(t *testing.T) {
+	t.Parallel()
 	for name, interactive := range map[string]func(io.Writer) bool{
 		"zero-value": nil,
 		"probed-no":  func(io.Writer) bool { return false },
@@ -698,6 +732,7 @@ func TestAutoUIWithoutATerminalRendersPlainLines(t *testing.T) {
 }
 
 func TestAutoUIRendersTheDashboardOnAnInteractiveTerminal(t *testing.T) {
+	t.Parallel()
 	var progress lockedProgressBuffer
 	service := app.Service{
 		Root: t.TempDir(), Progress: &progress,

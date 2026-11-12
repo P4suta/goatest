@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Assurance contract v1
 
 ## Meaning
@@ -15,6 +20,13 @@ scope.
 
 Replay is an operation, not a new project assurance. It returns `REPRODUCED`
 when the selected finding remains observable or `RESOLVED` when it does not.
+
+The other operations assure nothing at all - `init`, `plan`, `doctor`,
+`report`, `accept`, `fix`, `cache` and `trace` - and return `COMPLETED`. The
+word is deliberately not one of the assured family: those commands measure no
+mutant and prove no property, and a verdict meaning "the command worked" must
+not be readable as "the project is assured". `COMPLETED` exits zero, with
+`ASSURED`, `CHANGE_ASSURED`, `SCOPE_ASSURED` and `RESOLVED`.
 
 ## Fault model
 
@@ -203,9 +215,9 @@ environment.
 A failed or timed-out original cannot distinguish a mutant failure from the
 suite's own state, so all mutants sharing it become inconclusive without
 repeating the command. A passing original supplies the closest duration
-control. The deadline covers test execution, not a second workspace's cold
-compilation. Mutant replay deliberately skips probe preparation and retains a
-lazy pristine-workspace fallback.
+control. The deadline covers test execution, not compilation. Mutant replay
+deliberately skips probe preparation, and takes its control through the same
+prepared session as every other run.
 
 These reach statements rest on one measured execution. A target or suite whose
 behaviour differs between runs may enter a block, or make a site differ, in the
@@ -230,6 +242,13 @@ A mutant is `killed` only after:
 
 1. the exact original-code control for that request passes; and
 2. one execution of the same request with the mutant active fails.
+
+The control is `Session.Control`: the same prepared test binaries the mutant
+runs on, launched the same way, with nothing activated. There is one way to ask
+it. Until the control existed there were two, chosen by the kind of run - an
+argv assembled here and handed to a second workspace, or the probe tree's
+`test-failed` outcome read as a red suite - and neither measured the binaries
+the comparison is about.
 
 Each distinct control command — the package, arguments, and environment of the
 killing request, which the original code does not vary by mutant — runs once

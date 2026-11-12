@@ -129,8 +129,8 @@ func TestSingleComparativeKillRecordsItsRepositoryObservation(t *testing.T) {
 		}
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 	}}
-	control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		return gomutants.CommandResult{}, nil
+	control := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{}, nil
 	}
 	if _, err := evaluateMutationsForTest(t.Context(), session, []TargetEvidence{target}, MutationOptions{
 		Evidence: index, RepositoryObserver: observer, OriginalControl: control,
@@ -259,6 +259,7 @@ func TestWholeTreeMarkerSelectsTheMatchingRepositoryBoundary(t *testing.T) {
 		{name: "whole baseline refuses a narrow record", baselineWhole: true, record: record(narrow, false)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			current := target
 			current.WholeTree = test.baselineWhole
 			index := newRunMutationEvidence(evidence.MutationStore{Records: []evidence.MutationRecord{test.record}},
@@ -514,14 +515,14 @@ func TestEvaluateMutationsRecordsAReusedRouteInTheTrace(t *testing.T) {
 
 func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 	t.Parallel()
-	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-		return gomutants.CommandResult{}, nil
+	passingControl := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+		return gomutants.ControlResult{}, nil
 	}
 	for _, test := range []struct {
 		name     string
 		targets  []TargetEvidence
 		exec     func(gomutants.ExecRequest) (gomutants.MutantResult, error)
-		control  func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error)
+		control  func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error)
 		killer   bool
 		survivor bool
 	}{
@@ -539,8 +540,8 @@ func TestEvaluateMutationsRecordsAKillOrASurvivorAndNothingElse(t *testing.T) {
 			},
 		},
 		{
-			name: "a kill the original control refused", control: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-				return gomutants.CommandResult{ExitCode: 1, Output: []byte("the original failed")}, nil
+			name: "a kill the original control refused", control: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+				return gomutants.ControlResult{ExitCode: 1, Output: []byte("the original failed")}, nil
 			},
 			exec: func(request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 				return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil

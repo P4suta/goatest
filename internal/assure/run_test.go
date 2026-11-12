@@ -1,3 +1,5 @@
+//go:build integration
+
 // SPDX-FileCopyrightText: 2026 goatest contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
@@ -38,7 +40,7 @@ const (
 )
 
 func TestRunResourceProviderHelper(t *testing.T) {
-	if !testkit.HelperEnabled("GOATEST_ASSURE_RESOURCE_HELPER") {
+	if !testkit.RunningAsHelper(t, "GOATEST_ASSURE_RESOURCE_HELPER", "TestRunResourceProviderHelper") {
 		return
 	}
 	decoder := json.NewDecoder(os.Stdin)
@@ -63,7 +65,7 @@ func TestRunResourceProviderHelper(t *testing.T) {
 }
 
 func TestRunGenerationProviderHelper(t *testing.T) {
-	if !testkit.HelperEnabled("GOATEST_ASSURE_GENERATION_HELPER") {
+	if !testkit.RunningAsHelper(t, "GOATEST_ASSURE_GENERATION_HELPER", "TestRunGenerationProviderHelper") {
 		return
 	}
 	var request provider.Request

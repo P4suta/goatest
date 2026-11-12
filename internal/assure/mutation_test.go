@@ -30,8 +30,8 @@ func mutationOptionsForTest(options assure.MutationOptions) assure.MutationOptio
 		options.Timeout = mutationTestContainment
 	}
 	if options.OriginalControl == nil {
-		options.OriginalControl = func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			return gomutants.CommandResult{Duration: mutationTestControlDuration}, nil
+		options.OriginalControl = func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{Duration: mutationTestControlDuration}, nil
 		}
 	}
 	return options
@@ -56,6 +56,13 @@ func (session *parallelSession) Catalog() gomutants.Catalog { return session.cat
 
 func (session *parallelSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
+// Control reports a clean original of a measurable duration, because these
+// tests are about what a mutant does and a control that reported nothing
+// would make every one of them inconclusive for another reason.
+func (session *parallelSession) Control(context.Context, gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	return gomutants.ControlResult{Duration: time.Millisecond}, nil
 }
 
 func (session *parallelSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -278,8 +285,8 @@ func TestEvaluateRunsFuzzSeedCorpusAsDeterministicTarget(t *testing.T) {
 
 	result, err := evaluateMutationsForTest(t.Context(), session, targets, assure.MutationOptions{
 		Timeout: time.Second,
-		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
-			return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		OriginalControl: func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
+			return gomutants.ControlResult{Duration: time.Millisecond}, nil
 		},
 	})
 

@@ -221,7 +221,7 @@ func wholeTreeKeyLimitation(targets []TargetEvidence, suites map[string]PackageS
 		return report.Limitation{}, false
 	}
 	return report.Limitation{
-		Code: "whole-tree-behaviour-keys",
+		Code: report.LimitationWholeTreeBehaviourKeys,
 		Summary: fmt.Sprintf(
 			"%d of %d targets and %d of %d package suites read outside their ordinary inputs, so their evidence is reused only while nothing in the tree changes; goatest trace summary names which boundary widened each one",
 			widenedTargets, len(targets), widenedSuites, len(suites)),

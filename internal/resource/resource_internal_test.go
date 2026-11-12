@@ -340,6 +340,7 @@ func TestEnvironmentValidationCoversInvalidAndReservedKeys(t *testing.T) {
 		{name: "tmpdir", env: map[string]string{"tmpdir": "x"}, want: `reserved environment key "tmpdir"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if err := validateEnvironment(test.env); err == nil || err.Error() != test.want {
 				t.Fatalf("validateEnvironment error = %v, want %q", err, test.want)
 			}
@@ -432,6 +433,7 @@ func TestDecodeAcceptsExactLimitAndRejectsProtocolFailures(t *testing.T) {
 		{name: "no newline", input: validJSON, want: "EOF"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			provider := &instance{stdout: bufio.NewReaderSize(bytes.NewReader(test.input), ProtocolOutputLimit+1)}
 			_, err := provider.decode(context.Background())
 			if err == nil || err.Error() != test.want {

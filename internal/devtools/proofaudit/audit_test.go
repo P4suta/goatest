@@ -666,6 +666,7 @@ func TestAuditRejectsUnknownFieldsAndTrailingDocuments(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := auditTrace(strings.NewReader(test.stream), evidence{}, nil, auditLayers(nil))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("audit error = %v, want %q", err, test.want)

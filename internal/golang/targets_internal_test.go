@@ -53,6 +53,7 @@ func TestTargetKindMatchesGoTestNamingRules(t *testing.T) {
 		{name: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			kind, ok := targetKind(test.name)
 			if kind != test.kind || ok != test.ok {
 				t.Fatalf("targetKind(%q) = (%q, %t), want (%q, %t)", test.name, kind, ok, test.kind, test.ok)
@@ -100,6 +101,7 @@ func TestEmptyResults(t *tst.T) () {}
 		{name: "FuzzWrong", kind: KindFuzz},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			got := testingSignature(findTargetFunction(t, file, test.name), aliases, test.kind)
 			if got != test.want {
 				t.Fatalf("testingSignature(%s) = %t, want %t", test.name, got, test.want)
@@ -144,6 +146,7 @@ func TestTargetCapabilitiesRecognizesOnlyWellFormedIntegrationScopes(t *testing.
 		{name: "scope argument is rune", body: `gt.Run(t, gt.Integration('x'), callback)`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			file := parseTargetSource(t, "package sample\nfunc target() { "+test.body+" }\n")
 			got := targetCapabilities(findTargetFunction(t, file, "target"), aliases)
 			if !slices.Equal(got, test.want) {
@@ -184,6 +187,7 @@ func TestSelectorIsRequiresSelectorAliasAndAllowedName(t *testing.T) {
 		{name: "selector base not identifier", expr: &ast.SelectorExpr{X: selector("outer", "gt"), Sel: ast.NewIdent("Run")}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if got := selectorIs(test.expr, aliases, "Run", "Check"); got != test.want {
 				t.Fatalf("selectorIs = %t, want %t", got, test.want)
 			}

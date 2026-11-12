@@ -25,7 +25,14 @@ func (service Service) readTrace(root, action string, runs []string) (report.Rep
 	switch action {
 	case "summary":
 		if len(runs) > 1 {
-			return report.Report{}, errors.New("goatest: trace summary accepts at most one run")
+			// The command line refuses this first, with a usage hint. Reaching
+			// here means something called the operation directly with arguments
+			// the surface would not have accepted, so the message says that
+			// rather than repeating the one a user would have seen - the same
+			// words in two layers means the same mistake reads two ways
+			// depending on which one caught it, and only one of them offers the
+			// hint.
+			return report.Report{}, fmt.Errorf("goatest: trace summary was given %d runs and accepts at most one", len(runs))
 		}
 		name := ""
 		if len(runs) != 0 {

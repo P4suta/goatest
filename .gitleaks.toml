@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 goatest contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# gitleaks does not ask git what it tracks. `gitleaks dir .` walks the working
+# tree, so it reads whatever a developer's last run left behind: this
+# repository's tracked files are 3.3 MB and the unfiltered scan reads 142 MB,
+# which is to say that 98% of the gate's work is about content the repository
+# does not contain. A finding there is a red lint about a file nobody can fix
+# by editing the repository, and a gate that goes red for reasons outside the
+# repository is a gate people learn to scroll past.
+#
+# These are not judgements that something is not a secret. They are the claim
+# that a path is outside the repository, and `internal/devgates` checks that
+# claim in the only two ways it can be wrong: git must actually ignore the path,
+# and no tracked file may match it. The second is the one that matters. A path
+# can be named in .gitignore and still be tracked - ignore rules do not reach a
+# file that was committed before them - so asking git whether a path is ignored
+# answers a question about the rules, not about the files.
+#
+# The paths are restricted by that gate to the form `(^|/)name/`. gitleaks
+# accepts arbitrary regular expressions, and a line like `.*key.*` would arrive
+# here wearing the face of a tidy-up while switching the scanner off; fixing the
+# shape is what makes it possible to turn each entry back into a path and put
+# the question to git.
+
+[extend]
+useDefault = true
+
+# A global allowlist, not a per-rule one. A rule's allowlist filters findings
+# after the file has been read, which leaves the reading - the 142 MB - exactly
+# where it was. This one is consulted while walking.
+[[allowlists]]
+description = "Paths this repository does not contain, checked by internal/devgates"
+paths = ['''(^|/)\.goatest/''', '''(^|/)dist/''', '''(^|/)reports/''']

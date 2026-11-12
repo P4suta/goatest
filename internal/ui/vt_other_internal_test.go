@@ -11,6 +11,7 @@ import (
 )
 
 func TestVirtualTerminalIsNativeOutsideWindows(t *testing.T) {
+	t.Parallel()
 	if !EnableVirtualTerminal(&bytes.Buffer{}) {
 		t.Fatal("non-Windows terminal refused ANSI escape processing")
 	}

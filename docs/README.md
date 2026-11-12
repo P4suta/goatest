@@ -1,95 +1,46 @@
-# Goatest guide
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
 
-goatest is an audit-oriented assurance runner that connects Go tests and fuzz targets with mutation testing and durable evidence.
+# Documentation
 
-The current release line is a pre-release alpha, and `v1` defines the first intended public contract.
+`internal/devgates` pins this index to the directory, in both directions: a page with no line here fails, and a line here naming a page the tree no longer holds fails as loudly.
+A page nothing checks is a page that will be wrong, and the only question is when.
 
-## Scope and assurance
+## What it does, and will not do
 
-`ASSURED` means that a recorded full-project scope completed its configured fault model without missing evidence.
+| Page | Subject |
+| --- | --- |
+| [architecture.md](architecture.md) | the shape of a run, and which package owns which part of it |
+| [limitations.md](limitations.md) | what goatest refuses to do, and what is deferred rather than broken |
 
-Changeset and package runs receive separate verdicts, so they can't overwrite the full-project result.
+## Contracts
 
-goatest provides evidence about its configured checks, not proof that a program is correct or ready for production.
+These are the documents something else validates against.
+Each is pinned to the code by a ledger in the package that owns it.
 
-The `standard-v1` contract reports race coverage as a static estimate, while `deep-v1` runs race checks for every resolved package.
+| Page | Subject |
+| --- | --- |
+| [assurance-contract.md](assurance-contract.md) | what `ASSURED` means, the fault model, and the mutant accounting |
+| [report-v1.md](report-v1.md) | the report a run writes, its artifacts, and the exit codes |
+| [trace-v1.md](trace-v1.md) | the recording a run keeps, and every closed vocabulary in it |
+| [checkpoint-v1.md](checkpoint-v1.md) | how an interrupted run is resumed, and when its evidence is refused |
+| [protocols.md](protocols.md) | the resource and generation provider protocols |
 
-## Install from source
+## Surfaces
 
-The Go module declares Go 1.26, and `mise.toml` pins Go 1.27.3 for source development.
+[commands.md](commands.md) lists the command surface.
 
-Clone the source and install the pinned Go tool before building the command from that checkout.
+| Page | Subject |
+| --- | --- |
+| [configuration.md](configuration.md) | every `.goatest.toml` section and key |
+| [property-testing.md](property-testing.md) | native fuzzing, and what goatest deliberately does not define |
 
-```sh
-git clone https://github.com/P4suta/goatest.git
-cd goatest
-mise install go
-mise x -- go install ./cmd/goatest
-```
+## Working on it
 
-## Initialize and plan
-
-`goatest init` writes a minimal `.goatest.toml` and suggests adding `.goatest/` and `reports/` to `.gitignore`.
-
-`goatest plan ./...` previews the resolved package scope and planned checks.
-
-Download the project's modules first because planning resolves dependency metadata offline.
-
-```sh
-mise x -- go mod download all
-goatest init
-goatest plan ./...
-```
-
-## Verify, diagnose, and review
-
-`goatest verify ./...` freezes the inputs, runs the configured checks, and records a scope-specific verdict.
-
-Verification uses native tests and fuzz seeds, coverage routing, mutation checks, and configured resource providers.
-
-`verify` leaves source and test corpora unchanged, and it stores generated repairs as reviewable candidates.
-
-`goatest doctor` checks the local tool and repository setup before a run.
-
-Use `goatest explain ID` to inspect a recorded result and `goatest replay ID` to reproduce its target.
-
-The optional `--trace` output records phases and routing for diagnosis, but traces don't affect verdicts or provide evidence.
-
-`goatest trace summary` reports missing events and sequence gaps, while `goatest trace diff RUN-A RUN-B` compares runs.
-
-## Durable reports
-
-Every completed verification writes immutable results under `reports/runs/<run-id>/`.
-
-Each run contains a `JSON` report, searchable `HTML`, `SARIF` findings, `JUnit` results, and the report schema.
-
-`reports/latest-full.json` advances only after a full-project run.
-
-`goatest report --latest-full` reads that durable full-project result.
-
-## Current limits
-
-goatest rejects a `go.work` file that contains more than one main module and rejects symbolic links in the evidence tree.
-
-The resource protocol supports start, ready, and stop operations with shared or exclusive instances.
-
-It doesn't support resource health checks, reset operations, or log artifacts.
-
-Local benchmarks observe critical paths, but they don't define a performance contract.
-
-See the [limitations guide](limitations.md) for the full list.
-
-## More documentation
-
-- [Architecture](architecture.md)
-- [Assurance contract](assurance-contract.md)
-- [Configuration](configuration.md)
-- [Checkpoint v1](checkpoint-v1.md)
-- [Protocols](protocols.md)
-- [Report v1](report-v1.md)
-- [Trace v1](trace-v1.md)
-- [Limitations](limitations.md)
-- [Development](development.md)
-- [Continuous integration](ci.md)
-
-[Full original README at commit 244027f](https://github.com/P4suta/goatest/blob/244027fa877e72e5eb37b79af97ee8e01e7d6069/README.md).
+| Page | Subject |
+| --- | --- |
+| [development.md](development.md) | the test harness, the two tiers, tracing, keep-temp, and the seam policy |
+| [ci.md](ci.md) | using goatest in a workflow, and this repository's own checks |
+| [adr/](adr/README.md) | decisions that are expensive to revisit and cheap to forget |

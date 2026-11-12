@@ -61,6 +61,7 @@ func (file *stubConfigFile) Close() error {
 }
 
 func TestInitPropagatesEveryFileStageAndCleansPartialOutput(t *testing.T) {
+	t.Parallel()
 	openFailure := errors.New("open failure")
 	for _, testCase := range []struct {
 		name       string
@@ -75,6 +76,7 @@ func TestInitPropagatesEveryFileStageAndCleansPartialOutput(t *testing.T) {
 		{name: "close", file: &stubConfigFile{closeErr: errors.New("close failure")}, want: errors.New("close failure"), wantRemove: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			if testCase.file != nil {
 				testCase.file.name = filepath.Join(t.TempDir(), FileName)
 				if testCase.file.writeErr != nil {
@@ -88,11 +90,11 @@ func TestInitPropagatesEveryFileStageAndCleansPartialOutput(t *testing.T) {
 				}
 			}
 			removed := ""
-			installConfigIO(t, configIOHooks{
+			hooks := configIOHooks{
 				open:   func(string, int, os.FileMode) (configWritableFile, error) { return testCase.file, testCase.openErr },
 				remove: func(path string) error { removed = path; return nil },
-			})
-			err := Init(t.TempDir())
+			}
+			err := initWithHooks(t.TempDir(), hooks.writeHooks())
 			if !errors.Is(err, testCase.want) {
 				t.Fatalf("Init error = %v, want %v", err, testCase.want)
 			}
@@ -104,8 +106,10 @@ func TestInitPropagatesEveryFileStageAndCleansPartialOutput(t *testing.T) {
 }
 
 func TestSavePropagatesEveryAtomicWriteStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"marshal", "create", "write", "sync", "chmod", "close"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			failure := errors.New(stage + " failure")
 			file := &stubConfigFile{name: filepath.Join(root, "temporary")}
@@ -126,8 +130,7 @@ func TestSavePropagatesEveryAtomicWriteStage(t *testing.T) {
 			case "close":
 				file.closeErr = failure
 			}
-			installConfigIO(t, hooks)
-			if err := save(root, minimalConfig()); !errors.Is(err, failure) {
+			if err := saveWithHooks(root, minimalConfig(), hooks.writeHooks()); !errors.Is(err, failure) {
 				t.Fatalf("save error = %v, want %v", err, failure)
 			}
 		})
@@ -135,6 +138,7 @@ func TestSavePropagatesEveryAtomicWriteStage(t *testing.T) {
 }
 
 func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
+	t.Parallel()
 	firstRename := errors.New("first rename")
 	retryFailure := errors.New("retry rename")
 	backupFailure := errors.New("backup rename")
@@ -155,13 +159,14 @@ func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
 		{name: "restore failure preserves backup", retryErr: retryFailure, restoreErr: restoreFailure, want: []error{firstRename, retryFailure, restoreFailure}, wantCalls: 4},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			temporary := filepath.Join(root, "temporary")
 			destination := filepath.Join(root, FileName)
 			backup := temporary + ".backup"
 			file := &stubConfigFile{name: temporary}
 			renames := 0
-			installConfigIO(t, configIOHooks{
+			hooks := configIOHooks{
 				create: func(string, string) (configWritableFile, error) { return file, nil },
 				rename: func(oldPath, newPath string) error {
 					renames++
@@ -191,8 +196,8 @@ func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
 						return nil
 					}
 				},
-			})
-			err := save(root, minimalConfig())
+			}
+			err := saveWithHooks(root, minimalConfig(), hooks.writeHooks())
 			if len(testCase.want) == 0 && err != nil {
 				t.Fatalf("save error = %v", err)
 			}
@@ -209,6 +214,7 @@ func TestSaveRenameFallbackPreservesThePreviousConfiguration(t *testing.T) {
 }
 
 func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, FileName)
 	original := []byte("original configuration\n")
@@ -218,7 +224,7 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 	firstFailure := errors.New("platform refused replacement")
 	retryFailure := errors.New("replacement retry failed")
 	renames := 0
-	installConfigIO(t, configIOHooks{rename: func(oldPath, newPath string) error {
+	hooks := configIOHooks{rename: func(oldPath, newPath string) error {
 		renames++
 		switch renames {
 		case initialConfigRename:
@@ -228,8 +234,8 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 		default:
 			return os.Rename(oldPath, newPath)
 		}
-	}})
-	err := save(root, minimalConfig())
+	}}
+	err := saveWithHooks(root, minimalConfig(), hooks.writeHooks())
 	contents, readErr := os.ReadFile(path)
 	if !errors.Is(err, firstFailure) || !errors.Is(err, retryFailure) || readErr != nil || string(contents) != string(original) || renames != restoreConfigRename {
 		t.Fatalf("save = %v, config=%q read=%v renames=%d", err, contents, readErr, renames)
@@ -237,11 +243,12 @@ func TestSaveRestoresExistingFileAfterAReplacementFailure(t *testing.T) {
 }
 
 func TestSaveSuccessWritesSyncsModesClosesAndRenames(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	temporary := filepath.Join(root, "temporary")
 	file := &stubConfigFile{name: temporary}
 	renames := 0
-	installConfigIO(t, configIOHooks{
+	hooks := configIOHooks{
 		create: func(string, string) (configWritableFile, error) { return file, nil },
 		rename: func(oldPath, newPath string) error {
 			renames++
@@ -250,8 +257,8 @@ func TestSaveSuccessWritesSyncsModesClosesAndRenames(t *testing.T) {
 			}
 			return nil
 		},
-	})
-	if err := save(root, minimalConfig()); err != nil {
+	}
+	if err := saveWithHooks(root, minimalConfig(), hooks.writeHooks()); err != nil {
 		t.Fatal(err)
 	}
 	if file.writes != 1 || file.syncs != 1 || file.chmods != 1 || file.closes != 1 || file.writtenMode != filemode.ReadableFile || renames != 1 {
@@ -262,6 +269,13 @@ func TestSaveSuccessWritesSyncsModesClosesAndRenames(t *testing.T) {
 	}
 }
 
+// configIOHooks names the operations a test drives, in the order this file's
+// tests think about them.
+//
+// It is a separate shape from writeHooks so the tests read as they did before,
+// and it is converted rather than installed: what a test supplies is reachable
+// only from the call it passed it to, which is what lets this package run in
+// parallel.
 type configIOHooks struct {
 	open    func(string, int, os.FileMode) (configWritableFile, error)
 	create  func(string, string) (configWritableFile, error)
@@ -270,28 +284,11 @@ type configIOHooks struct {
 	rename  func(string, string) error
 }
 
-func installConfigIO(t *testing.T, hooks configIOHooks) {
-	t.Helper()
-	oldOpen, oldCreate, oldMarshal := openConfigFile, createConfigTemp, marshalConfig
-	oldRemove, oldRename := removeConfigFile, renameConfigFile
-	t.Cleanup(func() {
-		openConfigFile, createConfigTemp, marshalConfig = oldOpen, oldCreate, oldMarshal
-		removeConfigFile, renameConfigFile = oldRemove, oldRename
-	})
-	if hooks.open != nil {
-		openConfigFile = hooks.open
-	}
-	if hooks.create != nil {
-		createConfigTemp = hooks.create
-	}
-	if hooks.marshal != nil {
-		marshalConfig = hooks.marshal
-	}
-	if hooks.remove != nil {
-		removeConfigFile = hooks.remove
-	}
-	if hooks.rename != nil {
-		renameConfigFile = hooks.rename
+// writeHooks converts a test's table into the value the code takes.
+func (hooks configIOHooks) writeHooks() writeHooks {
+	return writeHooks{
+		open: hooks.open, createTemp: hooks.create, marshal: hooks.marshal,
+		remove: hooks.remove, rename: hooks.rename,
 	}
 }
 

@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: 2026 goatest contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
-internal/app operatingSystemAtomicWrites
-internal/app readConfigurationFile
-internal/app startDoctorProcess
 internal/assure absoluteRepositoryPath
 internal/assure acquireProductionResource
 internal/assure changedImpactFiles
@@ -33,11 +30,6 @@ internal/assure statRepositoryPath
 internal/assure walkCandidateFiles
 internal/assure writeCandidateFile
 internal/assure writeCandidateRepositoryFile
-internal/config createConfigTemp
-internal/config marshalConfig
-internal/config openConfigFile
-internal/config removeConfigFile
-internal/config renameConfigFile
 internal/golang relativePackagePath
 internal/mutationbridge openMutationWorkspace
 internal/processtree assignWindowsProcessToJob

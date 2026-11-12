@@ -63,7 +63,7 @@ func inspectMutationWithHooks(path string, hooks mutationHooks) (MutationStatus,
 	}
 	store, err := decodeMutation(data)
 	if err == nil && (store.Schema != MutationSchemaV1 || store.ModulePath == "") {
-		err = errors.New("goatest: mutation evidence identity mismatch")
+		err = ErrMutationIdentityMismatch
 	}
 	if err == nil {
 		err = store.validate()

@@ -24,10 +24,10 @@ const (
 type controlRecorder struct {
 	mu     sync.Mutex
 	calls  map[string]int
-	result gomutants.CommandResult
+	result gomutants.ControlResult
 }
 
-func (recorder *controlRecorder) run(_ context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+func (recorder *controlRecorder) run(_ context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	if recorder.calls == nil {
@@ -56,6 +56,13 @@ func (session *killingSession) Probe(context.Context, gomutants.ProbeRequest) (g
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
 }
 
+// Control reports a clean original of a measurable duration, because these
+// tests are about what a mutant does and a control that reported nothing
+// would make every one of them inconclusive for another reason.
+func (session *killingSession) Control(context.Context, gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	return gomutants.ControlResult{Duration: time.Millisecond}, nil
+}
+
 func (session *killingSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
 	return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 }
@@ -72,6 +79,13 @@ func (session *suiteControlSession) Catalog() gomutants.Catalog { return session
 
 func (session *suiteControlSession) Probe(context.Context, gomutants.ProbeRequest) (gomutants.ProbeResult, error) {
 	return gomutants.ProbeResult{Outcome: gomutants.ProbeUnavailable}, nil
+}
+
+// Control reports a clean original of a measurable duration, because these
+// tests are about what a mutant does and a control that reported nothing
+// would make every one of them inconclusive for another reason.
+func (session *suiteControlSession) Control(context.Context, gomutants.ControlRequest) (gomutants.ControlResult, error) {
+	return gomutants.ControlResult{Duration: time.Millisecond}, nil
 }
 
 func (session *suiteControlSession) Exec(_ context.Context, request gomutants.ExecRequest) (gomutants.MutantResult, error) {
@@ -114,7 +128,7 @@ func controlTargets() []assure.TargetEvidence {
 func TestEvaluateRunsOneOriginalControlForEachDistinctControlCommand(t *testing.T) {
 	t.Parallel()
 	session := &killingSession{catalog: gomutants.Catalog{Mutants: controlMutants()}}
-	recorder := &controlRecorder{result: gomutants.CommandResult{ExitCode: 0, Duration: controlObservationDuration}}
+	recorder := &controlRecorder{result: gomutants.ControlResult{ExitCode: 0, Duration: controlObservationDuration}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, controlTargets(), assure.MutationOptions{
 		Jobs:    1,
 		Timeout: controlContainmentTimeout, OriginalControl: recorder.run,
@@ -141,7 +155,7 @@ func TestEvaluateMemoizesAFailedControlWithoutRerunningIt(t *testing.T) {
 	t.Parallel()
 	mutants := controlMutants()[:3]
 	session := &killingSession{catalog: gomutants.Catalog{Mutants: mutants}}
-	recorder := &controlRecorder{result: gomutants.CommandResult{ExitCode: 1, Output: []byte("boundary regressed")}}
+	recorder := &controlRecorder{result: gomutants.ControlResult{ExitCode: 1, Output: []byte("boundary regressed")}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, controlTargets()[:1], assure.MutationOptions{
 		Jobs:    1,
 		Timeout: controlContainmentTimeout, OriginalControl: recorder.run,
@@ -167,11 +181,11 @@ func TestEvaluateChecksAnUnreachedPackageControlOnceBeforeAnyMutant(t *testing.T
 	t.Parallel()
 	for _, test := range []struct {
 		name    string
-		control gomutants.CommandResult
+		control gomutants.ControlResult
 		kind    string
 	}{
-		{name: "failed", control: gomutants.CommandResult{ExitCode: 1, Output: []byte("suite setup failed")}, kind: "mutation-control-failure"},
-		{name: "timed out", control: gomutants.CommandResult{TimedOut: true}, kind: "mutation-control-timeout"},
+		{name: "failed", control: gomutants.ControlResult{ExitCode: 1, Output: []byte("suite setup failed")}, kind: "mutation-control-failure"},
+		{name: "timed out", control: gomutants.ControlResult{TimedOut: true}, kind: "mutation-control-timeout"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -203,7 +217,7 @@ func TestPassingUnreachedPackageControlCalibratesTheMutantWatchdog(t *testing.T)
 	t.Parallel()
 	mutant := controlMutants()[0]
 	session := &suiteControlSession{catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}}
-	recorder := &controlRecorder{result: gomutants.CommandResult{Duration: 250 * time.Millisecond}}
+	recorder := &controlRecorder{result: gomutants.ControlResult{Duration: 250 * time.Millisecond}}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
 		Timeout: time.Second, OriginalControl: recorder.run,
 		SuiteEnvironment: []string{"DB=ready"},
@@ -227,7 +241,7 @@ func TestTimeoutRunsAgainOnceUnderTheContainmentCeiling(t *testing.T) {
 	const controlDuration = time.Millisecond
 	for _, test := range []struct {
 		name               string
-		controls           []gomutants.CommandResult
+		controls           []gomutants.ControlResult
 		outcomes           []gomutants.Outcome
 		wantKind           string
 		wantControls       int
@@ -235,24 +249,24 @@ func TestTimeoutRunsAgainOnceUnderTheContainmentCeiling(t *testing.T) {
 	}{
 		{
 			name:     "a completed second control buys the containment ceiling",
-			controls: []gomutants.CommandResult{{Duration: controlDuration}},
+			controls: []gomutants.ControlResult{{Duration: controlDuration}},
 			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut, gomutants.OutcomeSurvived},
 			wantKind: "unreached-mutant", wantControls: 2, wantSecondDeadline: time.Second,
 		},
 		{
 			name: "a second control that expires buys nothing",
-			controls: []gomutants.CommandResult{
+			controls: []gomutants.ControlResult{
 				{Duration: controlDuration}, {TimedOut: true},
 			},
 			outcomes: []gomutants.Outcome{gomutants.OutcomeTimedOut},
 			wantKind: "mutation-timeout", wantControls: 2,
 		},
 		{
-			name: "original timed out", controls: []gomutants.CommandResult{{TimedOut: true}},
+			name: "original timed out", controls: []gomutants.ControlResult{{TimedOut: true}},
 			wantKind: "mutation-control-timeout", wantControls: 1,
 		},
 		{
-			name: "original failed", controls: []gomutants.CommandResult{{ExitCode: 1, Output: []byte("control failed")}},
+			name: "original failed", controls: []gomutants.ControlResult{{ExitCode: 1, Output: []byte("control failed")}},
 			wantKind: "mutation-control-failure", wantControls: 1,
 		},
 	} {
@@ -263,7 +277,7 @@ func TestTimeoutRunsAgainOnceUnderTheContainmentCeiling(t *testing.T) {
 				catalog: gomutants.Catalog{Mutants: []gomutants.Mutant{mutant}}, outcomes: test.outcomes,
 			}
 			controlCalls := 0
-			control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+			control := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
 				result := test.controls[min(controlCalls, len(test.controls)-1)]
 				controlCalls++
 				return result, nil
@@ -300,9 +314,9 @@ func TestKilledMutationRunsOnceAfterItsExactOriginalControl(t *testing.T) {
 		},
 	}
 	controlCalls := 0
-	control := func(context.Context, gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	control := func(context.Context, gomutants.ExecRequest) (gomutants.ControlResult, error) {
 		controlCalls++
-		return gomutants.CommandResult{Duration: time.Millisecond}, nil
+		return gomutants.ControlResult{Duration: time.Millisecond}, nil
 	}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, nil, assure.MutationOptions{
 		Timeout: time.Second, OriginalControl: control,
@@ -335,9 +349,9 @@ func TestExactOriginalAndMutantUseCompletedCleanDurations(t *testing.T) {
 		return gomutants.MutantResult{ID: request.Mutant, Outcome: gomutants.OutcomeKilled}, nil
 	}
 	var controlRequest gomutants.ExecRequest
-	control := func(_ context.Context, request gomutants.ExecRequest) (gomutants.CommandResult, error) {
+	control := func(_ context.Context, request gomutants.ExecRequest) (gomutants.ControlResult, error) {
 		controlRequest = request
-		return gomutants.CommandResult{Duration: controlDuration}, nil
+		return gomutants.ControlResult{Duration: controlDuration}, nil
 	}
 	evaluation, err := assure.EvaluateMutations(t.Context(), session, []assure.TargetEvidence{{
 		Target: target("TestBoundary", goanalysis.KindTest), CoveredFiles: []string{"boundary.go"},

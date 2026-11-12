@@ -300,21 +300,14 @@ func checkPrepare(record trace.PrepareRecord, fields map[string]json.RawMessage)
 	}
 }
 
+// knownPreparePhase reports whether a recorded phase is one the contract names.
+//
+// It reads the vocabulary rather than restating it. This function used to
+// restate it, as a switch over the same nine constants that reader.go also
+// listed, so the phases were written out five times across two packages while
+// nothing compared any pair of them.
 func knownPreparePhase(phase string) bool {
-	switch phase {
-	case trace.PreparePhaseDiscovery,
-		trace.PreparePhaseProbeSnapshot,
-		trace.PreparePhaseMainValidation,
-		trace.PreparePhaseMainRestoration,
-		trace.PreparePhaseVerification,
-		trace.PreparePhaseBinaryBuild,
-		trace.PreparePhaseProbeValidation,
-		trace.PreparePhaseProbeCoverageBuild,
-		trace.PreparePhaseProbeRestoration:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(trace.PreparePhases(), phase)
 }
 
 func checkExec(record trace.ExecRecord, fields map[string]json.RawMessage) error {

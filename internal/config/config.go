@@ -147,17 +147,49 @@ type configWritableFile interface {
 	Close() error
 }
 
-var (
-	openConfigFile = func(name string, flag int, mode os.FileMode) (configWritableFile, error) {
-		return os.OpenFile(name, flag, mode)
+// writeHooks are the operations writing this file performs.
+//
+// The zero value is production. These were five package-level variables, and a
+// test replacing any one of them owned internal/config for as long as it ran -
+// twenty-one tests, most of which touch none of the five.
+type writeHooks struct {
+	// open creates the file Init writes, refusing one that already exists.
+	open func(name string, flag int, mode os.FileMode) (configWritableFile, error)
+
+	// createTemp makes the temporary a rewrite is staged in.
+	createTemp func(directory, pattern string) (configWritableFile, error)
+
+	// marshal encodes the document.
+	marshal func(any) ([]byte, error)
+
+	// remove and rename finish the rewrite, and clean up after one that failed.
+	remove func(string) error
+	rename func(oldpath, newpath string) error
+}
+
+// resolved fills every operation this value leaves unset.
+func (hooks writeHooks) resolved() writeHooks {
+	if hooks.open == nil {
+		hooks.open = func(name string, flag int, mode os.FileMode) (configWritableFile, error) {
+			return os.OpenFile(name, flag, mode)
+		}
 	}
-	createConfigTemp = func(directory, pattern string) (configWritableFile, error) {
-		return os.CreateTemp(directory, pattern)
+	if hooks.createTemp == nil {
+		hooks.createTemp = func(directory, pattern string) (configWritableFile, error) {
+			return os.CreateTemp(directory, pattern)
+		}
 	}
-	marshalConfig    = toml.Marshal
-	removeConfigFile = os.Remove
-	renameConfigFile = os.Rename
-)
+	if hooks.marshal == nil {
+		hooks.marshal = toml.Marshal
+	}
+	if hooks.remove == nil {
+		hooks.remove = os.Remove
+	}
+	if hooks.rename == nil {
+		hooks.rename = os.Rename
+	}
+	return hooks
+}
 
 const (
 	defaultExecutionTimeout = 10 * time.Minute
@@ -340,8 +372,14 @@ contract = "standard-v1"
 `
 
 func Init(root string) error {
+	return initWithHooks(root, writeHooks{})
+}
+
+// initWithHooks is Init with the operations it performs passed in.
+func initWithHooks(root string, hooks writeHooks) error {
+	hooks = hooks.resolved()
 	path := filepath.Join(root, FileName)
-	file, err := openConfigFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, filemode.ReadableFile)
+	file, err := hooks.open(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, filemode.ReadableFile)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("goatest: %s already exists", FileName)
@@ -351,16 +389,16 @@ func Init(root string) error {
 	data := []byte(initTemplate)
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		_ = removeConfigFile(path)
+		_ = hooks.remove(path)
 		return err
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		_ = removeConfigFile(path)
+		_ = hooks.remove(path)
 		return err
 	}
 	if err := file.Close(); err != nil {
-		_ = removeConfigFile(path)
+		_ = hooks.remove(path)
 		return err
 	}
 	return nil
@@ -389,6 +427,12 @@ func AddAcceptance(root string, acceptance Acceptance) error {
 }
 
 func save(root string, input Config) error {
+	return saveWithHooks(root, input, writeHooks{})
+}
+
+// saveWithHooks is save with the operations it performs passed in.
+func saveWithHooks(root string, input Config, hooks writeHooks) error {
+	hooks = hooks.resolved()
 	raw := rawConfig{
 		Version: input.Version, Contract: input.Contract,
 		Project: rawProject{Packages: slices.Clone(input.Project.Packages), Exclude: slices.Clone(input.Project.Exclude)},
@@ -419,17 +463,17 @@ func save(root string, input Config) error {
 			Owner: acceptance.Owner, Ticket: acceptance.Ticket,
 		})
 	}
-	data, err := marshalConfig(raw)
+	data, err := hooks.marshal(raw)
 	if err != nil {
 		return fmt.Errorf("goatest: encode %s: %w", FileName, err)
 	}
 	path := filepath.Join(root, FileName)
-	temporary, err := createConfigTemp(root, ".goatest-config-*.tmp")
+	temporary, err := hooks.createTemp(root, ".goatest-config-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer func() { _ = removeConfigFile(temporaryPath) }()
+	defer func() { _ = hooks.remove(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
 		return err
@@ -445,23 +489,23 @@ func save(root string, input Config) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := renameConfigFile(temporaryPath, path); err != nil {
+	if err := hooks.rename(temporaryPath, path); err != nil {
 		backupPath := temporaryPath + ".backup"
-		backupErr := renameConfigFile(path, backupPath)
+		backupErr := hooks.rename(path, backupPath)
 		if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
 			return errors.Join(err, backupErr)
 		}
-		retryErr := renameConfigFile(temporaryPath, path)
+		retryErr := hooks.rename(temporaryPath, path)
 		if retryErr != nil {
 			if backupErr == nil {
-				if restoreErr := renameConfigFile(backupPath, path); restoreErr != nil {
+				if restoreErr := hooks.rename(backupPath, path); restoreErr != nil {
 					return errors.Join(err, retryErr, fmt.Errorf("goatest: restore previous config from %s: %w", backupPath, restoreErr))
 				}
 			}
 			return errors.Join(err, retryErr)
 		}
 		if backupErr == nil {
-			_ = removeConfigFile(backupPath)
+			_ = hooks.remove(backupPath)
 		}
 	}
 	return nil

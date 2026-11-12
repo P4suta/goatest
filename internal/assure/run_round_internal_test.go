@@ -170,37 +170,6 @@ func TestRunCoordinatorPublishesStructuralFindingsAndCancelsPreparation(t *testi
 	}
 }
 
-func TestRunCoordinatorCancelsPreparationWhenThePristineWorkspaceCannotOpen(t *testing.T) {
-	openCause := errors.New("pristine workspace failed")
-	preparationCause := errors.New("preparation stopped")
-	harness := newRunCoordinatorHarness(t)
-	openWorkspace := harness.dependencies.openWorkspace
-	preparationStopped := make(chan struct{})
-	harness.dependencies.openWorkspace = func(ctx context.Context, root string, options mutationbridge.Options) (*mutationbridge.Workspace, error) {
-		if harness.openCalls+1 == preparedAndPristineWorkspaceCount {
-			harness.openCalls++
-			return nil, openCause
-		}
-		return openWorkspace(ctx, root, options)
-	}
-	harness.dependencies.prepareSession = func(ctx context.Context, _ *mutationbridge.Workspace, _ mutationbridge.PrepareOptions) (MutationSession, error) {
-		harness.prepareCalls++
-		<-ctx.Done()
-		close(preparationStopped)
-		return nil, preparationCause
-	}
-	result, err := harness.run(Options{})
-	if !errors.Is(err, openCause) || errors.Is(err, preparationCause) || !reflect.DeepEqual(result, report.Report{}) ||
-		harness.prepareCalls != 1 || harness.baselineCalls != 0 || harness.manager.calls != 1 || harness.workspaceCloses != 1 || harness.scratchRemovals != 1 {
-		t.Fatalf("run = (%+v, %v), harness=%+v", result, err, harness)
-	}
-	select {
-	case <-preparationStopped:
-	default:
-		t.Fatal("mutation preparation was not joined")
-	}
-}
-
 func TestRunCoordinatorReturnsEachBaselineFindingVerdictWithoutCachingIt(t *testing.T) {
 	for _, test := range []struct {
 		kind string

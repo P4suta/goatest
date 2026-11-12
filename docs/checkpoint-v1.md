@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Interrupted assurance checkpoint v1
 
 `assurance-checkpoint-v1` is strict scheduling state for continuing an

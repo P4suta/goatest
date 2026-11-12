@@ -15,16 +15,83 @@ syft = "1.56.0"
 description = "Build the public library and single CLI"
 run = ["go build ./...", "go vet ./..."]
 
+# Two tiers, and two ways to run each.
+#
+# The unit tier is `go test ./...`: everything that needs nothing but a
+# compiler. It is what a developer runs on every save, and it finishes in about
+# ten seconds. The integration tier adds `-tags integration`, which compiles in
+# the suites that drive a real toolchain - a go build, a git history, a whole
+# mutation run - and takes about half a minute.
+#
+# The split is not about speed, although speed is what it buys. A suite that
+# cannot say which of its tests need a toolchain cannot be told that it lost
+# one, which is how go-mutants once retired seventy-four tests and reported the
+# rest as a pass.
+#
+# The `-audit` variants answer a question `go test` cannot. A non-verbose run
+# prints `ok` for a package whose every test was skipped, so a runner that lost
+# `git` from PATH, or an environment variable that narrowed -test.run, could
+# retire a whole package and leave the job green. They read the
+# machine-readable stream and refuse a run that produced no verdict, a run that
+# was narrowed before it started, or a skip nobody recorded. They render
+# failures themselves, because a -json stream is not readable and a CI step that
+# hides the reason for a failure is a step nobody will trust.
 [tasks.test]
-description = "Run unit, property, protocol, and toolchain-backed E2E tests"
+description = "Run the unit tier: everything that needs nothing but a compiler"
 run = "go test -timeout 40m ./..."
 
+[tasks.test-integration]
+description = "Run both tiers, including the suites that drive a real toolchain"
+run = "go test -tags integration -timeout 40m ./..."
+
+[tasks.test-audit]
+description = "Run the unit tier and audit what actually ran"
+run = """
+mkdir -p .goatest
+go test -json -timeout 40m ./... > .goatest/test-events.jsonl && audit_exit=0 || audit_exit=$?
+go run ./internal/devtools/testaudit < .goatest/test-events.jsonl || audit_exit=1
+exit $audit_exit
+"""
+run_windows = """
+New-Item -ItemType Directory -Force -Path .goatest | Out-Null
+go test -json -timeout 40m ./... > .goatest/test-events.jsonl
+$auditExit = $LASTEXITCODE
+Get-Content .goatest/test-events.jsonl | go run ./internal/devtools/testaudit
+if ($LASTEXITCODE -ne 0) { $auditExit = 1 }
+exit $auditExit
+"""
+
+[tasks.test-integration-audit]
+description = "Run both tiers and audit what actually ran"
+run = """
+mkdir -p .goatest
+go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl && audit_exit=0 || audit_exit=$?
+go run ./internal/devtools/testaudit < .goatest/integration-events.jsonl || audit_exit=1
+exit $audit_exit
+"""
+run_windows = """
+New-Item -ItemType Directory -Force -Path .goatest | Out-Null
+go test -json -tags integration -timeout 40m ./... > .goatest/integration-events.jsonl
+$auditExit = $LASTEXITCODE
+Get-Content .goatest/integration-events.jsonl | go run ./internal/devtools/testaudit
+if ($LASTEXITCODE -ne 0) { $auditExit = 1 }
+exit $auditExit
+"""
+
 [tasks.test-race]
-description = "Run the complete suite under Go's race detector"
-run = "go test -race -timeout 40m ./..."
+description = "Run both tiers under Go's race detector"
+run = "go test -race -tags integration -timeout 40m ./..."
 
 [tasks.fmt]
 description = "Check Go and TOML formatting without rewriting files"
+# taplo with no path checks every TOML in the tree, so a TOML added tomorrow is
+# checked without anybody remembering to name it. The alternative - listing the
+# files - moves the same problem rather than solving it: then the list is the
+# thing nobody reviews, and the seventh file is the one that goes unformatted.
+#
+# What CI runs is this task. It used to reimplement it: `test -z "$(gofmt -l .)"`
+# in one job and `taplo fmt --check` in another, which is two places for the
+# definition to drift from and neither of them the one a developer runs.
 run = [
   'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }',
   "taplo fmt --check",
@@ -44,12 +111,34 @@ run = [
   "golangci-lint run",
   "actionlint",
   "typos",
-  "gitleaks dir . --no-banner --redact",
+  "gitleaks dir . --no-banner --redact --config .gitleaks.toml",
 ]
 
 [tasks.package]
 description = "Build cross-platform snapshot archives"
 run = "goreleaser release --snapshot --clean"
+
+# Two scopes, because they answer to different readers.
+#
+# `dogfood` measures the whole project, which is the run whose verdict means
+# something: ASSURED is defined over a full scope and nothing else. It is also
+# over an hour of work on this repository - the mutation phase evaluates every
+# mutant of 2591 tests - so it belongs to a developer who asked for it, or to a
+# schedule, and not to a check that has to answer a pull request.
+#
+# `dogfood-changed` measures what a change touched. That is the scope
+# docs/ci.md recommends to anybody using goatest in a workflow, and the one this
+# repository's own workflow should therefore be seen using.
+[tasks.dogfood-changed]
+description = "Verify what this branch changed, the way docs/ci.md tells a user to"
+run = [
+  "go build -o ./dist/dogfood/goatest ./cmd/goatest",
+  "./dist/dogfood/goatest verify --changed=origin/main --ui=plain",
+]
+run_windows = [
+  "go build -o ./dist/dogfood/goatest.exe ./cmd/goatest",
+  '.\dist\dogfood\goatest.exe verify --changed=origin/main --ui=plain',
+]
 
 [tasks.dogfood]
 description = "Run goatest against its own repository"
@@ -70,6 +159,13 @@ run = "go run ./internal/devtools/tracesummary"
 description = "Compare two assurance reports: verdict, accounting, mutant transitions, and lost kills"
 run = "go run ./internal/devtools/reportdiff"
 
+# Takes arguments, and says so.
+#
+# It read `mise run proof-audit` with no arguments until the day somebody ran
+# it, which printed a usage message and exited 2 - a task that had never worked
+# and could not, because the tool needs a recording and a directory of coverage
+# profiles and neither has a default. A description that implies a task runs is
+# a description that will be believed.
 [tasks.proof-audit]
-description = "Audit the proof layers of a recorded run: does a layer drop a target that killed a mutant?"
+description = "Audit the proof layers of a recorded run: proof-audit TRACE.jsonl PROFILES-DIR"
 run = "go run ./internal/devtools/proofaudit"

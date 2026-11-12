@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 goatest contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # CI usage
 
 A packaged GitHub Action isn't required.
@@ -42,6 +47,10 @@ Tracing changes neither the verdict nor the cache identity of the run and suppli
 See [trace v1](trace-v1.md) for the format and [the trace decision](adr/0002-trace-is-not-evidence.md) for why a failed trace never fails the step.
 
 ## This repository
+
+The `test` job checks formatting, vets packages, and audits the unit and integration tiers on Linux.
+The `lint` job runs the pinned Go, workflow, spelling, secret, and TOML checks.
+The `required` job rejects failed or cancelled prerequisites.
 
 Pull requests and merge groups run formatting, vet, package tests, and lint on Linux.
 The `required` job rejects failed or cancelled dependencies.

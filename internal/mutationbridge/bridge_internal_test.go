@@ -92,8 +92,9 @@ func TestWorkspaceExecForwardsResultAndError(t *testing.T) {
 	if !errors.Is(err, sentinel) || got.ExitCode != want.ExitCode || got.TimedOut != want.TimedOut || got.Duration != want.Duration || !slices.Equal(got.Output, want.Output) {
 		t.Fatalf("Exec = (%+v, %v)", got, err)
 	}
-	if !slices.Equal(engine.command.Argv, command.Argv) || engine.command.Dir != command.Dir || !slices.Equal(engine.command.Env, command.Env) || engine.command.Timeout != command.Timeout {
-		t.Fatalf("forwarded command = %+v", engine.command)
+	wantEnv := []string{"A=1", goWorkDisabled}
+	if !slices.Equal(engine.command.Argv, command.Argv) || engine.command.Dir != command.Dir || !slices.Equal(engine.command.Env, wantEnv) || engine.command.Timeout != command.Timeout {
+		t.Fatalf("forwarded command = %+v, want Env %q", engine.command, wantEnv)
 	}
 }
 
@@ -249,3 +250,54 @@ func (workspace *fakeMutationWorkspace) Close() error {
 func (workspace *fakeMutationWorkspace) Swept() gomutants.SweepResult { return workspace.swept }
 
 func (workspace *fakeMutationWorkspace) Preserved() []string { return workspace.preserved }
+
+// TestExecKeepsEveryCommandInsideTheModuleItMeasures pins the one place this
+// module answers go-mutants' rule for consumers that run their own go
+// commands: pass GOWORK=off.
+//
+// It matters for the merge. Today the snapshot lives under TMPDIR and no
+// go.work is anywhere near it, so nothing here is observable. Once goatest is a
+// second module beside the engine, a go.work sits at the root of the very tree
+// it measures, and without this the three things it changes - what `go list`
+// answers, what a build resolves, and the identity a cached verdict is keyed on
+// through buildEnvironmentNames - all change at once and in silence.
+func TestExecKeepsEveryCommandInsideTheModuleItMeasures(t *testing.T) {
+	t.Parallel()
+	engine := &fakeMutationWorkspace{}
+	workspace := &Workspace{inner: engine}
+
+	var seen []gomutants.Command
+	for _, command := range []gomutants.Command{
+		{Argv: []string{"go", "list", "-json", "./..."}},
+		{Argv: []string{"go", "vet", "./..."}, Env: []string{"CGO_ENABLED=0"}},
+	} {
+		if _, err := workspace.Exec(t.Context(), command); err != nil {
+			t.Fatalf("Exec(%v): %v", command.Argv, err)
+		}
+		seen = append(seen, engine.command)
+	}
+	for index, command := range seen {
+		if !slices.Contains(command.Env, goWorkDisabled) {
+			t.Errorf("command %d ran with Env %q, which does not hold %q", index, command.Env, goWorkDisabled)
+		}
+	}
+	if want := []string{"CGO_ENABLED=0", goWorkDisabled}; !slices.Equal(seen[1].Env, want) {
+		t.Errorf("Env = %q, want %q: the caller's own overlay must survive", seen[1].Env, want)
+	}
+}
+
+// TestExecObeysACallerThatNamesGOWORKItself keeps the rule from being one no
+// caller can opt out of.
+func TestExecObeysACallerThatNamesGOWORKItself(t *testing.T) {
+	t.Parallel()
+	engine := &fakeMutationWorkspace{}
+	workspace := &Workspace{inner: engine}
+
+	explicit := []string{GoWorkVariable + "=/somewhere/go.work"}
+	if _, err := workspace.Exec(t.Context(), gomutants.Command{Argv: []string{"go", "list"}, Env: explicit}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(engine.command.Env, explicit) {
+		t.Fatalf("Env = %q, want the caller's own %q untouched", engine.command.Env, explicit)
+	}
+}
