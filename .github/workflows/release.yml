@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
           cache: false
       - name: Download pinned modules
         run: go mod download
@@ -56,7 +56,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
           cache: false
       - run: go mod download
       - name: Race detector
@@ -77,7 +77,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
         with:
-          version: 2026.11.2
+          version: 2026.11.7
           install_args: go golangci-lint actionlint typos gitleaks taplo
           cache: false
       - name: Lint
@@ -99,13 +99,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
           cache: false
       - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
         with:
           distribution: goreleaser
-          version: v2.20.0
+          version: v2.20.2
           args: release --snapshot --clean
 
   release:
@@ -124,13 +124,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
           cache: false
       - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
         with:
           distribution: goreleaser
-          version: v2.20.0
+          version: v2.20.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
